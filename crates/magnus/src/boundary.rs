@@ -659,6 +659,22 @@ impl Kernel {
                     let img = base64::engine::general_purpose::STANDARD.encode(png);
                     Ok(("Screenshot of the sandbox desktop attached.".into(), false, Some(json!({ "image_b64": img }))))
                 }
+                "deliver_file" => {
+                    let path = s("path");
+                    let bytes = self.sandboxes.read(&a.run, &path).await?;
+                    anyhow::ensure!(bytes.len() <= 25 * 1024 * 1024, "{path} is larger than 25 MB");
+                    let name = a.input["name"].as_str().map(String::from).unwrap_or_else(|| path.rsplit('/').next().unwrap_or("file").to_string());
+                    let media_type = media_type_for(&name);
+                    use base64::Engine;
+                    let id = new_id("out");
+                    let size = bytes.len();
+                    self.emit(
+                        "kernel",
+                        Ev::Output { id: id.clone(), run: a.run.clone(), name: name.clone(), media_type, data_b64: base64::engine::general_purpose::STANDARD.encode(bytes) },
+                    )
+                    .await?;
+                    Ok((format!("Delivered {name} ({size} bytes) to the person."), false, Some(json!({ "output_id": id }))))
+                }
                 "memory_write" => {
                     let run = self.read(|st| st.runs.get(&a.run).cloned()).ok_or_else(|| anyhow!("run"))?;
                     let label = Label { untrusted: run.untrusted, private: run.private };
@@ -774,4 +790,25 @@ pub fn computer_command(tool: &str, input: &Value) -> Result<String> {
     Ok(format!(
         "export DISPLAY=:0; if ! xdpyinfo >/dev/null 2>&1; then (Xvfb :0 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &); for i in $(seq 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done; (fluxbox >/tmp/wm.log 2>&1 &); sleep 0.5; fi; {act}; sleep 0.4; import -window root /tmp/magnus-shot.png"
     ))
+}
+
+pub fn media_type_for(name: &str) -> String {
+    let ext = name.rsplit('.').next().unwrap_or_default().to_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "csv" => "text/csv",
+        "md" => "text/markdown",
+        "txt" | "log" => "text/plain",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "svg" => "image/svg+xml",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }

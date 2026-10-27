@@ -4,3 +4,4 @@
 *.ext4
 .env
 /browser/node_modules
+/desktop/node_modules

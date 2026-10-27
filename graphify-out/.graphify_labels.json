@@ -57,5 +57,12 @@
   "55": "ErrorClass",
   "56": "Usage",
   "57": "Vault",
-  "58": "Web"
+  "58": "Web",
+  "59": "Duration",
+  "60": "never",
+  "61": "Kernel",
+  "62": "Path",
+  "63": "Browser",
+  "64": "Mutex",
+  "65": "BTreeMap"
 }

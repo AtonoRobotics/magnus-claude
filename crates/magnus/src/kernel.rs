@@ -97,6 +97,10 @@ impl Kernel {
         Ok(e)
     }
 
+    pub async fn output_bytes(&self, run: &str, id: &str) -> Result<Option<(String, String, Vec<u8>)>> {
+        self.log.output(run, id).await
+    }
+
     pub fn read<T>(&self, f: impl FnOnce(&State) -> T) -> T {
         f(&self.state.lock().unwrap())
     }

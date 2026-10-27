@@ -93,6 +93,7 @@ async function render() {
   if (!me) { try { me = await api("GET", "/v1/me"); } catch { return; } }
   const owner = me.roles.includes("owner");
   let items = []; try { items = (await api("GET", "/v1/inbox")).items; } catch {}
+  notifyNew(items);
   const open = items.filter(i => i.status === "open" && i.can_respond).length;
   root.innerHTML = `<div class="app"><nav>
       <div class="brand">Magnus</div>
@@ -111,6 +112,20 @@ async function render() {
   wire(main);
   clearTimeout(timer); timer = setTimeout(refresh, 4000);
 }
+// Desktop app: notify about new items that need this person, and finish
+// a ChatGPT sign-in when the desktop catches its redirect.
+let seen = null;
+function notifyNew(items) {
+  if (!window.magnusDesktop) return;
+  const mine = items.filter(i => i.status === "open" && i.can_respond);
+  if (seen) for (const i of mine) if (!seen.has(i.id)) window.magnusDesktop.notify("Magnus needs you", i.summary || i.kind);
+  seen = new Set(mine.map(i => i.id));
+}
+let pendingOAuth = null;
+if (window.magnusDesktop) window.magnusDesktop.onOAuthCallback(async url => {
+  if (!pendingOAuth) { toast("Sign-in address received, but no sign-in is in progress."); return; }
+  try { await api("POST", `/v1/adapters/${pendingOAuth.adapter}/sign-in/complete`, { flow: pendingOAuth.flow, input: { callback_url: url } }); toast("Signed in."); pendingOAuth = null; render(); } catch (e) { toast(e.message); }
+});
 async function refresh() { if (document.activeElement && ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) { timer = setTimeout(refresh, 4000); return; } if (token) render(); }
 
 function loginView() {
@@ -201,6 +216,7 @@ async function taskView(id) {
   const active = !["completed", "failed", "cancelled"].includes(t.status);
   return `<div class="spread"><h1>${esc(t.title)}</h1>${statusChip(t.status)}</div>
     ${t.waiting_on ? `<p class="muted">${esc(waiting(t.waiting_on))}</p>` : ""}${t.summary ? `<div class="card"><strong>${t.status === "completed" ? "Result" : "Outcome"}</strong><p class="step-text">${esc(t.summary)}</p></div>` : ""}
+    ${(t.outputs || []).length ? `<div class="card"><strong>Files</strong><div class="row" style="margin-top:8px">${t.outputs.map(o => `<button data-dl="${esc(o.id)}" data-name="${esc(o.name)}" data-task-id="${esc(id)}">${esc(o.name)} <span class="muted small">${Math.max(1, Math.round(o.size / 1024))} KB</span></button>`).join("")}</div></div>` : ""}
     <div class="card"><strong>How the worker knows it is done</strong>${crit ? `<div style="margin-top:8px">${crit}</div>` : `<p class="muted small">The worker has not written its done-criteria yet.</p>`}</div>
     <div class="live" id="live"></div>
     <h2>What it did</h2><div class="card">${steps || `<p class="muted small">No steps yet.</p>`}</div>
@@ -234,6 +250,11 @@ async function settingsView() {
 
 function wire(main) {
   main.querySelectorAll("[data-task]").forEach(el => el.onclick = e => { e.preventDefault(); view = { page: "task", task: el.dataset.task }; render(); });
+  main.querySelectorAll("[data-dl]").forEach(b => b.onclick = async () => {
+    const r = await fetch(`/v1/tasks/${b.dataset.taskId}/outputs/${b.dataset.dl}`, { headers: { authorization: "Bearer " + token } });
+    if (!r.ok) { toast("Could not download."); return; }
+    const a = document.createElement("a"); a.href = URL.createObjectURL(await r.blob()); a.download = b.dataset.name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  });
   main.querySelectorAll("[data-act]").forEach(b => b.onclick = async () => {
     const id = b.dataset.id, act = b.dataset.act; b.disabled = true;
     try {
@@ -268,6 +289,7 @@ async function signIn(adapter) {
   const el = $("#signin-" + adapter); const step = await api("POST", `/v1/adapters/${adapter}/sign-in`, {});
   if (step.event === "error") { el.innerHTML = `<p class="small" style="color:var(--bad)">${esc(step.message)}</p>`; return; }
   const kind = step.flow.kind;
+  if (kind === "oauth_pkce") pendingOAuth = { adapter, flow: step.flow };
   el.innerHTML = `<div style="margin-top:10px"><p class="small">${esc(step.instructions)}</p>${step.url ? `<p><a href="${esc(step.url)}" target="_blank" rel="noopener">Open the sign-in page</a></p>` : ""}${step.user_code ? `<p>Code: <code>${esc(step.user_code)}</code></p>` : ""}
     ${kind === "api_key" ? `<input type="password" id="si-${adapter}" placeholder="API key">` : kind === "oauth_pkce" ? `<input type="text" id="si-${adapter}" placeholder="Paste the address here">` : ""}<div class="row" style="margin-top:8px"><button class="primary" id="sid-${adapter}">${kind === "oauth_device" ? "Done" : "Finish sign-in"}</button></div></div>`;
   $("#sid-" + adapter).onclick = async () => { const v = $("#si-" + adapter)?.value || ""; const input = kind === "api_key" ? { api_key: v } : { callback_url: v };

@@ -50,6 +50,7 @@ pub fn router(k: Arc<Kernel>) -> Router {
         .route("/", get(|| async { axum::response::Html(include_str!("../ui/index.html")) }))
         .route("/v1/health", get(health))
         .route("/v1/tasks/{id}/live", get(live))
+        .route("/v1/tasks/{id}/outputs/{out}", get(output))
         .route("/v1/transcribe", post(transcribe))
         .route("/v1/me", get(me))
         .route("/v1/tasks", post(submit).get(list_tasks))
@@ -132,6 +133,7 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Va
         v["model"] = json!({ "adapter": run.config.adapter, "name": run.config.model });
         v["usage"] = json!({ "model_calls": run.model_calls, "actions": run.actions, "cost_usd": run.usd });
         v["taint"] = json!({ "untrusted": run.untrusted, "private": run.private });
+        v["outputs"] = json!(run.outputs.iter().map(|(id, name, mt, size)| json!({ "id": id, "name": name, "media_type": mt, "size": size })).collect::<Vec<_>>());
         v["open_items"] = json!(k.read(|s| s
             .items
             .values()
@@ -658,4 +660,25 @@ async fn remove_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
 
 pub(crate) fn rule_for(b: &Value) -> Result<(Option<u32>, Option<String>), String> {
     schedule_rule(b)
+}
+
+/// Download a delivered file. Read from the log, the source of truth.
+async fn output(State(k): K, h: HeaderMap, Path((id, out)): Path<(String, String)>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some((_, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
+    if !run.outputs.iter().any(|(o, ..)| o == &out) {
+        return err(StatusCode::NOT_FOUND, "no such file");
+    }
+    match k.output_bytes(&run.id, &out).await {
+        Ok(Some((name, mt, bytes))) => Response::builder()
+            .header("content-type", mt)
+            .header("content-disposition", format!("attachment; filename=\"{}\"", name.replace('"', "")))
+            .body(axum::body::Body::from(bytes))
+            .unwrap(),
+        Ok(None) => err(StatusCode::NOT_FOUND, "no such file"),
+        Err(e) => internal(e),
+    }
 }

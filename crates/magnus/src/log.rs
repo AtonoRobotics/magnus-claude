@@ -102,6 +102,19 @@ impl Log {
         Ok(Event { seq: row.get(0), at: row.get(1), actor: actor.into(), ev: ev.clone() })
     }
 
+    /// One delivered file's content, read straight from the log.
+    pub async fn output(&self, run: &str, id: &str) -> Result<Option<(String, String, Vec<u8>)>> {
+        let row = self
+            .client
+            .query_opt("SELECT body FROM public.events WHERE run_id = $1 AND kind = 'output' AND body->>'id' = $2", &[&run, &id])
+            .await?;
+        let Some(row) = row else { return Ok(None) };
+        let b: Value = row.get(0);
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b["data_b64"].as_str().unwrap_or_default())?;
+        Ok(Some((b["name"].as_str().unwrap_or("file").into(), b["media_type"].as_str().unwrap_or("application/octet-stream").into(), bytes)))
+    }
+
     pub async fn load(&self) -> Result<Vec<Event>> {
         let rows = self.client.query("SELECT seq, at, actor, body FROM public.events ORDER BY seq", &[]).await?;
         let mut out = Vec::with_capacity(rows.len());

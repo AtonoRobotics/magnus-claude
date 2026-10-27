@@ -242,6 +242,14 @@ pub enum Ev {
         run: String,
         budget: crate::config::Budget,
     },
+    /// A file the agent delivered to the person from its workspace (K19).
+    Output {
+        id: String,
+        run: String,
+        name: String,
+        media_type: String,
+        data_b64: String,
+    },
     /// A conformance suite run for an adapter version.
     AdapterVerified {
         adapter_id: String,
@@ -287,7 +295,8 @@ impl Ev {
             | ApprovalUsed { run, .. }
             | Wait { run, .. }
             | BudgetExtended { run, .. }
-            | Memory { run, .. } => Some(run),
+            | Memory { run, .. }
+            | Output { run, .. } => Some(run),
             Item { run, .. } => run.as_deref(),
             _ => None,
         }

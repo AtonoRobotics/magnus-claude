@@ -44,5 +44,18 @@
   "42": "invariant-tests-v2.md",
   "43": "Sender",
   "44": "HeaderMap",
-  "45": "Response"
+  "45": "Response",
+  "46": "complete",
+  "47": "sidecar.js",
+  "48": "package.json",
+  "49": "review.rs",
+  "50": "tests/tools.rs",
+  "51": "HeaderMap",
+  "52": "Response",
+  "53": "Stream",
+  "54": "Web",
+  "55": "ErrorClass",
+  "56": "Usage",
+  "57": "Vault",
+  "58": "Web"
 }

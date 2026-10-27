@@ -129,6 +129,7 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "browser_click", app: "browser", risk: Risk::ReversibleWrite, label: Label::UNTRUSTED, audience: Audience::Public },
     Builtin { name: "browser_type", app: "browser", risk: Risk::ReversibleWrite, label: Label::UNTRUSTED, audience: Audience::Public },
     Builtin { name: "browser_select", app: "browser", risk: Risk::ReversibleWrite, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "deliver_file", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "computer_screenshot", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "computer_click", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "computer_type", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -279,6 +280,11 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             name: "computer_scroll".into(),
             description: d("computer_scroll"),
             input_schema: obj(json!({ "x": xy, "y": xy, "down": { "type": "integer" } }), &["x", "y", "down"]),
+        });
+        v.push(ToolSpec {
+            name: "deliver_file".into(),
+            description: d("deliver_file"),
+            input_schema: obj(json!({ "path": { "type": "string" }, "name": { "type": "string" } }), &["path"]),
         });
         v.push(ToolSpec {
             name: "sandbox_exec".into(),

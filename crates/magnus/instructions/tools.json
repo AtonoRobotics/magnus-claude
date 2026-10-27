@@ -25,5 +25,6 @@
   "computer_type": "Type text on the sandbox desktop. Returns a screenshot.",
   "computer_key": "Press keys on the sandbox desktop, xdotool style (for example ctrl+s, Return, Tab). Returns a screenshot.",
   "computer_scroll": "Scroll at a position on the sandbox desktop (negative down scrolls up). Returns a screenshot.",
-  "propose_schedule": "Propose a recurring task (plain-language text, and every_minutes or daily_at as HH:MM local time) to the person. It starts only if they accept."
+  "propose_schedule": "Propose a recurring task (plain-language text, and every_minutes or daily_at as HH:MM local time) to the person. It starts only if they accept.",
+  "deliver_file": "Give the person a file from your workspace (a spreadsheet, document, slide deck, PDF, image). Your workspace is deleted when the task ends; only delivered files remain."
 }

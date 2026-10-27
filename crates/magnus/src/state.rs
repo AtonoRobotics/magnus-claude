@@ -90,6 +90,8 @@ pub struct Run {
     pub intents: HashMap<String, Intent>,
     pub wait_until: Option<DateTime<Utc>>,
     pub summary: Option<String>,
+    /// Delivered files: (id, name, media type, size in bytes).
+    pub outputs: Vec<(String, String, String, usize)>,
     pub last_seq: i64,
 }
 
@@ -294,6 +296,7 @@ impl State {
                         intents: HashMap::new(),
                         wait_until: None,
                         summary: None,
+                        outputs: vec![],
                         last_seq: e.seq,
                     },
                 );
@@ -443,6 +446,11 @@ impl State {
             Ev::BudgetExtended { run, budget } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.config.budget = budget.clone();
+                }
+            }
+            Ev::Output { id, run, name, media_type, data_b64 } => {
+                if let Some(r) = self.runs.get_mut(run) {
+                    r.outputs.push((id.clone(), name.clone(), media_type.clone(), data_b64.len() * 3 / 4));
                 }
             }
             Ev::AdapterVerified { adapter_id, version, model, passed, report, .. } => {
