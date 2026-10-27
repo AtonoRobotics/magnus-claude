@@ -1,0 +1,5 @@
+/target
+/sandbox/out
+/sandbox/cache
+*.ext4
+.env

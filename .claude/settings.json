@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(/tests/invariants/**)",
+      "Write(/tests/invariants/**)",
+      "NotebookEdit(/tests/invariants/**)"
+    ]
+  }
+}

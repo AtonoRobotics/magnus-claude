@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/magnus", "crates/adapter-anthropic", "tests/invariants"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "UNLICENSED"
+publish = false

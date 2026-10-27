@@ -1,0 +1,15 @@
+[package]
+name = "magnus"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "magnus"
+path = "src/main.rs"
+
+[dependencies]
