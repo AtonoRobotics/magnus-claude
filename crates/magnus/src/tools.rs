@@ -105,7 +105,7 @@ impl Audience {
 }
 
 /// Run records the loop writes to the log itself, outside execute() (K21).
-pub const RECORDS: &[&str] = &["task_contract", "task_complete", "task_fail", "ask_principal", "propose_policy", "wait_until", "notify"];
+pub const RECORDS: &[&str] = &["task_contract", "task_complete", "task_fail", "ask_principal", "propose_policy", "propose_schedule", "wait_until", "notify"];
 
 /// Built-in actions that pass the boundary like app tools.
 pub struct Builtin {
@@ -208,6 +208,14 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             input_schema: obj(
                 json!({ "layer": { "type": "string" }, "cedar": { "type": "string" }, "rationale": { "type": "string" } }),
                 &["layer", "cedar", "rationale"],
+            ),
+        },
+        ToolSpec {
+            name: "propose_schedule".into(),
+            description: d("propose_schedule"),
+            input_schema: obj(
+                json!({ "text": { "type": "string" }, "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" } }),
+                &["text"],
             ),
         },
         ToolSpec {

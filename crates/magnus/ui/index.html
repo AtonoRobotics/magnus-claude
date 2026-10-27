@@ -148,6 +148,8 @@ function card(i) {
       <p class="small muted">Nothing changes unless you accept.</p>${btns(`<button class="primary" data-act="accept-policy" data-id="${i.id}">Accept</button><button data-act="reject-policy" data-id="${i.id}">Reject</button>`)}</div>`;
   if (i.kind === "tool_change") return `<div class="card risk-irreversible">${head("An app changed one of its tools", `<span class="chip bad">disabled</span>`)}<p>${esc(i.summary)}</p><p class="small muted">New description, written by the app (read it carefully):</p><pre>${esc(d.description)}</pre>
       ${btns(`<button data-act="approve-tool" data-id="${i.id}">Approve the new definition</button><button data-act="reject-tool" data-id="${i.id}">Keep it disabled</button>`)}</div>`;
+  if (i.kind === "schedule_proposal") return `<div class="card">${head("The worker proposes a recurring task", `<span class="chip">${d.every_minutes ? "every " + d.every_minutes + " min" : "daily at " + esc(d.daily_at)}</span>`)}<p>${esc(d.text)}</p>
+      <p class="small muted">It would run on its own, as you. Nothing is scheduled unless you accept.</p>${btns(`<button class="primary" data-act="accept-policy" data-id="${i.id}">Accept</button><button data-act="reject-policy" data-id="${i.id}">Decline</button>`)}</div>`;
   if (i.kind === "tool_review") return `<div class="card">${head("Review an app's tool descriptions", `<span class="chip">${esc(d.app)}</span>`)}<p>${esc(i.summary)}</p>
       ${(d.tools || []).map(t => `<div class="small muted">${esc(t.tool)}</div><pre>${esc(t.description)}</pre>`).join("")}<p class="small muted">These texts were written by the app's maker. Approve them only if they describe the tools plainly and give no orders.</p>
       ${btns(`<button class="primary" data-act="approve-tool" data-id="${i.id}">Approve</button><button data-act="reject-tool" data-id="${i.id}">Keep hidden</button>`)}</div>`;
@@ -158,12 +160,15 @@ function card(i) {
 }
 
 async function tasksView() {
-  const { tasks } = await api("GET", "/v1/tasks");
+  const [{ tasks }, { schedules }] = await Promise.all([api("GET", "/v1/tasks"), api("GET", "/v1/schedules")]);
   tasks.sort((a, b) => b.created_at.localeCompare(a.created_at));
   return `<h1>Tasks</h1><div class="card"><label for="newtask"><strong>New task</strong></label><p class="small muted">Say what you need in plain words. The worker plans it, does it, and shows you the evidence.</p>
     <textarea id="newtask" placeholder="For example: Summarize the attached contracts into a table of parties, dates and amounts, and email it to Dana."></textarea>
     <div class="files" id="files"></div>
     <div class="spread" style="margin-top:10px"><div class="row"><label class="small"><input type="file" id="attach" multiple hidden><button type="button" id="attachbtn">Attach files</button></label><button type="button" id="mic" title="Speak your task">Speak</button></div><button class="primary" id="send">Start</button></div></div>
+    <details class="card"><summary><strong>Recurring tasks</strong> <span class="muted small">(${schedules.length})</span></summary>
+      ${schedules.map(x => `<div class="spread" style="padding:6px 0"><div>${esc(x.text)}<div class="small muted">${x.every_minutes ? "every " + x.every_minutes + " minutes" : "daily at " + esc(x.daily_at)} · next ${when(x.next)}</div></div><button data-act="unschedule" data-sched="${esc(x.id)}">Remove</button></div>`).join("")}
+      <div class="row" style="margin-top:8px"><input type="text" id="schedtext" placeholder="What to do" style="flex:1;min-width:220px"><input type="text" id="schedat" placeholder="HH:MM" style="max-width:90px" aria-label="Daily time"><button data-act="schedule">Add daily</button></div></details>
     ${tasks.length ? tasks.map(t => `<div class="card task" data-task="${esc(t.task_id)}"><div>${esc(t.title)}</div><div>${statusChip(t.status)}</div><div class="muted small">${when(t.created_at)}${t.waiting_on ? " · " + esc(waiting(t.waiting_on)) : ""}</div><div></div></div>`).join("") : `<div class="empty">No tasks yet.</div>`}`;
 }
 let pending = [];
@@ -248,6 +253,8 @@ function wire(main) {
       if (act === "cancel") await api("POST", `/v1/tasks/${b.dataset.taskId}/cancel`, {});
       if (act === "kill-on") { if (!confirm("Stop every task and refuse every action?")) { b.disabled = false; return; } await api("POST", "/v1/kill-switch", { engaged: true }); }
       if (act === "kill-off") await api("POST", "/v1/kill-switch", { engaged: false });
+      if (act === "schedule") { await api("POST", "/v1/schedules", { text: $("#schedtext").value.trim(), daily_at: $("#schedat").value.trim() }); toast("Scheduled."); }
+      if (act === "unschedule") await api("DELETE", "/v1/schedules/" + b.dataset.sched);
       if (act === "set-model") { await api("PUT", "/v1/model", { adapter: $("#madapter").value, model: $("#mname").value.trim() }); toast("New tasks will use this model."); }
       if (act === "save-policy") { await api("PUT", "/v1/policies/org", { cedar: $("#orgpol").value }); toast("Policy saved."); }
       if (act === "save-secret") { await api("PUT", "/v1/secrets/" + encodeURIComponent($("#secname").value.trim()), { value: $("#secval").value }); toast("Stored."); }

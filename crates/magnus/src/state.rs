@@ -163,6 +163,39 @@ pub struct MemoryEntry {
     pub at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug)]
+pub struct Schedule {
+    pub id: String,
+    pub person: String,
+    pub text: String,
+    pub every_minutes: Option<u32>,
+    pub daily_at: Option<String>,
+    pub created: DateTime<Utc>,
+    pub last_fired: Option<DateTime<Utc>>,
+}
+
+impl Schedule {
+    /// The next time this schedule is due after its last run (or creation).
+    pub fn next_due(&self) -> Option<DateTime<Utc>> {
+        let after = self.last_fired.unwrap_or(self.created);
+        if let Some(m) = self.every_minutes {
+            return Some(after + chrono::Duration::minutes(m.max(1) as i64));
+        }
+        let (h, m) = self.daily_at.as_deref()?.split_once(':')?;
+        let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+        use chrono::{Local, TimeZone};
+        let local = after.with_timezone(&Local);
+        let mut day = local.date_naive();
+        loop {
+            let t = Local.from_local_datetime(&day.and_hms_opt(h, m, 0)?).earliest()?;
+            if t > local {
+                return Some(t.with_timezone(&Utc));
+            }
+            day = day.succ_opt()?;
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct State {
     pub tasks: BTreeMap<String, Task>,
@@ -171,6 +204,7 @@ pub struct State {
     pub approvals: Vec<Approval>,
     pub policies: BTreeMap<String, String>,
     pub kill_switch: bool,
+    pub schedules: BTreeMap<String, Schedule>,
     pub model: Option<(String, String)>,
     pub pins: HashMap<String, Pin>,
     /// Tools whose live definition differs from the pin, with the open item.
@@ -199,6 +233,20 @@ impl State {
                 self.policies.insert(layer.clone(), cedar.clone());
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
+            Ev::ScheduleSet { id, person, text, every_minutes, daily_at } => {
+                self.schedules.insert(
+                    id.clone(),
+                    Schedule { id: id.clone(), person: person.clone(), text: text.clone(), every_minutes: *every_minutes, daily_at: daily_at.clone(), created: e.at, last_fired: None },
+                );
+            }
+            Ev::ScheduleRemoved { id } => {
+                self.schedules.remove(id);
+            }
+            Ev::ScheduleFired { id, .. } => {
+                if let Some(s) = self.schedules.get_mut(id) {
+                    s.last_fired = Some(e.at);
+                }
+            }
             Ev::ModelSet { adapter, model } => self.model = Some((adapter.clone(), model.clone())),
             Ev::ToolPinned { tool, hash, description, input_schema, approved } => {
                 self.pins.insert(

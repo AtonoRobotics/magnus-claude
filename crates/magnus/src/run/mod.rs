@@ -315,6 +315,21 @@ impl Kernel {
                     (_, Err(e)) => self.result(rid, call_id, format!("The policy does not parse: {e}. A retry with the same text will not help."), true).await?,
                 }
             }
+            "propose_schedule" => match crate::api::rule_for(input) {
+                Ok((every, daily)) => {
+                    let text = input["text"].as_str().unwrap_or_default().to_string();
+                    let item = self
+                        .item(
+                            run,
+                            "schedule_proposal",
+                            format!("The worker proposes a recurring task: {text}"),
+                            json!({ "text": text, "every_minutes": every, "daily_at": daily, "call_id": call_id }),
+                        )
+                        .await?;
+                    self.result(rid, call_id, format!("Proposal {item} sent to the person. Nothing is scheduled until they accept it."), false).await?;
+                }
+                Err(m) => self.result(rid, call_id, format!("{m}. A retry with the same values will not help."), true).await?,
+            },
             "wait_until" => {
                 let at = input["at"].as_str().unwrap_or_default();
                 match chrono::DateTime::parse_from_rfc3339(at) {

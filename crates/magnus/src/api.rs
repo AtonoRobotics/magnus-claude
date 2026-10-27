@@ -3,7 +3,7 @@
 //! cannot reach (its sandbox has no network and no tool calls this API).
 
 use crate::config::{Adapter, Person};
-use crate::events::{Ev, RunConfig};
+use crate::events::Ev;
 use crate::inbox::{self, Answer};
 use crate::kernel::{new_id, Kernel, HARNESS_VERSION};
 use crate::state::{Run, Status};
@@ -72,6 +72,8 @@ pub fn router(k: Arc<Kernel>) -> Router {
         .route("/v1/adapters/{id}/sign-in", post(sign_in_begin))
         .route("/v1/adapters/{id}/sign-in/complete", post(sign_in_complete))
         .route("/v1/memory", get(memory))
+        .route("/v1/schedules", get(schedules).post(add_schedule))
+        .route("/v1/schedules/{id}", axum::routing::delete(remove_schedule))
         .with_state(k)
 }
 
@@ -149,19 +151,6 @@ async fn submit(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
     if text.is_empty() {
         return err(StatusCode::BAD_REQUEST, "the task has no text");
     }
-    let (task, run) = (new_id("task"), new_id("run"));
-    let m = &k.cfg.model;
-    let (adapter, model) = k.read(|s| s.model.clone()).unwrap_or_else(|| (m.adapter.clone(), m.name.clone()));
-    let config = RunConfig {
-        adapter,
-        model,
-        max_retries: m.max_retries,
-        max_tokens: m.max_tokens,
-        budget: k.cfg.budget.clone(),
-        verifier: k.cfg.verifier.enabled,
-        instructions: crate::run::instructions_version(),
-        harness: HARNESS_VERSION.into(),
-    };
     let attachments = b["attachments"].as_array().cloned().unwrap_or_default();
     for a in &attachments {
         let size = a["data_b64"].as_str().map(|d| d.len() * 3 / 4).unwrap_or(0);
@@ -172,12 +161,10 @@ async fn submit(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
             return err(StatusCode::PAYLOAD_TOO_LARGE, "attachments are limited to 25 MB each");
         }
     }
-    let ev = Ev::TaskCreated { task: task.clone(), run: run.clone(), person: p.id.clone(), text, attachments, config };
-    if let Err(e) = k.emit(&format!("person:{}", p.id), ev).await {
-        return internal(e);
+    match k.create_task(&format!("person:{}", p.id), &p.id, text, attachments).await {
+        Ok((task, run)) => (StatusCode::CREATED, Json(json!({ "task_id": task, "run_id": run }))).into_response(),
+        Err(e) => internal(e),
     }
-    k.wake(&run);
-    (StatusCode::CREATED, Json(json!({ "task_id": task, "run_id": run }))).into_response()
 }
 
 fn visible_task(p: &Person, t: &crate::state::Task) -> bool {
@@ -606,4 +593,69 @@ async fn put_model(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response 
         Ok(_) => Json(json!({ "adapter": adapter, "model": model })).into_response(),
         Err(e) => internal(e),
     }
+}
+
+async fn schedules(State(k): K, h: HeaderMap) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let list: Vec<Value> = k.read(|s| {
+        s.schedules
+            .values()
+            .filter(|x| x.person == p.id || p.is_owner())
+            .map(|x| json!({ "id": x.id, "person": x.person, "text": x.text, "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due() }))
+            .collect()
+    });
+    Json(json!({ "schedules": list })).into_response()
+}
+
+fn schedule_rule(b: &Value) -> Result<(Option<u32>, Option<String>), String> {
+    let every = b["every_minutes"].as_u64().map(|m| m as u32);
+    let daily = b["daily_at"].as_str().map(String::from);
+    match (every, &daily) {
+        (Some(m), None) if m >= 5 => Ok((Some(m), None)),
+        (Some(_), None) => Err("schedules run at most every 5 minutes".into()),
+        (None, Some(t)) if t.split_once(':').is_some_and(|(h, m)| h.parse::<u32>().is_ok_and(|h| h < 24) && m.parse::<u32>().is_ok_and(|m| m < 60)) => Ok((None, daily)),
+        _ => Err("give either every_minutes or daily_at as HH:MM".into()),
+    }
+}
+
+async fn add_schedule(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let text = b["text"].as_str().unwrap_or_default().trim().to_string();
+    if text.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "the schedule has no task text");
+    }
+    let (every_minutes, daily_at) = match schedule_rule(&b) {
+        Ok(r) => r,
+        Err(m) => return err(StatusCode::BAD_REQUEST, m),
+    };
+    let id = new_id("sched");
+    match k.emit(&format!("person:{}", p.id), Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at }).await {
+        Ok(_) => (StatusCode::CREATED, Json(json!({ "id": id }))).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn remove_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some(owner_id) = k.read(|s| s.schedules.get(&id).map(|x| x.person.clone())) else { return err(StatusCode::NOT_FOUND, "no such schedule") };
+    if owner_id != p.id && !p.is_owner() {
+        return err(StatusCode::NOT_FOUND, "no such schedule");
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::ScheduleRemoved { id }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+pub(crate) fn rule_for(b: &Value) -> Result<(Option<u32>, Option<String>), String> {
+    schedule_rule(b)
 }

@@ -45,6 +45,25 @@ pub enum Ev {
     KillSwitch {
         engaged: bool,
     },
+    /// A recurring task a person set up (or accepted from the agent's proposal).
+    ScheduleSet {
+        id: String,
+        person: String,
+        text: String,
+        /// Minutes between runs, or None with `daily_at`.
+        #[serde(default)]
+        every_minutes: Option<u32>,
+        /// Local time "HH:MM" for a daily run.
+        #[serde(default)]
+        daily_at: Option<String>,
+    },
+    ScheduleRemoved {
+        id: String,
+    },
+    ScheduleFired {
+        id: String,
+        task: String,
+    },
     /// The model new tasks run on, chosen by the owner.
     ModelSet {
         adapter: String,

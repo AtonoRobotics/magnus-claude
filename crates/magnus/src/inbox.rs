@@ -177,7 +177,21 @@ impl Kernel {
                 self.emit(&actor, resolve(None)).await?;
                 self.emit(&actor, Ev::PolicySet { layer, cedar: next }).await?;
             }
-            ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") => {
+            ("schedule_proposal", "accept") => {
+                self.emit(&actor, resolve(None)).await?;
+                self.emit(
+                    &actor,
+                    Ev::ScheduleSet {
+                        id: new_id("sched"),
+                        person: item.person.clone(),
+                        text: item.details["text"].as_str().unwrap_or_default().into(),
+                        every_minutes: item.details["every_minutes"].as_u64().map(|m| m as u32),
+                        daily_at: item.details["daily_at"].as_str().map(String::from),
+                    },
+                )
+                .await?;
+            }
+            ("schedule_proposal", "reject") | ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") => {
                 self.emit(&actor, resolve(None)).await?;
             }
             // Only the kernel's own notices (which name a reason) can continue a

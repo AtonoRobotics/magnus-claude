@@ -144,10 +144,42 @@ impl Kernel {
         self.drivers.lock().unwrap().contains(run)
     }
 
-    /// Keep runs moving: restart drivers for running runs, wake due timers.
+    /// Create a task for `person` with the current model and budgets.
+    pub async fn create_task(self: &Arc<Self>, actor: &str, person: &str, text: String, attachments: Vec<serde_json::Value>) -> Result<(String, String)> {
+        let (task, run) = (new_id("task"), new_id("run"));
+        let m = &self.cfg.model;
+        let (adapter, model) = self.read(|s| s.model.clone()).unwrap_or_else(|| (m.adapter.clone(), m.name.clone()));
+        let config = crate::events::RunConfig {
+            adapter,
+            model,
+            max_retries: m.max_retries,
+            max_tokens: m.max_tokens,
+            budget: self.cfg.budget.clone(),
+            verifier: self.cfg.verifier.enabled,
+            instructions: crate::run::instructions_version(),
+            harness: HARNESS_VERSION.into(),
+        };
+        self.emit(actor, Ev::TaskCreated { task: task.clone(), run: run.clone(), person: person.into(), text, attachments, config }).await?;
+        self.wake(&run);
+        Ok((task, run))
+    }
+
+    /// Keep runs moving: restart drivers for running runs, wake due timers,
+    /// start scheduled tasks.
     pub async fn sweep(self: Arc<Self>) {
         loop {
             let now = chrono::Utc::now();
+            let due_schedules: Vec<crate::state::Schedule> =
+                self.read(|s| if s.kill_switch { vec![] } else { s.schedules.values().filter(|x| x.next_due().is_some_and(|t| t <= now)).cloned().collect() });
+            for sc in due_schedules {
+                // A scheduled task acts for the person who set it up (K54).
+                match self.create_task(&format!("schedule:{}", sc.id), &sc.person, sc.text.clone(), vec![]).await {
+                    Ok((task, _)) => {
+                        let _ = self.emit("kernel", Ev::ScheduleFired { id: sc.id.clone(), task }).await;
+                    }
+                    Err(e) => tracing::error!("schedule {}: {e:#}", sc.id),
+                }
+            }
             let (running, due): (Vec<String>, Vec<(String, u32)>) = self.read(|s| {
                 let running = s.runs.values().filter(|r| r.status == Status::Running).map(|r| r.id.clone()).collect();
                 let due = s
