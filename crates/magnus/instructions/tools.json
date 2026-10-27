@@ -1,0 +1,16 @@
+{
+  "task_contract": "Record or revise the task contract: goal, assumptions, done-criteria (each with an optional executable check), and the irreversible actions you expect. Required before any action that changes something, and before completing.",
+  "task_complete": "Report the task done. Every criterion is then checked against the world; if a check fails you get the failure back and the task stays open.",
+  "task_fail": "Declare that you cannot finish the task, with the reason and what you observed.",
+  "ask_principal": "Ask the person a question and wait for the answer. Use only when an assumption changes the outcome or an action cannot be undone.",
+  "propose_policy": "Propose a policy change (Cedar rules for a layer such as org or user/<id>) to the person who owns that layer, citing evidence. It changes nothing until they accept it.",
+  "wait_until": "Pause the task until a time (RFC 3339), for example to wait for a reply or a scheduled moment.",
+  "notify": "Send the person a short note without waiting for an answer.",
+  "web_fetch": "Fetch a web page or file by URL and return its text.",
+  "web_search": "Search the web and return result titles, URLs and snippets.",
+  "memory_write": "Remember a fact for future tasks, with an optional topic.",
+  "memory_search": "Search facts remembered from earlier tasks.",
+  "sandbox_exec": "Run a shell command in your private Linux workspace (Python 3 with document, spreadsheet, slide and PDF libraries). It has no network. Files persist under /workspace for this task.",
+  "sandbox_write_file": "Write a file into your workspace. Set base64 true for binary content.",
+  "sandbox_read_file": "Read a file from your workspace. Binary files come back base64-encoded."
+}

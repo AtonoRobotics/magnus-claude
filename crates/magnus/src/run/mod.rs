@@ -1,0 +1,390 @@
+//! Runs: the context each model call sees, the tools it is offered, and the
+//! run records (contract, completion, failure, questions, proposals, waits)
+//! that the loop writes to the log itself (K21). Run records grant nothing.
+
+mod agent_loop;
+
+pub use agent_loop::Flow;
+
+use crate::boundary::{self, Action, Issuer, Verdict};
+use crate::events::Ev;
+use crate::kernel::{new_id, Kernel};
+use crate::state::Run;
+use crate::tools::{self, Label, Risk};
+use anyhow::Result;
+use magnus_adapter_proto::{Block, Message, Role, ToolSpec};
+use serde_json::{json, Value};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+pub const INSTRUCTIONS: &str = include_str!("../../instructions/agent.md");
+const MAX_RESULT_IN_CONTEXT: usize = 40_000;
+
+pub fn instructions_version() -> String {
+    use sha2::Digest;
+    format!("agent.md@{}", &hex::encode(sha2::Sha256::digest(INSTRUCTIONS.as_bytes()))[..12])
+}
+
+fn clip(s: &str) -> String {
+    if s.len() <= MAX_RESULT_IN_CONTEXT {
+        return s.to_string();
+    }
+    let mut cut = MAX_RESULT_IN_CONTEXT;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n[output shortened from {} characters; the full result is in the task log]", &s[..cut], s.len())
+}
+
+impl Kernel {
+    /// The exact context for the run's next model call, rebuilt from the log.
+    /// It only grows at the end, so provider prompt caches stay valid (C1).
+    pub fn context(&self, run: &Run) -> (String, Vec<Message>) {
+        let task = self.read(|s| s.tasks.get(&run.task).cloned());
+        let mut first = vec![Block::Text { text: task.map(|t| t.text).unwrap_or_default() }];
+        let mut msgs: Vec<Message> = vec![];
+        for (s, _, text) in run.notices.iter().filter(|(s, _, _)| *s == 0) {
+            let _ = s;
+            first.push(Block::Text { text: text.clone() });
+        }
+        msgs.push(Message { role: Role::User, content: first, state: None });
+        for (i, reply) in run.replies.iter().enumerate() {
+            msgs.push(Message { role: Role::Assistant, content: reply.blocks.clone(), state: reply.state.clone() });
+            let mut user = vec![];
+            for (id, _, _) in reply.calls() {
+                if let Some(r) = run.results.get(&id) {
+                    user.push(Block::ToolResult { call_id: id, content: vec![Block::Text { text: clip(&r.text) }], is_error: r.is_error });
+                }
+            }
+            for (_, _, text) in run.notices.iter().filter(|(s, _, _)| *s as usize == i + 1) {
+                user.push(Block::Text { text: text.clone() });
+            }
+            if !user.is_empty() {
+                msgs.push(Message { role: Role::User, content: user, state: None });
+            }
+        }
+        (INSTRUCTIONS.to_string(), msgs)
+    }
+
+    /// Tools offered to the run's next model call: run records, built-ins,
+    /// and the person's classified app tools with pinned definitions.
+    pub async fn tools_for(&self, run: &Run) -> Vec<ToolSpec> {
+        let mut specs = tools::builtin_specs(self.sandboxes.available(), self.web.can_search());
+        let Some(person) = self.person(&run.person).cloned() else { return specs };
+        for c in self.cfg.connectors.clone() {
+            let live = self.live_app_tools(&c).await;
+            for (remote, class) in &c.tools {
+                let name = format!("{}__{remote}", c.name);
+                let Some(f) = boundary::facts(self, &name) else { continue };
+                if Risk::parse(&class.risk) == Some(Risk::Prohibited) || !boundary::has_rights(&person, &f) {
+                    continue;
+                }
+                if let Some(t) = live.as_ref().and_then(|l| l.iter().find(|t| &t.name == remote)) {
+                    if let Err(e) = self.pin(&name, t).await {
+                        tracing::warn!("pin {name}: {e:#}");
+                    }
+                }
+                let usable = self.read(|s| s.pins.get(&name).cloned().filter(|_| !s.changed.contains_key(&name)));
+                if let Some(p) = usable {
+                    specs.push(ToolSpec { name, description: p.description, input_schema: p.input_schema });
+                }
+            }
+        }
+        specs
+    }
+
+    async fn live_app_tools(&self, c: &crate::config::Connector) -> Option<Vec<crate::apps::AppTool>> {
+        {
+            let cache = self.live_tools.lock().await;
+            if let Some((at, tools)) = cache.get(&c.name) {
+                if at.elapsed() < Duration::from_secs(2) {
+                    return Some(tools.clone());
+                }
+            }
+        }
+        let secret = c.credential.as_ref().and_then(|n| self.vault.get(n).ok().flatten());
+        let secret = secret?;
+        match self.mcp.list_tools(&c.url, Some(secret.expose())).await {
+            Ok(t) => {
+                self.live_tools.lock().await.insert(c.name.clone(), (Instant::now(), t.clone()));
+                Some(t)
+            }
+            Err(e) => {
+                tracing::warn!("list tools of {}: {e:#}", c.name);
+                None
+            }
+        }
+    }
+
+    /// Pin a tool definition on first sight; disable it if it later changes (B10).
+    pub(crate) async fn pin(&self, name: &str, t: &crate::apps::AppTool) -> Result<()> {
+        let hash = crate::apps::definition_hash(t);
+        let (pinned, changed) = self.read(|s| (s.pins.get(name).map(|p| p.hash.clone()), s.changed.get(name).map(|(_, p)| p.hash.clone())));
+        match pinned {
+            None => {
+                self.emit(
+                    "kernel",
+                    Ev::ToolPinned { tool: name.into(), hash, description: t.description.clone(), input_schema: t.input_schema.clone() },
+                )
+                .await?;
+            }
+            Some(h) if h == hash => {}
+            Some(_) if changed.as_deref() == Some(hash.as_str()) => {}
+            Some(_) => {
+                let owner = self.owners().first().map(|p| p.id.clone()).unwrap_or_default();
+                let item = new_id("item");
+                // The new description is third-party text: it goes to the owner
+                // for review, never to the model.
+                self.emit(
+                    "kernel",
+                    Ev::Item {
+                        id: item.clone(),
+                        item_kind: "tool_change".into(),
+                        task: None,
+                        run: None,
+                        person: owner,
+                        summary: format!("The definition of {name} changed. It is disabled until you approve the new one."),
+                        details: json!({ "tool": name, "hash": hash, "description": t.description, "input_schema": t.input_schema }),
+                    },
+                )
+                .await?;
+                self.emit(
+                    "kernel",
+                    Ev::ToolChanged { tool: name.into(), hash, description: t.description.clone(), input_schema: t.input_schema.clone(), item },
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn result(&self, run: &str, call_id: &str, text: impl Into<String>, is_error: bool) -> Result<()> {
+        self.emit(
+            "kernel",
+            Ev::ToolResult {
+                run: run.into(),
+                call_id: call_id.into(),
+                key: None,
+                status: if is_error { "failed".into() } else { "done".into() },
+                text: text.into(),
+                is_error,
+                label: Label::Principal,
+                data: None,
+                source: None,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn item(&self, run: &Run, kind: &str, summary: String, details: Value) -> Result<String> {
+        let id = new_id("item");
+        self.emit(
+            "kernel",
+            Ev::Item {
+                id: id.clone(),
+                item_kind: kind.into(),
+                task: Some(run.task.clone()),
+                run: Some(run.id.clone()),
+                person: run.person.clone(),
+                summary,
+                details,
+            },
+        )
+        .await?;
+        Ok(id)
+    }
+
+    pub(crate) async fn record_call(self: &Arc<Self>, run: &Run, call_id: &str, step_id: &str, name: &str, input: &Value) -> Result<Flow> {
+        let rid = run.id.as_str();
+        match name {
+            "task_contract" => match self.validate_contract(input) {
+                Ok(()) => {
+                    let version = run.contract_version + 1;
+                    self.emit("model", Ev::Contract { run: rid.into(), version, contract: input.clone() }).await?;
+                    self.result(rid, call_id, format!("Contract recorded (version {version})."), false).await?;
+                }
+                Err(why) => {
+                    self.result(rid, call_id, format!("The contract was not recorded: {why}. Fix it and call task_contract again; a retry with the same contract will not help."), true)
+                        .await?
+                }
+            },
+            "task_complete" => return self.complete(run, call_id, step_id, input).await,
+            "task_fail" => {
+                let reason = input["reason"].as_str().unwrap_or("no reason given").to_string();
+                self.result(rid, call_id, "Recorded.", false).await?;
+                self.emit("model", Ev::Failed { run: rid.into(), reason, by: "model".into() }).await?;
+                self.on_stop(rid, true).await;
+                return Ok(Flow::Stop);
+            }
+            "ask_principal" => {
+                let q = input["question"].as_str().unwrap_or_default().to_string();
+                let item = self.item(run, "question", q.clone(), json!({ "call_id": call_id, "question": q, "options": input["options"] })).await?;
+                self.suspend(rid, "question", Some(item)).await?;
+                return Ok(Flow::Stop);
+            }
+            "propose_policy" => {
+                let layer = input["layer"].as_str().unwrap_or_default().to_string();
+                let cedar = input["cedar"].as_str().unwrap_or_default().to_string();
+                let layer_ok = layer == "org" || layer.starts_with("group/") || layer.starts_with("user/");
+                match (layer_ok, crate::policy::validate(&cedar)) {
+                    (true, Ok(())) => {
+                        let item = self
+                            .item(
+                                run,
+                                "policy_proposal",
+                                format!("The agent proposes a policy change for {layer}."),
+                                json!({ "layer": layer, "cedar": cedar, "rationale": input["rationale"], "call_id": call_id }),
+                            )
+                            .await?;
+                        self.result(rid, call_id, format!("Proposal {item} sent to whoever owns the {layer} policy. It changes nothing until they accept it."), false)
+                            .await?;
+                    }
+                    (false, _) => self.result(rid, call_id, "Unknown layer: use org, group/<id> or user/<id>. A retry with the same layer will not help.", true).await?,
+                    (_, Err(e)) => self.result(rid, call_id, format!("The policy does not parse: {e}. A retry with the same text will not help."), true).await?,
+                }
+            }
+            "wait_until" => {
+                let at = input["at"].as_str().unwrap_or_default();
+                match chrono::DateTime::parse_from_rfc3339(at) {
+                    Ok(t) => {
+                        let until = t.with_timezone(&chrono::Utc);
+                        self.result(rid, call_id, format!("Waiting until {}.", until.to_rfc3339()), false).await?;
+                        self.emit("model", Ev::Wait { run: rid.into(), until }).await?;
+                        self.suspend(rid, "timer", None).await?;
+                        return Ok(Flow::Stop);
+                    }
+                    Err(e) => self.result(rid, call_id, format!("Not an RFC 3339 time ({e}). A retry with the same value will not help."), true).await?,
+                }
+            }
+            "notify" => {
+                let m = input["message"].as_str().unwrap_or_default().to_string();
+                self.item(run, "notice", m, json!({ "from": "agent" })).await?;
+                self.result(rid, call_id, "Sent.", false).await?;
+            }
+            _ => self.result(rid, call_id, format!("{name} is not a run record."), true).await?,
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn validate_contract(&self, c: &Value) -> std::result::Result<(), String> {
+        if c["goal"].as_str().map(str::trim).unwrap_or_default().is_empty() {
+            return Err("it has no goal".into());
+        }
+        let criteria = c["criteria"].as_array().ok_or("it has no criteria")?;
+        if criteria.is_empty() {
+            return Err("it has no criteria; every task needs done-criteria".into());
+        }
+        let mut ids = std::collections::HashSet::new();
+        for cr in criteria {
+            let id = cr["id"].as_str().filter(|s| !s.is_empty()).ok_or("a criterion has no id")?;
+            if !ids.insert(id) {
+                return Err(format!("criterion id {id} is used twice"));
+            }
+            if cr["description"].as_str().unwrap_or_default().is_empty() {
+                return Err(format!("criterion {id} has no description"));
+            }
+            if let Some(check) = cr.get("check").filter(|v| !v.is_null()) {
+                let tool = check["tool"].as_str().ok_or(format!("criterion {id}: the check names no tool"))?;
+                let f = boundary::facts(self, tool).ok_or(format!("criterion {id}: {tool} is not a usable tool"))?;
+                if f.risk != Risk::Read {
+                    return Err(format!("criterion {id}: checks must use a read-only tool, and {tool} is {}", f.risk.as_str()));
+                }
+                let expect = check["expect"].as_array().filter(|a| !a.is_empty()).ok_or(format!("criterion {id}: the check expects nothing"))?;
+                for e in expect {
+                    if e["pointer"].as_str().is_none() || (e.get("equals").is_none() && e.get("contains").is_none()) {
+                        return Err(format!("criterion {id}: each expectation needs a pointer and equals or contains"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The model reports completion; the world decides (A4, K25, K26, K37).
+    async fn complete(self: &Arc<Self>, run: &Run, call_id: &str, step_id: &str, input: &Value) -> Result<Flow> {
+        let rid = run.id.as_str();
+        let Some(contract) = run.contract.clone() else {
+            self.result(rid, call_id, "There is no task contract, so completion cannot be checked. Record one with task_contract, then retry.", true).await?;
+            return Ok(Flow::Continue);
+        };
+        let mut failures = vec![];
+        let mut unchecked = vec![];
+        for (n, cr) in contract["criteria"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+            let id = cr["id"].as_str().unwrap_or_default().to_string();
+            let Some(check) = cr.get("check").filter(|v| !v.is_null()) else {
+                unchecked.push(cr.clone());
+                continue;
+            };
+            let tool = check["tool"].as_str().unwrap_or_default().to_string();
+            let v = self
+                .execute(Action {
+                    run: rid.into(),
+                    call_id: format!("check:{call_id}:{id}"),
+                    step_id: format!("{step_id}.check.{n}"),
+                    tool: tool.clone(),
+                    input: check["input"].clone(),
+                    issuer: Issuer::Check,
+                })
+                .await?;
+            let Verdict::Done { text, is_error, data } = v else {
+                failures.push(format!("{id}: the check could not run"));
+                continue;
+            };
+            let observed = data.or_else(|| serde_json::from_str::<Value>(&text).ok()).unwrap_or(Value::String(text.clone()));
+            let mut ok = !is_error;
+            let mut seen = vec![];
+            for e in check["expect"].as_array().cloned().unwrap_or_default() {
+                let p = e["pointer"].as_str().unwrap_or_default();
+                let got = observed.pointer(p).cloned().unwrap_or(Value::Null);
+                let pass = if let Some(want) = e.get("equals") {
+                    &got == want
+                } else {
+                    let needle = e["contains"].as_str().unwrap_or_default();
+                    match &got {
+                        Value::String(s) => s.contains(needle),
+                        other => other.to_string().contains(needle),
+                    }
+                };
+                ok &= pass;
+                seen.push(json!({ "pointer": p, "observed": got, "expected": e }));
+            }
+            let evidence = json!({ "tool": tool, "input": check["input"], "error": is_error, "observations": seen });
+            self.emit("kernel", Ev::Verification { run: rid.into(), criterion: id.clone(), passed: ok, evidence: evidence.clone(), by: "kernel".into() }).await?;
+            if !ok {
+                failures.push(format!("{id}: {}", serde_json::to_string(&seen).unwrap_or_default()));
+            }
+        }
+        if !failures.is_empty() {
+            self.result(
+                rid,
+                call_id,
+                format!(
+                    "Not complete. These criteria do not hold in the world: {}. The task stays open: fix the work or revise the contract, then call task_complete again; a retry without changes will not help.",
+                    failures.join("; ")
+                ),
+                true,
+            )
+            .await?;
+            return Ok(Flow::Continue);
+        }
+        let summary = input["summary"].as_str().unwrap_or_default().to_string();
+        if !unchecked.is_empty() {
+            // No executable check and no verifier: the person reviews (K37).
+            let item = self
+                .item(
+                    run,
+                    "review",
+                    format!("Review: {}", contract["goal"].as_str().unwrap_or("the task")),
+                    json!({ "call_id": call_id, "summary": summary, "criteria": unchecked }),
+                )
+                .await?;
+            self.suspend(rid, "review", Some(item)).await?;
+            return Ok(Flow::Stop);
+        }
+        self.result(rid, call_id, "Verified and completed.", false).await?;
+        self.emit("kernel", Ev::Completed { run: rid.into(), summary }).await?;
+        self.on_stop(rid, true).await;
+        Ok(Flow::Stop)
+    }
+}

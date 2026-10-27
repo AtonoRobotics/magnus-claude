@@ -1,0 +1,198 @@
+//! The kernel: wiring, the single writer, boot, and the sweeper that keeps
+//! runs moving. Every change goes through `emit`: append to the log first,
+//! then apply to the projection.
+
+use crate::adapters::Adapters;
+use crate::apps::{AppTool, Mcp};
+use crate::config::{Config, Person};
+use crate::events::Ev;
+use crate::log::{Event, Log};
+use crate::sandbox::Sandboxes;
+use crate::state::{State, Status};
+use crate::vault::Vault;
+use crate::web::Web;
+use anyhow::Result;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+pub const HARNESS_VERSION: &str = concat!("magnus-", env!("CARGO_PKG_VERSION"));
+
+pub struct Kernel {
+    pub cfg: Config,
+    log: Log,
+    state: Mutex<State>,
+    write: tokio::sync::Mutex<()>,
+    pub vault: Arc<Vault>,
+    pub adapters: Adapters,
+    pub mcp: Mcp,
+    pub web: Web,
+    pub sandboxes: Sandboxes,
+    drivers: Mutex<HashSet<String>>,
+    pub(crate) leases: Mutex<HashMap<String, String>>,
+    pub(crate) live_tools: tokio::sync::Mutex<HashMap<String, (Instant, Vec<AppTool>)>>,
+    pub live_text: tokio::sync::broadcast::Sender<(String, String)>,
+}
+
+pub fn new_id(prefix: &str) -> String {
+    format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
+}
+
+impl Kernel {
+    pub async fn boot(cfg: Config) -> Result<Arc<Kernel>> {
+        std::fs::create_dir_all(&cfg.appliance.state_dir)?;
+        let log = Log::open(&cfg.database.url).await?;
+        let mut state = State::default();
+        for e in log.load().await? {
+            state.apply(&e);
+        }
+        let vault = Arc::new(Vault::open(&cfg.appliance.state_dir)?);
+        let adapters = Adapters::new(&cfg.appliance.state_dir, vault.clone(), &cfg.adapters);
+        let (live_text, _) = tokio::sync::broadcast::channel(1024);
+        let k = Arc::new(Kernel {
+            web: Web::new(&cfg.web),
+            sandboxes: Sandboxes::new(cfg.sandbox.clone(), &cfg.appliance.state_dir),
+            mcp: Mcp::new(),
+            adapters,
+            vault,
+            log,
+            state: Mutex::new(state),
+            write: tokio::sync::Mutex::new(()),
+            drivers: Mutex::new(HashSet::new()),
+            leases: Mutex::new(HashMap::new()),
+            live_tools: tokio::sync::Mutex::new(HashMap::new()),
+            live_text,
+            cfg,
+        });
+        k.emit("kernel", Ev::KernelBoot { version: HARNESS_VERSION.into(), pid: std::process::id() }).await?;
+        // Guest processes did not survive the restart; tell runs that used a sandbox (K20).
+        let restarted: Vec<(String, u32)> = k.read(|s| {
+            s.runs
+                .values()
+                .filter(|r| !r.status.terminal() && r.intents.values().any(|i| i.tool.starts_with("sandbox_")))
+                .map(|r| (r.id.clone(), r.replies.len() as u32))
+                .collect()
+        });
+        for (run, step) in restarted {
+            k.emit(
+                "kernel",
+                Ev::Notice {
+                    run,
+                    step,
+                    text: "The appliance restarted. Processes in your sandbox were stopped; files in /workspace are kept.".into(),
+                },
+            )
+            .await?;
+        }
+        Ok(k)
+    }
+
+    /// Append an event, then apply it. Only correctness writes come here (K6).
+    pub async fn emit(&self, actor: &str, ev: Ev) -> Result<Event> {
+        let _g = self.write.lock().await;
+        let e = self.log.append(actor, &ev).await?;
+        self.state.lock().unwrap().apply(&e);
+        Ok(e)
+    }
+
+    pub fn read<T>(&self, f: impl FnOnce(&State) -> T) -> T {
+        f(&self.state.lock().unwrap())
+    }
+
+    pub fn person(&self, id: &str) -> Option<&Person> {
+        self.cfg.person(id)
+    }
+
+    pub fn owners(&self) -> Vec<&Person> {
+        self.cfg.people.iter().filter(|p| p.is_owner()).collect()
+    }
+
+    /// Start driving a run if nothing is.
+    pub fn wake(self: &Arc<Self>, run: &str) {
+        if !self.drivers.lock().unwrap().insert(run.to_string()) {
+            return;
+        }
+        let k = self.clone();
+        let run = run.to_string();
+        tokio::spawn(async move {
+            let r = k.clone().drive(&run).await;
+            k.drivers.lock().unwrap().remove(&run);
+            if let Err(e) = r {
+                tracing::error!("run {run}: {e:#}");
+            }
+        });
+    }
+
+    pub fn driving(&self, run: &str) -> bool {
+        self.drivers.lock().unwrap().contains(run)
+    }
+
+    /// Keep runs moving: restart drivers for running runs, wake due timers.
+    pub async fn sweep(self: Arc<Self>) {
+        loop {
+            let now = chrono::Utc::now();
+            let (running, due): (Vec<String>, Vec<(String, u32)>) = self.read(|s| {
+                let running = s.runs.values().filter(|r| r.status == Status::Running).map(|r| r.id.clone()).collect();
+                let due = s
+                    .runs
+                    .values()
+                    .filter(|r| r.status == Status::Suspended && r.reason.as_deref() == Some("timer") && r.wait_until.is_some_and(|t| t <= now))
+                    .map(|r| (r.id.clone(), r.replies.len() as u32))
+                    .collect();
+                (running, due)
+            });
+            for (run, step) in due {
+                let ok = self
+                    .emit("kernel", Ev::Notice { run: run.clone(), step, text: format!("It is now {}. Your wait has ended.", now.to_rfc3339()) })
+                    .await
+                    .is_ok()
+                    && self.emit("kernel", Ev::Resumed { run: run.clone() }).await.is_ok();
+                if ok {
+                    self.wake(&run);
+                }
+            }
+            for run in running {
+                if !self.driving(&run) {
+                    self.wake(&run);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    /// Release a run's resources when it stops moving.
+    pub async fn on_stop(&self, run: &str, terminal: bool) {
+        self.leases.lock().unwrap().retain(|_, holder| holder != run);
+        if terminal {
+            self.sandboxes.destroy(run).await;
+        } else {
+            self.sandboxes.stop(run).await;
+        }
+    }
+
+    pub async fn suspend(&self, run: &str, reason: &str, item: Option<String>) -> Result<()> {
+        self.emit("kernel", Ev::Suspended { run: run.into(), reason: reason.into(), item }).await?;
+        self.on_stop(run, false).await;
+        Ok(())
+    }
+
+    /// Code stops a run and tells the person why, with the evidence (K24).
+    pub async fn suspend_with_notice(&self, run: &str, reason: &str, summary: String, details: serde_json::Value) -> Result<()> {
+        let (task, person) = self.read(|s| s.runs.get(run).map(|r| (r.task.clone(), r.person.clone()))).unwrap_or_default();
+        let id = new_id("item");
+        self.emit(
+            "kernel",
+            Ev::Item {
+                id: id.clone(),
+                item_kind: "notice".into(),
+                task: Some(task),
+                run: Some(run.into()),
+                person,
+                summary,
+                details: serde_json::json!({ "reason": reason, "evidence": details }),
+            },
+        )
+        .await?;
+        self.suspend(run, reason, Some(id)).await
+    }
+}

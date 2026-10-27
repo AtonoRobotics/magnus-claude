@@ -1,0 +1,12 @@
+[package]
+name = "magnus-scratch"
+description = "Debugging scenarios built on the invariant harness. Not a contract; free to change."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+magnus-invariants = { path = "../invariants" }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

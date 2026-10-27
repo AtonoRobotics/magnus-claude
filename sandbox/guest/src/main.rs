@@ -1,0 +1,228 @@
+//! The guest side of the sandbox. As PID 1 it mounts the filesystems, brings
+//! up loopback (the only interface; the VM has no network device), and runs the
+//! agent: a vsock server on port 52 that runs commands and moves files for the
+//! kernel, one JSON request per connection. It holds no credentials.
+
+use base64::Engine;
+use serde_json::{json, Value};
+use std::ffi::CString;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const PORT: u32 = 52;
+const MAX_OUT: usize = 200_000;
+
+fn mount(src: &str, target: &str, fstype: &str, flags: libc::c_ulong, data: &str) {
+    let _ = std::fs::create_dir_all(target);
+    let (s, t, f, d) = (
+        CString::new(src).unwrap(),
+        CString::new(target).unwrap(),
+        CString::new(fstype).unwrap(),
+        CString::new(data).unwrap(),
+    );
+    let rc = unsafe { libc::mount(s.as_ptr(), t.as_ptr(), f.as_ptr(), flags, d.as_ptr() as *const libc::c_void) };
+    if rc != 0 {
+        eprintln!("magnus-guest: mount {target}: {}", std::io::Error::last_os_error());
+    }
+}
+
+fn loopback_up() {
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        if fd < 0 {
+            return;
+        }
+        let mut req: libc::ifreq = std::mem::zeroed();
+        for (i, b) in b"lo\0".iter().enumerate() {
+            req.ifr_name[i] = *b as libc::c_char;
+        }
+        if libc::ioctl(fd, libc::SIOCGIFFLAGS as _, &mut req) == 0 {
+            req.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
+            libc::ioctl(fd, libc::SIOCSIFFLAGS as _, &req);
+        }
+        libc::close(fd);
+    }
+}
+
+fn init() {
+    mount("proc", "/proc", "proc", 0, "");
+    mount("sysfs", "/sys", "sysfs", 0, "");
+    mount("devtmpfs", "/dev", "devtmpfs", 0, "");
+    mount("devpts", "/dev/pts", "devpts", 0, "");
+    mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777");
+    mount("tmpfs", "/run", "tmpfs", 0, "mode=755");
+    mount("/dev/vdb", "/workspace", "ext4", 0, "");
+    loopback_up();
+    let _ = std::fs::write("/proc/sys/kernel/hostname", "sandbox");
+}
+
+fn listen() -> RawFd {
+    unsafe {
+        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
+        assert!(fd >= 0, "vsock socket: {}", std::io::Error::last_os_error());
+        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+        addr.svm_port = PORT;
+        addr.svm_cid = libc::VMADDR_CID_ANY;
+        let rc = libc::bind(fd, &addr as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_vm>() as u32);
+        assert!(rc == 0, "vsock bind: {}", std::io::Error::last_os_error());
+        assert!(libc::listen(fd, 64) == 0, "vsock listen");
+        fd
+    }
+}
+
+fn truncate(mut b: Vec<u8>) -> (String, bool) {
+    let cut = b.len() > MAX_OUT;
+    b.truncate(MAX_OUT);
+    (String::from_utf8_lossy(&b).into_owned(), cut)
+}
+
+fn exec(req: &Value) -> Value {
+    let command = req["command"].as_str().unwrap_or_default();
+    let timeout = Duration::from_secs(req["timeout_s"].as_u64().unwrap_or(120).clamp(1, 3600));
+    let mut child = match Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir("/workspace")
+        .env_clear()
+        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("HOME", "/workspace")
+        .env("LANG", "C.UTF-8")
+        .env("DISPLAY", ":0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return json!({ "error": format!("could not start the shell: {e}") }),
+    };
+    let mut so = child.stdout.take().unwrap();
+    let mut se = child.stderr.take().unwrap();
+    let t1 = std::thread::spawn(move || {
+        let mut b = vec![];
+        let _ = so.read_to_end(&mut b);
+        b
+    });
+    let t2 = std::thread::spawn(move || {
+        let mut b = vec![];
+        let _ = se.read_to_end(&mut b);
+        b
+    });
+    let start = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if start.elapsed() > timeout => {
+                timed_out = true;
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                break child.wait().ok();
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break None,
+        }
+    };
+    let (stdout, c1) = truncate(t1.join().unwrap_or_default());
+    let (stderr, c2) = truncate(t2.join().unwrap_or_default());
+    json!({
+        "exit_code": status.and_then(|s| s.code()),
+        "stdout": stdout, "stderr": stderr,
+        "timed_out": timed_out, "truncated": c1 || c2
+    })
+}
+
+fn resolve(path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() { p.to_path_buf() } else { std::path::Path::new("/workspace").join(p) }
+}
+
+fn handle(req: Value) -> Value {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    match req["op"].as_str().unwrap_or_default() {
+        "ping" => json!({ "ok": true }),
+        "exec" => exec(&req),
+        "write" => {
+            let p = resolve(req["path"].as_str().unwrap_or_default());
+            let data = match b64.decode(req["data_b64"].as_str().unwrap_or_default()) {
+                Ok(d) => d,
+                Err(e) => return json!({ "error": format!("bad base64: {e}") }),
+            };
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            match std::fs::write(&p, data) {
+                Ok(()) => json!({ "ok": true, "path": p }),
+                Err(e) => json!({ "error": format!("{}: {e}", p.display()) }),
+            }
+        }
+        "read" => {
+            let p = resolve(req["path"].as_str().unwrap_or_default());
+            match std::fs::read(&p) {
+                Ok(d) => json!({ "data_b64": b64.encode(d), "path": p }),
+                Err(e) => json!({ "error": format!("{}: {e}", p.display()) }),
+            }
+        }
+        "sync" => {
+            unsafe { libc::sync() };
+            json!({ "ok": true })
+        }
+        other => json!({ "error": format!("unknown op {other}") }),
+    }
+}
+
+fn serve() {
+    let lfd = listen();
+    loop {
+        let fd = unsafe { libc::accept(lfd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        if fd < 0 {
+            continue;
+        }
+        std::thread::spawn(move || {
+            let stream = unsafe { std::fs::File::from_raw_fd(fd) };
+            let mut line = String::new();
+            let mut r = BufReader::new(&stream);
+            if r.read_line(&mut line).is_err() {
+                return;
+            }
+            let resp = match serde_json::from_str::<Value>(&line) {
+                Ok(req) => handle(req),
+                Err(e) => json!({ "error": format!("bad request: {e}") }),
+            };
+            let mut w = &stream;
+            let _ = w.write_all(format!("{resp}\n").as_bytes());
+        });
+    }
+}
+
+fn main() {
+    if std::process::id() != 1 {
+        serve();
+        return;
+    }
+    init();
+    loop {
+        match unsafe { libc::fork() } {
+            0 => {
+                serve();
+                std::process::exit(0);
+            }
+            pid if pid > 0 => {
+                // Reap everything, including orphans reparented to PID 1; start
+                // the agent again if it dies.
+                loop {
+                    let mut st = 0;
+                    let got = unsafe { libc::waitpid(-1, &mut st, 0) };
+                    if got == pid {
+                        break;
+                    }
+                }
+            }
+            _ => std::thread::sleep(Duration::from_secs(1)),
+        }
+    }
+}

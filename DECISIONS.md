@@ -54,3 +54,15 @@ One line per choice the brief left open, with its reason. The brief and the owne
 
 - Guest kernel: Firecracker CI `vmlinux-6.1.155` (v1.15 artifacts). Reason: upstream-tested with Firecracker 1.16 and has vsock and virtio-blk built in.
 - The jailer is used when the appliance runs as root. Tests run Firecracker unjailed as an unprivileged user in the `kvm` group. Reason: the jailer needs root for chroot and cgroups.
+
+## Evaluation
+
+- TheAgentCompany: a handful of tasks while developing, then one full run of all 175 for the reported score; spend cap asked once per-task cost is measured. Reason: published scores are over all 175, and at a ~30% pass rate a 40-task sample has a ±14-point 95% interval against ±7 for the full set.
+- Live provider sign-in happens through the app (API-key entry, OAuth links); tokens go straight to the vault. Reason: owner's choice (2026-10-27).
+- Two adapters cover the five providers: `anthropic` (Messages API) and one OpenAI-compatible adapter configured per provider (Chat Completions or Responses, API key or OAuth, base URL, extra headers) for GLM (api.z.ai), Muse (api.meta.ai), Codex (chatgpt.com/backend-api/codex) and Grok (cli-chat-proxy.grok.com). Reason: owner instruction that OpenAI-compatible providers share one adapter; research in docs/research/providers-and-tac.md.
+- The adapter contract adds a fifth error class, `invalid_request` (for example, context too long), to the four the owner named. Reason: the kernel must tell a rejected request (no retry) from an unavailable provider (retry).
+- One connection per adapter request over a Unix socket, newline-delimited JSON. Reason: a replaced adapter takes new requests on its new socket while in-flight requests finish on the old one, with no kernel restart.
+- The kernel passes the vault credential in each request and stores any refreshed credential the adapter returns; adapters keep no token state. Reason: tokens come from the vault, and a replaced adapter must not lose sign-ins.
+- While the kill switch is engaged, the boundary refuses every action and the credential stage releases no secret; the vault itself is kept. Provider-side revocation of OAuth tokens is left to the adapters. Reason: B11's intent is that nothing can act; deleting the vault would also delete the model key and every sign-in, so releasing the switch would leave a dead appliance.
+- Canonical JSON (keys sorted at every level) for every hash: approval bindings, idempotency, tool pins. Reason: Postgres jsonb reorders object keys, so a call read back from the log must hash like the original.
+- The audience rule asks only when private content read from a different app goes to an internal or public audience; content returning to the app it came from reaches no one new. The Rule of Two is unchanged and still gates every outbound action once untrusted and private content have both been read. Reason: B4's documented leaks (GitHub MCP, EchoLeak) all involved injected content, which the Rule of Two stops; without the exemption, posting to a team chat twice would ask because the chat's own acknowledgement carries the chat's label.

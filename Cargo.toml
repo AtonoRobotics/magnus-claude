@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/magnus", "crates/adapter-anthropic", "tests/invariants"]
+members = ["crates/magnus", "crates/adapter-proto", "crates/adapter-anthropic", "sandbox/guest", "tests/invariants", "tests/scratch"]
 
 [workspace.package]
 edition = "2021"
