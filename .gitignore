@@ -3,3 +3,4 @@
 /sandbox/cache
 *.ext4
 .env
+/browser/node_modules

@@ -45,6 +45,11 @@ pub enum Ev {
     KillSwitch {
         engaged: bool,
     },
+    /// The model new tasks run on, chosen by the owner.
+    ModelSet {
+        adapter: String,
+        model: String,
+    },
     /// A tool definition approved for use, pinned by hash (B10).
     ToolPinned {
         tool: String,

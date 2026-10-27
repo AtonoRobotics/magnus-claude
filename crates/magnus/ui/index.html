@@ -211,12 +211,14 @@ async function streamLive(id) {
 }
 
 async function settingsView() {
-  const [{ adapters }, pol, sec] = await Promise.all([api("GET", "/v1/adapters"), api("GET", "/v1/policies"), api("GET", "/v1/secrets")]);
+  const [{ adapters }, pol, sec, cur] = await Promise.all([api("GET", "/v1/adapters"), api("GET", "/v1/policies"), api("GET", "/v1/secrets"), api("GET", "/v1/model")]);
   const kill = (await api("GET", "/v1/health")).kill_switch;
   return `<h1>Settings</h1>
     <div class="card"><div class="spread"><div><strong>Kill switch</strong><p class="small muted">Stops every task at once and refuses every action until you release it. Released tasks stay paused until you continue them.</p></div>
       ${kill ? `<button data-act="kill-off">Release</button>` : `<button class="danger" data-act="kill-on">Stop everything</button>`}</div></div>
-    <h2>Models</h2>${adapters.map(a => `<div class="card"><div class="spread"><strong>${esc(a.id)}</strong><span class="row">${a.conformance ? `<span class="chip ${a.conformance.passed ? "ok" : "bad"}">conformance ${a.conformance.passed ? "passed" : "failed"} (${esc(a.conformance.model)})</span>` : `<span class="chip warn">not verified</span>`}</span></div>
+    <h2>Models</h2><div class="card"><strong>New tasks run on</strong> <code>${esc(cur.adapter)}</code> · <code>${esc(cur.model)}</code>
+      <div class="row" style="margin-top:8px"><select id="madapter" aria-label="Adapter">${adapters.map(a => `<option ${a.id === cur.adapter ? "selected" : ""}>${esc(a.id)}</option>`).join("")}</select><input type="text" id="mname" value="${esc(cur.model)}" aria-label="Model id" style="max-width:260px"><button data-act="set-model">Use</button></div></div>
+    ${adapters.map(a => `<div class="card"><div class="spread"><strong>${esc(a.id)}</strong><span class="row">${a.conformance ? `<span class="chip ${a.conformance.passed ? "ok" : "bad"}">conformance ${a.conformance.passed ? "passed" : "failed"} (${esc(a.conformance.model)})</span>` : `<span class="chip warn">not verified</span>`}</span></div>
       <div class="small muted">${a.running ? esc(a.running.adapter + " " + a.running.version) : "not running"}</div>
       <div class="row" style="margin-top:10px"><button data-act="signin" data-adapter="${esc(a.id)}">Sign in</button><button data-act="conformance" data-adapter="${esc(a.id)}">Run conformance</button></div><div id="signin-${esc(a.id)}"></div><div id="conf-${esc(a.id)}"></div></div>`).join("")}
     <h2>Policy</h2><div class="card"><p class="small muted">What the worker may do on its own (execute) and what it must ask about (request_approval), written in Cedar. Lower layers can only narrow the organization's.</p>
@@ -246,6 +248,7 @@ function wire(main) {
       if (act === "cancel") await api("POST", `/v1/tasks/${b.dataset.taskId}/cancel`, {});
       if (act === "kill-on") { if (!confirm("Stop every task and refuse every action?")) { b.disabled = false; return; } await api("POST", "/v1/kill-switch", { engaged: true }); }
       if (act === "kill-off") await api("POST", "/v1/kill-switch", { engaged: false });
+      if (act === "set-model") { await api("PUT", "/v1/model", { adapter: $("#madapter").value, model: $("#mname").value.trim() }); toast("New tasks will use this model."); }
       if (act === "save-policy") { await api("PUT", "/v1/policies/org", { cedar: $("#orgpol").value }); toast("Policy saved."); }
       if (act === "save-secret") { await api("PUT", "/v1/secrets/" + encodeURIComponent($("#secname").value.trim()), { value: $("#secval").value }); toast("Stored."); }
       if (act === "signin") { await signIn(b.dataset.adapter); return; }

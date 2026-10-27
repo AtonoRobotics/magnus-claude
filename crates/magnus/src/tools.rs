@@ -122,6 +122,18 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "sandbox_read_file", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "web_fetch", app: "web", risk: Risk::Read, label: Label::UNTRUSTED, audience: Audience::Public },
     Builtin { name: "web_search", app: "web", risk: Risk::Read, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "browser_navigate", app: "browser", risk: Risk::Read, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "browser_snapshot", app: "browser", risk: Risk::Read, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "browser_screenshot", app: "browser", risk: Risk::Read, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "browser_back", app: "browser", risk: Risk::Read, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "browser_click", app: "browser", risk: Risk::ReversibleWrite, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "browser_type", app: "browser", risk: Risk::ReversibleWrite, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "browser_select", app: "browser", risk: Risk::ReversibleWrite, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "computer_screenshot", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "computer_click", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "computer_type", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "computer_key", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "computer_scroll", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_write", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_search", app: "memory", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
 ];
@@ -136,7 +148,7 @@ fn obj(props: Value, required: &[&str]) -> Value {
 
 /// Specs for run records and built-in actions. Descriptions are part of the
 /// versioned instructions (X11): they live in `instructions/tools.json`.
-pub fn builtin_specs(sandbox: bool, search: bool) -> Vec<ToolSpec> {
+pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec> {
     let desc: Value = serde_json::from_str(include_str!("../instructions/tools.json")).expect("tools.json");
     let d = |n: &str| desc[n].as_str().unwrap_or_default().to_string();
     let criterion = json!({
@@ -231,7 +243,35 @@ pub fn builtin_specs(sandbox: bool, search: bool) -> Vec<ToolSpec> {
             input_schema: obj(json!({ "query": { "type": "string" } }), &["query"]),
         });
     }
+    if browser {
+        let target = json!({ "type": "string", "description": "an element ref like e12 from the latest snapshot, or visible text" });
+        v.push(ToolSpec { name: "browser_navigate".into(), description: d("browser_navigate"), input_schema: obj(json!({ "url": { "type": "string" } }), &["url"]) });
+        v.push(ToolSpec { name: "browser_snapshot".into(), description: d("browser_snapshot"), input_schema: obj(json!({}), &[]) });
+        v.push(ToolSpec { name: "browser_click".into(), description: d("browser_click"), input_schema: obj(json!({ "target": target }), &["target"]) });
+        v.push(ToolSpec {
+            name: "browser_type".into(),
+            description: d("browser_type"),
+            input_schema: obj(json!({ "target": target, "text": { "type": "string" }, "submit": { "type": "boolean" } }), &["target", "text"]),
+        });
+        v.push(ToolSpec { name: "browser_select".into(), description: d("browser_select"), input_schema: obj(json!({ "target": target, "value": { "type": "string" } }), &["target", "value"]) });
+        v.push(ToolSpec { name: "browser_back".into(), description: d("browser_back"), input_schema: obj(json!({}), &[]) });
+        v.push(ToolSpec { name: "browser_screenshot".into(), description: d("browser_screenshot"), input_schema: obj(json!({}), &[]) });
+    }
     if sandbox {
+        let xy = json!({ "type": "integer" });
+        v.push(ToolSpec { name: "computer_screenshot".into(), description: d("computer_screenshot"), input_schema: obj(json!({}), &[]) });
+        v.push(ToolSpec {
+            name: "computer_click".into(),
+            description: d("computer_click"),
+            input_schema: obj(json!({ "x": xy, "y": xy, "button": { "type": "string", "enum": ["left", "right", "middle"] }, "double": { "type": "boolean" } }), &["x", "y"]),
+        });
+        v.push(ToolSpec { name: "computer_type".into(), description: d("computer_type"), input_schema: obj(json!({ "text": { "type": "string" } }), &["text"]) });
+        v.push(ToolSpec { name: "computer_key".into(), description: d("computer_key"), input_schema: obj(json!({ "keys": { "type": "string" } }), &["keys"]) });
+        v.push(ToolSpec {
+            name: "computer_scroll".into(),
+            description: d("computer_scroll"),
+            input_schema: obj(json!({ "x": xy, "y": xy, "down": { "type": "integer" } }), &["x", "y", "down"]),
+        });
         v.push(ToolSpec {
             name: "sandbox_exec".into(),
             description: d("sandbox_exec"),

@@ -65,6 +65,7 @@ pub fn router(k: Arc<Kernel>) -> Router {
         .route("/v1/secrets/{name}", put(put_secret))
         .route("/v1/kill-switch", post(kill_switch))
         .route("/v1/adapters", get(adapters))
+        .route("/v1/model", get(get_model).put(put_model))
         .route("/v1/adapters/{id}", put(put_adapter))
         .route("/v1/adapters/{id}/catalog", get(catalog))
         .route("/v1/adapters/{id}/conformance", post(conformance))
@@ -150,9 +151,10 @@ async fn submit(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
     }
     let (task, run) = (new_id("task"), new_id("run"));
     let m = &k.cfg.model;
+    let (adapter, model) = k.read(|s| s.model.clone()).unwrap_or_else(|| (m.adapter.clone(), m.name.clone()));
     let config = RunConfig {
-        adapter: m.adapter.clone(),
-        model: m.name.clone(),
+        adapter,
+        model,
         max_retries: m.max_retries,
         max_tokens: m.max_tokens,
         budget: k.cfg.budget.clone(),
@@ -577,5 +579,31 @@ async fn transcribe(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response
     match crate::speech::transcribe(&k.cfg.appliance.state_dir, data).await {
         Ok(text) => Json(json!({ "text": text })).into_response(),
         Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")),
+    }
+}
+
+async fn get_model(State(k): K, h: HeaderMap) -> Response {
+    if let Err(r) = who(&k, &h) {
+        return r;
+    }
+    let (adapter, model) = k.read(|s| s.model.clone()).unwrap_or_else(|| (k.cfg.model.adapter.clone(), k.cfg.model.name.clone()));
+    Json(json!({ "adapter": adapter, "model": model })).into_response()
+}
+
+/// Choose the model new tasks run on. Running tasks keep their pinned model (K9).
+async fn put_model(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let (Some(adapter), Some(model)) = (b["adapter"].as_str(), b["model"].as_str()) else {
+        return err(StatusCode::BAD_REQUEST, "adapter and model are required");
+    };
+    if k.adapters.list().await.iter().all(|(id, _, _)| id != adapter) {
+        return err(StatusCode::NOT_FOUND, "no such adapter");
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::ModelSet { adapter: adapter.into(), model: model.into() }).await {
+        Ok(_) => Json(json!({ "adapter": adapter, "model": model })).into_response(),
+        Err(e) => internal(e),
     }
 }

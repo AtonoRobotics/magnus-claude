@@ -171,6 +171,7 @@ pub struct State {
     pub approvals: Vec<Approval>,
     pub policies: BTreeMap<String, String>,
     pub kill_switch: bool,
+    pub model: Option<(String, String)>,
     pub pins: HashMap<String, Pin>,
     /// Tools whose live definition differs from the pin, with the open item.
     pub changed: HashMap<String, (String, Pin)>,
@@ -198,6 +199,7 @@ impl State {
                 self.policies.insert(layer.clone(), cedar.clone());
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
+            Ev::ModelSet { adapter, model } => self.model = Some((adapter.clone(), model.clone())),
             Ev::ToolPinned { tool, hash, description, input_schema, approved } => {
                 self.pins.insert(
                     tool.clone(),

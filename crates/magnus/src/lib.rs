@@ -9,6 +9,7 @@ pub mod adapters;
 pub mod api;
 pub mod apps;
 pub mod boundary;
+pub mod browser;
 pub mod cli;
 pub mod config;
 pub mod conformance;

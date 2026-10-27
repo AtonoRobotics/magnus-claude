@@ -28,6 +28,7 @@ pub struct Kernel {
     pub mcp: Mcp,
     pub web: Web,
     pub sandboxes: Sandboxes,
+    pub browser: crate::browser::Browser,
     drivers: Mutex<HashSet<String>>,
     pub(crate) leases: Mutex<HashMap<String, String>>,
     pub(crate) live_tools: tokio::sync::Mutex<HashMap<String, (Instant, Vec<AppTool>)>>,
@@ -52,6 +53,7 @@ impl Kernel {
         let k = Arc::new(Kernel {
             web: Web::new(&cfg.web),
             sandboxes: Sandboxes::new(cfg.sandbox.clone(), &cfg.appliance.state_dir),
+            browser: crate::browser::Browser::new(cfg.browser.clone(), &cfg.appliance.state_dir),
             mcp: Mcp::new(),
             adapters,
             vault,
@@ -179,6 +181,7 @@ impl Kernel {
     pub async fn on_stop(&self, run: &str, terminal: bool) {
         self.leases.lock().unwrap().retain(|_, holder| holder != run);
         if terminal {
+            self.browser.close(run).await;
             self.sandboxes.destroy(run).await;
         } else {
             self.sandboxes.stop(run).await;

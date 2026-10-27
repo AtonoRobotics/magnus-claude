@@ -101,18 +101,27 @@ fn exec(req: &Value) -> Value {
         Ok(c) => c,
         Err(e) => return json!({ "error": format!("could not start the shell: {e}") }),
     };
-    let mut so = child.stdout.take().unwrap();
-    let mut se = child.stderr.take().unwrap();
-    let t1 = std::thread::spawn(move || {
-        let mut b = vec![];
-        let _ = so.read_to_end(&mut b);
-        b
-    });
-    let t2 = std::thread::spawn(move || {
-        let mut b = vec![];
-        let _ = se.read_to_end(&mut b);
-        b
-    });
+    // Read output as it comes; background processes may keep the pipes open
+    // after the shell exits, so stop collecting shortly after it does.
+    let collect = |mut r: Box<dyn Read + Send>| {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let b = buf.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = r.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                let mut g = b.lock().unwrap();
+                if g.len() < MAX_OUT + 1 {
+                    g.extend_from_slice(&chunk[..n]);
+                }
+            }
+        });
+        buf
+    };
+    let so = collect(Box::new(child.stdout.take().unwrap()));
+    let se = collect(Box::new(child.stderr.take().unwrap()));
     let start = Instant::now();
     let mut timed_out = false;
     let status = loop {
@@ -127,8 +136,9 @@ fn exec(req: &Value) -> Value {
             Err(_) => break None,
         }
     };
-    let (stdout, c1) = truncate(t1.join().unwrap_or_default());
-    let (stderr, c2) = truncate(t2.join().unwrap_or_default());
+    std::thread::sleep(Duration::from_millis(150));
+    let (stdout, c1) = truncate(so.lock().unwrap().clone());
+    let (stderr, c2) = truncate(se.lock().unwrap().clone());
     json!({
         "exit_code": status.and_then(|s| s.code()),
         "stdout": stdout, "stderr": stderr,

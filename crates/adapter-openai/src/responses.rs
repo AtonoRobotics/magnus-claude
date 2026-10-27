@@ -19,6 +19,12 @@ fn input(p: &CompleteParams) -> Vec<Value> {
                             let t: Vec<&str> = content.iter().filter_map(|c| if let Block::Text { text } = c { Some(text.as_str()) } else { None }).collect();
                             let t = t.join("\n");
                             out.push(json!({ "type": "function_call_output", "call_id": call_id, "output": if *is_error { format!("ERROR: {t}") } else { t } }));
+                            for c in content {
+                                if let Block::Image { media_type, data_b64 } = c {
+                                    parts.push(json!({ "type": "input_text", "text": format!("Image from tool call {call_id}:") }));
+                                    parts.push(json!({ "type": "input_image", "image_url": format!("data:{media_type};base64,{data_b64}") }));
+                                }
+                            }
                         }
                         Block::Text { text } => parts.push(json!({ "type": "input_text", "text": text })),
                         Block::Image { media_type, data_b64 } => parts.push(json!({ "type": "input_image", "image_url": format!("data:{media_type};base64,{data_b64}") })),

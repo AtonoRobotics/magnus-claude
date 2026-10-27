@@ -34,5 +34,15 @@
   "32": "adapter-anthropic/src/main.rs",
   "33": "build.sh",
   "34": "agent.md",
-  "35": "scratch/src/lib.rs"
+  "35": "scratch/src/lib.rs",
+  "36": "new_id",
+  "37": "Vault",
+  "38": "auth.rs",
+  "39": "Progress",
+  "40": "transcribe",
+  "41": "adapter-openai/src/main.rs",
+  "42": "invariant-tests-v2.md",
+  "43": "Sender",
+  "44": "HeaderMap",
+  "45": "Response"
 }

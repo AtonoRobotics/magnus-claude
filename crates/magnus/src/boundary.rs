@@ -437,7 +437,7 @@ impl Kernel {
         // A call carries data out if it changes state, fetches from the web, or
         // reaches an app whose audience is wider than the person (its inputs
         // travel there even when it only reads).
-        let transmits = f.risk.changes_state() || f.app == "web" || (f.connector.is_some() && f.audience > Audience::Private);
+        let transmits = f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private);
         // These override a policy ask: the approval must then cover this exact
         // action, not a broader scope granted for policy reasons.
         if transmits && run.untrusted && run.private {
@@ -639,6 +639,26 @@ impl Kernel {
                         }
                     }
                 }
+                t if t.starts_with("browser_") => {
+                    let op = t.trim_start_matches("browser_");
+                    let mut req = a.input.clone();
+                    req["op"] = json!(op);
+                    let v = self.browser.request(&a.run, req).await?;
+                    let text = v["text"].as_str().unwrap_or_default().to_string();
+                    let data = v["image_b64"].as_str().map(|i| json!({ "image_b64": i }));
+                    Ok((text, false, data))
+                }
+                t if t.starts_with("computer_") => {
+                    let cmd = computer_command(t, &a.input)?;
+                    let v = self.sandboxes.exec(&a.run, &cmd, 60).await?;
+                    if v["exit_code"] != json!(0) {
+                        return Ok((format!("the desktop action failed: {}", v["stderr"].as_str().unwrap_or_default()), true, None));
+                    }
+                    use base64::Engine;
+                    let png = self.sandboxes.read(&a.run, "/tmp/magnus-shot.png").await?;
+                    let img = base64::engine::general_purpose::STANDARD.encode(png);
+                    Ok(("Screenshot of the sandbox desktop attached.".into(), false, Some(json!({ "image_b64": img }))))
+                }
                 "memory_write" => {
                     let run = self.read(|st| st.runs.get(&a.run).cloned()).ok_or_else(|| anyhow!("run"))?;
                     let label = Label { untrusted: run.untrusted, private: run.private };
@@ -717,4 +737,41 @@ impl Kernel {
 enum CallFailure {
     NotDone(String),
     Unknown(String),
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The guest command for a desktop action: start the display if needed, act
+/// with xdotool, then capture a screenshot.
+pub fn computer_command(tool: &str, input: &Value) -> Result<String> {
+    let n = |k: &str| input[k].as_i64().unwrap_or(0);
+    let act = match tool {
+        "computer_screenshot" => "true".to_string(),
+        "computer_click" => {
+            let button = match input["button"].as_str().unwrap_or("left") {
+                "right" => 3,
+                "middle" => 2,
+                _ => 1,
+            };
+            let repeat = if input["double"] == true { "--repeat 2 " } else { "" };
+            format!("xdotool mousemove {} {} click {repeat}{button}", n("x"), n("y"))
+        }
+        "computer_type" => format!("xdotool type --delay 20 -- {}", shell_quote(input["text"].as_str().unwrap_or_default())),
+        "computer_key" => {
+            let keys = input["keys"].as_str().unwrap_or_default();
+            anyhow::ensure!(keys.chars().all(|c| c.is_ascii_alphanumeric() || "+_- ".contains(c)), "keys may only name keys, like ctrl+s or Return");
+            format!("xdotool key -- {keys}")
+        }
+        "computer_scroll" => {
+            let down = n("down");
+            let (button, times) = if down >= 0 { (5, down) } else { (4, -down) };
+            format!("xdotool mousemove {} {} click --repeat {} {button}", n("x"), n("y"), times.clamp(1, 30))
+        }
+        other => anyhow::bail!("no desktop action {other}"),
+    };
+    Ok(format!(
+        "export DISPLAY=:0; if ! xdpyinfo >/dev/null 2>&1; then (Xvfb :0 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &); for i in $(seq 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.1; done; (fluxbox >/tmp/wm.log 2>&1 &); sleep 0.5; fi; {act}; sleep 0.4; import -window root /tmp/magnus-shot.png"
+    ))
 }

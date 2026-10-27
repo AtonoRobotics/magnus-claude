@@ -64,7 +64,11 @@ impl Kernel {
             let mut user = vec![];
             for (id, _, _) in reply.calls() {
                 if let Some(r) = run.results.get(&id) {
-                    user.push(Block::ToolResult { call_id: id, content: vec![Block::Text { text: clip(&r.text) }], is_error: r.is_error });
+                    let mut content = vec![Block::Text { text: clip(&r.text) }];
+                    if let Some(img) = r.data.as_ref().and_then(|d| d["image_b64"].as_str()) {
+                        content.push(Block::Image { media_type: "image/png".into(), data_b64: img.to_string() });
+                    }
+                    user.push(Block::ToolResult { call_id: id, content, is_error: r.is_error });
                 }
             }
             for (_, _, text) in run.notices.iter().filter(|(s, _, _)| *s as usize == i + 1) {
@@ -80,7 +84,7 @@ impl Kernel {
     /// Tools offered to the run's next model call: run records, built-ins,
     /// and the person's classified app tools with pinned definitions.
     pub async fn tools_for(&self, run: &Run) -> Vec<ToolSpec> {
-        let mut specs = tools::builtin_specs(self.sandboxes.available(), self.web.can_search());
+        let mut specs = tools::builtin_specs(self.sandboxes.available(), self.web.can_search(), self.browser.available());
         let Some(person) = self.person(&run.person).cloned() else { return specs };
         for c in self.cfg.connectors.clone() {
             let live = self.live_app_tools(&c).await;

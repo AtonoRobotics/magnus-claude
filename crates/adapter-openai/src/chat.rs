@@ -30,6 +30,13 @@ fn messages(p: &CompleteParams) -> Vec<Value> {
                         Block::ToolResult { call_id, content, is_error } => {
                             let t = text_of(content);
                             out.push(json!({ "role": "tool", "tool_call_id": call_id, "content": if *is_error { format!("ERROR: {t}") } else { t } }));
+                            // Tool messages carry text only; images follow in the user turn.
+                            for c in content {
+                                if let Block::Image { media_type, data_b64 } = c {
+                                    parts.push(json!({ "type": "text", "text": format!("Image from tool call {call_id}:") }));
+                                    parts.push(json!({ "type": "image_url", "image_url": { "url": format!("data:{media_type};base64,{data_b64}") } }));
+                                }
+                            }
                         }
                         Block::Text { text } => parts.push(json!({ "type": "text", "text": text })),
                         Block::Image { media_type, data_b64 } => {

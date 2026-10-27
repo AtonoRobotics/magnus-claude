@@ -20,6 +20,8 @@ pub struct Config {
     #[serde(default)]
     pub sandbox: Option<Sandbox>,
     #[serde(default)]
+    pub browser: Option<Browser>,
+    #[serde(default)]
     pub people: Vec<Person>,
     #[serde(default)]
     pub connectors: Vec<Connector>,
@@ -92,6 +94,13 @@ pub struct Web {
     /// Optional search endpoint (SearXNG JSON API).
     #[serde(default)]
     pub search_url: Option<String>,
+}
+
+/// The browser sidecar: Chromium on the host, behind the boundary.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Browser {
+    pub command: Vec<String>,
+    pub chromium: PathBuf,
 }
 
 #[derive(Deserialize, Clone, Debug)]
