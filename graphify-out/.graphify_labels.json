@@ -71,5 +71,8 @@
   "69": "Client",
   "70": "Event",
   "71": "ToolSpec",
-  "72": "Log"
+  "72": "Log",
+  "73": "grade.py",
+  "74": "run.py",
+  "75": "make_fixtures.py"
 }

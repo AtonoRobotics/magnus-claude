@@ -348,5 +348,35 @@
     "mtime": 1793111644.8933854,
     "ast_hash": "51cf6d309eef1f2b070181c7dc322edb",
     "semantic_hash": ""
+  },
+  "eval/plain/grade.py": {
+    "mtime": 1793111945.4615834,
+    "ast_hash": "8d775148324a355e3a1ea9c6af3eaf95",
+    "semantic_hash": ""
+  },
+  "eval/plain/make_fixtures.py": {
+    "mtime": 1793111835.0620456,
+    "ast_hash": "df4ba85d64bb57671df4b79138d1880d",
+    "semantic_hash": ""
+  },
+  "eval/plain/run.py": {
+    "mtime": 1793111907.1005244,
+    "ast_hash": "ba5bc5365756c064eabdea7207eb9855",
+    "semantic_hash": ""
+  },
+  "eval/plain/tasks.json": {
+    "mtime": 1793111835.1400461,
+    "ast_hash": "b210aed22baf6f15e4e4f39fd5bfa635",
+    "semantic_hash": ""
+  },
+  "eval/plain/fixtures/survey-report.pdf": {
+    "mtime": 1793111919.383606,
+    "ast_hash": "c5b9446fac56f3ea0887d6e48ba1bbbf",
+    "semantic_hash": ""
+  },
+  "eval/plain/fixtures/receipt.png": {
+    "mtime": 1793111919.378737,
+    "ast_hash": "d0b25a054d78d8e0cce38403a5be2427",
+    "semantic_hash": ""
   }
 }

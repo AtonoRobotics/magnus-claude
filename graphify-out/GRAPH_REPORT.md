@@ -1,16 +1,16 @@
 # Graph Report - magnus-claude  (2026-10-27)
 
 ## Corpus Check
-- 68 files · ~56,699 words
+- 72 files · ~60,447 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1094 nodes · 2588 edges · 73 communities (49 shown, 24 thin omitted)
+- 1114 nodes · 2611 edges · 76 communities (51 shown, 25 thin omitted)
 - Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 95 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `f872bbc0`
+- Built from commit: `c54d71c3`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -79,6 +79,9 @@
 - Event
 - ToolSpec
 - Log
+- grade.py
+- run.py
+- make_fixtures.py
 
 ## God Nodes (most connected - your core abstractions)
 1. `steps()` - 42 edges
@@ -107,7 +110,7 @@
 ## Import Cycles
 - None detected.
 
-## Communities (73 total, 24 thin omitted)
+## Communities (76 total, 25 thin omitted)
 
 ### Community 0 - "steps"
 Cohesion: 0.12
@@ -119,7 +122,7 @@ Nodes (32): Handler, Notify, Builder, Call, chat(), crm(), err(), FakeMcp (+24 m
 
 ### Community 2 - "Api"
 Cohesion: 0.09
-Nodes (22): Default, Method, StatusCode, TempDir, Api, Appliance, bin(), Connector (+14 more)
+Nodes (21): Method, StatusCode, TempDir, Api, Appliance, bin(), Connector, free_port() (+13 more)
 
 ### Community 3 - "Reply"
 Cohesion: 0.15
@@ -162,16 +165,16 @@ Cohesion: 0.11
 Nodes (28): AtomicU64, AdapterError, Adapters, Arc, Block, Child, Drop, ErrorClass (+20 more)
 
 ### Community 17 - "Person"
-Cohesion: 0.08
-Nodes (40): Adapter, Appliance, Browser, Budget, Config, Connector, Database, header() (+32 more)
+Cohesion: 0.06
+Nodes (50): Adapter, Appliance, Browser, Budget, Config, Connector, Database, header() (+42 more)
 
 ### Community 18 - "Run"
 Cohesion: 0.11
 Nodes (38): BTreeMap, BTreeSet, status_str(), Answer, Kernel, may_respond(), may_set_policy(), render() (+30 more)
 
 ### Community 19 - ".pipeline"
-Cohesion: 0.11
-Nodes (35): Connector, Action, CallFailure, canonical(), computer_command(), err_text(), Facts, Gate (+27 more)
+Cohesion: 0.18
+Nodes (26): Connector, Action, CallFailure, canonical(), computer_command(), err_text(), Facts, Gate (+18 more)
 
 ### Community 20 - "Kernel"
 Cohesion: 0.28
@@ -269,20 +272,28 @@ Nodes (10): description, devDependencies, electron, main, name, private, scripts
 Cohesion: 0.22
 Nodes (5): { app, BrowserWindow, Notification, ipcMain, shell }, configPath, fs, http, path
 
+### Community 73 - "grade.py"
+Cohesion: 0.22
+Nodes (3): Graders for the plain-language suite. They check the world (the files the worker, Values of a workbook after LibreOffice recalculates its formulas., recalc()
+
+### Community 74 - "run.py"
+Cohesion: 0.33
+Nodes (5): Api, main(), Run the plain-language suite against a Magnus appliance and grade it.      pytho, run_task(), token_from()
+
 ## Knowledge Gaps
 - **66 isolated node(s):** `Process`, `Event log and state`, `Boundary and policy`, `Runs and verification`, `Identity` (+61 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **24 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **25 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `State` connect `Run` to `.pipeline`, `api.rs`, `Ev`?**
-  _High betweenness centrality (0.116) - this node is a cross-community bridge._
-- **Why does `Sse` connect `TestDb` to `Run`?**
-  _High betweenness centrality (0.063) - this node is a cross-community bridge._
+  _High betweenness centrality (0.092) - this node is a cross-community bridge._
 - **Why does `eval()` connect `Person` to `adapter-proto/src/lib.rs`?**
-  _High betweenness centrality (0.057) - this node is a cross-community bridge._
+  _High betweenness centrality (0.091) - this node is a cross-community bridge._
+- **Why does `Request` connect `adapter-proto/src/lib.rs` to `Person`?**
+  _High betweenness centrality (0.090) - this node is a cross-community bridge._
 - **Are the 36 inferred relationships involving `steps()` (e.g. with `a_changed_tool_definition_is_disabled_and_hidden()` and `missing_credential_denies_the_action()`) actually correct?**
   _`steps()` has 36 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `Process`, `Event log and state`, `Boundary and policy` to the rest of the system?**
@@ -290,4 +301,4 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `steps` be split into smaller, more focused modules?**
   _Cohesion score 0.12315270935960591 - nodes in this community are weakly interconnected._
 - **Should `mcp.rs` be split into smaller, more focused modules?**
-  _Cohesion score 0.10884353741496598 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.11170212765957446 - nodes in this community are weakly interconnected._

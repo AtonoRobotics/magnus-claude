@@ -1,37 +1,56 @@
 # Progress
 
-## Now
+## Now (2026-10-27)
 
-All 45 invariant tests pass (`cargo test -p magnus-invariants`), on three consecutive full runs (2026-10-27). A clean-context security review of tests and kernel is running; its findings go below when it reports.
-
-Next up: live model access (OpenAI-compatible adapter with OAuth and API-key sign-in, conformance suites), then the desktop app, then the remaining tools and TheAgentCompany.
+- The invariant tests pass: 45 of 45, on three consecutive full runs and again after every later change.
+- A clean-context security review found 14 kernel holes the tests did not catch. All are fixed and covered by `tests/scratch/tests/review.rs` (7 regressions, passing). The test weaknesses it found are proposed as contract changes in `docs/proposals/invariant-tests-v2.md`; these need the owner's approval.
+- **Blocked on live models.** The dev appliance runs at http://127.0.0.1:7700. It is waiting for the owner to sign in to at least one provider (Settings → Models). Until then, no adapter conformance suite, plain-language score or TheAgentCompany score can be produced.
+- TheAgentCompany preparation is with a background agent: service stack, three sample tasks, and a runner design in `eval/tac/`.
 
 ## Done
 
-- `crates/magnus` kernel:
-  - Event log in Postgres (`public.events`, append-only role created by `magnus migrate`); the in-memory projection is rebuilt on boot.
-  - Execution boundary (`boundary.rs`) with identify, lease, budget, policy, approval, idempotency, credentials and execute stages. Policy layers are Cedar (`policy.rs`). The Rule of Two and audience rules are fixed in the kernel. Approvals are out of band (`inbox.rs`).
-  - Vault encrypted at rest, with redaction of echoed secrets.
-  - Run loop (`run/agent_loop.rs`), context and run records (`run/mod.rs`). Contract checks run against the world.
-  - HTTP API (`api.rs`); MCP app client (`apps.rs`); web fetch (`web.rs`); Firecracker sandbox (`sandbox.rs`).
-  - Adapter registry with hot replacement (`adapters.rs`).
-- `crates/adapter-proto`: the `magnus.adapter/1` contract.
-- `crates/adapter-anthropic`: Messages API adapter (streaming, thinking state, error classes, cost).
-- `sandbox/`: guest agent (PID 1, vsock), image build (`build.sh`: Firecracker CI kernel 6.1.155 plus a Debian/Python rootfs with office, PDF, OCR and X tools).
-- `tests/invariants`: the contract. `tests/scratch`: free-form debugging scenarios on the same harness.
+- Kernel (`crates/magnus`):
+  - event log (Postgres, append-only role); boundary (eight stages, layered Cedar)
+  - Rule of Two and audience rules, multi-label taint, approvals bound to their reason
+  - vault with central redaction; adapter registry with hot swap gated by conformance
+  - run loop, contract checks against the world, inbox, HTTP API
+  - schedules (people create them, the agent proposes them), memory with taint, deliverable outputs
+- Tools:
+  - Firecracker sandbox (no network; Python, office, PDF, OCR)
+  - computer use (Xvfb desktop in the VM)
+  - browser (Chromium sidecar on the host)
+  - web fetch (SSRF-safe) and search (local SearXNG)
+  - MCP apps with first-sight tool review
+  - image and PDF input; voice input (needs a whisper model, below)
+- Adapters:
+  - `anthropic`: Messages API.
+  - `openai`: Chat Completions and Responses, with API key, OAuth PKCE or device sign-in. Presets for GLM, Muse, Codex and Grok in `config/providers.toml`.
+  - Conformance suite: `magnus conformance`, `POST /v1/adapters/{id}/conformance`.
+- Desktop app (`desktop/`, Electron): inbox, task list, task view with evidence and downloads, settings, OS notifications, ChatGPT sign-in capture.
+- Evaluation:
+  - `eval/plain`: 14 plain-language tasks, graders validated against correct and wrong answers, runner.
+  - `eval/tac`: in progress.
 
 ## Next
 
-1. OpenAI-compatible adapter (Chat Completions and Responses; API key and OAuth device/PKCE flows) for GLM, Muse, Codex and Grok. Conformance suite per adapter against the live provider, once the owner signs in.
-2. Desktop app: inbox, task list, task view with evidence, sign-in screens.
-3. Tools: browser (Chromium on the host behind the boundary), web search (SearXNG), computer use (Xvfb in the sandbox), image/PDF/voice input, schedules and triggers, notifications.
-4. TheAgentCompany runner; plain-language end-to-end runs with scores.
+1. Owner signs in, then: conformance suite per adapter (live), plain-language run (`python3 eval/plain/run.py`), first TheAgentCompany tasks, then a spend cap for the full 175.
+2. TheAgentCompany runner and connectors to its services (GitLab, RocketChat, ownCloud, Plane).
+3. Context compaction (C5) and context reset (A5) for long tasks; verifier module (removable, off by default).
+4. Jailer for the root-run appliance. MCP servers for the person's mail, calendar and files (needs the owner's choice of servers and OAuth apps).
+5. Voice: install whisper.cpp and a model (`MAGNUS_WHISPER`, `MAGNUS_WHISPER_MODEL`).
 
 ## How to resume
 
 - Toolchain: `export PATH=$HOME/.cargo/bin:$PATH` (rust-toolchain.toml pins 1.99.1).
-- Postgres: `docker start magnus-claude-pg` (127.0.0.1:54340, password `magnus_dev`).
-- Sandbox assets: `sandbox/build.sh` writes `sandbox/out/{vmlinux,rootfs.ext4}` (gitignored).
-- Run the invariant tests: `cargo test -p magnus-invariants --no-fail-fast`.
-- Debug a scenario: add a test to `tests/scratch/tests/debug.rs` and run it with `-- --nocapture`. Build `magnus-invariants --bins` first so the appliance binary is current.
+- Postgres: `docker start magnus-claude-pg` (127.0.0.1:54340, password `magnus_dev`). Search: `docker start magnus-searxng`.
+- Sandbox assets: `sandbox/build.sh` writes `sandbox/out/{vmlinux,rootfs.ext4}` (gitignored). Grader image: `docker build --target rootfs -t magnus-grader sandbox/cache`.
+- Dev appliance: config, state and binaries in `~/.magnus-appliance/`.
+  - Start: `~/.magnus-appliance/bin/magnus serve --config ~/.magnus-appliance/magnus.toml`.
+  - The owner's access key is the `token` in that config.
+  - It is not a system service; the owner declined persistence.
+- Tests:
+  - `cargo test -p magnus-invariants --no-fail-fast` (the contract)
+  - `cargo test -p magnus-scratch` (regressions)
+  - `cargo test -p magnus --test tools` (browser and desktop)
+- Desktop app: `cd desktop && npm install && npx electron .` (add `--no-sandbox` on a dev box without the setuid helper).
 - Read `DECISIONS.md` before changing behavior. Do not edit `tests/invariants/` without the owner's approval.
