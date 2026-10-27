@@ -115,8 +115,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/instructions/tools.json": {
-    "mtime": 1793111241.7395837,
-    "ast_hash": "b498bb0a0d5ea0dcad625142575ab42a",
+    "mtime": 1793111597.8575153,
+    "ast_hash": "58559f37d8e47fb88f404fdbcbba66d5",
     "semantic_hash": ""
   },
   "crates/magnus/src/adapters.rs": {
@@ -125,8 +125,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/api.rs": {
-    "mtime": 1793110935.4739923,
-    "ast_hash": "91cdc0b1f30f88081a049cd2c9081ea4",
+    "mtime": 1793111597.844148,
+    "ast_hash": "d1dd24b6b14a6e80733c344f547a3285",
     "semantic_hash": ""
   },
   "crates/magnus/src/apps.rs": {
@@ -150,18 +150,18 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/events.rs": {
-    "mtime": 1793110935.4738157,
-    "ast_hash": "c48432a45ef7851c175cea6dc3dd3ef2",
+    "mtime": 1793111597.8435714,
+    "ast_hash": "1bddc1f646463dd75d43b15f59be4a95",
     "semantic_hash": ""
   },
   "crates/magnus/src/inbox.rs": {
-    "mtime": 1793110576.5204065,
-    "ast_hash": "619cc0a6c5adde2abc4af6dab6a08118",
+    "mtime": 1793111597.8446474,
+    "ast_hash": "88efdbaee3fd5c4b5a61d875887456ca",
     "semantic_hash": ""
   },
   "crates/magnus/src/kernel.rs": {
-    "mtime": 1793111241.750172,
-    "ast_hash": "903e9f27e7bc0709ddba5acfee11dcc0",
+    "mtime": 1793111597.8438866,
+    "ast_hash": "f1efd6955b608a1b9eee85ff80ba4264",
     "semantic_hash": ""
   },
   "crates/magnus/src/log.rs": {
@@ -180,8 +180,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/run/mod.rs": {
-    "mtime": 1793111241.7502434,
-    "ast_hash": "fa75ba9cbd81a6542b1879aaa5bba595",
+    "mtime": 1793111597.8444958,
+    "ast_hash": "5b48200c9e11d1bbb9c3701a90cee449",
     "semantic_hash": ""
   },
   "crates/magnus/src/sandbox.rs": {
@@ -195,13 +195,13 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/state.rs": {
-    "mtime": 1793110935.4739106,
-    "ast_hash": "ab87ae8e2c8969d5477527ca2ce59126",
+    "mtime": 1793111597.8437574,
+    "ast_hash": "81f10e3d9361089266bef31308e375fc",
     "semantic_hash": ""
   },
   "crates/magnus/src/tools.rs": {
-    "mtime": 1793111241.7257905,
-    "ast_hash": "59ad6d9ab2d4f767d47a84e342e3760e",
+    "mtime": 1793111597.8443236,
+    "ast_hash": "1d0f99db1f9c40a6d1dbf8cc6607724a",
     "semantic_hash": ""
   },
   "crates/magnus/src/vault.rs": {
@@ -300,8 +300,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/ui/index.html": {
-    "mtime": 1793110935.482228,
-    "ast_hash": "fa6a7c38f02ee269525e790dec424de0",
+    "mtime": 1793111616.487062,
+    "ast_hash": "e0cd3925d4245efb9f43098a9776f9b0",
     "semantic_hash": ""
   },
   "docs/proposals/invariant-tests-v2.md": {

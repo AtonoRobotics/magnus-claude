@@ -5,3 +5,4 @@
 .env
 /browser/node_modules
 /desktop/node_modules
+/eval/plain/results

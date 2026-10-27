@@ -64,5 +64,12 @@
   "62": "Path",
   "63": "Browser",
   "64": "Mutex",
-  "65": "BTreeMap"
+  "65": "BTreeMap",
+  "66": "preload.js",
+  "67": "Into",
+  "68": "Event",
+  "69": "Client",
+  "70": "Event",
+  "71": "ToolSpec",
+  "72": "Log"
 }
