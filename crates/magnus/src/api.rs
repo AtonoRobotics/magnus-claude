@@ -47,7 +47,10 @@ fn owner(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
 
 pub fn router(k: Arc<Kernel>) -> Router {
     Router::new()
-        .route("/v1/health", get(|| async { Json(json!({ "ok": true, "version": HARNESS_VERSION })) }))
+        .route("/", get(|| async { axum::response::Html(include_str!("../ui/index.html")) }))
+        .route("/v1/health", get(health))
+        .route("/v1/tasks/{id}/live", get(live))
+        .route("/v1/transcribe", post(transcribe))
         .route("/v1/me", get(me))
         .route("/v1/tasks", post(submit).get(list_tasks))
         .route("/v1/tasks/{id}", get(task))
@@ -64,6 +67,7 @@ pub fn router(k: Arc<Kernel>) -> Router {
         .route("/v1/adapters", get(adapters))
         .route("/v1/adapters/{id}", put(put_adapter))
         .route("/v1/adapters/{id}/catalog", get(catalog))
+        .route("/v1/adapters/{id}/conformance", post(conformance))
         .route("/v1/adapters/{id}/sign-in", post(sign_in_begin))
         .route("/v1/adapters/{id}/sign-in/complete", post(sign_in_complete))
         .route("/v1/memory", get(memory))
@@ -157,6 +161,15 @@ async fn submit(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
         harness: HARNESS_VERSION.into(),
     };
     let attachments = b["attachments"].as_array().cloned().unwrap_or_default();
+    for a in &attachments {
+        let size = a["data_b64"].as_str().map(|d| d.len() * 3 / 4).unwrap_or(0);
+        if a["name"].as_str().is_none() || a["media_type"].as_str().is_none() || size == 0 {
+            return err(StatusCode::BAD_REQUEST, "each attachment needs name, media_type and data_b64");
+        }
+        if size > 25 * 1024 * 1024 {
+            return err(StatusCode::PAYLOAD_TOO_LARGE, "attachments are limited to 25 MB each");
+        }
+    }
     let ev = Ev::TaskCreated { task: task.clone(), run: run.clone(), person: p.id.clone(), text, attachments, config };
     if let Err(e) = k.emit(&format!("person:{}", p.id), ev).await {
         return internal(e);
@@ -389,25 +402,75 @@ async fn adapters(State(k): K, h: HeaderMap) -> Response {
         .list()
         .await
         .into_iter()
-        .map(|(id, cmd, running)| json!({ "id": id, "command": cmd, "running": running.map(|(a, v)| json!({ "adapter": a, "version": v })) }))
+        .map(|(id, cmd, running)| {
+            let verified = k.read(|s| s.conformance.get(&id).cloned());
+            json!({
+                "id": id, "command": cmd,
+                "running": running.map(|(a, v)| json!({ "adapter": a, "version": v })),
+                "conformance": verified.map(|(v, m, ok, _)| json!({ "version": v, "model": m, "passed": ok })),
+            })
+        })
         .collect();
     Json(json!({ "adapters": list })).into_response()
 }
 
-/// Replace or add an adapter while the kernel runs.
+/// Replace or add an adapter while the kernel runs. The candidate must pass
+/// the conformance suite against the live provider before it takes requests,
+/// unless the owner explicitly skips the gate.
 async fn put_adapter(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    if let Err(r) = owner(&k, &h) {
-        return r;
-    }
-    let mut cfg: Adapter = match serde_json::from_value(json!({ "id": id, "command": b["command"], "settings": b.get("settings").cloned().unwrap_or(json!({})) })) {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let cfg: Adapter = match serde_json::from_value(json!({ "id": id, "command": b["command"], "settings": b.get("settings").cloned().unwrap_or(json!({})) })) {
         Ok(c) => c,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("bad adapter: {e}")),
     };
-    cfg.id = id;
-    match k.adapters.replace(cfg).await {
-        Ok((adapter, version)) => Json(json!({ "adapter": adapter, "version": version })).into_response(),
-        Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    let candidate = match k.adapters.launch(&cfg).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    };
+    let info = json!({ "adapter": candidate.adapter, "version": candidate.version });
+    if b["skip_conformance"].as_bool() != Some(true) {
+        let model = b["model"].as_str().map(String::from).unwrap_or_else(|| k.cfg.model.name.clone());
+        let report = k.adapters.conformance(&candidate, &model).await;
+        let rv = serde_json::to_value(&report).unwrap_or_default();
+        let ev = Ev::AdapterVerified {
+            adapter_id: id.clone(),
+            adapter: report.adapter.clone(),
+            version: report.version.clone(),
+            model,
+            passed: report.passed,
+            report: rv.clone(),
+        };
+        if let Err(e) = k.emit(&format!("person:{}", p.id), ev).await {
+            return internal(e);
+        }
+        if !report.passed {
+            return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "installed": false, "conformance": rv }))).into_response();
+        }
     }
+    k.adapters.install(candidate).await;
+    Json(json!({ "installed": true, "running": info })).into_response()
+}
+
+async fn conformance(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let running = match k.adapters.get(&id).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    };
+    let model = b["model"].as_str().map(String::from).unwrap_or_else(|| k.cfg.model.name.clone());
+    let report = k.adapters.conformance(&running, &model).await;
+    let rv = serde_json::to_value(&report).unwrap_or_default();
+    let ev = Ev::AdapterVerified { adapter_id: id, adapter: report.adapter.clone(), version: report.version.clone(), model, passed: report.passed, report: rv.clone() };
+    if let Err(e) = k.emit(&format!("person:{}", p.id), ev).await {
+        return internal(e);
+    }
+    Json(rv).into_response()
 }
 
 async fn catalog(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
@@ -459,4 +522,60 @@ async fn memory(State(k): K, h: HeaderMap) -> Response {
             .collect()
     });
     Json(json!({ "memory": items })).into_response()
+}
+
+async fn health(State(k): K) -> Response {
+    Json(json!({ "ok": true, "version": HARNESS_VERSION, "kill_switch": k.read(|s| s.kill_switch) })).into_response()
+}
+
+/// Model text for a task as it streams (server-sent events), before the
+/// turn is appended to the log (K6).
+async fn live(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some((_, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
+    let mut rx = k.live_text.subscribe();
+    let stream = async_stream(move |tx| async move {
+        loop {
+            match rx.recv().await {
+                Ok((r, text)) if r == run.id => {
+                    if tx.send(format!("data: {}\n\n", json!({ "text": text }))).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => return,
+            }
+        }
+    });
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap()
+}
+
+fn async_stream<F, Fut>(f: F) -> impl futures::Stream<Item = Result<String, std::convert::Infallible>>
+where
+    F: FnOnce(tokio::sync::mpsc::Sender<String>) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(f(tx));
+    futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|s| (Ok(s), rx)) })
+}
+
+/// Speech to text on the appliance. The person reviews the text before sending it.
+async fn transcribe(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    if let Err(r) = who(&k, &h) {
+        return r;
+    }
+    let Some(data) = b["data_b64"].as_str() else { return err(StatusCode::BAD_REQUEST, "no audio") };
+    match crate::speech::transcribe(&k.cfg.appliance.state_dir, data).await {
+        Ok(text) => Json(json!({ "text": text })).into_response(),
+        Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")),
+    }
 }

@@ -36,7 +36,7 @@ pub fn may_respond(p: &Person, i: &Item) -> bool {
     match i.kind.as_str() {
         "approval" => p.is_owner() || p.has_role(&format!("approver:{}", i.details["risk"].as_str().unwrap_or_default())),
         "policy_proposal" => may_set_policy(p, i.details["layer"].as_str().unwrap_or_default()),
-        "tool_change" => p.is_owner(),
+        "tool_change" | "tool_review" => p.is_owner(),
         _ => i.person == p.id || p.is_owner(),
     }
 }
@@ -85,10 +85,20 @@ impl Kernel {
                 if !["once", "task", "window", "standing"].contains(&scope.as_str()) {
                     return Ok(Answer::Invalid(format!("unknown scope {scope}")));
                 }
+                let rule = item.details["rule"].as_str().unwrap_or_default();
+                let unknown = item.details["reason"] == "unknown_outcome";
+                if scope != "once" && (rule.starts_with("kernel:") || unknown) {
+                    return Ok(Answer::Invalid("this action can only be approved once: it is asked because of what the task has read, or because its outcome is unknown".into()));
+                }
+                // A standing approval is autonomy; only the owner grants it (invariant 6).
+                if scope == "standing" && !p.is_owner() {
+                    return Ok(Answer::Forbidden("only the owner can approve standing; propose a policy instead"));
+                }
                 let until = match scope.as_str() {
-                    "window" => Some(chrono::Utc::now() + chrono::Duration::minutes(body["minutes"].as_i64().unwrap_or(60))),
+                    "window" => Some(chrono::Utc::now() + chrono::Duration::minutes(body["minutes"].as_i64().unwrap_or(60).clamp(1, 24 * 60))),
                     _ => None,
                 };
+                let reason = if unknown { Some("unknown_outcome".to_string()) } else { item.details["rule"].as_str().map(String::from) };
                 self.emit(&actor, resolve(Some(scope.clone()))).await?;
                 self.emit(
                     &actor,
@@ -101,6 +111,7 @@ impl Kernel {
                         input_hash: item.details["input_hash"].as_str().map(String::from),
                         scope,
                         until,
+                        reason,
                     },
                 )
                 .await?;
@@ -117,7 +128,7 @@ impl Kernel {
                         text.as_ref().map(|t| format!(": {t}")).unwrap_or_default()
                     )
                 };
-                self.reply(&run, &call_id, msg, true, Label::Principal).await?;
+                self.reply(&run, &call_id, msg, true, Label::PRINCIPAL).await?;
                 self.resume_after(&run).await?;
             }
             ("review", "accept") => {
@@ -135,7 +146,7 @@ impl Kernel {
                     )
                     .await?;
                 }
-                self.reply(&run, &call_id, "The person reviewed the work and accepted it.", false, Label::Principal).await?;
+                self.reply(&run, &call_id, "The person reviewed the work and accepted it.", false, Label::PRINCIPAL).await?;
                 self.emit(&actor, Ev::Completed { run: run.clone(), summary: item.details["summary"].as_str().unwrap_or_default().into() }).await?;
                 self.on_stop(&run, true).await;
             }
@@ -145,12 +156,12 @@ impl Kernel {
                     "The person reviewed the work and did not accept it{}. The task stays open; a retry without changes will not help.",
                     text.as_ref().map(|t| format!(": {t}")).unwrap_or_default()
                 );
-                self.reply(&run, &call_id, msg, true, Label::Principal).await?;
+                self.reply(&run, &call_id, msg, true, Label::PRINCIPAL).await?;
                 self.resume_after(&run).await?;
             }
             ("question", "answer") => {
                 self.emit(&actor, resolve(None)).await?;
-                self.reply(&run, &call_id, format!("The person answered: {}", text.clone().unwrap_or_default()), false, Label::Principal).await?;
+                self.reply(&run, &call_id, format!("The person answered: {}", text.clone().unwrap_or_default()), false, Label::PRINCIPAL).await?;
                 self.resume_after(&run).await?;
             }
             ("policy_proposal", "accept") => {
@@ -166,10 +177,12 @@ impl Kernel {
                 self.emit(&actor, resolve(None)).await?;
                 self.emit(&actor, Ev::PolicySet { layer, cedar: next }).await?;
             }
-            ("policy_proposal", "reject") | ("notice", "dismiss") | ("tool_change", "reject") => {
+            ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") => {
                 self.emit(&actor, resolve(None)).await?;
             }
-            ("notice", "extend") | ("notice", "resume") => {
+            // Only the kernel's own notices (which name a reason) can continue a
+            // run; a message the agent wrote cannot.
+            ("notice", "extend") | ("notice", "resume") if item.details["reason"].is_string() && (decision != "extend" || item.details["reason"] == "budget") => {
                 self.emit(&actor, resolve(None)).await?;
                 if decision == "extend" {
                     if let Some(mut b) = self.read(|s| s.runs.get(&run).map(|r| r.config.budget.clone())) {
@@ -190,9 +203,31 @@ impl Kernel {
                         hash: item.details["hash"].as_str().unwrap_or_default().into(),
                         description: item.details["description"].as_str().unwrap_or_default().into(),
                         input_schema: item.details["input_schema"].clone(),
+                        approved: true,
                     },
                 )
                 .await?;
+            }
+            ("tool_review", "approve") => {
+                self.emit(&actor, resolve(None)).await?;
+                for t in item.details["tools"].as_array().cloned().unwrap_or_default() {
+                    let name = t["tool"].as_str().unwrap_or_default().to_string();
+                    // Approve only definitions that are still the pinned ones.
+                    let current = self.read(|s| s.pins.get(&name).map(|p| p.hash.clone()));
+                    if current.as_deref() == t["hash"].as_str() {
+                        self.emit(
+                            &actor,
+                            Ev::ToolPinned {
+                                tool: name,
+                                hash: t["hash"].as_str().unwrap_or_default().into(),
+                                description: t["description"].as_str().unwrap_or_default().into(),
+                                input_schema: t["input_schema"].clone(),
+                                approved: true,
+                            },
+                        )
+                        .await?;
+                    }
+                }
             }
             (kind, d) => return Ok(Answer::Invalid(format!("{d:?} is not a decision for a {kind} item"))),
         }
@@ -214,7 +249,7 @@ impl Kernel {
                 is_error,
                 label,
                 data: None,
-                source: None,
+                sources: vec![],
             },
         )
         .await?;

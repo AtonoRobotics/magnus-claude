@@ -33,6 +33,7 @@ pub struct Sandboxes {
     cfg: Option<Cfg>,
     root: PathBuf,
     vms: tokio::sync::Mutex<HashMap<String, Arc<Vm>>>,
+    inputs: Mutex<HashMap<String, Vec<(String, Vec<u8>)>>>,
 }
 
 /// The Firecracker configuration for a run's VM. It never has a network
@@ -54,7 +55,7 @@ pub fn vm_config(cfg: &Cfg, workspace: &Path, vsock: &Path) -> Value {
 
 impl Sandboxes {
     pub fn new(cfg: Option<Cfg>, state_dir: &Path) -> Sandboxes {
-        Sandboxes { cfg, root: state_dir.join("runs"), vms: tokio::sync::Mutex::new(HashMap::new()) }
+        Sandboxes { cfg, root: state_dir.join("runs"), vms: tokio::sync::Mutex::new(HashMap::new()), inputs: Mutex::new(HashMap::new()) }
     }
 
     pub fn available(&self) -> bool {
@@ -90,6 +91,7 @@ impl Sandboxes {
         let console = std::fs::File::create(dir.join("console.log"))?;
         let mut cmd = Command::new(&cfg.firecracker);
         cmd.arg("--api-sock").arg(&api).arg("--config-file").arg(&config_path).arg("--level").arg("Error");
+        cmd.env_clear();
         cmd.stdin(Stdio::null()).stdout(Stdio::from(console.try_clone()?)).stderr(Stdio::from(console));
         let child = crate::spawn::spawn(cmd).context("start firecracker")?;
         let vm = Arc::new(Vm { child: Mutex::new(child), vsock });
@@ -112,6 +114,11 @@ impl Sandboxes {
         }
     }
 
+    /// Files to place in /workspace/inputs when a run's workspace is created.
+    pub fn set_inputs(&self, run: &str, files: Vec<(String, Vec<u8>)>) {
+        self.inputs.lock().unwrap().insert(run.to_string(), files);
+    }
+
     async fn vm(&self, run: &str) -> Result<Arc<Vm>> {
         let mut vms = self.vms.lock().await;
         if let Some(vm) = vms.get(run) {
@@ -119,7 +126,16 @@ impl Sandboxes {
                 return Ok(vm.clone());
             }
         }
+        let fresh = !self.dir(run).join("workspace.ext4").exists();
         let vm = self.launch(run).await?;
+        if fresh {
+            let files = self.inputs.lock().unwrap().get(run).cloned().unwrap_or_default();
+            for (name, data) in files {
+                let safe: String = name.chars().map(|c| if c == '/' || c == '\\' { '_' } else { c }).collect();
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                request(&vm.vsock, &json!({ "op": "write", "path": format!("/workspace/inputs/{safe}"), "data_b64": b64 }), Duration::from_secs(60)).await?;
+            }
+        }
         vms.insert(run.to_string(), vm.clone());
         Ok(vm)
     }

@@ -51,6 +51,10 @@ pub enum Ev {
         hash: String,
         description: String,
         input_schema: Value,
+        /// Whether the owner has reviewed this definition's text. Unreviewed
+        /// descriptions are third-party text and never reach the model.
+        #[serde(default)]
+        approved: bool,
     },
     /// A tool's definition no longer matches its pin; it is disabled.
     ToolChanged {
@@ -132,9 +136,9 @@ pub enum Ev {
         label: Label,
         #[serde(default)]
         data: Option<Value>,
-        /// The app the content came from, for the audience rule.
+        /// The apps the content came from, for the audience rule.
         #[serde(default)]
-        source: Option<String>,
+        sources: Vec<String>,
     },
     Contract {
         run: String,
@@ -198,6 +202,8 @@ pub enum Ev {
         scope: String,
         #[serde(default)]
         until: Option<chrono::DateTime<chrono::Utc>>,
+        #[serde(default)]
+        reason: Option<String>,
     },
     ApprovalUsed {
         id: String,
@@ -212,6 +218,15 @@ pub enum Ev {
         run: String,
         budget: crate::config::Budget,
     },
+    /// A conformance suite run for an adapter version.
+    AdapterVerified {
+        adapter_id: String,
+        adapter: String,
+        version: String,
+        model: String,
+        passed: bool,
+        report: Value,
+    },
     Memory {
         id: String,
         person: String,
@@ -219,7 +234,10 @@ pub enum Ev {
         fact: String,
         #[serde(default)]
         topic: Option<String>,
+        /// The writing run's taint; reading the entry back carries it (M1).
         label: Label,
+        #[serde(default)]
+        sources: Vec<String>,
     },
 }
 

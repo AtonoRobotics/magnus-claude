@@ -77,7 +77,7 @@ impl Adapters {
         }
     }
 
-    async fn launch(&self, cfg: &config::Adapter) -> Result<Arc<Running>> {
+    pub async fn launch(&self, cfg: &config::Adapter) -> Result<Arc<Running>> {
         anyhow::ensure!(!cfg.command.is_empty(), "adapter {} has no command", cfg.id);
         let gen = self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let socket = self.dir.join(format!("{}-{}-{gen}.sock", cfg.id, std::process::id()));
@@ -132,21 +132,22 @@ impl Adapters {
         Ok(r)
     }
 
-    /// Replace or add an adapter without restarting the kernel. The new process
-    /// must pass the contract handshake before it takes any request.
-    pub async fn replace(&self, cfg: config::Adapter) -> Result<(String, String)> {
-        let r = self.launch(&cfg).await?;
-        let info = (r.adapter.clone(), r.version.clone());
-        self.configs.write().await.insert(cfg.id.clone(), cfg.clone());
-        let old = self.running.write().await.insert(cfg.id.clone(), r);
+    /// Put a launched adapter in service without restarting the kernel. New
+    /// requests go to it; the old process finishes what it has in flight.
+    pub async fn install(&self, r: Arc<Running>) {
+        self.configs.write().await.insert(r.cfg.id.clone(), r.cfg.clone());
+        let old = self.running.write().await.insert(r.cfg.id.clone(), r);
         if let Some(old) = old {
-            // Let in-flight requests on the old socket finish, then stop it.
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(600)).await;
                 drop(old);
             });
         }
-        Ok(info)
+    }
+
+    /// Run the conformance suite against a launched adapter.
+    pub async fn conformance(&self, r: &Running, model: &str) -> crate::conformance::Report {
+        crate::conformance::run(&self.vault, &r.cfg, &r.socket, &r.adapter, &r.version, model).await
     }
 
     pub async fn list(&self) -> Vec<(String, Vec<String>, Option<(String, String)>)> {

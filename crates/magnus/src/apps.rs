@@ -135,7 +135,42 @@ impl Mcp {
         Ok(s)
     }
 
+    /// Everything an app returns passes here before anyone sees it, so an app
+    /// that echoes the credential it was called with leaks it nowhere.
+    fn clean(s: &str, bearer: Option<&str>) -> String {
+        match bearer {
+            Some(b) => crate::vault::redact(s, b),
+            None => s.to_string(),
+        }
+    }
+
+    fn clean_value(v: Value, bearer: Option<&str>) -> Value {
+        match bearer {
+            Some(b) => serde_json::from_str(&crate::vault::redact(&v.to_string(), b)).unwrap_or(Value::Null),
+            None => v,
+        }
+    }
+
+    fn clean_err(e: CallError, bearer: Option<&str>) -> CallError {
+        match e {
+            CallError::NotSent(m) => CallError::NotSent(Self::clean(&m, bearer)),
+            CallError::Unknown(m) => CallError::Unknown(Self::clean(&m, bearer)),
+        }
+    }
+
     pub async fn list_tools(&self, url: &str, bearer: Option<&str>) -> Result<Vec<AppTool>> {
+        let tools = self.list_tools_raw(url, bearer).await.map_err(|e| anyhow!("{}", Self::clean(&e.to_string(), bearer)))?;
+        Ok(tools
+            .into_iter()
+            .map(|t| AppTool {
+                name: Self::clean(&t.name, bearer),
+                description: Self::clean(&t.description, bearer),
+                input_schema: Self::clean_value(t.input_schema, bearer),
+            })
+            .collect())
+    }
+
+    async fn list_tools_raw(&self, url: &str, bearer: Option<&str>) -> Result<Vec<AppTool>> {
         let s = self.open(url, bearer).await.map_err(|e| anyhow!("{e:?}"))?;
         let r = self.rpc(&s, Some(1), "tools/list", json!({}), &[]).await.map_err(|e| anyhow!("{e:?}"))?;
         let r = r.unwrap_or_default();
@@ -152,6 +187,17 @@ impl Mcp {
     }
 
     pub async fn call(&self, url: &str, bearer: Option<&str>, tool: &str, args: &Value, key: Option<&str>) -> Result<CallOutput, CallError> {
+        match self.call_raw(url, bearer, tool, args, key).await {
+            Ok(o) => Ok(CallOutput {
+                text: Self::clean(&o.text, bearer),
+                structured: o.structured.map(|v| Self::clean_value(v, bearer)),
+                is_error: o.is_error,
+            }),
+            Err(e) => Err(Self::clean_err(e, bearer)),
+        }
+    }
+
+    async fn call_raw(&self, url: &str, bearer: Option<&str>, tool: &str, args: &Value, key: Option<&str>) -> Result<CallOutput, CallError> {
         let s = self.open(url, bearer).await?;
         let mut params = json!({ "name": tool, "arguments": args });
         let mut extra = vec![];

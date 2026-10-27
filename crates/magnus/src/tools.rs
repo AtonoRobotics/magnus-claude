@@ -46,22 +46,35 @@ impl Risk {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Label {
-    Principal,
-    Private,
-    Untrusted,
+/// How content is labeled on the way in (B3). A source can be both private
+/// and untrusted: a mailbox holds the person's private mail, written by others.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Label {
+    pub untrusted: bool,
+    pub private: bool,
 }
 
 impl Label {
+    pub const PRINCIPAL: Label = Label { untrusted: false, private: false };
+    pub const PRIVATE: Label = Label { untrusted: false, private: true };
+    pub const UNTRUSTED: Label = Label { untrusted: true, private: false };
+
+    /// `principal`, `private`, `untrusted`, or a combination like `private+untrusted`.
     pub fn parse(s: &str) -> Option<Label> {
-        Some(match s {
-            "principal" => Label::Principal,
-            "private" => Label::Private,
-            "untrusted" => Label::Untrusted,
-            _ => return None,
-        })
+        let mut l = Label::PRINCIPAL;
+        for part in s.split(['+', ',', ' ']).filter(|p| !p.is_empty()) {
+            match part {
+                "principal" => {}
+                "private" => l.private = true,
+                "untrusted" => l.untrusted = true,
+                _ => return None,
+            }
+        }
+        Some(l)
+    }
+
+    pub fn join(self, o: Label) -> Label {
+        Label { untrusted: self.untrusted || o.untrusted, private: self.private || o.private }
     }
 }
 
@@ -104,13 +117,13 @@ pub struct Builtin {
 }
 
 pub const BUILTINS: &[Builtin] = &[
-    Builtin { name: "sandbox_exec", app: "sandbox", risk: Risk::Sandbox, label: Label::Principal, audience: Audience::Private },
-    Builtin { name: "sandbox_write_file", app: "sandbox", risk: Risk::Sandbox, label: Label::Principal, audience: Audience::Private },
-    Builtin { name: "sandbox_read_file", app: "sandbox", risk: Risk::Sandbox, label: Label::Principal, audience: Audience::Private },
-    Builtin { name: "web_fetch", app: "web", risk: Risk::Read, label: Label::Untrusted, audience: Audience::Public },
-    Builtin { name: "web_search", app: "web", risk: Risk::Read, label: Label::Untrusted, audience: Audience::Public },
-    Builtin { name: "memory_write", app: "memory", risk: Risk::ReversibleWrite, label: Label::Principal, audience: Audience::Private },
-    Builtin { name: "memory_search", app: "memory", risk: Risk::Read, label: Label::Principal, audience: Audience::Private },
+    Builtin { name: "sandbox_exec", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "sandbox_write_file", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "sandbox_read_file", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "web_fetch", app: "web", risk: Risk::Read, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "web_search", app: "web", risk: Risk::Read, label: Label::UNTRUSTED, audience: Audience::Public },
+    Builtin { name: "memory_write", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "memory_search", app: "memory", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
 ];
 
 pub fn builtin(name: &str) -> Option<&'static Builtin> {

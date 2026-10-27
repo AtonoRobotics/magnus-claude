@@ -1,0 +1,74 @@
+# Model adapters for the five supported providers. Append the ones you use to
+# the appliance config; `credential` names the vault secret that sign-in fills.
+# Endpoints and prices: docs/research/providers-and-tac.md (2026-10-27).
+
+[[adapters]]
+id = "claude"
+command = ["/opt/magnus/bin/magnus-adapter-anthropic"]
+[adapters.settings]
+credential = "claude_api_key"
+anthropic_version = "2023-06-01"
+
+[[adapters]]
+id = "glm"
+command = ["/opt/magnus/bin/magnus-adapter-openai"]
+[adapters.settings]
+credential = "glm_api_key"
+api = "chat"
+base_url = "https://api.z.ai/api/paas/v4"
+key_url = "https://z.ai/manage-apikey/apikey-list"
+auth = { kind = "api_key" }
+send_reasoning = true
+prices = { "glm-5" = { input = 1.4, output = 4.4, cache_read = 0.26 } }
+
+[[adapters]]
+id = "muse"
+command = ["/opt/magnus/bin/magnus-adapter-openai"]
+[adapters.settings]
+credential = "muse_api_key"
+api = "responses"
+base_url = "https://api.meta.ai/v1"
+key_url = "https://developers.meta.ai/"
+auth = { kind = "api_key" }
+include = ["reasoning.encrypted_content"]
+prices = { "muse-spark" = { input = 1.25, output = 4.25, cache_read = 0.15 }, "muse-wonder" = { input = 4.0, output = 20.0, cache_read = 0.2 } }
+
+# ChatGPT sign-in, as the Codex CLI does it. Subscription usage; no per-token price.
+[[adapters]]
+id = "codex"
+command = ["/opt/magnus/bin/magnus-adapter-openai"]
+[adapters.settings]
+credential = "codex_oauth"
+api = "responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+max_tokens_field = false
+headers = { originator = "codex_cli_rs", "OpenAI-Beta" = "responses=experimental" }
+[adapters.settings.auth]
+kind = "oauth_pkce"
+authorize_url = "https://auth.openai.com/oauth/authorize"
+token_url = "https://auth.openai.com/oauth/token"
+client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
+redirect_uri = "http://localhost:1455/auth/callback"
+scopes = "openid profile email offline_access"
+account_claim = "/https:~1~1api.openai.com~1auth/chatgpt_account_id"
+account_header = "chatgpt-account-id"
+extra_params = { id_token_add_organizations = "true", codex_cli_simplified_flow = "true", originator = "codex_cli_rs" }
+
+# xAI sign-in with a device code. The client id is not published by xAI; set it
+# before use (see docs/research/providers-and-tac.md).
+[[adapters]]
+id = "grok"
+command = ["/opt/magnus/bin/magnus-adapter-openai"]
+[adapters.settings]
+credential = "grok_oauth"
+api = "chat"
+base_url = "https://cli-chat-proxy.grok.com/v1"
+models_path = "/models-v2"
+fixed_models = ["grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning"]
+prices = { "grok-4" = { input = 2.0, output = 6.0, cache_read = 0.5 } }
+[adapters.settings.auth]
+kind = "oauth_device"
+device_url = "https://auth.x.ai/oauth2/device/code"
+token_url = "https://auth.x.ai/oauth2/token"
+client_id = "SET-ME"
+scopes = "openid offline_access"

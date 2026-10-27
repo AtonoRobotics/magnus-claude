@@ -27,7 +27,7 @@ impl Web {
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(45))
-                .redirect(reqwest::redirect::Policy::limited(5))
+                .redirect(reqwest::redirect::Policy::none())
                 .user_agent("Mozilla/5.0 (compatible; Magnus/0.1)")
                 .build()
                 .expect("http client"),
@@ -40,25 +40,53 @@ impl Web {
         self.search_url.is_some()
     }
 
-    async fn check_host(&self, url: &url::Url) -> Result<()> {
+    /// Check a URL's host and return the address to connect to, so the
+    /// connection goes to the address that was checked (no DNS rebinding).
+    async fn check_host(&self, url: &url::Url) -> Result<Option<(String, std::net::SocketAddr)>> {
         anyhow::ensure!(matches!(url.scheme(), "http" | "https"), "only http and https URLs can be fetched");
         if self.allow_private {
-            return Ok(());
+            return Ok(None);
         }
-        let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+        let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?.to_string();
         let port = url.port_or_known_default().unwrap_or(443);
-        let addrs = tokio::net::lookup_host((host, port)).await?;
-        for a in addrs {
+        let addrs: Vec<_> = tokio::net::lookup_host((host.as_str(), port)).await?.collect();
+        anyhow::ensure!(!addrs.is_empty(), "{host} does not resolve");
+        for a in &addrs {
             anyhow::ensure!(!private_ip(a.ip()), "{host} resolves to a private address; fetching it is not allowed");
         }
-        Ok(())
+        Ok(Some((host, addrs[0])))
+    }
+
+    /// GET with every redirect hop checked like the first request.
+    async fn get(&self, start: url::Url) -> Result<reqwest::Response> {
+        let mut url = start;
+        for _ in 0..6 {
+            let pinned = self.check_host(&url).await?;
+            let client = match &pinned {
+                Some((host, addr)) => reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .timeout(Duration::from_secs(45))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .user_agent("Mozilla/5.0 (compatible; Magnus/0.1)")
+                    .resolve(host, *addr)
+                    .build()?,
+                None => self.http.clone(),
+            };
+            let resp = client.get(url.clone()).send().await.map_err(|e| anyhow!("fetch failed: {e}"))?;
+            if resp.status().is_redirection() {
+                let loc = resp.headers().get("location").and_then(|v| v.to_str().ok()).ok_or_else(|| anyhow!("redirect without a location"))?;
+                url = url.join(loc).map_err(|e| anyhow!("bad redirect: {e}"))?;
+                continue;
+            }
+            return Ok(resp);
+        }
+        Err(anyhow!("too many redirects"))
     }
 
     /// Returns (text, content type).
     pub async fn fetch(&self, raw: &str) -> Result<(String, String)> {
         let url = url::Url::parse(raw).map_err(|e| anyhow!("not a URL: {e}"))?;
-        self.check_host(&url).await?;
-        let resp = self.http.get(url.clone()).send().await.map_err(|e| anyhow!("fetch failed: {e}"))?;
+        let resp = self.get(url.clone()).await?;
         let status = resp.status();
         let ctype = resp
             .headers()
@@ -98,7 +126,7 @@ impl Web {
         let base = self.search_url.as_ref().ok_or_else(|| anyhow!("no search service is configured"))?;
         let mut url = url::Url::parse(base)?;
         url.query_pairs_mut().append_pair("q", query).append_pair("format", "json");
-        let v: serde_json::Value = self.http.get(url).send().await?.json().await?;
+        let v: serde_json::Value = self.http.get(url).send().await?.json().await?; // the owner's own search service
         let mut out = String::new();
         for r in v["results"].as_array().into_iter().flatten().take(10) {
             out.push_str(&format!(

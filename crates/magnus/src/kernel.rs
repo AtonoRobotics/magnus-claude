@@ -109,6 +109,21 @@ impl Kernel {
 
     /// Start driving a run if nothing is.
     pub fn wake(self: &Arc<Self>, run: &str) {
+        let files = self.read(|s| {
+            let task = s.runs.get(run).map(|r| r.task.clone()).unwrap_or_default();
+            s.attachments.get(&task).cloned().unwrap_or_default()
+        });
+        if !files.is_empty() {
+            use base64::Engine;
+            let decoded = files
+                .iter()
+                .filter_map(|a| {
+                    let data = base64::engine::general_purpose::STANDARD.decode(a["data_b64"].as_str()?).ok()?;
+                    Some((a["name"].as_str()?.to_string(), data))
+                })
+                .collect();
+            self.sandboxes.set_inputs(run, decoded);
+        }
         if !self.drivers.lock().unwrap().insert(run.to_string()) {
             return;
         }

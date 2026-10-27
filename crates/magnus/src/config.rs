@@ -152,8 +152,10 @@ pub struct Connector {
 fn mcp_http() -> String {
     "mcp_http".into()
 }
+/// Apps are assumed not to deduplicate unless the owner says they honor an
+/// `Idempotency-Key` header, so a crash never causes a blind resend.
 fn header() -> String {
-    "header".into()
+    "none".into()
 }
 
 #[derive(Deserialize, Clone, Debug)]

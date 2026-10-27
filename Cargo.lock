@@ -1417,6 +1417,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "magnus-adapter-openai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "magnus-adapter-proto",
+ "rand 0.8.8",
+ "reqwest",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "magnus-adapter-proto"
 version = "0.1.0"
 dependencies = [

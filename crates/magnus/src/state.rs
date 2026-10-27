@@ -139,6 +139,8 @@ pub struct Approval {
     pub until: Option<DateTime<Utc>>,
     pub used: bool,
     pub by: String,
+    /// Why the approval was asked for: the rule, or `unknown_outcome`.
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +148,7 @@ pub struct Pin {
     pub hash: String,
     pub description: String,
     pub input_schema: Value,
+    pub approved: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +159,7 @@ pub struct MemoryEntry {
     pub fact: String,
     pub topic: Option<String>,
     pub label: Label,
+    pub sources: Vec<String>,
     pub at: DateTime<Utc>,
 }
 
@@ -172,6 +176,10 @@ pub struct State {
     pub changed: HashMap<String, (String, Pin)>,
     pub secrets: HashSet<String>,
     pub memory: Vec<MemoryEntry>,
+    /// Files attached to each task, by task id.
+    pub attachments: HashMap<String, Vec<Value>>,
+    /// Latest conformance result per adapter id: (version, model, passed, report).
+    pub conformance: HashMap<String, (String, String, bool, Value)>,
     pub last_seq: i64,
 }
 
@@ -190,20 +198,23 @@ impl State {
                 self.policies.insert(layer.clone(), cedar.clone());
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
-            Ev::ToolPinned { tool, hash, description, input_schema } => {
+            Ev::ToolPinned { tool, hash, description, input_schema, approved } => {
                 self.pins.insert(
                     tool.clone(),
-                    Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone() },
+                    Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: *approved },
                 );
                 self.changed.remove(tool);
             }
             Ev::ToolChanged { tool, hash, description, input_schema, item } => {
                 self.changed.insert(
                     tool.clone(),
-                    (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone() }),
+                    (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: false }),
                 );
             }
-            Ev::TaskCreated { task, run, person, text, config, .. } => {
+            Ev::TaskCreated { task, run, person, text, config, attachments } => {
+                if !attachments.is_empty() {
+                    self.attachments.insert(task.clone(), attachments.clone());
+                }
                 self.tasks.insert(
                     task.clone(),
                     Task { task_id: task.clone(), run_id: run.clone(), person: person.clone(), text: text.clone(), created_at: e.at },
@@ -223,7 +234,8 @@ impl State {
                         contract: None,
                         contract_version: 0,
                         verified: BTreeMap::new(),
-                        untrusted: false,
+                        // Attached files are content from elsewhere: data, not instructions.
+                        untrusted: !attachments.is_empty(),
                         private: false,
                         private_from: Default::default(),
                         model_calls: 0,
@@ -263,7 +275,7 @@ impl State {
                 }
             }
             Ev::Decision { .. } => {}
-            Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, source } => {
+            Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, sources } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     let rec = ResultRec { seq: e.seq, text: text.clone(), is_error: *is_error, status: status.clone(), data: data.clone() };
                     if let Some(k) = key {
@@ -274,13 +286,15 @@ impl State {
                     if !call_id.is_empty() {
                         r.results.insert(call_id.clone(), rec);
                     }
-                    match label {
-                        Label::Untrusted => r.untrusted = true,
-                        Label::Private => {
-                            r.private = true;
-                            r.private_from.insert(source.clone().unwrap_or_default());
+                    if label.untrusted {
+                        r.untrusted = true;
+                    }
+                    if label.private {
+                        r.private = true;
+                        r.private_from.extend(sources.iter().cloned());
+                        if sources.is_empty() {
+                            r.private_from.insert(String::new());
                         }
-                        Label::Principal => {}
                     }
                 }
             }
@@ -354,7 +368,7 @@ impl State {
                     i.resolution = Some((decision.clone(), scope.clone(), text.clone(), e.actor.clone()));
                 }
             }
-            Ev::Approval { id, person, task, tool, input_hash, scope, until, .. } => self.approvals.push(Approval {
+            Ev::Approval { id, person, task, tool, input_hash, scope, until, reason, .. } => self.approvals.push(Approval {
                 id: id.clone(),
                 person: person.clone(),
                 task: task.clone(),
@@ -364,6 +378,7 @@ impl State {
                 until: *until,
                 used: false,
                 by: e.actor.clone(),
+                reason: reason.clone(),
             }),
             Ev::ApprovalUsed { id, .. } => {
                 if let Some(a) = self.approvals.iter_mut().find(|a| &a.id == id) {
@@ -380,13 +395,17 @@ impl State {
                     r.config.budget = budget.clone();
                 }
             }
-            Ev::Memory { id, person, run, fact, topic, label } => self.memory.push(MemoryEntry {
+            Ev::AdapterVerified { adapter_id, version, model, passed, report, .. } => {
+                self.conformance.insert(adapter_id.clone(), (version.clone(), model.clone(), *passed, report.clone()));
+            }
+            Ev::Memory { id, person, run, fact, topic, label, sources } => self.memory.push(MemoryEntry {
                 id: id.clone(),
                 person: person.clone(),
                 run: run.clone(),
                 fact: fact.clone(),
                 topic: topic.clone(),
                 label: *label,
+                sources: sources.clone(),
                 at: e.at,
             }),
         }

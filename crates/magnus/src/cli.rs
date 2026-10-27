@@ -21,8 +21,9 @@ pub fn main() {
         match args.get(1).map(String::as_str) {
             Some("migrate") => migrate(&args).await,
             Some("serve") => serve(&args).await,
+            Some("conformance") => conformance(&args).await,
             _ => {
-                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>");
+                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus conformance --config <file> --adapter <id> [--model <id>]");
                 std::process::exit(2);
             }
         }
@@ -52,5 +53,21 @@ async fn serve(args: &[String]) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("listen on {listen}"))?;
     tracing::info!("magnus listening on {listen}");
     axum::serve(listener, crate::api::router(k)).await?;
+    Ok(())
+}
+
+/// Run an adapter's conformance suite with the appliance's vault, for release
+/// checks. Prints the report; exits 1 unless every check passes.
+async fn conformance(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    let id = arg(args, "--adapter").context("--adapter is required")?;
+    let model = arg(args, "--model").unwrap_or_else(|| cfg.model.name.clone());
+    let vault = std::sync::Arc::new(crate::vault::Vault::open(&cfg.appliance.state_dir)?);
+    let a = cfg.adapters.iter().find(|a| a.id == id).context("no such adapter in the config")?.clone();
+    let adapters = crate::adapters::Adapters::new(&cfg.appliance.state_dir, vault, &cfg.adapters);
+    let r = adapters.launch(&a).await?;
+    let report = adapters.conformance(&r, &model).await;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    anyhow::ensure!(report.passed, "conformance failed");
     Ok(())
 }
