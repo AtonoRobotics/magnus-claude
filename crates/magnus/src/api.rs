@@ -129,6 +129,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/kill-switch", post(kill_switch))
         .route("/v1/adapters", get(adapters))
         .route("/v1/model", get(get_model).put(put_model))
+        .route("/v1/models", get(models))
         .route("/v1/adapters/{id}", put(put_adapter))
         .route("/v1/adapters/{id}/catalog", get(catalog))
         .route("/v1/adapters/{id}/conformance", post(conformance))
@@ -452,9 +453,29 @@ async fn submit(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
             return err(StatusCode::PAYLOAD_TOO_LARGE, "attachments are limited to 25 MB each");
         }
     }
-    match k.create_task(&format!("person:{}", p.id), &p.id, text, attachments).await {
+    let model = match chosen_model(&k, &b).await {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let o = crate::kernel::NewRun { model, ..Default::default() };
+    match k.create_run(&format!("person:{}", p.id), &p.id, text, attachments, o).await {
         Ok((task, run)) => (StatusCode::CREATED, Json(json!({ "task_id": task, "run_id": run }))).into_response(),
         Err(e) => internal(e),
+    }
+}
+
+/// The model a request chose (`"model": {"adapter", "model"}`), if any,
+/// once its adapter confirms it offers it.
+async fn chosen_model(k: &Kernel, b: &Value) -> Result<Option<(String, String)>, Response> {
+    if b["model"].is_null() {
+        return Ok(None);
+    }
+    let (Some(adapter), Some(model)) = (b["model"]["adapter"].as_str(), b["model"]["model"].as_str()) else {
+        return Err(err(StatusCode::BAD_REQUEST, "model needs adapter and model"));
+    };
+    match k.check_model(adapter, model).await {
+        Ok(()) => Ok(Some((adapter.into(), model.into()))),
+        Err(m) => Err(err(StatusCode::BAD_REQUEST, m)),
     }
 }
 
@@ -487,7 +508,11 @@ async fn chat_post(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response 
     if text.is_empty() {
         return err(StatusCode::BAD_REQUEST, "the message has no text");
     }
-    match k.chat_say(&p.id, text, b["thread"].as_str().map(String::from)).await {
+    let model = match chosen_model(&k, &b).await {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    match k.chat_say(&p.id, text, b["thread"].as_str().map(String::from), model).await {
         Ok(Some((thread, task))) => (StatusCode::CREATED, Json(json!({ "thread": thread, "task_id": task }))).into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "no such thread"),
         Err(e) => internal(e),
@@ -969,6 +994,17 @@ async fn get_model(State(k): K, h: HeaderMap) -> Response {
     }
     let (adapter, model) = k.read(|s| s.model.clone()).unwrap_or_else(|| (k.cfg.model.adapter.clone(), k.cfg.model.name.clone()));
     Json(json!({ "adapter": adapter, "model": model })).into_response()
+}
+
+/// The models anyone signed in may choose for a task or a chat message,
+/// and the one used when they choose none.
+async fn models(State(k): K, h: HeaderMap) -> Response {
+    if let Err(r) = who(&k, &h) {
+        return r;
+    }
+    let (adapter, model) = k.default_model();
+    let list: Vec<Value> = k.models().await.into_iter().map(|(id, models)| json!({ "adapter": id, "models": models })).collect();
+    Json(json!({ "default": { "adapter": adapter, "model": model }, "adapters": list })).into_response()
 }
 
 /// Choose the model new tasks run on. Running tasks keep their pinned model (K9).

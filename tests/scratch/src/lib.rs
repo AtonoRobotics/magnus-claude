@@ -25,6 +25,13 @@ pub const TASK: &str = "Write me a one-line summary of Q3 revenue (41.7M, Q2 was
 /// `/v1/models` answered here, since connecting a key checks it there;
 /// everything else goes to the scripted model.
 pub async fn provider(model: &FakeModel) -> String {
+    provider_with(model, &["claude-test"]).await
+}
+
+/// The same, listing these model ids.
+pub async fn provider_with(model: &FakeModel, ids: &[&str]) -> String {
+    let data: Vec<Value> = ids.iter().map(|id| json!({ "id": id, "display_name": id, "type": "model" })).collect();
+    let listing = json!({ "data": data, "has_more": false });
     #[derive(Clone)]
     struct Up(String, reqwest::Client);
     async fn forward(State(up): State<Up>, headers: HeaderMap, body: String) -> Response {
@@ -42,7 +49,7 @@ pub async fn provider(model: &FakeModel) -> String {
         resp.body(Body::from(r.bytes().await.unwrap())).unwrap()
     }
     let app = Router::new()
-        .route("/v1/models", get(|| async { Json(json!({ "data": [{ "id": "claude-test", "display_name": "Claude (test)", "type": "model" }], "has_more": false })) }))
+        .route("/v1/models", get(move || async move { Json(listing) }))
         .route("/v1/messages", post(forward))
         .with_state(Up(model.url.clone(), reqwest::Client::new()));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
