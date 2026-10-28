@@ -109,6 +109,64 @@ async fn a_question_is_answered_in_the_thread_and_is_not_a_task() {
     assert_eq!(app.api("bob").post("/v1/chat", json!({ "text": "hi", "thread": thread })).await.0.as_u16(), 404);
 }
 
+/// A search service answering every query with one result, the given page.
+async fn fake_search(page: String) -> String {
+    let app = axum::Router::new().route(
+        "/search",
+        axum::routing::get(move || {
+            let page = page.clone();
+            async move { axum::Json(json!({ "results": [{ "title": "LLC vs S corporation", "url": page, "content": "An LLC is a legal structure; S-corp is a tax status." }] })) }
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/search", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    url
+}
+
+/// The owner's request 1 (2026-10-28): a question answered after a quick
+/// search and a page read is a chat answer, with no task and nothing in the
+/// inbox. Reading the web taints the turn as untrusted; with no private data
+/// read, the Rule of Two does not ask.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_with_a_quick_search_is_answered_in_chat_without_asking() {
+    let web = FakeWeb::start(&[("/llc", "An LLC is a state-law entity. S corporation status is a federal tax election.")]).await;
+    let page = web.url("/llc");
+    let search = fake_search(page.clone()).await;
+    let m = FakeModel::start(model(
+        move |_, turn| match turn {
+            0 => tool("web_search", json!({ "query": "LLC vs S corporation" })),
+            1 => tool("web_fetch", json!({ "url": page })),
+            _ => say("An LLC is a legal structure; an S-corp is a tax status an LLC can elect."),
+        },
+        vec![],
+    ))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let path = app.dir.path().join("magnus.toml");
+    let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    cfg["web"].as_table_mut().unwrap().insert("search_url".into(), toml::Value::String(search));
+    std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+    app.restart().await;
+    let alice = app.api("alice");
+    let (thread, turn) = chat(&alice, "What's the difference between an LLC and an S-corp?", None).await;
+    let t = alice.wait_settled(&turn).await;
+    assert_eq!(t["status"], "completed", "{t}");
+    let offered = m.requests()[0].offered_tools();
+    for t in ["web_search", "web_fetch"] {
+        assert!(offered.contains(&t.to_string()), "{t} not offered in chat: {offered:?}");
+    }
+    for turn in [1, 2] {
+        let r = m.requests().into_iter().find(|c| is_chat(c) && c.turn() == turn).unwrap().last_results();
+        assert!(r.len() == 1 && !r[0].is_error, "read {turn} failed: {r:?}");
+    }
+    assert_eq!(web.hits(), ["/llc"]);
+    let e = entries(&alice, &thread).await;
+    assert_eq!(e.iter().map(|e| e["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["message", "answer"], "{e:?}");
+    assert!(alice.tasks().await["tasks"].as_array().unwrap().is_empty(), "the question became a task");
+    assert!(alice.inbox().await.is_empty(), "a read asked: {:?}", alice.inbox().await);
+}
+
 /// In chat the model may only read. Anything that changes something is
 /// denied at the boundary, even when the model calls a tool it was not
 /// offered, and the chat tools work nowhere else.
