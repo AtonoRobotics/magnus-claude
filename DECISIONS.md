@@ -45,6 +45,7 @@ One line per choice the brief left open, with its reason. The brief and the owne
 ## Identity
 
 - In v1 the appliance config lists people with their groups and roles (`owner`, `approver:<risk>`, `policy:user`, `policy:group:<id>`); each person has an API token for the desktop app. Reason: K46 requires groups from an identity provider, the appliance needs a local one to start, and OIDC can replace it behind the same interface.
+- The appliance listens on all interfaces (`listen = "0.0.0.0:7700"`); its helpers (browser sidecar, search, Postgres) stay on loopback. Reason: owner instruction (2026-10-27); people's desktop apps run on their own machines and reach the appliance over the network.
 
 ## Models
 
