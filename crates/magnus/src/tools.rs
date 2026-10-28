@@ -210,8 +210,23 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             input_schema: obj(
                 json!({
                     "summary": { "type": "string" },
-                    "view": { "type": "array", "description": d("task_complete.view"), "items": { "type": "object", "properties": {
-                        "type": { "type": "string", "enum": crate::compose::KINDS }
+                    // Every component field is declared: a model that keeps to
+                    // the schema cannot otherwise fill one in.
+                    "view": { "type": "array", "minItems": 1, "description": d("task_complete.view"), "items": { "type": "object", "properties": {
+                        "type": { "type": "string", "enum": crate::compose::KINDS },
+                        "text": { "type": "string", "description": "heading, text" },
+                        "items": { "type": "array", "items": { "type": "string" }, "description": "list" },
+                        "columns": { "type": "array", "items": { "type": "string" }, "description": "table" },
+                        "rows": { "type": "array", "items": { "type": "array", "items": { "type": ["string", "number"] } }, "description": "table: one list of cells per row, as many as columns" },
+                        "label": { "type": "string", "description": "stat" },
+                        "value": { "type": ["string", "number"], "description": "stat" },
+                        "unit": { "type": "string", "description": "stat, bar_chart" },
+                        "labels": { "type": "array", "items": { "type": "string" }, "description": "bar_chart, line_chart" },
+                        "values": { "type": "array", "items": { "type": "number" }, "description": "bar_chart: one per label" },
+                        "series": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "values": { "type": "array", "items": { "type": "number" } } }, "required": ["name", "values"] }, "description": "line_chart: 1 to 6, one value per label each" },
+                        "file": { "type": "string", "description": "image: the name of a file you delivered" },
+                        "title": { "type": "string" },
+                        "caption": { "type": "string" }
                     }, "required": ["type"] } },
                     "spoken": { "type": "string", "description": d("task_complete.spoken") }
                 }),
