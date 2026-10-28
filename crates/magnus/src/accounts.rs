@@ -122,9 +122,12 @@ impl Accounts {
         let phc = all.get(person).unwrap_or(dummy);
         let ok = PasswordHash::new(phc).map(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok()).unwrap_or(false) && all.contains_key(person);
         if !ok {
-            let mut f = self.failures.lock().unwrap();
-            let e = f.entry(person.to_string()).or_insert((0, now));
-            e.0 += 1;
+            // Count failures only for real names, so guessing names cannot grow the table.
+            if all.contains_key(person) {
+                let mut f = self.failures.lock().unwrap();
+                let e = f.entry(person.to_string()).or_insert((0, now));
+                e.0 += 1;
+            }
             return Ok(Err(SignInError::Rejected));
         }
         self.failures.lock().unwrap().remove(person);

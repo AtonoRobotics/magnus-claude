@@ -257,13 +257,17 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
                 harness.push(json!({ "seq": e.seq, "step": step, "kind": "notice", "issuer": "code", "text": text }));
             }
             Ev::Intent { call_id, step_id, tool, input, issuer, .. } => {
-                let ix = actions.len();
-                actions.push(json!({
-                    "call_id": call_id, "step_id": step_id, "tool": tool, "input": input,
-                    "issuer": if issuer == "check" { "code (a check the model wrote)" } else { issuer.as_str() },
-                    "intent_seq": e.seq, "decisions": [], "result": null,
-                }));
-                action_ix.insert(call_id.clone(), ix);
+                // The boundary decides before it records the intent, so the
+                // action may already be listed.
+                let ix = *action_ix.entry(call_id.clone()).or_insert_with(|| {
+                    actions.push(json!({ "call_id": call_id, "tool": tool, "decisions": [], "result": null }));
+                    actions.len() - 1
+                });
+                let a = &mut actions[ix];
+                a["step_id"] = json!(step_id);
+                a["input"] = input.clone();
+                a["issuer"] = json!(if issuer == "check" { "code (a check the model wrote)" } else { issuer.as_str() });
+                a["intent_seq"] = json!(e.seq);
             }
             Ev::Decision { call_id, tool, outcome, stage, reason, rule, .. } => {
                 let ix = *action_ix.entry(call_id.clone()).or_insert_with(|| {
@@ -275,7 +279,7 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
             Ev::ToolResult { call_id, status, text, is_error, label, .. } => {
                 let tool = call_tool.get(call_id).cloned().unwrap_or_else(|| "run records".into());
                 seen.add(&format!("tool results: {tool}"), text.len().min(crate::run::MAX_RESULT_IN_CONTEXT));
-                let res = json!({ "seq": e.seq, "status": status, "is_error": is_error, "label": label, "text": clip(text, 4000), "issuer": who });
+                let res = json!({ "seq": e.seq, "status": status, "is_error": is_error, "label": label, "text": clip(text, 4000), "recorded_by": who });
                 match action_ix.get(call_id) {
                     Some(ix) => actions[*ix]["result"] = res,
                     None => records.push(json!({ "seq": e.seq, "kind": "record_result", "call_id": call_id, "tool": tool, "issuer": who, "result": res })),
