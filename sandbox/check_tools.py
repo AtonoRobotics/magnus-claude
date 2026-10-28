@@ -1,15 +1,20 @@
-"""Resolve the tools a contract check's command runs, against this image.
+"""Resolve the tools a contract check's command runs, against this image,
+and say whether its verdict comes from running workspace code.
 
 The kernel runs this in a fresh check VM with an empty workspace when a
-contract is recorded, so whatever is found here is in the image. A check may
-run workspace code as its subject (a file handed to an interpreter or a shell),
-never as the tool doing the checking: every program, sourced file and
-`python -m` module must come from the image, and nothing may change where they
-are looked up.
+contract is recorded, so whatever is found here is in the image. Every
+program a check runs must come from the image, and nothing may change where
+programs and modules are looked up. A check that also
+executes a workspace file (a script, tests, a demo, code it imports) is
+self-checked: its verdict rests on code the agent wrote. One that only reads
+the work with the image's tools is appliance-verified. When in doubt, it is
+self-checked.
 
 usage: python3 -I check_tools.py BASE64_JSON_LIST_OF_COMMANDS
-Prints a JSON list holding, for each command, a list of problems.
+Prints a JSON list holding, for each command,
+{"problems": [...], "self_checked": [reasons it runs workspace code]}.
 """
+import ast
 import base64
 import importlib.util
 import json
@@ -43,6 +48,17 @@ SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n", ";;", "|&"}
 REDIRECTS = {"<", ">", ">>", "<<", "<<<", ">&", "<&", ">|", "&>", "&>>", "<>"}
 PYTHON = re.compile(r"^python(\d+(\.\d+)?)?$")
 SHELLS = {"sh", "bash", "dash"}
+# Image programs that run code from the files or folder they are given.
+RUNNERS = {
+    "node", "nodejs", "npm", "npx", "perl", "ruby", "php", "java", "make", "cmake", "ninja", "tox", "nox",
+    "pytest", "py.test", "git", "xargs", "parallel", "watch", "xvfb-run", "soffice", "libreoffice",
+}
+# Modules that only read data, never run code from a file.
+DATA_MODULES = {"json.tool", "base64", "zipfile", "tarfile", "gzip", "py_compile", "tokenize", "ast", "filecmp", "sqlite3"}
+# Names in python3 -c code that can run other code.
+LAUNCHERS = {"subprocess", "os.system", "os.popen", "os.exec", "os.spawn", "runpy", "importlib", "exec", "eval", "compile", "__import__", "sys.path", "pty", "multiprocessing", "pickle", "shelve", "marshal", "ctypes", "code"}
+# Programs that run a program file when given -f (or --file).
+SCRIPTED = {"awk", "gawk", "mawk", "sed", "jq"}
 
 
 def substitutions(cmd):
@@ -131,110 +147,168 @@ def image_module(name):
     return bool(spec) and (origin in ("built-in", "frozen") or os.path.realpath(str(origin)).startswith("/usr/"))
 
 
-def check(cmd, depth=0):
-    problems = []
+
+class Found:
+    def __init__(self):
+        self.problems = []
+        self.runs = []
+
+
+def check(cmd, depth=0, found=None):
+    found = found or Found()
     flat, inner = substitutions(cmd)
     for sub in inner:
-        problems += check(sub, depth + 1)
+        check(sub, depth + 1, found)
     try:
         commands = simple_commands(flat)
     except ValueError as e:
-        return problems + [f"the command cannot be parsed ({e})"]
+        found.problems.append(f"the command cannot be parsed ({e})")
+        return found
     for words in commands:
-        problems += check_simple(words, depth)
-    return problems
+        check_simple(words, depth, found)
+    return found
 
 
-def check_simple(words, depth):
-    problems = []
+def search_var(name, found):
+    if name in SEARCH or name.startswith("PYTHON"):
+        found.problems.append(f"it sets {name}, which changes where the check's tools come from")
+
+
+def check_simple(words, depth, found):
     i = 0
     while i < len(words) and words[i] in KEYWORDS:
         i += 1
     if i < len(words) and words[i] == "for":
-        return problems
+        return
     # Leading assignments, then wrappers with their options and assignments.
     while i < len(words):
         w = words[i]
         name = assignment(w)
         if name:
-            if name in SEARCH or name.startswith("PYTHON"):
-                problems.append(f"it sets {name}, which changes where the check's tools come from")
+            search_var(name, found)
             i += 1
             continue
         if w in WRAPPERS:
             if not image_program(w) and w not in ("command", "exec", "time"):
-                problems.append(f"`{w}` is not in the sandbox image")
+                found.problems.append(f"`{w}` is not in the sandbox image")
             i += 1
             first = True
             while i < len(words) and (words[i].startswith("-") or assignment(words[i]) or (w in ("timeout", "nice") and first and re.match(r"^[0-9.]+[smhd]?$", words[i]))):
                 name = assignment(words[i])
-                if name and (name in SEARCH or name.startswith("PYTHON")):
-                    problems.append(f"it sets {name}, which changes where the check's tools come from")
+                if name:
+                    search_var(name, found)
                 if not words[i].startswith("-"):
                     first = False
                 i += 1
             continue
         break
     if i >= len(words):
-        return problems
+        return
     prog, args = words[i], words[i + 1 :]
     if prog in REFUSED:
-        return problems + [f"`{prog}` {REFUSED[prog]}"]
+        found.problems.append(f"`{prog}` {REFUSED[prog]}")
+        return
     if prog == "export":
         for a in args:
-            name = assignment(a) or a
-            if name in SEARCH or name.startswith("PYTHON"):
-                problems.append(f"it sets {name}, which changes where the check's tools come from")
-        return problems
+            search_var(assignment(a) or a, found)
+        return
     if prog in BUILTINS or prog == "SUBSTITUTED":
-        return problems
+        return
     if not image_program(prog):
         if "/" in prog:
-            problems.append(f"`{prog}` is a program from the workspace; a check's tools must come from the sandbox image (run a workspace file through one, e.g. `sh {prog}` or `python3 {prog}`)")
+            found.problems.append(f"`{prog}` would run a workspace file directly, and a check VM does not execute workspace files; run it with its interpreter, such as `sh {prog}` or `python3 {prog}`")
         else:
-            problems.append(f"`{prog}` is not in the sandbox image")
-        return problems
+            found.problems.append(f"`{prog}` is not in the sandbox image")
+        return
     base = os.path.basename(prog)
     if PYTHON.match(base):
-        problems += check_python(args)
+        check_python(args, found)
     elif base in SHELLS:
         for j, a in enumerate(args):
             if a == "-c" and j + 1 < len(args):
                 if depth > 3:
-                    problems.append("the command nests shells too deeply to resolve")
+                    found.problems.append("the command nests shells too deeply to resolve")
                 else:
-                    problems += check(args[j + 1], depth + 1)
-                break
+                    check(args[j + 1], depth + 1, found)
+                return
             if not a.startswith("-"):
-                break
-    return problems
+                found.runs.append(f"`{base} {a}` runs a workspace script")
+                return
+    elif base in RUNNERS:
+        found.runs.append(f"`{base}` runs code from the workspace")
+    elif base == "find" and set(args) & {"-exec", "-execdir", "-ok", "-okdir"}:
+        found.runs.append("`find -exec` runs other programs")
+    elif base in SCRIPTED and any(a == "-f" or a.startswith("--file") or (a.startswith("-") and not a.startswith("--") and "f" in a[1:]) for a in args):
+        found.runs.append(f"`{base} -f` runs a program file from the workspace")
 
 
-def check_python(args):
+def check_python(args, found):
     j = 0
     while j < len(args):
         a = args[j]
         if a.startswith("-") and not a.startswith("--") and len(a) > 1 and a[1] not in "mcWX" and set(a[1:]) & {"E", "S"}:
-            return [f"`python3 {a}` turns off the check environment"]
+            found.problems.append(f"`python3 {a}` turns off the check environment")
+            return
         if a == "-c" or a.startswith("-c"):
-            return []
+            code = args[j + 1] if a == "-c" and j + 1 < len(args) else a[2:]
+            check_code(code, found)
+            return
         if a == "-m" or (a.startswith("-m") and len(a) > 2):
             mod = args[j + 1] if a == "-m" and j + 1 < len(args) else a[2:]
             if not mod:
-                return ["`python3 -m` names no module"]
-            if not image_module(mod):
-                return [f"`python3 -m {mod}`: {mod} is not in the sandbox image; a check's tools must come from the image (run workspace code by path, e.g. `python3 path/to/script.py`)"]
-            return []
+                found.problems.append("`python3 -m` names no module")
+            elif not image_module(mod):
+                found.runs.append(f"`python3 -m {mod}` runs a module from the workspace")
+            elif mod not in DATA_MODULES:
+                found.runs.append(f"`python3 -m {mod}` runs code from the workspace")
+            return
         if a in ("-W", "-X"):
             j += 2
             continue
         if a.startswith("-"):
             j += 1
             continue
-        return []  # a script: the subject the check runs
-    return []
+        found.runs.append(f"`python3 {a}` runs a workspace script")
+        return
+
+
+def check_code(code, found):
+    """python3 -c code is appliance-verified only when it imports nothing
+    from outside the image and cannot launch other code."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        found.runs.append("its python3 -c code cannot be parsed, so what it runs is unknown")
+        return
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [n.name for n in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""] if node.level == 0 else [""]
+        for n in names:
+            if not n or not image_module(n.split(".")[0]):
+                found.runs.append(f"its python3 -c code imports {n or 'a relative module'}, which is not in the image")
+            elif any(n == l or n.startswith(l + ".") for l in LAUNCHERS):
+                found.runs.append(f"its python3 -c code imports {n}, which can run other code")
+        if isinstance(node, ast.Name) and node.id in LAUNCHERS:
+            found.runs.append(f"its python3 -c code uses {node.id}, which can run other code")
+        if isinstance(node, ast.Attribute):
+            dotted = []
+            cur = node
+            while isinstance(cur, ast.Attribute):
+                dotted.append(cur.attr)
+                cur = cur.value
+            if isinstance(cur, ast.Name):
+                full = ".".join([cur.id] + dotted[::-1])
+                if any(full == l or full.startswith(l) for l in LAUNCHERS if "." in l):
+                    found.runs.append(f"its python3 -c code uses {full}, which can run other code")
 
 
 if __name__ == "__main__":
     commands = json.loads(base64.b64decode(sys.argv[1]))
-    print(json.dumps([check(c) for c in commands]))
+    out = []
+    for c in commands:
+        f = check(c)
+        out.append({"problems": f.problems, "self_checked": list(dict.fromkeys(f.runs))})
+    print(json.dumps(out))

@@ -283,28 +283,29 @@ impl Kernel {
             "task_contract" => match self.validate_contract_tools(input).await {
                 // Work has started: the change goes to the person, old and new
                 // side by side, and only an approved version counts (K37).
-                Ok(()) if run.contract_frozen.is_some() => {
+                Ok(labelled) if run.contract_frozen.is_some() => {
                     let item = self
                         .item(
                             run,
                             "contract_change",
                             format!("The agent asks to change the done-criteria of: {}", run.contract.as_ref().and_then(|c| c["goal"].as_str()).unwrap_or("the task")),
-                            json!({ "call_id": call_id, "version": run.contract_version, "old": run.contract, "new": input }),
+                            json!({ "call_id": call_id, "version": run.contract_version, "old": run.contract, "new": labelled }),
                         )
                         .await?;
                     self.suspend(rid, "contract_change", Some(item)).await?;
                     return Ok(Flow::Stop);
                 }
-                Ok(()) => {
+                Ok(labelled) => {
                     let version = run.contract_version + 1;
-                    self.emit("model", Ev::Contract { run: rid.into(), version, contract: input.clone(), approved_by: None }).await?;
+                    let note = self_checked_note(&labelled);
+                    self.emit("model", Ev::Contract { run: rid.into(), version, contract: labelled, approved_by: None }).await?;
                     let frozen = if run.work_started {
                         self.emit("kernel", Ev::ContractFrozen { run: rid.into(), version }).await?;
                         " Work has started, so it is frozen: a later change goes to the person for approval."
                     } else {
                         ""
                     };
-                    self.result(rid, call_id, format!("Contract recorded (version {version}).{frozen}"), false).await?;
+                    self.result(rid, call_id, format!("Contract recorded (version {version}).{frozen}{note}"), false).await?;
                 }
                 Err(why) => {
                     self.result(rid, call_id, format!("The contract was not recorded: {why}. Fix it and call task_contract again; a retry with the same contract will not help."), true)
@@ -397,26 +398,42 @@ impl Kernel {
     /// workspace, so a check can use only the image's tools, and workspace code
     /// only as what a tool runs (K42). The image does not change during a run,
     /// so the answer still holds when the contract freezes.
-    async fn validate_contract_tools(&self, c: &Value) -> std::result::Result<(), String> {
+    /// Validate a contract and label each criterion by where its verdict
+    /// comes from: "appliance-verified" when the image's tools or the
+    /// kernel's comparison against the frozen expectations decide it,
+    /// "self-checked" when the check executes a workspace file. The labels
+    /// are the kernel's, whatever the model sent.
+    async fn validate_contract_tools(&self, c: &Value) -> std::result::Result<Value, String> {
         self.validate_contract(c)?;
-        let checks: Vec<(String, String)> = c["criteria"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|cr| cr["check"]["tool"] == "sandbox_exec")
-            .map(|cr| (cr["id"].as_str().unwrap_or_default().to_string(), cr["check"]["input"]["command"].as_str().unwrap_or_default().to_string()))
-            .collect();
-        if checks.is_empty() {
-            return Ok(());
-        }
-        let commands: Vec<String> = checks.iter().map(|(_, cmd)| cmd.clone()).collect();
-        let found = self.sandboxes.resolve_check_tools(&commands).await.map_err(|e| format!("the tools its checks run could not be looked up in the sandbox image ({e})"))?;
-        let problems: Vec<String> = checks.iter().zip(found).flat_map(|((id, _), ps)| ps.into_iter().map(move |p| format!("criterion {id}: {p}"))).collect();
-        if problems.is_empty() {
-            Ok(())
+        let mut c = c.clone();
+        let criteria = c["criteria"].as_array_mut().expect("validated");
+        let execs: Vec<usize> = (0..criteria.len()).filter(|&i| criteria[i]["check"]["tool"] == "sandbox_exec").collect();
+        let commands: Vec<String> = execs.iter().map(|&i| criteria[i]["check"]["input"]["command"].as_str().unwrap_or_default().to_string()).collect();
+        let found = if commands.is_empty() {
+            vec![]
         } else {
-            Err(format!("a check may run only tools from the sandbox image, with workspace files as what they run: {}", problems.join("; ")))
+            self.sandboxes.resolve_check_tools(&commands).await.map_err(|e| format!("the tools its checks run could not be looked up in the sandbox image ({e})"))?
+        };
+        let problems: Vec<String> = execs.iter().zip(&found).flat_map(|(&i, r)| r.problems.iter().map(move |p| (i, p))).map(|(i, p)| format!("criterion {}: {p}", criteria[i]["id"].as_str().unwrap_or_default())).collect();
+        if !problems.is_empty() {
+            return Err(format!("a check's tools must come from the sandbox image: {}", problems.join("; ")));
         }
+        let mut why: Vec<Vec<String>> = vec![vec![]; criteria.len()];
+        for (&i, r) in execs.iter().zip(found) {
+            why[i] = r.self_checked;
+        }
+        for (cr, why) in criteria.iter_mut().zip(why) {
+            let Some(m) = cr.as_object_mut() else { continue };
+            m.remove("assurance");
+            m.remove("assurance_why");
+            if m.get("check").is_some_and(|v| !v.is_null()) {
+                m.insert("assurance".into(), json!(if why.is_empty() { "appliance-verified" } else { "self-checked" }));
+                if !why.is_empty() {
+                    m.insert("assurance_why".into(), json!(why));
+                }
+            }
+        }
+        Ok(c)
     }
 
     fn validate_contract(&self, c: &Value) -> std::result::Result<(), String> {
@@ -592,6 +609,22 @@ impl Kernel {
         self.emit("kernel", Ev::Completed { run: rid.into(), summary, view, spoken }).await?;
         self.on_stop(rid, true).await;
         Ok(Flow::Stop)
+    }
+}
+
+/// Which criteria the person will see as self-checked, and why.
+fn self_checked_note(c: &Value) -> String {
+    let own: Vec<String> = c["criteria"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|cr| cr["assurance"] == "self-checked")
+        .map(|cr| format!("{} ({})", cr["id"].as_str().unwrap_or_default(), cr["assurance_why"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("; ")))
+        .collect();
+    if own.is_empty() {
+        String::new()
+    } else {
+        format!(" The person sees these criteria as self-checked, because their checks run workspace code: {}.", own.join(", "))
     }
 }
 

@@ -143,19 +143,18 @@ fn exits_0() -> Value {
     json!([{ "pointer": "/exit_code", "equals": 0 }])
 }
 
-/// A checking tool must come from the image. The agent's own runner exists
-/// only in the workspace, so a contract that runs it as the tool is refused
-/// before work starts; the same file as what an image tool runs is fine.
+/// The tools a check runs come from the image, and nothing may change where
+/// they are looked up: a program the image lacks, a changed PYTHONPATH, or a
+/// workspace file executed directly (the check VM mounts the workspace
+/// noexec) is refused when the contract is recorded, before work starts.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_checking_tool_that_exists_only_in_the_workspace_is_rejected() {
+async fn a_check_that_changes_where_its_tools_come_from_is_refused() {
     let says_passed = json!([{ "pointer": "/stdout", "contains": "all passed" }]);
     let model = FakeModel::start(steps(vec![
-        exec_contract(&[("runner", "python3 -m checkrunner", says_passed.clone())]),
-        tool("sandbox_write_file", json!({ "path": "/workspace/checkrunner.py", "content": "print('all passed')\n" })),
-        exec_contract(&[("runner", "python3 -m checkrunner", says_passed.clone())]),
+        exec_contract(&[("runner", "jest --ci", exits_0())]),
         exec_contract(&[("runner", "./checkrunner.py", says_passed.clone())]),
         exec_contract(&[("runner", "PYTHONPATH=/workspace python3 -m pytest -q", exits_0())]),
-        exec_contract(&[("image-pytest", "python3 -m pytest --version", exits_0()), ("subject", "python3 /workspace/checkrunner.py", says_passed)]),
+        exec_contract(&[("image-pytest", "python3 -m pytest --version", exits_0())]),
         complete("checked"),
     ]))
     .await;
@@ -164,14 +163,58 @@ async fn a_checking_tool_that_exists_only_in_the_workspace_is_rejected() {
     let id = alice.submit("Check the work.").await;
     let t = alice.wait_settled(&id).await;
     let result = |turn: usize| model.at_turn(turn).unwrap().last_results()[0].clone();
-    for (turn, needle) in [(1, "checkrunner is not in the sandbox image"), (3, "checkrunner is not in the sandbox image"), (4, "program from the workspace"), (5, "PYTHONPATH")] {
+    for (turn, needle) in [(1, "jest` is not in the sandbox image"), (2, "run it with its interpreter"), (3, "PYTHONPATH")] {
         let r = result(turn);
-        assert!(r.is_error && r.text.contains(needle), "turn {turn}: a contract with a workspace checking tool was not refused: {}", r.text);
+        assert!(r.is_error && r.text.contains(needle), "turn {turn}: the contract was not refused: {}", r.text);
     }
-    assert!(!result(6).is_error, "a contract using only image tools was refused: {}", result(6).text);
+    assert!(!result(4).is_error, "a contract using only image tools was refused: {}", result(4).text);
     assert_eq!(t["status"], "completed", "{t}");
     assert_eq!(t["contract_version"], 1, "a refused contract was recorded: {t}");
-    assert!(t["criteria"].as_array().unwrap().iter().all(|c| c["verified"] == true), "{t}");
+}
+
+/// Workspace runners are allowed and labelled: a check whose verdict rests
+/// on a file the agent wrote (its runner, its tests under the image's
+/// pytest, a script) is self-checked; one the image's tools decide is
+/// appliance-verified. The kernel sets the label at freeze, whatever the
+/// model claims, and the outcome counts both.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_executing_a_workspace_script_is_labeled_self_checked() {
+    let says_passed = json!([{ "pointer": "/stdout", "contains": "all passed" }]);
+    let crit = |id: &str, command: &str, expect: &Value| json!({ "id": id, "description": id, "assurance": "appliance-verified", "check": { "tool": "sandbox_exec", "input": { "command": command }, "expect": expect } });
+    let contract = json!({
+        "goal": "check the work",
+        "assumptions": [],
+        "irreversible_actions": [],
+        "criteria": [
+            crit("script", "python3 /workspace/checkrunner.py", &says_passed),
+            crit("module", "cd /workspace && python3 -m checkrunner", &says_passed),
+            crit("tests", "python3 -m pytest -q /workspace/test_it.py", &exits_0()),
+            crit("present", "grep -q 'all passed' /workspace/checkrunner.py", &exits_0()),
+        ]
+    });
+    let model = FakeModel::start(steps(vec![
+        tool("task_contract", contract),
+        tool("sandbox_write_file", json!({ "path": "/workspace/checkrunner.py", "content": "print('all passed')\n" })),
+        tool("sandbox_write_file", json!({ "path": "/workspace/test_it.py", "content": "def test_it():\n    assert True\n" })),
+        complete("checked"),
+    ]))
+    .await;
+    let app = Appliance::start(Spec::default(), &model).await;
+    let alice = app.api("alice");
+    let id = alice.submit("Check the work.").await;
+    let t = alice.wait_settled(&id).await;
+    assert_eq!(t["status"], "completed", "{t}");
+    let recorded = model.at_turn(1).unwrap().last_results()[0].clone();
+    assert!(!recorded.is_error && recorded.text.contains("self-checked"), "the agent was not told which checks are self-checked: {}", recorded.text);
+    let label = |id: &str| t["criteria"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap().clone();
+    for id in ["script", "module", "tests"] {
+        let c = label(id);
+        assert_eq!(c["assurance"], "self-checked", "{id} runs workspace code but is labelled {}: {c}", c["assurance"]);
+        assert!(c["assurance_why"].as_array().is_some_and(|w| !w.is_empty()), "{id} has no reason: {c}");
+    }
+    assert_eq!(label("present")["assurance"], "appliance-verified", "{t}");
+    assert_eq!(t["contract"]["criteria"][0]["assurance"], "self-checked", "the frozen contract does not carry the label: {t}");
+    assert_eq!(t["assurance"], json!({ "appliance_verified": 1, "self_checked": 3, "by_person": 0 }), "{t}");
 }
 
 /// The rerun's trick: a stand-in pytest on the user site and in the working

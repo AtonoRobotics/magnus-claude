@@ -19,6 +19,13 @@ use tokio::net::UnixStream;
 
 const GUEST_PORT: u32 = 52;
 
+/// What the image's resolver found in one check command.
+#[derive(Debug, serde::Deserialize)]
+pub struct Resolved {
+    pub problems: Vec<String>,
+    pub self_checked: Vec<String>,
+}
+
 pub struct Vm {
     child: Mutex<Child>,
     vsock: PathBuf,
@@ -198,14 +205,17 @@ impl Sandboxes {
     /// Resolve the tools each check command runs against the image, in a
     /// check VM whose workspace is empty (`check_tools.py` in the image): one
     /// list of problems per command.
-    pub async fn resolve_check_tools(&self, commands: &[String]) -> Result<Vec<Vec<String>>> {
+    /// Resolve each check command's tools against the image: what is wrong
+    /// with it, and why its verdict rests on workspace code (empty when the
+    /// image's tools alone decide it).
+    pub async fn resolve_check_tools(&self, commands: &[String]) -> Result<Vec<Resolved>> {
         let dir = self.scratch_dir();
         let result = async {
             let vm = self.launch_in(&dir, true).await?;
             let arg = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(commands)?);
             let v = request(&vm.vsock, &json!({ "op": "exec", "command": format!("python3 -I /usr/local/lib/magnus/check_tools.py {arg}"), "timeout_s": 60 }), Duration::from_secs(75)).await?;
             anyhow::ensure!(v["exit_code"] == json!(0), "the image's resolver failed: {}", v["stderr"].as_str().unwrap_or_default().chars().rev().take(400).collect::<String>().chars().rev().collect::<String>());
-            let found: Vec<Vec<String>> = serde_json::from_str(v["stdout"].as_str().unwrap_or_default().trim())?;
+            let found: Vec<Resolved> = serde_json::from_str(v["stdout"].as_str().unwrap_or_default().trim())?;
             anyhow::ensure!(found.len() == commands.len(), "the image's resolver answered for {} of {} commands", found.len(), commands.len());
             Ok(found)
         }

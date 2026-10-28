@@ -373,10 +373,17 @@ function checkText(ch) {
   const exp = (ch.expect || []).map(e => `${e.pointer || "(whole result)"} ${"equals" in e ? `equals ${JSON.stringify(e.equals)}` : `contains ${JSON.stringify(e.contains)}`}`).join("; ");
   return `<span class="mono">${esc(ch.tool)}</span> ${fieldValue(ch.input)}<div class="small">expects ${esc(exp)}</div>`;
 }
+// Where a check's verdict comes from, as the kernel labelled it when the
+// contract was recorded.
+function assuranceChip(cr) {
+  if (cr.assurance === "appliance-verified") return ` <span class="chip ok" title="The sandbox image's own tools, or the appliance's comparison against the expected values in this contract, decide it">appliance-verified</span>`;
+  if (cr.assurance === "self-checked") return ` <span class="chip warn" title="${esc((cr.assurance_why || []).join("; "))}">self-checked</span><div class="small faint">Its check runs code the agent wrote: ${esc((cr.assurance_why || []).join("; "))}</div>`;
+  return "";
+}
 function contractView(c, label) {
   if (!c) return `<div class="small faint">${esc(label)}: none</div>`;
   return `<div aria-label="${esc(label)}"><div class="small muted">${esc(label)}</div><p><strong>${esc(c.goal || "")}</strong></p>
-    <ol class="small">${(c.criteria || []).map(cr => `<li><div>${esc(cr.description || cr.id)} <span class="faint mono">${esc(cr.id)}</span></div>${checkText(cr.check)}</li>`).join("")}</ol></div>`;
+    <ol class="small">${(c.criteria || []).map(cr => `<li><div>${esc(cr.description || cr.id)} <span class="faint mono">${esc(cr.id)}</span>${assuranceChip(cr)}</div>${checkText(cr.check)}</li>`).join("")}</ol></div>`;
 }
 
 function buttons(i, list) {
@@ -548,7 +555,8 @@ function criteria(t) {
     const state = c.verified === true ? (person ? `<span class="chip ok">confirmed by ${esc(person)}</span>` : `<span class="chip ok">holds</span>`)
       : c.verified === false ? `<span class="chip bad">does not hold</span>` : c.check ? `<span class="chip">not checked yet</span>` : `<span class="chip warn">no check: needs a person</span>`;
     const by = c.verified_by && !person ? `<span class="small faint"> · checked by the appliance</span>` : "";
-    return `<div class="evidence ${cls}"><div class="spread"><span>${esc(c.description)}</span><span>${state}${by}</span></div>
+    const label = c.assurance ? ` <span class="chip ${c.assurance === "self-checked" ? "warn" : ""}" title="${esc((c.assurance_why || []).join("; "))}">${esc(c.assurance)}</span>` : "";
+    return `<div class="evidence ${cls}"><div class="spread"><span>${esc(c.description)}</span><span>${state}${by}${label}</span></div>
       ${c.check ? `<div class="small muted" style="margin-top:4px">Check: <span class="mono">${esc(c.check.tool)}</span> ${esc(JSON.stringify(c.check.input || {}))}</div>` : ""}
       ${c.evidence !== undefined && c.evidence !== null ? `<details><summary class="small">Evidence</summary>${fieldValue(c.evidence)}</details>` : ""}</div>`;
   }).join("");
@@ -567,6 +575,15 @@ function glance(t) {
   if (failed) parts.push(`${failed} do not hold`);
   if (open) parts.push(`${open} not yet checked`);
   return parts.join(", ");
+}
+
+// "Done: 3 appliance-verified, 1 self-checked" for a finished task.
+function doneLine(t) {
+  const a = t.assurance;
+  if (t.status !== "completed" || !a) return "";
+  const parts = [`${a.appliance_verified} appliance-verified`, `${a.self_checked} self-checked`];
+  if (a.by_person) parts.push(`${a.by_person} confirmed by a person`);
+  return `<p class="small" data-done-line>Done: ${esc(parts.join(", "))}</p>`;
 }
 
 function plan(t) {
@@ -606,7 +623,7 @@ route(/^#\/task\/([^/]+)$/, async (main, id) => {
     if (running && !stopLive) stopLive = Magnus.live(id, txt => { liveText += txt; const el = $("#live", main); if (el) el.textContent = liveText; });
     if (!running && stopLive) { stopLive(); stopLive = null; liveText = ""; }
     const open = App.inbox.filter(i => i.task_id === id && i.status === "open");
-    const outcome = `${t.summary && t.status !== "running" ? `<p style="font-size:16px">${esc(t.summary)}</p>` : ""}
+    const outcome = `${doneLine(t)}${t.summary && t.status !== "running" ? `<p style="font-size:16px">${esc(t.summary)}</p>` : ""}
       ${t.outcome_view ? `<iframe class="composed" sandbox="allow-same-origin" title="The outcome" id="view"></iframe>` : ""}
       ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
       ${t.outputs?.length ? `<h3>Files</h3>${t.outputs.map(o => `<div class="row"><button class="link" data-act="download" data-out="${esc(o.id)}" data-name="${esc(o.name)}">${esc(o.name)}</button><span class="small faint">${esc(o.media_type)} · ${Math.max(1, Math.round(o.size / 1024))} KB</span></div>`).join("")}` : ""}

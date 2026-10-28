@@ -118,6 +118,8 @@ await step("see the outcome with its evidence", async () => {
   const confirmed = await page.locator(".evidence.pass .chip.ok", { hasText: `confirmed by ${person}` }).count();
   if (!confirmed) throw new Error("the reviewed criterion does not say who confirmed it");
   await page.getByText(/1 of 2 criteria checked against the world, 1 confirmed by a person/).waitFor({ timeout: T });
+  // The outcome says where each verdict came from (the kernel's labels).
+  await page.getByText("Done: 1 appliance-verified, 0 self-checked, 1 confirmed by a person").waitFor({ timeout: T });
   await page.locator(".evidence.pass details").first().click();
   await page.locator(".evidence.pass pre").first().waitFor({ timeout: T });
   const frame = page.frameLocator("iframe.composed");
@@ -131,6 +133,7 @@ await step("see the outcome with its evidence", async () => {
   // The plan left u1 active; once the task is done, nothing shows as active.
   await page.getByRole("tab", { name: "Contract and plan" }).click();
   await page.locator("[data-unit-status]").first().waitFor({ timeout: T });
+  await page.locator("ol .chip", { hasText: "appliance-verified" }).first().waitFor({ timeout: T });
   const states = await page.locator("[data-unit-status]").evaluateAll(els => els.map(e => e.dataset.unitStatus));
   if (states.some(s => s === "active" || s === "pending")) throw new Error(`a finished task shows plan units as ${states.join(", ")}`);
   await page.getByRole("tab", { name: "Full trace" }).click();

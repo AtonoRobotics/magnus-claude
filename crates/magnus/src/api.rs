@@ -381,6 +381,8 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Va
                     "id": id,
                     "description": c["description"],
                     "check": c.get("check"),
+                    "assurance": c.get("assurance"),
+                    "assurance_why": c.get("assurance_why"),
                     "verified": ver.map(|v| v.0),
                     "evidence": ver.map(|v| v.1.clone()),
                     "verified_by": ver.map(|v| v.2.clone()),
@@ -391,6 +393,11 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Va
         v["contract_version"] = json!(run.contract_version);
         v["contract_frozen"] = json!(run.contract_frozen.is_some());
         v["contract_approved_by"] = json!(run.contract_approved_by);
+        // Where each criterion that holds got its verdict: the appliance's
+        // own tools, a check that ran workspace code, or a person.
+        let held = |label: &str| criteria.iter().filter(|c| c["verified"] == json!(true) && !c["verified_by"].as_str().unwrap_or_default().starts_with("person:") && c["assurance"] == label).count();
+        let by_person = criteria.iter().filter(|c| c["verified"] == json!(true) && c["verified_by"].as_str().unwrap_or_default().starts_with("person:")).count();
+        v["assurance"] = json!({ "appliance_verified": held("appliance-verified"), "self_checked": held("self-checked"), "by_person": by_person });
         v["criteria"] = json!(criteria);
         v["model"] = json!({ "adapter": run.config.adapter, "name": run.config.model });
         v["usage"] = json!({ "model_calls": run.model_calls, "actions": run.actions, "cost_usd": run.usd });
