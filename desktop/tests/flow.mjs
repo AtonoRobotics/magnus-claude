@@ -3,7 +3,10 @@
 // outcome with its evidence. It checks behavior, not appearance (U7).
 //
 // MAGNUS_URL       the appliance (its own page, or a page that loads ../ui)
-// MAGNUS_PERSON    MAGNUS_PASSWORD   the person signing in
+// MAGNUS_PERSON    the person signing in, with either
+//   MAGNUS_PASSWORD  their password, or
+//   MAGNUS_PROVIDER  the identity provider's name on the sign-in button
+//                    (the person approves on the provider's page)
 // MAGNUS_API_KEY   the key to paste when connecting Claude
 // MAGNUS_TASK      the task to type
 // MAGNUS_CHROMIUM  Chrome to drive; MAGNUS_SHOTS  where to keep screenshots
@@ -15,7 +18,9 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const { chromium } = createRequire(import.meta.url)(join(root, "browser/node_modules/playwright-core"));
 const env = k => { const v = process.env[k]; if (!v) { console.error(`${k} is not set`); process.exit(2); } return v; };
-const [base, person, password, apiKey, task] = ["MAGNUS_URL", "MAGNUS_PERSON", "MAGNUS_PASSWORD", "MAGNUS_API_KEY", "MAGNUS_TASK"].map(env);
+const [base, person, apiKey, task] = ["MAGNUS_URL", "MAGNUS_PERSON", "MAGNUS_API_KEY", "MAGNUS_TASK"].map(env);
+const provider = process.env.MAGNUS_PROVIDER;
+const password = provider ? null : env("MAGNUS_PASSWORD");
 const shots = process.env.MAGNUS_SHOTS;
 if (shots) mkdirSync(shots, { recursive: true });
 
@@ -31,7 +36,22 @@ const step = async (name, f) => {
 };
 const T = 60_000;
 
-await step("sign in", async () => {
+if (provider) await step(`sign in with ${provider}`, async () => {
+  await page.goto(base);
+  const popup = page.waitForEvent("popup", { timeout: T });
+  await page.getByRole("button", { name: `Sign in with ${provider}` }).click();
+  // The provider's page opens with the code; the person approves there.
+  const idp = await popup;
+  await idp.waitForLoadState();
+  const code = (await page.locator("#code").innerText()).trim();
+  if (!idp.url().includes(code)) throw new Error(`the provider's page ${idp.url()} is not for code ${code}`);
+  await idp.getByText(`Signed in as ${person}`).waitFor({ timeout: T });
+  await page.getByRole("heading", { name: "Home" }).waitFor({ timeout: T });
+  const page_kept = await page.evaluate(() => JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie);
+  if (page_kept.includes("mgs_")) throw new Error("the session token reached the page");
+});
+
+if (!provider) await step("sign in", async () => {
   await page.goto(base);
   await page.getByLabel("Your name on the appliance").fill(person);
   await page.getByLabel("Password").fill("not the password");

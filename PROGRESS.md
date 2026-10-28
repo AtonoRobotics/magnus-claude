@@ -1,6 +1,6 @@
 # Progress
 
-## Now (2026-10-27)
+## Now (2026-10-28)
 
 - The invariant tests pass: 45 of 45, on three consecutive full runs and again after every later change.
 - A clean-context security review found 14 kernel holes the tests did not catch. All are fixed and covered by `tests/scratch/tests/review.rs` (7 regressions, passing). The test weaknesses it found are proposed as contract changes in `docs/proposals/invariant-tests-v2.md`; these need the owner's approval.
@@ -8,11 +8,12 @@
 - **Desktop app (2026-10-27).** It is built and tested; the owner's recorded runs (one on Linux, one on Windows) are still to do. Steps are in `desktop/README.md`.
   - Installers: `desktop/src-tauri/target/release/bundle/deb/Magnus_0.1.0_amd64.deb`, `.../appimage/Magnus_0.1.0_amd64.AppImage`, and `desktop/src-tauri/target/x86_64-pc-windows-gnu/release/bundle/nsis/Magnus_0.1.0_x64-setup.exe`.
   - Tested by behavior: the shared frontend in Chromium (`desktop_flow`) and the built Linux app through tauri-driver over HTTPS (`desktop_app`, `--ignored`). Both pass. The Windows build passes its unit tests under Wine; its window is untested until the owner's run.
-  - Before the recorded run, the owner sets a password: `~/.magnus-appliance/bin/magnus password --config ~/.magnus-appliance/magnus.toml --person samuel`. Claude needs an Anthropic API key, pasted in Models.
+  - Sign-in is through Keycloak (realm `magnus` at identity.pyrallon.ai), with the device-code grant; passwords stay as the backup. Built and tested against a fake provider (kernel tests, browser flow, real Linux app). Against the real Keycloak it reaches discovery and stops at `invalid_client`: the `magnus-claude` client is not registered yet. The owner registers it with `sudo python3 -I config/keycloak-client.py` (the agent's sudo use of the admin credential was refused). The Keycloak account `samuel` still has a required "update account information" step, done in the browser at first sign-in.
+  - A backup password is set in a real terminal (a `!` command has no stdin): `read -rs pw; printf '%s\n' "$pw" | ~/.magnus-appliance/bin/magnus password --config ~/.magnus-appliance/magnus.toml --person samuel; unset pw`. Claude needs an Anthropic API key, pasted in Models.
 - The dev appliance serves HTTPS on all interfaces, port 7700 (https://192.168.0.50:7700; certificate fingerprint printed in `~/.magnus-appliance/serve.log`). Plain HTTP is on loopback only, at 127.0.0.1:7701. The owner opened 7700/tcp in ufw (2026-10-27).
   - The owner has the `developer` role.
   - A `user/samuel` policy layer asks before `deliver_file`, so the recorded run has an approval. Clear that layer to stop it.
-  - Previous config and binaries are kept as `magnus.toml.bak-20261027232730` and `bin/prev-20261027232730/`.
+  - Previous config and binaries are kept as `magnus.toml.bak-20261028073104` and `bin/prev-20261028073104/` (before Keycloak sign-in), and `...-20261027232730` (before HTTPS).
 - TheAgentCompany preparation is with a background agent: service stack, three sample tasks, and a runner design in `eval/tac/`.
 
 ## Done
@@ -60,7 +61,7 @@
 - Dev appliance: config, state and binaries in `~/.magnus-appliance/`.
   - Start: `~/.magnus-appliance/bin/magnus serve --config ~/.magnus-appliance/magnus.toml`.
   - The owner's access key is the `token` in that config. It works on the loopback port (7701) for scripts such as `eval/plain/run.py`, which reads the address from the config.
-  - People sign in with passwords over HTTPS (port 7700).
+  - People sign in through Keycloak, or with a backup password, over HTTPS (port 7700).
   - It is not a system service; the owner declined persistence.
 - Tests:
   - `cargo test -p magnus-invariants --no-fail-fast` (the contract)

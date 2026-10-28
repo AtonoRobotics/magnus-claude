@@ -22,7 +22,10 @@ const appBridge = tauri && {
   async restore() { return this.invoke("restore"); },
   async connect(url) { return this.invoke("connect", { url }); },
   async trust(url, fingerprint) { return this.invoke("trust", { url, fingerprint }); },
+  async signInMethod() { return this.invoke("sign_in_method"); },
   async signIn(person, password) { return this.invoke("sign_in", { person, password }); },
+  async deviceStart() { return this.invoke("device_start"); },
+  async devicePoll(flow) { return this.invoke("device_poll", { flow }); },
   async signOut() { return this.invoke("sign_out"); },
   async api(method, path, body) {
     const r = await this.invoke("api", { method, path, body: body === undefined ? null : body });
@@ -52,9 +55,18 @@ const webBridge = {
   },
   async connect() { return { status: "trusted", url: location.origin }; },
   async trust() {},
+  async signInMethod() { return this.api("GET", "/v1/sign-in"); },
   async signIn(person, password) {
     const body = await this.api("POST", "/v1/sign-in", { person, password });
     return body.person;
+  },
+  async deviceStart() { return this.api("POST", "/v1/sign-in/device", { client: "browser" }); },
+  async devicePoll(flow) {
+    const r = await fetch(`/v1/sign-in/device/${encodeURIComponent(flow)}`, { method: "POST", credentials: "same-origin", headers: { "x-magnus-client": "web" } });
+    const body = await r.json().catch(() => null);
+    if (r.status === 202) return { pending: true };
+    if (!r.ok) throw errorOf(r.status, body);
+    return { person: body.person };
   },
   async signOut() { await this.api("POST", "/v1/sign-out", {}).catch(() => {}); },
   async api(method, path, body) {

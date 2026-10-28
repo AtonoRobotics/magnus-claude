@@ -141,6 +141,52 @@ async fn sign_in(app: State<'_, App>, person: String, password: String) -> Res<V
     Ok(body["person"].clone())
 }
 
+/// How this appliance signs people in: "oidc" (with the provider's name) or "password".
+#[tauri::command]
+async fn sign_in_method(app: State<'_, App>) -> Res<Value> {
+    let (url, c) = app.conn()?;
+    let r = c.get(format!("{url}/v1/sign-in")).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
+    let (status, body) = body_of(r).await;
+    if status >= 400 {
+        return Err(message(&body, status));
+    }
+    Ok(body)
+}
+
+/// Start a sign-in through the appliance's identity provider. The page gets
+/// the code and the provider's page to show; the appliance holds the rest.
+#[tauri::command]
+async fn device_start(app: State<'_, App>) -> Res<Value> {
+    let (url, c) = app.conn()?;
+    let r = c.post(format!("{url}/v1/sign-in/device")).json(&json!({ "client": "app" })).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
+    let (status, body) = body_of(r).await;
+    if status >= 400 {
+        return Err(message(&body, status));
+    }
+    Ok(body)
+}
+
+/// Ask whether the person approved. On approval the session goes to the
+/// keyring and the page gets only who signed in.
+#[tauri::command]
+async fn device_poll(app: State<'_, App>, flow: String) -> Res<Value> {
+    if flow.is_empty() || !flow.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err("not a sign-in".into());
+    }
+    let (url, c) = app.conn()?;
+    let r = c.post(format!("{url}/v1/sign-in/device/{flow}")).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
+    let (status, body) = body_of(r).await;
+    if status == 202 {
+        return Ok(json!({ "pending": true }));
+    }
+    if status >= 400 {
+        return Err(message(&body, status));
+    }
+    let token = body["token"].as_str().ok_or("the appliance sent no session")?;
+    app.store.set_token(&url, token)?;
+    Ok(json!({ "person": body["person"] }))
+}
+
 #[tauri::command]
 async fn sign_out(app: State<'_, App>) -> Res<()> {
     if let Ok((url, c, token)) = app.session() {
@@ -298,7 +344,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default() })
-        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url])
+        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, device_start, device_poll, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url])
         .run(tauri::generate_context!())
         .expect("start the Magnus app");
 }
@@ -309,7 +355,7 @@ mod tests {
 
     #[test]
     fn the_page_cannot_reach_beyond_the_api_or_take_a_session() {
-        for bad in ["/v1/sign-in", "/v1/sign-out", "/v1/../etc", "https://evil.example/v1/x", "/other", "/v1/x#y"] {
+        for bad in ["/v1/sign-in", "/v1/sign-in/device", "/v1/sign-in/device/signin_1", "/v1/sign-out", "/v1/../etc", "https://evil.example/v1/x", "/other", "/v1/x#y"] {
             assert!(allowed(bad).is_err(), "{bad} was allowed");
         }
         assert!(allowed("/v1/inbox").is_ok());

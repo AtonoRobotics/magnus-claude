@@ -25,6 +25,8 @@ pub struct Kernel {
     write: tokio::sync::Mutex<()>,
     pub vault: Arc<Vault>,
     pub accounts: crate::accounts::Accounts,
+    /// Sign-in through an identity provider, when one is configured.
+    pub oidc: Option<crate::oidc::Provider>,
     pub adapters: Adapters,
     pub mcp: Mcp,
     pub web: Web,
@@ -63,6 +65,7 @@ impl Kernel {
         }
         let vault = Arc::new(Vault::open(&cfg.appliance.state_dir)?);
         let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+        let oidc = cfg.sign_in.oidc.clone().map(crate::oidc::Provider::new).transpose()?;
         let adapters = Adapters::new(&cfg.appliance.state_dir, vault.clone(), &cfg.adapters);
         let (live_text, _) = tokio::sync::broadcast::channel(1024);
         let k = Arc::new(Kernel {
@@ -73,6 +76,7 @@ impl Kernel {
             adapters,
             vault,
             accounts,
+            oidc,
             log,
             state: Mutex::new(state),
             write: tokio::sync::Mutex::new(()),

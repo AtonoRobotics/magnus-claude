@@ -65,7 +65,7 @@ pub struct Appliance {
     pub tls_key: Option<PathBuf>,
 }
 
-/// Password sign-in for people's apps. Tunable values, not decisions (K51).
+/// Sign-in for people's apps. Tunable values, not decisions (K51).
 #[derive(Deserialize, Clone, Debug)]
 pub struct SignIn {
     #[serde(default = "session_days")]
@@ -76,12 +76,48 @@ pub struct SignIn {
     pub lockout_minutes: u32,
     #[serde(default = "min_password_length")]
     pub min_password_length: usize,
+    /// Sign in through an identity provider instead of passwords.
+    #[serde(default)]
+    pub oidc: Option<Oidc>,
 }
 
 impl Default for SignIn {
     fn default() -> Self {
-        SignIn { session_days: session_days(), max_failures: max_failures(), lockout_minutes: lockout_minutes(), min_password_length: min_password_length() }
+        SignIn { session_days: session_days(), max_failures: max_failures(), lockout_minutes: lockout_minutes(), min_password_length: min_password_length(), oidc: None }
     }
+}
+
+/// An OpenID Connect provider (Keycloak, for one). People approve the
+/// sign-in on its own page (the device-code grant, RFC 8628); its endpoints
+/// come from its discovery document.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Oidc {
+    /// For example `https://identity.example.com/realms/magnus`.
+    pub issuer: String,
+    /// A public client with the device-code grant turned on.
+    pub client_id: String,
+    /// The ID token claim that holds a person's id on this appliance.
+    #[serde(default = "person_claim")]
+    pub person_claim: String,
+    #[serde(default = "oidc_scope")]
+    pub scope: String,
+    /// What the sign-in button names; the issuer's host when unset.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Sign-ins waiting for approval at once. Starting one needs no
+    /// credential, so this bounds what strangers can make the appliance hold.
+    #[serde(default = "max_pending")]
+    pub max_pending: usize,
+}
+
+fn person_claim() -> String {
+    "preferred_username".into()
+}
+fn oidc_scope() -> String {
+    "openid".into()
+}
+fn max_pending() -> usize {
+    100
 }
 
 fn session_days() -> u32 {
@@ -197,7 +233,7 @@ pub struct Person {
     pub id: String,
     #[serde(default)]
     pub name: String,
-    /// An API token for scripts; people's apps sign in with a password instead.
+    /// An API token for scripts; people's apps sign in (provider or password) instead.
     #[serde(default)]
     pub token: Option<String>,
     #[serde(default)]

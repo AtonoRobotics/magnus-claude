@@ -16,7 +16,7 @@ The appliance serves the same frontend (`ui/`) to browsers.
   - `store.rs`: settings and the session.
   - `speech.rs`: read-aloud.
   - `lib.rs`: the commands the page may call.
-- `tests/flow.mjs`: the operator flow in a browser.
+- `tests/flow.mjs`: the operator flow in a browser, signing in with a password or through an identity provider.
 - `tests/app.mjs`: the same flow in the built app, through tauri-driver.
 
 ## Build
@@ -42,14 +42,21 @@ This writes `target/x86_64-pc-windows-gnu/release/bundle/nsis/Magnus_<version>_x
 ## Before the first sign-in (owner, on the appliance)
 
 1. Turn on HTTPS: set `appliance.tls_listen` (for example `"0.0.0.0:7700"`) and restart. The appliance prints its certificate's SHA-256 fingerprint at start. People compare it once, when the app first connects.
-2. Give each person a password:
+2. To sign in through Keycloak (or another OpenID Connect provider), register the appliance as a client and add `[sign_in.oidc]` to `magnus.toml`:
+
+   ```
+   sudo python3 -I config/keycloak-client.py
+   ```
+
+   It creates a public client with only the device-code grant, and prints the lines for `magnus.toml` (`issuer`, `client_id`). Each person's Keycloak username must be their `id` in `[[people]]`.
+3. Optionally, or without a provider, give each person a password. With a provider it is the backup way in:
 
    ```
    magnus password --config magnus.toml --person <id>
    ```
 
    The password is read from standard input. Passwords are refused over plain HTTP except from the appliance itself.
-3. Optional: add the `developer` role to anyone who should see the developer view.
+4. Optional: add the `developer` role to anyone who should see the developer view.
 
 ## The recorded run
 
@@ -57,7 +64,7 @@ On each platform:
 
 1. Install the app and open it.
 2. Type the appliance's address (for example `https://192.168.0.50:7700`). Check that the fingerprint matches the one the appliance printed, then choose **They match**.
-3. Sign in with your name and password.
+3. Choose **Sign in with identity.pyrallon.ai**. Your browser opens the Keycloak page with a code; check that it matches the code in the app, sign in there and approve. The app finishes by itself. (**Use a password instead** is the backup.)
 4. Go to **Models**. On the Claude adapter choose **Connect**, paste the API key, then **Save to the vault**. Pick the model and choose **Use this model**.
 5. In **New task**, type the task in plain language and choose **Start**.
 6. In **Inbox**, the card under **Needs you now** shows exactly what will happen. Choose **Approve once**. If a review card follows, accept it once you have checked the work.
@@ -65,7 +72,7 @@ On each platform:
 
 ## Tests
 
-- `cargo test -p magnus-scratch --test desktop_flow`: the frontend in Chromium against a real appliance.
+- `cargo test -p magnus-scratch --test desktop_flow`: the frontend in Chromium against a real appliance, once with a password and once through a fake identity provider.
 - `cargo test -p magnus-scratch --test desktop_app -- --ignored`: the built Linux app.
   - It needs `tauri-driver` (`cargo install tauri-driver --locked`), `WebKitWebDriver` (package `webkit2gtk-driver`, or set `MAGNUS_WEBKIT_DRIVER`) and `xvfb-run`.
   - Set `MAGNUS_SHOTS=<dir>` to keep screenshots.

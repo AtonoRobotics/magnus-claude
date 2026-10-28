@@ -1,4 +1,5 @@
-//! Password sign-in and sessions for people's apps.
+//! Password sign-in and sessions for people's apps. Sign-in through an
+//! identity provider (`oidc`) opens the same sessions.
 //!
 //! Password hashes (Argon2id) and session token hashes live in the state
 //! directory, never in the log: a session token is a credential (invariant 2).
@@ -131,6 +132,12 @@ impl Accounts {
             return Ok(Err(SignInError::Rejected));
         }
         self.failures.lock().unwrap().remove(person);
+        self.open_session(person).map(Ok)
+    }
+
+    /// Open a session for a person whose identity is already established.
+    pub fn open_session(&self, person: &str) -> Result<(Session, String)> {
+        let now = Utc::now();
         let mut raw = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut raw);
         let token = format!("mgs_{}", hex::encode(raw));
@@ -143,7 +150,7 @@ impl Accounts {
         let mut s = self.sessions.lock().unwrap();
         s.insert(token_hash(&token), session.clone());
         self.save(&s)?;
-        Ok(Ok((session, token)))
+        Ok((session, token))
     }
 
     /// The live session a token belongs to.

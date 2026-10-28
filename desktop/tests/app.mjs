@@ -1,18 +1,20 @@
 // The real desktop app, driven through tauri-driver (W3C WebDriver): connect
-// to the appliance over HTTPS and pin its certificate, sign in, connect
+// to the appliance over HTTPS and pin its certificate, sign in through the
+// identity provider, connect
 // Claude, type a task, approve in the inbox, and see the outcome with its
 // evidence. Behavior, not appearance (U7).
 //
 // MAGNUS_WEBDRIVER  tauri-driver's address      MAGNUS_APP  the app binary
 // MAGNUS_URL        the appliance (https)       MAGNUS_FINGERPRINT  what it printed
-// MAGNUS_PERSON  MAGNUS_PASSWORD  MAGNUS_API_KEY  MAGNUS_TASK  MAGNUS_DOWNLOADS
+// MAGNUS_PROVIDER   the identity provider's name on the sign-in button
+// MAGNUS_PERSON  MAGNUS_API_KEY  MAGNUS_TASK  MAGNUS_DOWNLOADS
 // MAGNUS_SHOTS      optional: where to keep screenshots
 import { writeFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const env = k => { const v = process.env[k]; if (!v) { console.error(`${k} is not set`); process.exit(2); } return v; };
-const [wd, app, url, fingerprint, person, password, apiKey, task, downloads] =
-  ["MAGNUS_WEBDRIVER", "MAGNUS_APP", "MAGNUS_URL", "MAGNUS_FINGERPRINT", "MAGNUS_PERSON", "MAGNUS_PASSWORD", "MAGNUS_API_KEY", "MAGNUS_TASK", "MAGNUS_DOWNLOADS"].map(env);
+const [wd, app, url, fingerprint, provider, person, apiKey, task, downloads] =
+  ["MAGNUS_WEBDRIVER", "MAGNUS_APP", "MAGNUS_URL", "MAGNUS_FINGERPRINT", "MAGNUS_PROVIDER", "MAGNUS_PERSON", "MAGNUS_API_KEY", "MAGNUS_TASK", "MAGNUS_DOWNLOADS"].map(env);
 const shots = process.env.MAGNUS_SHOTS;
 if (shots) mkdirSync(shots, { recursive: true });
 const E = "element-6066-11e4-a52e-4f735466cecf";
@@ -63,10 +65,15 @@ await step("pin the appliance's certificate", async () => {
   await click(button("They match"));
 });
 
-await step("sign in", async () => {
-  await type(css("#who"), person);
-  await type(css("#pw"), password);
-  await click(button("Sign in"));
+await step(`sign in with ${provider}`, async () => {
+  await click(button(`Sign in with ${provider}`));
+  // The app opens the provider's page in the person's browser; here the
+  // test is that browser, and approves the code the app shows.
+  const code = (await text(css("#code"))).trim();
+  const link = await call("GET", s(`/element/${await css("#open")}/attribute/data-url`));
+  if (!link.includes(code)) throw new Error(`the provider's page ${link} is not for code ${code}`);
+  const approved = await (await fetch(link)).text();
+  if (!approved.includes(`Signed in as ${person}`)) throw new Error(`the provider did not approve: ${approved}`);
   await xpath("//h1[normalize-space()='Home']");
   const page = await run("return JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie");
   if (page.includes("mgs_")) throw new Error("the session token reached the page");

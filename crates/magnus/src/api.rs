@@ -1,5 +1,5 @@
 //! The HTTP API, for people's apps. Every request names a person: by a
-//! session from password sign-in (the desktop app sends it as a bearer token,
+//! session from sign-in (the desktop app sends it as a bearer token,
 //! a browser as an HttpOnly cookie) or by a configured API token. Approvals,
 //! answers and policy arrive only here, a channel the agent cannot reach (its
 //! sandbox has no network and no tool calls this API).
@@ -103,7 +103,9 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/{file}", get(ui_file))
         .route("/fonts/{file}", get(ui_font))
         .route("/v1/health", get(health))
-        .route("/v1/sign-in", post(sign_in))
+        .route("/v1/sign-in", get(sign_in_method).post(sign_in))
+        .route("/v1/sign-in/device", post(device_start))
+        .route("/v1/sign-in/device/{flow}", post(device_poll))
         .route("/v1/sign-out", post(sign_out))
         .route("/v1/tasks/{id}/live", get(live))
         .route("/v1/tasks/{id}/outputs/{out}", get(output))
@@ -138,15 +140,62 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .with_state(k)
 }
 
-/// Password sign-in. Over plain HTTP only from this machine, so a password
-/// never crosses the network unencrypted.
-async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+/// Sign-in hands out a session, so over plain HTTP only from this machine:
+/// neither a password nor a session crosses the network unencrypted.
+fn over_tls(k: &Kernel, t: Transport, peer: SocketAddr) -> Result<(), Response> {
     if t == Transport::Plain && !peer.ip().is_loopback() {
         let hint = match &k.cfg.appliance.tls_listen {
             Some(l) => format!("sign in over https (port {})", l.rsplit(':').next().unwrap_or_default()),
             None => "sign in over https; the owner has not turned it on (appliance.tls_listen)".into(),
         };
-        return err(StatusCode::FORBIDDEN, hint);
+        return Err(err(StatusCode::FORBIDDEN, hint));
+    }
+    Ok(())
+}
+
+/// Open a session for a person and hand it over: to the app as a token,
+/// to a browser as an HttpOnly cookie the page cannot read.
+async fn issue(k: &Kernel, t: Transport, person: &str, app: bool) -> Response {
+    let Some(p) = k.cfg.person(person).cloned() else { return err(StatusCode::FORBIDDEN, format!("{person} is not a person on this appliance.")) };
+    let (session, token) = match k.accounts.open_session(person) {
+        Ok(s) => s,
+        Err(e) => return internal(e),
+    };
+    let ev = Ev::SignedIn { person: person.to_string(), session: session.id.clone(), client: if app { "app".into() } else { "browser".into() } };
+    if let Err(e) = k.emit(&format!("person:{person}"), ev).await {
+        return internal(e);
+    }
+    let mut body = json!({
+        "person": { "id": p.id, "name": p.name, "roles": p.roles, "groups": p.groups },
+        "session": { "id": session.id, "expires": session.expires },
+    });
+    if app {
+        body["token"] = json!(token);
+        return Json(body).into_response();
+    }
+    let secure = if t == Transport::Tls { "; Secure" } else { "" };
+    let max_age = (session.expires - session.created).num_seconds();
+    let mut r = Json(body).into_response();
+    if let Ok(v) = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}").parse() {
+        r.headers_mut().insert("set-cookie", v);
+    }
+    r
+}
+
+/// How people sign in here: through the identity provider when one is
+/// configured, with a password always open as the way in when it is down.
+async fn sign_in_method(State(k): K) -> Response {
+    match &k.oidc {
+        Some(o) => Json(json!({ "method": "oidc", "label": o.label(), "password": true })).into_response(),
+        None => Json(json!({ "method": "password", "password": true })).into_response(),
+    }
+}
+
+/// Password sign-in: the only way without an identity provider, and the
+/// backup with one.
+async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
     }
     let person = b["person"].as_str().unwrap_or_default().trim().to_lowercase();
     let password = b["password"].as_str().unwrap_or_default();
@@ -157,28 +206,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         return err(StatusCode::UNAUTHORIZED, "The name or password is wrong.");
     }
     match k.accounts.sign_in(&person, password) {
-        Ok(Ok((session, token))) => {
-            let ev = Ev::SignedIn { person: person.clone(), session: session.id.clone(), client: if app { "app".into() } else { "browser".into() } };
-            if let Err(e) = k.emit(&format!("person:{person}"), ev).await {
-                return internal(e);
-            }
-            let p = k.cfg.person(&person).cloned().expect("checked above");
-            let mut body = json!({
-                "person": { "id": p.id, "name": p.name, "roles": p.roles, "groups": p.groups },
-                "session": { "id": session.id, "expires": session.expires },
-            });
-            if app {
-                body["token"] = json!(token);
-                return Json(body).into_response();
-            }
-            let secure = if t == Transport::Tls { "; Secure" } else { "" };
-            let max_age = (session.expires - session.created).num_seconds();
-            let mut r = Json(body).into_response();
-            if let Ok(v) = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}").parse() {
-                r.headers_mut().insert("set-cookie", v);
-            }
-            r
-        }
+        Ok(Ok(_)) => issue(&k, t, &person, app).await,
         Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
         Ok(Err(crate::accounts::SignInError::Locked(until))) => (
             StatusCode::TOO_MANY_REQUESTS,
@@ -186,6 +214,47 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         )
             .into_response(),
         Err(e) => internal(e),
+    }
+}
+
+/// Start a sign-in through the identity provider: the person approves the
+/// code on the provider's page, then polls `/v1/sign-in/device/{flow}`.
+async fn device_start(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let Some(o) = &k.oidc else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
+    match o.start(b["client"].as_str() == Some("app")).await {
+        Ok(s) => Json(json!({
+            "flow": s.flow,
+            "user_code": s.user_code,
+            "verification_uri": s.verification_uri,
+            "verification_uri_complete": s.verification_uri_complete,
+            "expires_in": s.expires_in,
+            "interval": s.interval,
+            "label": o.label(),
+        }))
+        .into_response(),
+        Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+async fn device_poll(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Path(flow): Path<String>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let Some(o) = &k.oidc else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
+    match o.poll(&flow).await {
+        Ok(crate::oidc::Polled::Pending) => (StatusCode::ACCEPTED, Json(json!({ "pending": true }))).into_response(),
+        Ok(crate::oidc::Polled::Done { person, app }) => {
+            if k.cfg.person(&person).is_none() {
+                tracing::warn!("oidc: {person} signed in at {} but is not a person on this appliance", o.label());
+                return err(StatusCode::FORBIDDEN, format!("You signed in as {person}, who is not a person on this appliance. Ask the owner to add you."));
+            }
+            issue(&k, t, &person, app).await
+        }
+        Ok(crate::oidc::Polled::Failed(m)) => err(StatusCode::GONE, m),
+        Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }
 

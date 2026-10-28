@@ -1,9 +1,11 @@
-//! What the desktop app relies on from the kernel: sign-in and sessions,
+//! What the desktop app relies on from the kernel: sign-in (by password and
+//! through an identity provider) and sessions,
 //! inbox flags, plans, composed outcomes, the playbook, versions and the
 //! developer view. Behavior through the HTTP API only.
 
 use magnus_invariants::appliance::{bin, Person};
 use magnus_invariants::{mcp, *};
+use magnus_scratch::{FakeIdp, IDP_LABEL};
 use serde_json::{json, Value};
 use std::io::Write;
 
@@ -121,6 +123,97 @@ async fn a_browser_session_needs_the_client_header_to_change_anything() {
     assert_eq!(me.status(), 200);
     let forged = http.post(format!("{}/v1/tasks", app.base)).header("cookie", &pair).json(&json!({ "text": "hi" })).send().await.unwrap();
     assert_eq!(forged.status(), 403, "a cookie alone changed something");
+}
+
+async fn device_start(app: &Appliance) -> Value {
+    let r = reqwest::Client::new().post(format!("{}/v1/sign-in/device", app.base)).json(&json!({ "client": "app" })).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    r.json().await.unwrap()
+}
+
+/// Poll a provider sign-in the way the app does, until it is no longer pending.
+async fn device_finish(app: &Appliance, flow: &str) -> (u16, Value) {
+    let end = std::time::Instant::now() + PATIENCE;
+    loop {
+        let r = reqwest::Client::new().post(format!("{}/v1/sign-in/device/{flow}", app.base)).send().await.unwrap();
+        let st = r.status().as_u16();
+        let v: Value = r.json().await.unwrap_or(Value::Null);
+        if st != 202 || std::time::Instant::now() > end {
+            return (st, v);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sign_in_through_the_identity_provider_keeps_no_provider_token_and_passwords_stay_as_backup() {
+    let model = FakeModel::start(steps(vec![])).await;
+    let mut app = Appliance::start(spec(), &model).await;
+    let idp = FakeIdp::start("Carol").await;
+    idp.configure(&mut app).await;
+
+    let (_, m) = app.api("carol").get("/v1/sign-in").await;
+    assert_eq!((m["method"].as_str(), m["label"].as_str(), m["password"].as_bool()), (Some("oidc"), Some(IDP_LABEL), Some(true)), "{m}");
+
+    let s = device_start(&app).await;
+    let code = s["user_code"].as_str().unwrap().to_string();
+    assert!(s["verification_uri_complete"].as_str().unwrap().contains(&code), "{s}");
+    let flow = s["flow"].as_str().unwrap().to_string();
+    let r = reqwest::Client::new().post(format!("{}/v1/sign-in/device/{flow}", app.base)).send().await.unwrap();
+    assert_eq!(r.status(), 202, "a sign-in nobody approved went through");
+
+    idp.visit(&code, false).await;
+    let (st, v) = device_finish(&app, &flow).await;
+    assert_eq!(st, 200, "{v}");
+    let token = v["token"].as_str().expect("an app sign-in returns a token").to_string();
+    let (st, me) = with_token(&app, &token).get("/v1/me").await;
+    assert_eq!((st.as_u16(), me["id"].as_str()), (200, Some("carol")), "the provider's name maps to the person, whatever its case");
+    let (st, _) = device_finish(&app, &flow).await;
+    assert_eq!(st, 410, "one approval opened a second session");
+
+    let dump = app.db.dump().await;
+    for secret in [token.as_str(), "at-not-kept", "rt-not-kept"] {
+        assert!(!dump.contains(secret), "{secret} reached the database");
+    }
+    assert!(dump.contains("signed_in"));
+    let kept = std::fs::read_dir(app.state_dir.join("accounts")).unwrap().map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap_or_default()).collect::<String>();
+    assert!(!kept.contains("not-kept"), "a provider token was kept");
+
+    // Passwords stay open, for when the provider cannot be reached.
+    assert!(set_password(&app, "carol", PASSWORD).status.success());
+    let (st, v) = sign_in(&app, "carol", PASSWORD).await;
+    assert_eq!(st, 200, "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_sign_in_refuses_strangers_other_clients_and_declines() {
+    let model = FakeModel::start(steps(vec![])).await;
+    let mut app = Appliance::start(spec(), &model).await;
+    let idp = FakeIdp::start("mallory").await;
+    idp.configure(&mut app).await;
+
+    let attempt = |deny: bool| {
+        let (app, idp) = (&app, &idp);
+        async move {
+            let s = device_start(app).await;
+            idp.visit(s["user_code"].as_str().unwrap(), deny).await;
+            device_finish(app, s["flow"].as_str().unwrap()).await
+        }
+    };
+    let (st, v) = attempt(false).await;
+    assert_eq!(st, 403, "someone not on the appliance got in: {v}");
+    assert!(v["error"].as_str().unwrap().contains("not a person on this appliance"), "{v}");
+
+    idp.set_username("carol");
+    idp.set_audience("another-client");
+    let (st, v) = attempt(false).await;
+    assert_eq!(st, 410, "an ID token for another client was accepted: {v}");
+
+    idp.set_audience(magnus_scratch::IDP_CLIENT);
+    let (st, v) = attempt(true).await;
+    assert_eq!((st, v["error"].as_str()), (410, Some("The sign-in was declined.")));
+
+    assert!(!app.db.dump().await.contains("signed_in"), "a refused sign-in was recorded as one");
 }
 
 /// The whole operator flow: plan, an approval that blocks, a review card,

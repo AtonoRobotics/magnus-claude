@@ -141,7 +141,7 @@ async function signInScreen(note) {
         try {
           const c = await Magnus.connect(url);
           localStorage.setItem("magnus.address", url);
-          if (c.status === "trusted") ask("password", { url });
+          if (c.status === "trusted") ask("method", { url });
           else ask("pin", { url, ...c });
         } catch (err) { note = err.message || String(err); ask("address", { url }); }
       };
@@ -151,15 +151,57 @@ async function signInScreen(note) {
         <p class="small">${changed ? "This is not the certificate you trusted before. Continue only if the owner told you it was replaced." : "This is the first connection to this appliance. Compare this fingerprint with the one the owner sees on the appliance."}</p>
         <div class="fp" id="fp">${esc(data.fingerprint)}</div>
         <div class="row" style="margin-top:14px"><button class="${changed ? "danger" : "primary"}" id="ok">They match</button><button id="no">Cancel</button></div>`);
-      $("#ok").onclick = async () => { await Magnus.trust(data.url, data.fingerprint); ask("password", data); };
+      $("#ok").onclick = async () => { await Magnus.trust(data.url, data.fingerprint); ask("method", data); };
       $("#no").onclick = () => ask("address", data);
+    } else if (stage === "method") {
+      paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p><p class="small muted">Connecting…</p>`);
+      try {
+        const m = await Magnus.signInMethod();
+        ask(m.method === "oidc" ? "provider" : "password", { ...data, label: m.label });
+      } catch (err) { note = err.message || String(err); ask(Magnus.kind === "app" ? "address" : "password", data); }
+    } else if (stage === "provider") {
+      paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p>
+        ${data.error ? `<p class="small" style="color:var(--bad)" role="alert">${esc(data.error)}</p>` : ""}
+        <p>You sign in to this appliance with your <strong>${esc(data.label)}</strong> account.</p>
+        <div class="row" style="margin-top:16px"><button class="primary" id="go">Sign in with ${esc(data.label)}</button><button type="button" class="link" id="pwd">Use a password instead</button>${Magnus.kind === "app" ? `<button type="button" class="link" id="back">Other appliance</button>` : ""}</div>`);
+      $("#back")?.addEventListener("click", () => ask("address", data));
+      $("#pwd").onclick = () => ask("password", data);
+      $("#go").onclick = async () => {
+        $("#go").disabled = true;
+        let s;
+        try { s = await Magnus.deviceStart(); } catch (err) { return ask("provider", { ...data, error: err.message || String(err) }); }
+        const link = s.verification_uri_complete || s.verification_uri;
+        let stop = false;
+        paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p>
+          <p>Approve the sign-in on the ${esc(s.label)} page that just opened.</p>
+          <p class="small">Check that it shows this code:</p><div class="fp" id="code">${esc(s.user_code)}</div>
+          <div class="row" style="margin-top:14px"><button data-url="${esc(link)}" id="open">Open the sign-in page again</button><button class="link" id="cancel">Cancel</button></div>
+          <p class="small muted" id="wait" role="status">Waiting for you to approve…</p>`);
+        $("#open").onclick = () => Magnus.openExternal(link).catch(() => {});
+        $("#cancel").onclick = () => { stop = true; ask("provider", data); };
+        Magnus.openExternal(link).catch(() => {});
+        const until = Date.now() + s.expires_in * 1000;
+        const every = Math.max(1, s.interval) * 1000;
+        while (!stop && Date.now() < until) {
+          await new Promise(r => setTimeout(r, every));
+          if (stop) return;
+          try {
+            const r = await Magnus.devicePoll(s.flow);
+            if (r.pending) continue;
+            App.me = r.person; App.appliance = data.url || location.origin;
+            return boot();
+          } catch (err) { return ask("provider", { ...data, error: err.message || String(err) }); }
+        }
+        if (!stop) ask("provider", { ...data, error: "The sign-in code expired. Start again." });
+      };
     } else {
       paint(box, `<form id="f"><p class="small muted">${esc(data.url || location.origin)}</p>
         ${data.error ? `<p class="small" style="color:var(--bad)" role="alert">${esc(data.error)}</p>` : ""}
         <label for="who">Your name on the appliance</label><input id="who" style="width:100%" autocomplete="username" value="${esc(data.person || localStorage.getItem("magnus.person") || "")}" required>
         <label for="pw">Password</label><input id="pw" type="password" style="width:100%" autocomplete="current-password" required>
-        <div class="row" style="margin-top:16px"><button class="primary" id="go">Sign in</button>${Magnus.kind === "app" ? `<button type="button" class="link" id="back">Other appliance</button>` : ""}</div></form>`);
+        <div class="row" style="margin-top:16px"><button class="primary" id="go">Sign in</button>${data.label ? `<button type="button" class="link" id="prov">Sign in with ${esc(data.label)}</button>` : ""}${Magnus.kind === "app" ? `<button type="button" class="link" id="back">Other appliance</button>` : ""}</div></form>`);
       $("#back")?.addEventListener("click", () => ask("address", data));
+      $("#prov")?.addEventListener("click", () => ask("provider", { ...data, error: undefined }));
       $("#f").onsubmit = async e => {
         e.preventDefault();
         const person = $("#who").value.trim();
@@ -173,7 +215,7 @@ async function signInScreen(note) {
       };
     }
   };
-  if (Magnus.kind === "web") ask("password", { url: location.origin });
+  if (Magnus.kind === "web") ask("method", { url: location.origin });
   else ask("address");
 }
 

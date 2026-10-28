@@ -1,7 +1,7 @@
 //! The real desktop app on Linux, driven through tauri-driver against a real
 //! appliance over HTTPS (`desktop/tests/app.mjs`): pin the certificate, sign
-//! in, connect Claude, type a task, approve in the inbox, see the outcome
-//! with its evidence, download the file.
+//! in through the identity provider, connect Claude, type a task, approve in
+//! the inbox, see the outcome with its evidence, download the file.
 //!
 //! Needs the built app (`cargo tauri build` in desktop/src-tauri, or
 //! MAGNUS_DESKTOP_APP), `tauri-driver`, `WebKitWebDriver`
@@ -19,13 +19,15 @@ fn which(name: &str) -> Option<PathBuf> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
-async fn the_linux_app_pins_signs_in_approves_and_shows_evidence() {
+async fn the_linux_app_pins_signs_in_through_the_provider_approves_and_shows_evidence() {
     let app_bin = std::env::var("MAGNUS_DESKTOP_APP").map(PathBuf::from).unwrap_or_else(|_| workspace_root().join("desktop/src-tauri/target/release/magnus-desktop"));
     assert!(app_bin.is_file(), "build the app first: {}", app_bin.display());
     let native = std::env::var("MAGNUS_WEBKIT_DRIVER").map(PathBuf::from).ok().or_else(|| which("WebKitWebDriver")).expect("WebKitWebDriver (set MAGNUS_WEBKIT_DRIVER)");
     let driver = which("tauri-driver").or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo/bin/tauri-driver"))).expect("tauri-driver");
 
     let mut f = Flow::start().await;
+    let idp = FakeIdp::start(PERSON).await;
+    idp.configure(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
 
     // The app runs as a fresh user: its own home, settings and Downloads,
@@ -66,7 +68,7 @@ async fn the_linux_app_pins_signs_in_approves_and_shows_evidence() {
         .env("MAGNUS_URL", &url)
         .env("MAGNUS_FINGERPRINT", &fingerprint)
         .env("MAGNUS_PERSON", PERSON)
-        .env("MAGNUS_PASSWORD", PASSWORD)
+        .env("MAGNUS_PROVIDER", IDP_LABEL)
         .env("MAGNUS_API_KEY", &key)
         .env("MAGNUS_TASK", TASK)
         .env("MAGNUS_DOWNLOADS", &downloads)

@@ -20,6 +20,7 @@ pub mod events;
 pub mod inbox;
 pub mod kernel;
 pub mod log;
+pub mod oidc;
 pub mod policy;
 pub mod run;
 pub mod sandbox;
