@@ -5,14 +5,17 @@
 //! Everything outside the kernel talks to it through `api`, the adapter
 //! contract (`adapters`), MCP (`apps`), or vsock (`sandbox`).
 
+pub mod accounts;
 pub mod adapters;
 pub mod api;
 pub mod apps;
 pub mod boundary;
 pub mod browser;
 pub mod cli;
+pub mod compose;
 pub mod config;
 pub mod conformance;
+pub mod dev;
 pub mod events;
 pub mod inbox;
 pub mod kernel;
@@ -23,6 +26,7 @@ pub mod sandbox;
 pub mod spawn;
 pub mod speech;
 pub mod state;
+pub mod tls;
 pub mod tools;
 pub mod vault;
 pub mod web;

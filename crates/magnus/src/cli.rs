@@ -1,6 +1,8 @@
 //! `magnus migrate --config <file> --admin-url <url>`: create the event log
 //! and the kernel's database role.
 //! `magnus serve --config <file>`: run the appliance.
+//! `magnus password --config <file> --person <id>`: set a person's sign-in
+//! password, read from standard input.
 
 use crate::config::Config;
 use anyhow::{Context, Result};
@@ -22,8 +24,9 @@ pub fn main() {
             Some("migrate") => migrate(&args).await,
             Some("serve") => serve(&args).await,
             Some("conformance") => conformance(&args).await,
+            Some("password") => password(&args),
             _ => {
-                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus conformance --config <file> --adapter <id> [--model <id>]");
+                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus conformance --config <file> --adapter <id> [--model <id>]");
                 std::process::exit(2);
             }
         }
@@ -46,13 +49,46 @@ async fn migrate(args: &[String]) -> Result<()> {
 }
 
 async fn serve(args: &[String]) -> Result<()> {
+    use crate::api::{router, Transport};
+    use std::net::SocketAddr;
     let cfg = config(args)?;
     let listen = cfg.appliance.listen.clone();
+    let tls = match &cfg.appliance.tls_listen {
+        Some(addr) => {
+            let (server, fingerprint) = crate::tls::load(&cfg.appliance.state_dir, cfg.appliance.tls_cert.as_deref(), cfg.appliance.tls_key.as_deref())?;
+            Some((addr.clone(), server, fingerprint))
+        }
+        None => None,
+    };
     let k = crate::kernel::Kernel::boot(cfg).await?;
     tokio::spawn(k.clone().sweep());
-    let listener = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("listen on {listen}"))?;
-    tracing::info!("magnus listening on {listen}");
-    axum::serve(listener, crate::api::router(k)).await?;
+    let plain = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("listen on {listen}"))?;
+    tracing::info!("magnus listening on http://{listen}");
+    let plain = axum::serve(plain, router(k.clone(), Transport::Plain).into_make_service_with_connect_info::<SocketAddr>());
+    match tls {
+        Some((addr, server, fingerprint)) => {
+            use axum::serve::ListenerExt;
+            // tap_io gives the TLS listener axum's connect-info for its peer address.
+            let l = crate::tls::Listener::bind(&addr, server).await?.tap_io(|_| {});
+            tracing::info!("magnus listening on https://{addr}, certificate SHA-256 {fingerprint}");
+            let secure = axum::serve(l, router(k, Transport::Tls).into_make_service_with_connect_info::<SocketAddr>());
+            tokio::try_join!(async { plain.await }, async { secure.await })?;
+        }
+        None => plain.await?,
+    }
+    Ok(())
+}
+
+/// Set a person's password from standard input (one line).
+fn password(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    let person = arg(args, "--person").context("--person is required")?;
+    anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let pw = line.trim_end_matches(['\r', '\n']);
+    crate::accounts::set_password(&cfg.appliance.state_dir, &cfg.sign_in, &person, pw)?;
+    eprintln!("password set for {person}");
     Ok(())
 }
 

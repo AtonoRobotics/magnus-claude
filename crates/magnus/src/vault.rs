@@ -37,7 +37,7 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     {
         use std::io::Write;

@@ -26,5 +26,9 @@
   "computer_key": "Press keys on the sandbox desktop, xdotool style (for example ctrl+s, Return, Tab). Returns a screenshot.",
   "computer_scroll": "Scroll at a position on the sandbox desktop (negative down scrolls up). Returns a screenshot.",
   "propose_schedule": "Propose a recurring task (plain-language text, and every_minutes or daily_at as HH:MM local time) to the person. It starts only if they accept.",
-  "deliver_file": "Give the person a file from your workspace (a spreadsheet, document, slide deck, PDF, image). Your workspace is deleted when the task ends; only delivered files remain."
+  "deliver_file": "Give the person a file from your workspace (a spreadsheet, document, slide deck, PDF, image). Your workspace is deleted when the task ends; only delivered files remain.",
+  "task_plan": "Record or revise your plan: an ordered list of units, each with an id, a goal and when it is done. To revise it, send the whole list again with each unit's status. The person sees your plan; it is your account, not evidence.",
+  "task_complete.view": "Optional. How to show the outcome, built from fixed components: heading {text}, text {text}, list {items}, table {columns, rows}, stat {label, value, unit}, bar_chart {labels, values, unit}, line_chart {labels, series:[{name, values}]}, image {file: a file you delivered}. Add a visual only where it shows something the summary does not.",
+  "task_complete.spoken": "Optional. The outcome written to be heard rather than read: short sentences, no tables or symbols, numbers said in words where that helps. Read aloud when the person asks.",
+  "playbook_update": "Change your playbook, the lessons you keep for future tasks: add one item, or edit or retire one by id. Each item names the failure it addresses. Items are shown to you at the start of later tasks for the same person."
 }

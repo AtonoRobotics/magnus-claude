@@ -105,7 +105,7 @@ impl Audience {
 }
 
 /// Run records the loop writes to the log itself, outside execute() (K21).
-pub const RECORDS: &[&str] = &["task_contract", "task_complete", "task_fail", "ask_principal", "propose_policy", "propose_schedule", "wait_until", "notify"];
+pub const RECORDS: &[&str] = &["task_contract", "task_plan", "task_complete", "task_fail", "ask_principal", "propose_policy", "propose_schedule", "wait_until", "notify"];
 
 /// Built-in actions that pass the boundary like app tools.
 pub struct Builtin {
@@ -137,6 +137,7 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "computer_scroll", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_write", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_search", app: "memory", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "playbook_update", app: "playbook", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
 ];
 
 pub fn builtin(name: &str) -> Option<&'static Builtin> {
@@ -186,9 +187,29 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             ),
         },
         ToolSpec {
+            name: "task_plan".into(),
+            description: d("task_plan"),
+            input_schema: obj(
+                json!({ "units": { "type": "array", "minItems": 1, "items": { "type": "object", "properties": {
+                    "id": { "type": "string" }, "goal": { "type": "string" }, "done_when": { "type": "string" },
+                    "status": { "type": "string", "enum": ["pending", "active", "done", "dropped"] }
+                }, "required": ["id", "goal", "done_when"] } } }),
+                &["units"],
+            ),
+        },
+        ToolSpec {
             name: "task_complete".into(),
             description: d("task_complete"),
-            input_schema: obj(json!({ "summary": { "type": "string" } }), &["summary"]),
+            input_schema: obj(
+                json!({
+                    "summary": { "type": "string" },
+                    "view": { "type": "array", "description": d("task_complete.view"), "items": { "type": "object", "properties": {
+                        "type": { "type": "string", "enum": crate::compose::KINDS }
+                    }, "required": ["type"] } },
+                    "spoken": { "type": "string", "description": d("task_complete.spoken") }
+                }),
+                &["summary"],
+            ),
         },
         ToolSpec {
             name: "task_fail".into(),
@@ -243,6 +264,19 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             name: "memory_search".into(),
             description: d("memory_search"),
             input_schema: obj(json!({ "query": { "type": "string" } }), &["query"]),
+        },
+        ToolSpec {
+            name: "playbook_update".into(),
+            description: d("playbook_update"),
+            input_schema: obj(
+                json!({
+                    "op": { "type": "string", "enum": ["add", "edit", "retire"] },
+                    "item": { "type": "string", "description": "the item id, for edit and retire" },
+                    "text": { "type": "string" },
+                    "addresses": { "type": "string", "description": "the failure this item addresses" }
+                }),
+                &["op"],
+            ),
         },
     ];
     if search {

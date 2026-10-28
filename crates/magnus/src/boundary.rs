@@ -696,6 +696,35 @@ impl Kernel {
                     Ok((format!("remembered ({id})"), false, None))
                 }
                 "memory_search" => Ok((self.memory_search(&a.run, &s("query")), false, None)),
+                "playbook_update" => {
+                    let run = self.read(|st| st.runs.get(&a.run).cloned()).ok_or_else(|| anyhow!("run"))?;
+                    let label = Label { untrusted: run.untrusted, private: run.private };
+                    let op = s("op");
+                    let text = a.input["text"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
+                    let addresses = a.input["addresses"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
+                    let item = match op.as_str() {
+                        "add" => {
+                            if text.is_none() || addresses.is_none() {
+                                return Ok(("An added item needs text and the failure it addresses. A retry without them will not help.".into(), true, None));
+                            }
+                            new_id("pb")
+                        }
+                        "edit" | "retire" => {
+                            let id = s("item");
+                            let mine = self.read(|st| st.playbook.get(&id).is_some_and(|i| i.person == run.person && i.retired.is_none()));
+                            if !mine {
+                                return Ok((format!("There is no live playbook item {id:?}. A retry with the same id will not help."), true, None));
+                            }
+                            if op == "edit" && text.is_none() && addresses.is_none() {
+                                return Ok(("An edit needs new text or a new failure it addresses.".into(), true, None));
+                            }
+                            id
+                        }
+                        _ => return Ok(("op is add, edit or retire.".into(), true, None)),
+                    };
+                    self.emit("kernel", Ev::Playbook { item: item.clone(), op: op.clone(), person: run.person.clone(), run: a.run.clone(), text, addresses, label }).await?;
+                    Ok((format!("Playbook item {item}: {op} recorded. It applies from the next task."), false, Some(json!({ "item": item }))))
+                }
                 other => Err(anyhow!("no executor for {other}")),
             }
         }

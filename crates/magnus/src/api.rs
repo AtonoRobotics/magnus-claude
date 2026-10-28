@@ -1,6 +1,8 @@
-//! The local HTTP API, for the desktop app. Every request names a person by
-//! token. Approvals, answers and policy arrive only here, a channel the agent
-//! cannot reach (its sandbox has no network and no tool calls this API).
+//! The HTTP API, for people's apps. Every request names a person: by a
+//! session from password sign-in (the desktop app sends it as a bearer token,
+//! a browser as an HttpOnly cookie) or by a configured API token. Approvals,
+//! answers and policy arrive only here, a channel the agent cannot reach (its
+//! sandbox has no network and no tool calls this API).
 
 use crate::config::{Adapter, Person};
 use crate::events::Ev;
@@ -8,33 +10,83 @@ use crate::inbox::{self, Answer};
 use crate::kernel::{new_id, Kernel, HARNESS_VERSION};
 use crate::state::{Run, Status};
 use axum::{
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{ConnectInfo, Path, Request, State},
+    http::{HeaderMap, Method, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post, put},
-    Json, Router,
+    Extension, Json, Router,
 };
+use std::net::SocketAddr;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 type K = State<Arc<Kernel>>;
 
-fn err(code: StatusCode, msg: impl Into<String>) -> Response {
+pub(crate) fn err(code: StatusCode, msg: impl Into<String>) -> Response {
     (code, Json(json!({ "error": msg.into() }))).into_response()
 }
 
-fn internal(e: anyhow::Error) -> Response {
+pub(crate) fn internal(e: anyhow::Error) -> Response {
     tracing::error!("api: {e:#}");
     err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }
 
+/// Which listener a request came in on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Plain,
+    Tls,
+}
+
+pub const SESSION_COOKIE: &str = "magnus_session";
+
+fn bearer(h: &HeaderMap) -> Option<&str> {
+    h.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "))
+}
+
+fn cookie<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    h.get_all("cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|c| c.trim().split_once('='))
+        .find(|(n, _)| *n == name)
+        .map(|(_, v)| v)
+}
+
+fn credential(h: &HeaderMap) -> Option<&str> {
+    bearer(h).or_else(|| cookie(h, SESSION_COOKIE))
+}
+
 fn who(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
-    let token = h
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "sign in"))?;
-    k.cfg.person_by_token(token).cloned().ok_or_else(|| err(StatusCode::UNAUTHORIZED, "unknown token"))
+    let token = credential(h).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "sign in"))?;
+    if let Some(p) = k.cfg.person_by_token(token) {
+        return Ok(p.clone());
+    }
+    k.accounts
+        .session(token)
+        .and_then(|s| k.cfg.person(&s.person).cloned())
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "sign in again"))
+}
+
+pub(crate) fn developer(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
+    let p = who(k, h)?;
+    if !p.is_developer() {
+        return Err(err(StatusCode::FORBIDDEN, "this needs the developer role"));
+    }
+    Ok(p)
+}
+
+/// A browser sends the session cookie on its own, so a change made with the
+/// cookie must also carry a header another site's page cannot set.
+async fn cookie_guard(req: Request, next: Next) -> Response {
+    let h = req.headers();
+    let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    if !safe && bearer(h).is_none() && cookie(h, SESSION_COOKIE).is_some() && h.get("x-magnus-client").is_none() {
+        return err(StatusCode::FORBIDDEN, "missing x-magnus-client header");
+    }
+    next.run(req).await
 }
 
 fn owner(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
@@ -45,14 +97,17 @@ fn owner(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
     Ok(p)
 }
 
-pub fn router(k: Arc<Kernel>) -> Router {
+pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
     Router::new()
         .route("/", get(|| async { axum::response::Html(include_str!("../ui/index.html")) }))
         .route("/v1/health", get(health))
+        .route("/v1/sign-in", post(sign_in))
+        .route("/v1/sign-out", post(sign_out))
         .route("/v1/tasks/{id}/live", get(live))
         .route("/v1/tasks/{id}/outputs/{out}", get(output))
         .route("/v1/transcribe", post(transcribe))
         .route("/v1/me", get(me))
+        .route("/v1/versions", get(versions))
         .route("/v1/tasks", post(submit).get(list_tasks))
         .route("/v1/tasks/{id}", get(task))
         .route("/v1/tasks/{id}/timeline", get(timeline))
@@ -75,7 +130,79 @@ pub fn router(k: Arc<Kernel>) -> Router {
         .route("/v1/memory", get(memory))
         .route("/v1/schedules", get(schedules).post(add_schedule))
         .route("/v1/schedules/{id}", axum::routing::delete(remove_schedule))
+        .merge(crate::dev::router())
+        .layer(axum::middleware::from_fn(cookie_guard))
+        .layer(Extension(transport))
         .with_state(k)
+}
+
+/// Password sign-in. Over plain HTTP only from this machine, so a password
+/// never crosses the network unencrypted.
+async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+    if t == Transport::Plain && !peer.ip().is_loopback() {
+        let hint = match &k.cfg.appliance.tls_listen {
+            Some(l) => format!("sign in over https (port {})", l.rsplit(':').next().unwrap_or_default()),
+            None => "sign in over https; the owner has not turned it on (appliance.tls_listen)".into(),
+        };
+        return err(StatusCode::FORBIDDEN, hint);
+    }
+    let person = b["person"].as_str().unwrap_or_default().trim().to_lowercase();
+    let password = b["password"].as_str().unwrap_or_default();
+    let app = b["client"].as_str() == Some("app");
+    if k.cfg.person(&person).is_none() {
+        // Same answer and the same work as a wrong password.
+        let _ = k.accounts.sign_in(&person, password);
+        return err(StatusCode::UNAUTHORIZED, "The name or password is wrong.");
+    }
+    match k.accounts.sign_in(&person, password) {
+        Ok(Ok((session, token))) => {
+            let ev = Ev::SignedIn { person: person.clone(), session: session.id.clone(), client: if app { "app".into() } else { "browser".into() } };
+            if let Err(e) = k.emit(&format!("person:{person}"), ev).await {
+                return internal(e);
+            }
+            let p = k.cfg.person(&person).cloned().expect("checked above");
+            let mut body = json!({
+                "person": { "id": p.id, "name": p.name, "roles": p.roles, "groups": p.groups },
+                "session": { "id": session.id, "expires": session.expires },
+            });
+            if app {
+                body["token"] = json!(token);
+                return Json(body).into_response();
+            }
+            let secure = if t == Transport::Tls { "; Secure" } else { "" };
+            let max_age = (session.expires - session.created).num_seconds();
+            let mut r = Json(body).into_response();
+            if let Ok(v) = format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}").parse() {
+                r.headers_mut().insert("set-cookie", v);
+            }
+            r
+        }
+        Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
+        Ok(Err(crate::accounts::SignInError::Locked(until))) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": format!("Too many wrong passwords. Try again after {}.", until.format("%H:%M UTC")), "retry_at": until })),
+        )
+            .into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn sign_out(State(k): K, h: HeaderMap) -> Response {
+    let Some(token) = credential(&h) else { return err(StatusCode::UNAUTHORIZED, "not signed in") };
+    match k.accounts.sign_out(token) {
+        Ok(Some(s)) => {
+            if let Err(e) = k.emit(&format!("person:{}", s.person), Ev::SignedOut { person: s.person.clone(), session: s.id }).await {
+                return internal(e);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => return internal(e),
+    }
+    let mut r = Json(json!({ "ok": true })).into_response();
+    if let Ok(v) = format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0").parse() {
+        r.headers_mut().insert("set-cookie", v);
+    }
+    r
 }
 
 async fn me(State(k): K, h: HeaderMap) -> Response {
@@ -85,7 +212,27 @@ async fn me(State(k): K, h: HeaderMap) -> Response {
     }
 }
 
-fn status_str(s: Status) -> &'static str {
+/// What the appliance is running now, and every change to it, so apps can
+/// tell people when the agent they work with has changed (U5).
+async fn versions(State(k): K, h: HeaderMap) -> Response {
+    if let Err(r) = who(&k, &h) {
+        return r;
+    }
+    let v = k.read(|s| {
+        let changes: Vec<Value> = s.version_changes.iter().map(|(seq, at, what, value)| json!({ "seq": seq, "at": at, "what": what, "value": value })).collect();
+        json!({
+            "harness": crate::kernel::HARNESS_VERSION,
+            "instructions": crate::run::instructions_version(),
+            "model": s.model.as_ref().map(|(a, m)| format!("{a}/{m}")),
+            "playbook": s.playbook_version,
+            "latest_seq": s.version_changes.last().map(|c| c.0),
+            "changes": changes,
+        })
+    });
+    Json(v).into_response()
+}
+
+pub(crate) fn status_str(s: Status) -> &'static str {
     match s {
         Status::Running => "running",
         Status::Suspended => "suspended",
@@ -134,6 +281,13 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Va
         v["usage"] = json!({ "model_calls": run.model_calls, "actions": run.actions, "cost_usd": run.usd });
         v["taint"] = json!({ "untrusted": run.untrusted, "private": run.private });
         v["outputs"] = json!(run.outputs.iter().map(|(id, name, mt, size)| json!({ "id": id, "name": name, "media_type": mt, "size": size })).collect::<Vec<_>>());
+        v["plan"] = run.plan.clone().unwrap_or(Value::Null);
+        v["plan_version"] = json!(run.plan_version);
+        v["outcome_view"] = run.outcome_view.clone().unwrap_or(Value::Null);
+        v["spoken"] = json!(run.spoken);
+        v["ended_at"] = json!(run.ended_at);
+        v["waiting_item"] = json!(run.waiting_item);
+        v["config"] = json!({ "harness": run.config.harness, "instructions": run.config.instructions, "playbook": run.config.playbook });
         v["open_items"] = json!(k.read(|s| s
             .items
             .values()
@@ -226,8 +380,16 @@ async fn timeline(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response
                 magnus_adapter_proto::Block::Text { text } => said.push_str(text),
                 magnus_adapter_proto::Block::ToolCall { id, name, input } => {
                     let r = run.results.get(id);
+                    let decisions: Vec<Value> = run
+                        .decisions
+                        .iter()
+                        .filter(|d| &d.call_id == id)
+                        .map(|d| json!({ "stage": d.stage, "outcome": d.outcome, "rule": d.rule }))
+                        .collect();
                     calls.push(json!({
-                        "tool": name, "input": input,
+                        "call_id": id, "tool": name, "input": input,
+                        "issuer": run.intents.get(id).map(|i| i.issuer.clone()).unwrap_or_else(|| "model".into()),
+                        "decisions": decisions,
                         "result": r.map(|r| r.text.chars().take(4000).collect::<String>()),
                         "is_error": r.map(|r| r.is_error), "status": r.map(|r| r.status.clone()),
                     }));
@@ -237,7 +399,8 @@ async fn timeline(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response
         }
         steps.push(json!({ "step": reply.step, "text": said, "calls": calls }));
     }
-    Json(json!({ "steps": steps, "verifications": run.verified.iter().map(|(c, v)| json!({ "criterion": c, "passed": v.0, "evidence": v.1, "by": v.2 })).collect::<Vec<_>>() })).into_response()
+    let notices: Vec<Value> = run.notices.iter().map(|(step, seq, text)| json!({ "step": step, "seq": seq, "text": text })).collect();
+    Json(json!({ "steps": steps, "notices": notices, "verifications": run.verified.iter().map(|(c, v)| json!({ "criterion": c, "passed": v.0, "evidence": v.1, "by": v.2 })).collect::<Vec<_>>() })).into_response()
 }
 
 async fn resume(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
@@ -280,7 +443,7 @@ async fn inbox_list(State(k): K, h: HeaderMap) -> Response {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let items: Vec<Value> = k.read(|s| s.items.values().filter(|i| inbox::visible(&p, i)).map(|i| inbox::render(&p, i)).collect());
+    let items: Vec<Value> = k.read(|s| s.items.values().filter(|i| inbox::visible(&p, i)).map(|i| inbox::render(s, &p, i)).collect());
     Json(json!({ "items": items })).into_response()
 }
 

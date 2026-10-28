@@ -4,7 +4,7 @@
 use crate::config::Person;
 use crate::events::Ev;
 use crate::kernel::{new_id, Kernel};
-use crate::state::{Item, Status};
+use crate::state::{Item, State, Status};
 use crate::tools::Label;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -45,7 +45,36 @@ pub fn visible(p: &Person, i: &Item) -> bool {
     i.person == p.id || may_respond(p, i)
 }
 
-pub fn render(p: &Person, i: &Item) -> Value {
+/// What an approval's risk means for the person deciding (U6): the
+/// consequence of a destructive action is stated on the card, never left to
+/// the details.
+fn consequence(i: &Item) -> Option<&'static str> {
+    if i.kind != "approval" {
+        return None;
+    }
+    if i.details["reason"] == "unknown_outcome" {
+        return Some("It may already have happened once. Approving sends it again.");
+    }
+    match i.details["risk"].as_str().unwrap_or_default() {
+        "irreversible" => Some("This cannot be undone once it runs."),
+        "financial" => Some("This spends or moves money and cannot be undone."),
+        "reversible_write" => Some("This changes data outside the appliance. It can be undone afterwards."),
+        _ => None,
+    }
+}
+
+/// An item blocks when a run is paused waiting on it; the app interrupts
+/// only for those and batches the rest (U3).
+pub fn blocking(s: &State, i: &Item) -> bool {
+    i.resolution.is_none()
+        && i.run.as_ref().and_then(|r| s.runs.get(r)).is_some_and(|r| r.status == Status::Suspended && r.waiting_item.as_deref() == Some(&i.id))
+}
+
+pub fn render(s: &State, p: &Person, i: &Item) -> Value {
+    let tier = match i.kind.as_str() {
+        "approval" => i.details["risk"].as_str().unwrap_or("unknown").to_string(),
+        k => k.to_string(),
+    };
     json!({
         "id": i.id,
         "kind": i.kind,
@@ -57,6 +86,9 @@ pub fn render(p: &Person, i: &Item) -> Value {
         "status": if i.resolution.is_some() { "resolved" } else { "open" },
         "resolution": i.resolution.as_ref().map(|(d, s, t, by)| json!({ "decision": d, "scope": s, "text": t, "by": by })),
         "can_respond": i.resolution.is_none() && may_respond(p, i),
+        "blocking": blocking(s, i),
+        "tier": tier,
+        "consequence": consequence(i),
     })
 }
 
@@ -147,7 +179,16 @@ impl Kernel {
                     .await?;
                 }
                 self.reply(&run, &call_id, "The person reviewed the work and accepted it.", false, Label::PRINCIPAL).await?;
-                self.emit(&actor, Ev::Completed { run: run.clone(), summary: item.details["summary"].as_str().unwrap_or_default().into() }).await?;
+                self.emit(
+                    &actor,
+                    Ev::Completed {
+                        run: run.clone(),
+                        summary: item.details["summary"].as_str().unwrap_or_default().into(),
+                        view: item.details.get("view").filter(|v| !v.is_null()).cloned(),
+                        spoken: item.details["spoken"].as_str().map(String::from),
+                    },
+                )
+                .await?;
                 self.on_stop(&run, true).await;
             }
             ("review", "reject") => {

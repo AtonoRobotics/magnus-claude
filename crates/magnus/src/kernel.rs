@@ -24,6 +24,7 @@ pub struct Kernel {
     state: Mutex<State>,
     write: tokio::sync::Mutex<()>,
     pub vault: Arc<Vault>,
+    pub accounts: crate::accounts::Accounts,
     pub adapters: Adapters,
     pub mcp: Mcp,
     pub web: Web,
@@ -33,6 +34,19 @@ pub struct Kernel {
     pub(crate) leases: Mutex<HashMap<String, String>>,
     pub(crate) live_tools: tokio::sync::Mutex<HashMap<String, (Instant, Vec<AppTool>)>>,
     pub live_text: tokio::sync::broadcast::Sender<(String, String)>,
+    /// How long each log append took since boot, in microseconds (V6).
+    pub capture: Mutex<Capture>,
+}
+
+/// Capture overhead: the cost of writing each step to the log (V6).
+#[derive(Default, Clone, serde::Serialize)]
+pub struct Capture {
+    pub appends: u64,
+    pub total_us: u64,
+    pub max_us: u64,
+    /// The most recent append times, for percentiles.
+    #[serde(skip)]
+    pub recent: std::collections::VecDeque<u64>,
 }
 
 pub fn new_id(prefix: &str) -> String {
@@ -48,6 +62,7 @@ impl Kernel {
             state.apply(&e);
         }
         let vault = Arc::new(Vault::open(&cfg.appliance.state_dir)?);
+        let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
         let adapters = Adapters::new(&cfg.appliance.state_dir, vault.clone(), &cfg.adapters);
         let (live_text, _) = tokio::sync::broadcast::channel(1024);
         let k = Arc::new(Kernel {
@@ -57,6 +72,7 @@ impl Kernel {
             mcp: Mcp::new(),
             adapters,
             vault,
+            accounts,
             log,
             state: Mutex::new(state),
             write: tokio::sync::Mutex::new(()),
@@ -64,9 +80,10 @@ impl Kernel {
             leases: Mutex::new(HashMap::new()),
             live_tools: tokio::sync::Mutex::new(HashMap::new()),
             live_text,
+            capture: Mutex::new(Capture::default()),
             cfg,
         });
-        k.emit("kernel", Ev::KernelBoot { version: HARNESS_VERSION.into(), pid: std::process::id() }).await?;
+        k.emit("kernel", Ev::KernelBoot { version: HARNESS_VERSION.into(), pid: std::process::id(), instructions: crate::run::instructions_version() }).await?;
         // Guest processes did not survive the restart; tell runs that used a sandbox (K20).
         let restarted: Vec<(String, u32)> = k.read(|s| {
             s.runs
@@ -92,9 +109,25 @@ impl Kernel {
     /// Append an event, then apply it. Only correctness writes come here (K6).
     pub async fn emit(&self, actor: &str, ev: Ev) -> Result<Event> {
         let _g = self.write.lock().await;
+        let t = Instant::now();
         let e = self.log.append(actor, &ev).await?;
+        let us = t.elapsed().as_micros() as u64;
+        {
+            let mut c = self.capture.lock().unwrap();
+            c.appends += 1;
+            c.total_us += us;
+            c.max_us = c.max_us.max(us);
+            c.recent.push_back(us);
+            if c.recent.len() > 2000 {
+                c.recent.pop_front();
+            }
+        }
         self.state.lock().unwrap().apply(&e);
         Ok(e)
+    }
+
+    pub async fn run_events(&self, run: &str) -> Result<Vec<Event>> {
+        self.log.run_events(run).await
     }
 
     pub async fn output_bytes(&self, run: &str, id: &str) -> Result<Option<(String, String, Vec<u8>)>> {
@@ -150,6 +183,18 @@ impl Kernel {
 
     /// Create a task for `person` with the current model and budgets.
     pub async fn create_task(self: &Arc<Self>, actor: &str, person: &str, text: String, attachments: Vec<serde_json::Value>) -> Result<(String, String)> {
+        self.create_tagged(actor, person, text, attachments, None).await
+    }
+
+    /// Create a task, optionally as a trial of an experiment case (V2).
+    pub async fn create_tagged(
+        self: &Arc<Self>,
+        actor: &str,
+        person: &str,
+        text: String,
+        attachments: Vec<serde_json::Value>,
+        experiment: Option<crate::events::ExperimentTag>,
+    ) -> Result<(String, String)> {
         let (task, run) = (new_id("task"), new_id("run"));
         let m = &self.cfg.model;
         let (adapter, model) = self.read(|s| s.model.clone()).unwrap_or_else(|| (m.adapter.clone(), m.name.clone()));
@@ -162,8 +207,9 @@ impl Kernel {
             verifier: self.cfg.verifier.enabled,
             instructions: crate::run::instructions_version(),
             harness: HARNESS_VERSION.into(),
+            playbook: self.read(|s| s.playbook_version),
         };
-        self.emit(actor, Ev::TaskCreated { task: task.clone(), run: run.clone(), person: person.into(), text, attachments, config }).await?;
+        self.emit(actor, Ev::TaskCreated { task: task.clone(), run: run.clone(), person: person.into(), text, attachments, config, experiment }).await?;
         self.wake(&run);
         Ok((task, run))
     }

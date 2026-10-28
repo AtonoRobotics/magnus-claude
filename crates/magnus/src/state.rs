@@ -93,6 +93,46 @@ pub struct Run {
     /// Delivered files: (id, name, media type, size in bytes).
     pub outputs: Vec<(String, String, String, usize)>,
     pub last_seq: i64,
+    pub experiment: Option<crate::events::ExperimentTag>,
+    pub plan: Option<Value>,
+    pub plan_version: u32,
+    pub outcome_view: Option<Value>,
+    pub spoken: Option<String>,
+    /// Graders' verdicts: (grader, passed, score, details).
+    pub grades: Vec<(String, bool, Option<f64>, Value)>,
+    pub created_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    /// Time of the latest event for this run, to spot stalled runs.
+    pub last_at: DateTime<Utc>,
+    /// Boundary decisions, in order (E4).
+    pub decisions: Vec<DecisionRec>,
+    /// Every reason this run was ever suspended for.
+    pub suspensions: Vec<String>,
+    /// Provider-reported tokens over all replies.
+    pub tokens: Tokens,
+    pub model_errors: u32,
+    /// Contract checks that failed, over every completion attempt.
+    pub checks_failed: u32,
+    /// The inbox item a suspended run waits on.
+    pub waiting_item: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DecisionRec {
+    pub seq: i64,
+    pub call_id: String,
+    pub tool: String,
+    pub stage: String,
+    pub outcome: String,
+    pub rule: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Tokens {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
 }
 
 impl Run {
@@ -166,6 +206,31 @@ pub struct MemoryEntry {
 }
 
 #[derive(Clone, Debug)]
+pub struct PolicyVersion {
+    pub layer: String,
+    pub seq: i64,
+    pub at: DateTime<Utc>,
+    pub by: String,
+    pub cedar: String,
+}
+
+/// One item of the agent's playbook (I2).
+#[derive(Clone, Debug)]
+pub struct PlaybookItem {
+    pub id: String,
+    pub person: String,
+    pub text: String,
+    pub addresses: Option<String>,
+    /// The run that added it, and the runs that edited it.
+    pub runs: Vec<String>,
+    pub label: Label,
+    /// Playbook version at which the item was added, and retired.
+    pub added: u64,
+    pub retired: Option<u64>,
+    pub added_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Schedule {
     pub id: String,
     pub person: String,
@@ -217,6 +282,13 @@ pub struct State {
     pub attachments: HashMap<String, Vec<Value>>,
     /// Latest conformance result per adapter id: (version, model, passed, report).
     pub conformance: HashMap<String, (String, String, bool, Value)>,
+    pub playbook: BTreeMap<String, PlaybookItem>,
+    /// Every policy a layer ever had, oldest first.
+    pub policy_history: Vec<PolicyVersion>,
+    /// Model and harness changes, for version notices (U5): (seq, at, what, value).
+    pub version_changes: Vec<(i64, DateTime<Utc>, String, String)>,
+    /// Increments with every playbook change (I3).
+    pub playbook_version: u64,
     pub last_seq: i64,
 }
 
@@ -225,16 +297,27 @@ impl State {
         self.last_seq = e.seq;
         if let Some(r) = e.ev.run().and_then(|id| self.runs.get_mut(id)) {
             r.last_seq = e.seq;
+            r.last_at = e.at;
         }
         match &e.ev {
-            Ev::KernelBoot { .. } => {}
+            Ev::KernelBoot { version, instructions, .. } => {
+                for (what, v) in [("harness", version), ("instructions", instructions)] {
+                    if !v.is_empty() && self.version_changes.iter().rev().find(|c| c.2 == what).is_none_or(|c| &c.3 != v) {
+                        self.version_changes.push((e.seq, e.at, what.into(), v.clone()));
+                    }
+                }
+            }
             Ev::SecretSet { name } => {
                 self.secrets.insert(name.clone());
             }
             Ev::PolicySet { layer, cedar } => {
                 self.policies.insert(layer.clone(), cedar.clone());
+                self.policy_history.push(PolicyVersion { layer: layer.clone(), seq: e.seq, at: e.at, by: e.actor.clone(), cedar: cedar.clone() });
+                let n = self.policy_history.iter().filter(|p| &p.layer == layer).count();
+                self.version_changes.push((e.seq, e.at, format!("policy:{layer}"), format!("v{n}")));
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
+            Ev::SignedIn { .. } | Ev::SignedOut { .. } => {}
             Ev::ScheduleSet { id, person, text, every_minutes, daily_at } => {
                 self.schedules.insert(
                     id.clone(),
@@ -249,7 +332,10 @@ impl State {
                     s.last_fired = Some(e.at);
                 }
             }
-            Ev::ModelSet { adapter, model } => self.model = Some((adapter.clone(), model.clone())),
+            Ev::ModelSet { adapter, model } => {
+                self.model = Some((adapter.clone(), model.clone()));
+                self.version_changes.push((e.seq, e.at, "model".into(), format!("{adapter}/{model}")));
+            }
             Ev::ToolPinned { tool, hash, description, input_schema, approved } => {
                 self.pins.insert(
                     tool.clone(),
@@ -263,7 +349,10 @@ impl State {
                     (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: false }),
                 );
             }
-            Ev::TaskCreated { task, run, person, text, config, attachments } => {
+            Ev::TaskCreated { task, run, person, text, config, attachments, experiment } => {
+                // Playbook items the run starts with carry the taint of the
+                // runs that wrote them (I2, M1).
+                let pb = self.playbook_at(person, config.playbook).into_iter().fold(Label::PRINCIPAL, |l, i| l.join(i.label));
                 if !attachments.is_empty() {
                     self.attachments.insert(task.clone(), attachments.clone());
                 }
@@ -287,8 +376,8 @@ impl State {
                         contract_version: 0,
                         verified: BTreeMap::new(),
                         // Attached files are content from elsewhere: data, not instructions.
-                        untrusted: !attachments.is_empty(),
-                        private: false,
+                        untrusted: !attachments.is_empty() || pb.untrusted,
+                        private: pb.private,
                         private_from: Default::default(),
                         model_calls: 0,
                         actions: 0,
@@ -298,6 +387,21 @@ impl State {
                         summary: None,
                         outputs: vec![],
                         last_seq: e.seq,
+                        experiment: experiment.clone(),
+                        plan: None,
+                        plan_version: 0,
+                        outcome_view: None,
+                        spoken: None,
+                        grades: vec![],
+                        created_at: e.at,
+                        ended_at: None,
+                        last_at: e.at,
+                        decisions: vec![],
+                        suspensions: vec![],
+                        tokens: Tokens::default(),
+                        model_errors: 0,
+                        checks_failed: 0,
+                        waiting_item: None,
                     },
                 );
             }
@@ -309,10 +413,18 @@ impl State {
             Ev::ModelReply { run, step, blocks, state, usage, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.usd += usage.cost_usd;
+                    r.tokens.input += usage.input_tokens;
+                    r.tokens.output += usage.output_tokens;
+                    r.tokens.cache_read += usage.cache_read_tokens;
+                    r.tokens.cache_write += usage.cache_write_tokens;
                     r.replies.push(Reply { step: *step, seq: e.seq, blocks: blocks.clone(), state: state.clone() });
                 }
             }
-            Ev::ModelError { .. } => {}
+            Ev::ModelError { run, .. } => {
+                if let Some(r) = self.runs.get_mut(run) {
+                    r.model_errors += 1;
+                }
+            }
             Ev::Notice { run, step, text } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.notices.push((*step, e.seq, text.clone()));
@@ -327,7 +439,11 @@ impl State {
                     );
                 }
             }
-            Ev::Decision { .. } => {}
+            Ev::Decision { run, call_id, tool, outcome, stage, rule, .. } => {
+                if let Some(r) = self.runs.get_mut(run) {
+                    r.decisions.push(DecisionRec { seq: e.seq, call_id: call_id.clone(), tool: tool.clone(), stage: stage.clone(), outcome: outcome.clone(), rule: rule.clone() });
+                }
+            }
             Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, sources } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     let rec = ResultRec { seq: e.seq, text: text.clone(), is_error: *is_error, status: status.clone(), data: data.clone() };
@@ -358,16 +474,73 @@ impl State {
                     r.verified.clear();
                 }
             }
+            Ev::Plan { run, version, plan } => {
+                if let Some(r) = self.runs.get_mut(run) {
+                    r.plan = Some(plan.clone());
+                    r.plan_version = *version;
+                }
+            }
+            Ev::Playbook { item, op, person, run, text, addresses, label } => {
+                self.playbook_version += 1;
+                let v = self.playbook_version;
+                self.version_changes.push((e.seq, e.at, "playbook".into(), format!("v{v}")));
+                match op.as_str() {
+                    "add" => {
+                        self.playbook.insert(
+                            item.clone(),
+                            PlaybookItem {
+                                id: item.clone(),
+                                person: person.clone(),
+                                text: text.clone().unwrap_or_default(),
+                                addresses: addresses.clone(),
+                                runs: vec![run.clone()],
+                                label: *label,
+                                added: v,
+                                retired: None,
+                                added_at: e.at,
+                            },
+                        );
+                    }
+                    "edit" => {
+                        if let Some(i) = self.playbook.get_mut(item) {
+                            if let Some(t) = text {
+                                i.text = t.clone();
+                            }
+                            if addresses.is_some() {
+                                i.addresses = addresses.clone();
+                            }
+                            i.runs.push(run.clone());
+                            i.label = i.label.join(*label);
+                        }
+                    }
+                    "retire" => {
+                        if let Some(i) = self.playbook.get_mut(item) {
+                            i.retired = Some(v);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ev::Graded { run, grader, passed, score, details } => {
+                if let Some(r) = self.runs.get_mut(run) {
+                    r.grades.push((grader.clone(), *passed, *score, details.clone()));
+                }
+            }
             Ev::Verification { run, criterion, passed, evidence, by } => {
                 if let Some(r) = self.runs.get_mut(run) {
+                    if !passed {
+                        r.checks_failed += 1;
+                    }
                     r.verified.insert(criterion.clone(), (*passed, evidence.clone(), by.clone()));
                 }
             }
-            Ev::Suspended { run, reason, .. } => {
+            Ev::Suspended { run, reason, item } => {
                 if let Some(r) = self.runs.get_mut(run) {
+                    r.suspensions.push(reason.clone());
                     if !r.status.terminal() {
                         r.status = Status::Suspended;
                         r.reason = Some(reason.clone());
+                        r.waiting_item = item.clone();
                     }
                 }
             }
@@ -377,14 +550,18 @@ impl State {
                         r.status = Status::Running;
                         r.reason = None;
                         r.wait_until = None;
+                        r.waiting_item = None;
                     }
                 }
             }
-            Ev::Completed { run, summary } => {
+            Ev::Completed { run, summary, view, spoken } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.status = Status::Completed;
                     r.summary = Some(summary.clone());
+                    r.outcome_view = view.clone();
+                    r.spoken = spoken.clone();
                     r.reason = None;
+                    r.ended_at = Some(e.at);
                 }
             }
             Ev::Failed { run, reason, .. } => {
@@ -392,12 +569,14 @@ impl State {
                     r.status = Status::Failed;
                     r.summary = Some(reason.clone());
                     r.reason = None;
+                    r.ended_at = Some(e.at);
                 }
             }
             Ev::Cancelled { run } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.status = Status::Cancelled;
                     r.reason = None;
+                    r.ended_at = Some(e.at);
                 }
             }
             Ev::Item { id, item_kind, task, run, person, summary, details } => {
@@ -467,6 +646,11 @@ impl State {
                 at: e.at,
             }),
         }
+    }
+
+    /// The person's playbook items that were live at playbook version `v`.
+    pub fn playbook_at(&self, person: &str, v: u64) -> Vec<&PlaybookItem> {
+        self.playbook.values().filter(|i| i.person == person && i.added <= v && i.retired.is_none_or(|r| r > v)).collect()
     }
 
     pub fn open_item_for_run(&self, run: &str, kind: &str) -> Option<&Item> {

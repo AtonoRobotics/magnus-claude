@@ -25,12 +25,76 @@ pub struct Config {
     pub people: Vec<Person>,
     #[serde(default)]
     pub connectors: Vec<Connector>,
+    #[serde(default)]
+    pub sign_in: SignIn,
+    #[serde(default)]
+    pub observability: Observability,
+}
+
+/// Developer-view settings (K51).
+#[derive(Deserialize, Clone, Debug)]
+pub struct Observability {
+    /// A running run with no new event for this long counts as stalled (V3).
+    #[serde(default = "stall_minutes")]
+    pub stall_minutes: u32,
+}
+
+impl Default for Observability {
+    fn default() -> Self {
+        Observability { stall_minutes: stall_minutes() }
+    }
+}
+
+fn stall_minutes() -> u32 {
+    15
 }
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Appliance {
     pub state_dir: PathBuf,
+    /// Plain HTTP. Passwords are refused here except from this machine.
     pub listen: String,
+    /// HTTPS for people's apps on the network. Without `tls_cert` and
+    /// `tls_key`, the appliance makes its own certificate on first start and
+    /// apps pin it on first connection.
+    #[serde(default)]
+    pub tls_listen: Option<String>,
+    #[serde(default)]
+    pub tls_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub tls_key: Option<PathBuf>,
+}
+
+/// Password sign-in for people's apps. Tunable values, not decisions (K51).
+#[derive(Deserialize, Clone, Debug)]
+pub struct SignIn {
+    #[serde(default = "session_days")]
+    pub session_days: u32,
+    #[serde(default = "max_failures")]
+    pub max_failures: u32,
+    #[serde(default = "lockout_minutes")]
+    pub lockout_minutes: u32,
+    #[serde(default = "min_password_length")]
+    pub min_password_length: usize,
+}
+
+impl Default for SignIn {
+    fn default() -> Self {
+        SignIn { session_days: session_days(), max_failures: max_failures(), lockout_minutes: lockout_minutes(), min_password_length: min_password_length() }
+    }
+}
+
+fn session_days() -> u32 {
+    30
+}
+fn max_failures() -> u32 {
+    5
+}
+fn lockout_minutes() -> u32 {
+    15
+}
+fn min_password_length() -> usize {
+    10
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -133,7 +197,9 @@ pub struct Person {
     pub id: String,
     #[serde(default)]
     pub name: String,
-    pub token: String,
+    /// An API token for scripts; people's apps sign in with a password instead.
+    #[serde(default)]
+    pub token: Option<String>,
     #[serde(default)]
     pub groups: Vec<String>,
     #[serde(default)]
@@ -202,7 +268,7 @@ impl Config {
         use sha2::Digest;
         // Compare digests so the comparison time does not depend on the token.
         let want = sha2::Sha256::digest(token.as_bytes());
-        self.people.iter().find(|p| sha2::Sha256::digest(p.token.as_bytes()) == want)
+        self.people.iter().find(|p| p.token.as_ref().is_some_and(|t| sha2::Sha256::digest(t.as_bytes()) == want))
     }
 }
 
@@ -212,5 +278,9 @@ impl Person {
     }
     pub fn is_owner(&self) -> bool {
         self.has_role("owner")
+    }
+    /// The developer view: raw log, runs, experiments (K10, K45).
+    pub fn is_developer(&self) -> bool {
+        self.has_role("developer")
     }
 }

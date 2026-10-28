@@ -115,6 +115,18 @@ impl Log {
         Ok(Some((b["name"].as_str().unwrap_or("file").into(), b["media_type"].as_str().unwrap_or("application/octet-stream").into(), bytes)))
     }
 
+    /// One run's events in order: the developer view's full trace (V4).
+    pub async fn run_events(&self, run: &str) -> Result<Vec<Event>> {
+        let rows = self.client.query("SELECT seq, at, actor, body FROM public.events WHERE run_id = $1 ORDER BY seq", &[&run]).await?;
+        rows.into_iter()
+            .map(|r| {
+                let body: Value = r.get(3);
+                let ev: Ev = serde_json::from_value(body)?;
+                Ok(Event { seq: r.get(0), at: r.get(1), actor: r.get(2), ev })
+            })
+            .collect()
+    }
+
     pub async fn load(&self) -> Result<Vec<Event>> {
         let rows = self.client.query("SELECT seq, at, actor, body FROM public.events ORDER BY seq", &[]).await?;
         let mut out = Vec::with_capacity(rows.len());

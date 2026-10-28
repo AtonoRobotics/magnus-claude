@@ -17,6 +17,17 @@ pub struct RunConfig {
     pub verifier: bool,
     pub instructions: String,
     pub harness: String,
+    /// The playbook version the run started with (I3).
+    #[serde(default)]
+    pub playbook: u64,
+}
+
+/// A task started as one trial of an experiment case (V2).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ExperimentTag {
+    pub id: String,
+    pub case: String,
+    pub trial: u32,
 }
 
 /// How to rebuild exactly what one model call was sent (K5): the run's
@@ -34,6 +45,8 @@ pub enum Ev {
     KernelBoot {
         version: String,
         pid: u32,
+        #[serde(default)]
+        instructions: String,
     },
     SecretSet {
         name: String,
@@ -44,6 +57,16 @@ pub enum Ev {
     },
     KillSwitch {
         engaged: bool,
+    },
+    /// A person signed in from an app. The token itself is never logged.
+    SignedIn {
+        person: String,
+        session: String,
+        client: String,
+    },
+    SignedOut {
+        person: String,
+        session: String,
     },
     /// A recurring task a person set up (or accepted from the agent's proposal).
     ScheduleSet {
@@ -96,6 +119,8 @@ pub enum Ev {
         #[serde(default)]
         attachments: Vec<Value>,
         config: RunConfig,
+        #[serde(default)]
+        experiment: Option<ExperimentTag>,
     },
     ModelCall {
         run: String,
@@ -169,6 +194,13 @@ pub enum Ev {
         version: u32,
         contract: Value,
     },
+    /// The agent's plan (K36): ordered units, each with an id, a goal and
+    /// when it is done. A revision is a new version.
+    Plan {
+        run: String,
+        version: u32,
+        plan: Value,
+    },
     Verification {
         run: String,
         criterion: String,
@@ -188,6 +220,12 @@ pub enum Ev {
     Completed {
         run: String,
         summary: String,
+        /// Fixed components the agent composed to show the outcome (U8).
+        #[serde(default)]
+        view: Option<Value>,
+        /// The outcome written for listening, read aloud on request (U8).
+        #[serde(default)]
+        spoken: Option<String>,
     },
     Failed {
         run: String,
@@ -259,6 +297,30 @@ pub enum Ev {
         passed: bool,
         report: Value,
     },
+    /// One itemized change to the agent's playbook (I2), made through the
+    /// boundary like a memory write and labeled with the writing run's taint.
+    Playbook {
+        item: String,
+        op: String,
+        person: String,
+        run: String,
+        #[serde(default)]
+        text: Option<String>,
+        /// The failure the item addresses.
+        #[serde(default)]
+        addresses: Option<String>,
+        label: Label,
+    },
+    /// A grader's verdict on a run, recorded by the evaluation runner (V2).
+    Graded {
+        run: String,
+        grader: String,
+        passed: bool,
+        #[serde(default)]
+        score: Option<f64>,
+        #[serde(default)]
+        details: Value,
+    },
     Memory {
         id: String,
         person: String,
@@ -286,6 +348,9 @@ impl Ev {
             | Decision { run, .. }
             | ToolResult { run, .. }
             | Contract { run, .. }
+            | Plan { run, .. }
+            | Playbook { run, .. }
+            | Graded { run, .. }
             | Verification { run, .. }
             | Suspended { run, .. }
             | Resumed { run }
