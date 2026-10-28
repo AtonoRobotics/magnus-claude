@@ -11,3 +11,4 @@ magnus-invariants = { path = "../invariants" }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+axum = "0.8"

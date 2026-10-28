@@ -1507,6 +1507,7 @@ dependencies = [
 name = "magnus-scratch"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "magnus-invariants",
  "reqwest",
  "serde_json",

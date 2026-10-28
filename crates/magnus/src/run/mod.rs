@@ -455,7 +455,16 @@ impl Kernel {
                 failures.push(format!("{id}: the check could not run"));
                 continue;
             };
-            let observed = data.or_else(|| serde_json::from_str::<Value>(&text).ok()).unwrap_or(Value::String(text.clone()));
+            // A check sees the structured result and the text beside it: a
+            // fetched page's structured part holds only its content type.
+            let observed = match data {
+                Some(Value::Object(mut m)) => {
+                    m.entry("text").or_insert_with(|| Value::String(text.clone()));
+                    Value::Object(m)
+                }
+                Some(other) => other,
+                None => serde_json::from_str::<Value>(&text).ok().unwrap_or(Value::String(text.clone())),
+            };
             let mut ok = !is_error;
             let mut seen = vec![];
             for e in check["expect"].as_array().cloned().unwrap_or_default() {
