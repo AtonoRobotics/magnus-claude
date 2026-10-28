@@ -4,7 +4,7 @@
 
 - The invariant tests pass: 45 of 45, on three consecutive full runs and again after every later change.
 - A clean-context security review found 14 kernel holes the tests did not catch. All are fixed and covered by `tests/scratch/tests/review.rs` (7 regressions, passing). The test weaknesses it found are proposed as contract changes in `docs/proposals/invariant-tests-v2.md`; these need the owner's approval.
-- **Blocked on live models.** The dev appliance listens on all interfaces, port 7700 (http://192.168.0.50:7700 on the LAN). Other machines reach it only once the host firewall allows 7700/tcp (ufw allows only 22 today; opening it is the owner's step). It is waiting for the owner to sign in to at least one provider (Settings → Models). Until then, no adapter conformance suite, plain-language score or TheAgentCompany score can be produced.
+- **Blocked on live models.** The dev appliance listens on all interfaces, port 7700 (http://192.168.0.50:7700 on the LAN). The owner opened 7700/tcp in ufw (2026-10-27). It is waiting for the owner to sign in to at least one provider (Settings → Models). Until then, no adapter conformance suite, plain-language score or TheAgentCompany score can be produced.
 - TheAgentCompany preparation is with a background agent: service stack, three sample tasks, and a runner design in `eval/tac/`.
 
 ## Done
