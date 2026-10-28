@@ -132,6 +132,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/adapters/{id}/sign-in", post(sign_in_begin))
         .route("/v1/adapters/{id}/sign-in/complete", post(sign_in_complete))
         .route("/v1/memory", get(memory))
+        .route("/v1/memory/{id}", axum::routing::delete(forget))
         .route("/v1/schedules", get(schedules).post(add_schedule))
         .route("/v1/schedules/{id}", axum::routing::delete(remove_schedule))
         .merge(crate::dev::router())
@@ -278,7 +279,7 @@ async fn sign_out(State(k): K, h: HeaderMap) -> Response {
 
 async fn me(State(k): K, h: HeaderMap) -> Response {
     match who(&k, &h) {
-        Ok(p) => Json(json!({ "id": p.id, "name": p.name, "groups": p.groups, "roles": p.roles })).into_response(),
+        Ok(p) => Json(json!({ "id": p.id, "name": p.name, "groups": p.groups, "roles": p.roles, "voice": k.cfg.speech.is_some() })).into_response(),
         Err(r) => r,
     }
 }
@@ -819,6 +820,21 @@ async fn memory(State(k): K, h: HeaderMap) -> Response {
     Json(json!({ "memory": items })).into_response()
 }
 
+/// Forget one of the person's own memories.
+async fn forget(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if !k.read(|s| s.memory.iter().any(|m| m.id == id && m.person == p.id)) {
+        return err(StatusCode::NOT_FOUND, "no such memory");
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::MemoryForgotten { id }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
 async fn health(State(k): K) -> Response {
     Json(json!({ "ok": true, "version": HARNESS_VERSION, "kill_switch": k.read(|s| s.kill_switch) })).into_response()
 }
@@ -869,7 +885,7 @@ async fn transcribe(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response
         return r;
     }
     let Some(data) = b["data_b64"].as_str() else { return err(StatusCode::BAD_REQUEST, "no audio") };
-    match crate::speech::transcribe(&k.cfg.appliance.state_dir, data).await {
+    match crate::speech::transcribe(k.cfg.speech.as_ref(), &k.cfg.appliance.state_dir, data).await {
         Ok(text) => Json(json!({ "text": text })).into_response(),
         Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")),
     }

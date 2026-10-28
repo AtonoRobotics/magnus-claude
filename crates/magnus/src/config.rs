@@ -21,6 +21,9 @@ pub struct Config {
     pub sandbox: Option<Sandbox>,
     #[serde(default)]
     pub browser: Option<Browser>,
+    /// Local speech to text for voice input (`config/install-whisper.sh`).
+    #[serde(default)]
+    pub speech: Option<Speech>,
     #[serde(default)]
     pub people: Vec<Person>,
     #[serde(default)]
@@ -201,6 +204,14 @@ pub struct Web {
 pub struct Browser {
     pub command: Vec<String>,
     pub chromium: PathBuf,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct Speech {
+    /// whisper.cpp's `whisper-cli`.
+    pub whisper: PathBuf,
+    /// A ggml model file.
+    pub model: PathBuf,
 }
 
 #[derive(Deserialize, Clone, Debug)]

@@ -334,6 +334,7 @@ impl State {
                     Schedule { id: id.clone(), person: person.clone(), text: text.clone(), every_minutes: *every_minutes, daily_at: daily_at.clone(), created: e.at, last_fired: None },
                 );
             }
+            Ev::MemoryForgotten { id } => self.memory.retain(|m| &m.id != id),
             Ev::ScheduleRemoved { id } => {
                 self.schedules.remove(id);
             }

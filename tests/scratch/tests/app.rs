@@ -450,3 +450,30 @@ async fn a_model_change_is_a_version_change() {
     assert_eq!(after["model"], "anthropic/claude-other");
     assert!(after["latest_seq"].as_i64() > before["latest_seq"].as_i64());
 }
+
+/// A person sees their own memories and can have one forgotten; nobody
+/// else can, and a forgotten memory is gone after a restart too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_forgets_a_memory() {
+    let model = FakeModel::start(steps(vec![
+        contract_unchecked("remember", "remembered"),
+        tool("memory_write", json!({ "fact": "alice prefers PDF reports", "topic": "reports" })),
+        fail("done"),
+    ]))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &model).await;
+    let (alice, bob) = (app.api("alice"), app.api("bob"));
+    let id = alice.submit("Remember that I like PDF reports.").await;
+    alice.wait_settled(&id).await;
+    let (_, v) = alice.get("/v1/memory").await;
+    let mem = v["memory"].as_array().unwrap().clone();
+    assert_eq!(mem.len(), 1, "{v}");
+    let mid = mem[0]["id"].as_str().unwrap().to_string();
+    assert!(bob.get("/v1/memory").await.1["memory"].as_array().unwrap().is_empty(), "bob sees alice's memory");
+    let (st, _) = bob.send(reqwest::Method::DELETE, &format!("/v1/memory/{mid}"), None).await;
+    assert_eq!(st, 404, "bob forgot alice's memory");
+    let (st, _) = alice.send(reqwest::Method::DELETE, &format!("/v1/memory/{mid}"), None).await;
+    assert_eq!(st, 204);
+    app.restart().await;
+    assert!(alice.get("/v1/memory").await.1["memory"].as_array().unwrap().is_empty(), "the memory came back");
+}

@@ -352,6 +352,10 @@ pub enum Ev {
         #[serde(default)]
         sources: Vec<String>,
     },
+    /// The person had a memory forgotten; it is never read back again.
+    MemoryForgotten {
+        id: String,
+    },
 }
 
 impl Ev {
