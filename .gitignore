@@ -6,3 +6,5 @@
 /browser/node_modules
 /desktop/node_modules
 /eval/plain/results
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

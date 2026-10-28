@@ -1,6 +1,10 @@
 """Run the plain-language suite against a Magnus appliance and grade it.
 
-    python3 eval/plain/run.py --url http://127.0.0.1:7700 --token-file ~/.magnus-appliance/magnus.toml [--only id,id] [--trials N] [--parallel N]
+    python3 eval/plain/run.py [--url URL] --token-file ~/.magnus-appliance/magnus.toml [--only id,id] [--trials N] [--parallel N] [--experiment ID]
+
+With a token that holds the developer role, each trial is recorded as an
+experiment trial and its grade posted back, so the developer view compares
+configurations case by case (V2). Without it, trials are plain tasks.
 
 The runner plays a passive person: it answers questions with "use your best
 judgment", accepts review cards, and declines approvals (no task here needs
@@ -12,6 +16,14 @@ import argparse, base64, concurrent.futures, datetime, json, mimetypes, os, re, 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TERMINAL = {"completed", "failed", "cancelled"}
+
+
+def url_from(path):
+    """The appliance's plain-HTTP address from its config, reached on loopback."""
+    import tomllib
+    listen = tomllib.load(open(os.path.expanduser(path), "rb"))["appliance"]["listen"]
+    host, port = listen.rsplit(":", 1)
+    return f"http://{'127.0.0.1' if host in ('0.0.0.0', '::', '[::]') else host}:{port}"
 
 
 def token_from(path):
@@ -35,7 +47,7 @@ class Api:
             return data if raw else json.loads(data or b"null")
 
 
-def run_task(api, t, rdir, timeout_s):
+def run_task(api, t, rdir, timeout_s, exp=None, trial=0):
     os.makedirs(os.path.join(rdir, "outputs"), exist_ok=True)
     atts = []
     for name in t.get("attachments", []):
@@ -43,7 +55,10 @@ def run_task(api, t, rdir, timeout_s):
         atts.append({"name": name, "media_type": mimetypes.guess_type(name)[0] or "application/octet-stream",
                      "data_b64": base64.b64encode(open(p, "rb").read()).decode()})
     started = time.time()
-    tid = api.call("POST", "/v1/tasks", {"text": t["text"], "attachments": atts})["task_id"]
+    if exp:
+        tid = api.call("POST", f"/v1/dev/experiments/{exp}/trials", {"case": t["id"], "trial": trial, "text": t["text"], "attachments": atts})["task_id"]
+    else:
+        tid = api.call("POST", "/v1/tasks", {"text": t["text"], "attachments": atts})["task_id"]
     interventions = []
     handled = set()
     while True:
@@ -98,15 +113,17 @@ def grade(t, rdir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="http://127.0.0.1:7700")
+    ap.add_argument("--url", default="", help="default: the config's appliance.listen")
     ap.add_argument("--token-file", default="~/.magnus-appliance/magnus.toml")
     ap.add_argument("--only", default="")
     ap.add_argument("--trials", type=int, default=1)
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--timeout", type=int, default=1500)
+    ap.add_argument("--experiment", default="", help="experiment id (default: plain-<time>)")
     a = ap.parse_args()
-    api = Api(a.url, token_from(a.token_file))
+    api = Api(a.url or url_from(a.token_file), token_from(a.token_file))
     model = api.call("GET", "/v1/model")
+    roles = api.call("GET", "/v1/me").get("roles", [])
     tasks = json.load(open(os.path.join(HERE, "tasks.json")))
     if a.only:
         keep = set(a.only.split(","))
@@ -114,13 +131,18 @@ def main():
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     root = os.path.join(HERE, "results", stamp)
     jobs = [(t, k) for t in tasks for k in range(a.trials)]
+    exp = (a.experiment or f"plain-{stamp}") if "developer" in roles else None
+    if not exp:
+        print("This token has no developer role: trials run as plain tasks and do not appear as an experiment.", file=sys.stderr)
 
     def one(job):
         t, k = job
         rdir = os.path.join(root, f"{t['id']}-{k}")
         try:
-            tid, task, inter, secs = run_task(api, t, rdir, a.timeout)
+            tid, task, inter, secs = run_task(api, t, rdir, a.timeout, exp, k)
             g = grade(t, rdir)
+            if exp and task.get("run_id"):
+                api.call("POST", f"/v1/dev/runs/{task['run_id']}/grades", {"grader": "plain/grade.py", "passed": bool(g["passed"]), "score": g["score"], "details": {"checks": g["checks"]}})
         except Exception as e:
             tid, task, inter, secs, g = None, {}, [f"runner error: {e}"], 0, {"score": 0.0, "passed": False, "checks": [["runner", False, str(e)]]}
         usage = task.get("usage", {})
@@ -134,7 +156,7 @@ def main():
         results = list(ex.map(one, jobs))
     n = len(results)
     summary = {
-        "model": model, "when": stamp, "tasks": len(tasks), "trials": a.trials,
+        "model": model, "when": stamp, "tasks": len(tasks), "trials": a.trials, "experiment": exp,
         "mean_score": round(sum(r["score"] for r in results) / n, 3) if n else 0,
         "pass_rate": round(sum(r["passed"] for r in results) / n, 3) if n else 0,
         "interventions_per_task": round(sum(len(r["interventions"]) for r in results) / n, 2) if n else 0,
