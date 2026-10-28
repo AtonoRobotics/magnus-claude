@@ -62,6 +62,8 @@ pub struct Facts {
     pub audience: Audience,
     pub connector: Option<Connector>,
     pub remote: String,
+    /// The input field of the message this tool sends, signed by the kernel.
+    pub sends: Option<String>,
 }
 
 /// Look up a tool by the name the model uses.
@@ -75,18 +77,20 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
             audience: b.audience,
             connector: None,
             remote: tool.into(),
+            sends: None,
         });
     }
     let (app, remote) = tool.split_once("__")?;
-    let c = k.cfg.connectors.iter().find(|c| c.name == app)?;
-    let class = c.tools.get(remote)?;
+    let c = k.connector(app)?;
+    let class = k.class_of(tool)?;
     Some(Facts {
         name: tool.into(),
         app: app.into(),
         risk: Risk::parse(&class.risk)?,
         label: class.label.as_deref().and_then(Label::parse).or_else(|| Label::parse(&c.label))?,
         audience: Audience::parse(&c.audience)?,
-        connector: Some(c.clone()),
+        sends: class.sends.clone(),
+        connector: Some(c),
         remote: remote.into(),
     })
 }
@@ -98,10 +102,18 @@ fn is_chat_tool(f: &Facts) -> bool {
 }
 
 pub fn has_rights(person: &Person, f: &Facts) -> bool {
-    match &f.connector {
-        Some(c) if !c.access_groups.is_empty() => c.access_groups.iter().any(|g| person.groups.contains(g)),
-        _ => true,
-    }
+    f.connector.as_ref().is_none_or(|c| may_use(person, c))
+}
+
+/// Whether a person's identity-provider groups give them an app.
+pub fn may_use(person: &Person, c: &Connector) -> bool {
+    c.access_groups.is_empty() || c.access_groups.iter().any(|g| person.groups.contains(g))
+}
+
+/// The line that signs every message an app sends for a person (E6).
+pub fn attribution(person: &Person) -> String {
+    let who = if person.name.trim().is_empty() { person.id.as_str() } else { person.name.trim() };
+    format!("Sent by Magnus, a digital worker, on behalf of {who}.")
 }
 
 pub fn idempotency_key(run: &str, step_id: &str, tool: &str) -> String {
@@ -199,6 +211,7 @@ impl Kernel {
 
     /// Run an action through the boundary. Errors inside any stage deny it.
     pub async fn execute(self: &Arc<Self>, a: Action) -> Result<Verdict> {
+        let a = self.signed(a);
         match self.pipeline(&a).await {
             Ok(v) => Ok(v),
             Err(e) => {
@@ -209,6 +222,30 @@ impl Kernel {
                 self.deny(&a, "boundary", &reason, true, None).await
             }
         }
+    }
+
+    /// A message an app sends says it is from Magnus, for the person the run
+    /// acts for (E6). The kernel signs it before any stage, so the approval,
+    /// the intent and the idempotency key all cover the text that leaves.
+    fn signed(&self, mut a: Action) -> Action {
+        if a.issuer != Issuer::Model || !a.input.is_object() {
+            return a;
+        }
+        let Some(field) = facts(self, &a.tool).and_then(|f| f.sends) else { return a };
+        let Some(person) = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).and_then(|p| self.person(&p).cloned()) else { return a };
+        let line = attribution(&person);
+        match a.input.get_mut(&field) {
+            Some(Value::String(body)) => {
+                let html = body.trim_start().starts_with('<') && body.contains("</");
+                let signed = if html { format!("<p>{line}</p>") } else { format!("\n\n--\n{line}") };
+                if !body.trim_end().ends_with(signed.trim()) {
+                    body.push_str(&signed);
+                }
+            }
+            Some(v) if !v.is_null() => {}
+            _ => a.input[&field] = json!(format!("--\n{line}")),
+        }
+        a
     }
 
     async fn pipeline(self: &Arc<Self>, a: &Action) -> Result<Verdict> {
@@ -231,7 +268,7 @@ impl Kernel {
         if let Some(c) = &f.connector {
             // Compare the live definition with the pin right before acting, so
             // a definition changed after it was listed cannot run (B10).
-            if let Err(why) = self.check_pin(c, &f).await {
+            if let Err(why) = self.check_pin(c, &f, &run.person).await {
                 return self.deny(a, "identify", &why, true, None).await;
             }
             let (pinned, changed) = self.read(|s| (s.pins.contains_key(&a.tool), s.changed.contains_key(&a.tool)));
@@ -302,10 +339,13 @@ impl Kernel {
         if self.read(|s| s.kill_switch) {
             return self.deny(a, "credentials", "the kill switch is engaged", false, None).await;
         }
-        let secret = match f.connector.as_ref().and_then(|c| c.credential.clone()) {
-            Some(name) => match self.vault.get(&name)? {
-                Some(s) => Some(s),
-                None => return self.deny(a, "credentials", &format!("no credential is stored for {}", f.app), false, None).await,
+        // An app's credential is the shared one, or that of the person the
+        // run acts for.
+        let secret = match &f.connector {
+            Some(c) => match self.connector_cred(c, &run.person).await? {
+                crate::connect::Cred::None => None,
+                crate::connect::Cred::Bearer(s) => Some(s),
+                crate::connect::Cred::Missing(why) => return self.deny(a, "credentials", &why, false, None).await,
             },
             None => None,
         };
@@ -378,11 +418,15 @@ impl Kernel {
         }
     }
 
-    async fn check_pin(&self, c: &Connector, f: &Facts) -> std::result::Result<(), String> {
-        let secret = c.credential.as_ref().and_then(|n| self.vault.get(n).ok().flatten());
+    async fn check_pin(&self, c: &Connector, f: &Facts, person: &str) -> std::result::Result<(), String> {
+        let secret = match self.connector_cred(c, person).await.map_err(|e| e.to_string())? {
+            crate::connect::Cred::None => None,
+            crate::connect::Cred::Bearer(s) => Some(s),
+            crate::connect::Cred::Missing(why) => return Err(why),
+        };
         let live = self
             .mcp
-            .list_tools(&c.url, secret.as_ref().map(|s| s.expose()))
+            .list_tools(c, secret.as_ref().map(|s| s.expose()))
             .await
             .map_err(|e| format!("could not read {}'s tool definitions ({e})", f.app))?;
         let Some(t) = live.iter().find(|t| t.name == f.remote) else {
@@ -622,7 +666,7 @@ impl Kernel {
     async fn call(self: &Arc<Self>, a: &Action, f: &Facts, bearer: Option<&str>, key: &str) -> std::result::Result<(String, bool, Option<Value>), CallFailure> {
         if let Some(c) = &f.connector {
             let k = (c.idempotency == "header").then_some(key);
-            return match self.mcp.call(&c.url, bearer, &f.remote, &a.input, k).await {
+            return match self.mcp.call(c, bearer, &f.remote, &a.input, k).await {
                 Ok(o) => Ok((o.text, o.is_error, o.structured)),
                 Err(crate::apps::CallError::NotSent(m)) => Err(CallFailure::NotDone(m)),
                 Err(crate::apps::CallError::Unknown(m)) => Err(CallFailure::Unknown(m)),

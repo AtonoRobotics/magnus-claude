@@ -399,6 +399,29 @@ pub enum Ev {
     MemoryForgotten {
         id: String,
     },
+    /// The owner added or changed a connector in the app.
+    ConnectorSet {
+        connector: crate::config::Connector,
+    },
+    ConnectorRemoved {
+        name: String,
+    },
+    /// The owner classified an app tool: its risk, its results' label, and
+    /// the field of a message it sends.
+    ToolClassified {
+        tool: String,
+        class: crate::config::ToolClass,
+    },
+    /// A person signed in to an app, or out. Their tokens are in the vault,
+    /// never in the log.
+    ConnectorSignedIn {
+        connector: String,
+        person: String,
+    },
+    ConnectorSignedOut {
+        connector: String,
+        person: String,
+    },
 }
 
 impl Ev {

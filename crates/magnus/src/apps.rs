@@ -1,11 +1,17 @@
-//! Clients for the person's apps over MCP (streamable HTTP transport).
+//! Clients for the person's apps over MCP: streamable HTTP, or stdio for a
+//! server the appliance runs itself.
 //!
 //! Only the boundary calls `call`, after every check, with the credential it
 //! resolved from the vault. The kernel lists tools to pin their definitions.
 
+use crate::config::Connector;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const PROTOCOL: &str = "2025-06-18";
 
@@ -33,7 +39,22 @@ pub struct CallOutput {
 #[derive(Clone)]
 pub struct Mcp {
     http: reqwest::Client,
+    /// One running server per stdio connector, started on first use.
+    stdio: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<Stdio>>>>>>,
+    /// Where stdio servers get a home directory of their own.
+    home: PathBuf,
 }
+
+/// A stdio server: newline-delimited JSON-RPC on its stdin and stdout.
+struct Stdio {
+    command: Vec<String>,
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    next: u64,
+}
+
+const STDIO_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct Session {
     url: String,
@@ -42,14 +63,60 @@ struct Session {
 }
 
 impl Mcp {
-    pub fn new() -> Mcp {
+    pub fn new(state_dir: &std::path::Path) -> Mcp {
         Mcp {
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(120))
                 .build()
                 .expect("http client"),
+            stdio: Default::default(),
+            home: state_dir.join("connectors"),
         }
+    }
+
+    /// Start a stdio server with nothing of the appliance's environment but
+    /// PATH, in a home directory of its own, and introduce ourselves.
+    async fn spawn(&self, c: &Connector) -> Result<Stdio, CallError> {
+        let home = self.home.join(&c.name);
+        std::fs::create_dir_all(&home).map_err(|e| CallError::NotSent(format!("could not make {}: {e}", home.display())))?;
+        let mut cmd = tokio::process::Command::new(&c.command[0]);
+        cmd.args(&c.command[1..])
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &home)
+            .current_dir(&home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().map_err(|e| CallError::NotSent(format!("could not start {}: {e}", c.command[0])))?;
+        let stdin = child.stdin.take().expect("piped");
+        let stdout = BufReader::new(child.stdout.take().expect("piped")).lines();
+        let mut p = Stdio { command: c.command.clone(), child, stdin, stdout, next: 1 };
+        let init = json!({ "protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": { "name": "magnus", "version": env!("CARGO_PKG_VERSION") } });
+        p.request("initialize", init).await.map_err(|e| CallError::NotSent(format!("{} did not start: {}", c.name, match e { CallError::NotSent(m) | CallError::Unknown(m) => m })))?;
+        p.notify("notifications/initialized").await.map_err(|_| CallError::NotSent(format!("{} stopped while starting", c.name)))?;
+        Ok(p)
+    }
+
+    /// Send one request to a stdio connector's server, starting it (again)
+    /// when it is not running. A request that may have reached it is never
+    /// resent.
+    async fn stdio_rpc(&self, c: &Connector, method: &str, params: Value) -> Result<Value, CallError> {
+        let slot = self.stdio.lock().unwrap().entry(c.name.clone()).or_default().clone();
+        let mut g = slot.lock().await;
+        let alive = g.as_mut().is_some_and(|p| p.command == c.command && p.child.try_wait().ok().flatten().is_none());
+        if !alive {
+            *g = Some(self.spawn(c).await?);
+        }
+        let p = g.as_mut().expect("started");
+        let r = p.request(method, params).await;
+        if matches!(r, Err(CallError::Unknown(_))) {
+            // Its state is unknown: the next request starts it afresh.
+            *g = None;
+        }
+        r
     }
 
     async fn rpc(&self, s: &Session, id: Option<u64>, method: &str, params: Value, extra: &[(&str, &str)]) -> Result<Option<Value>, CallError> {
@@ -158,8 +225,8 @@ impl Mcp {
         }
     }
 
-    pub async fn list_tools(&self, url: &str, bearer: Option<&str>) -> Result<Vec<AppTool>> {
-        let tools = self.list_tools_raw(url, bearer).await.map_err(|e| anyhow!("{}", Self::clean(&e.to_string(), bearer)))?;
+    pub async fn list_tools(&self, c: &Connector, bearer: Option<&str>) -> Result<Vec<AppTool>> {
+        let tools = self.list_tools_raw(c, bearer).await.map_err(|e| anyhow!("{}", Self::clean(&e.to_string(), bearer)))?;
         Ok(tools
             .into_iter()
             .map(|t| AppTool {
@@ -170,10 +237,13 @@ impl Mcp {
             .collect())
     }
 
-    async fn list_tools_raw(&self, url: &str, bearer: Option<&str>) -> Result<Vec<AppTool>> {
-        let s = self.open(url, bearer).await.map_err(|e| anyhow!("{e:?}"))?;
-        let r = self.rpc(&s, Some(1), "tools/list", json!({}), &[]).await.map_err(|e| anyhow!("{e:?}"))?;
-        let r = r.unwrap_or_default();
+    async fn list_tools_raw(&self, c: &Connector, bearer: Option<&str>) -> Result<Vec<AppTool>> {
+        let r = if c.transport == "mcp_stdio" {
+            self.stdio_rpc(c, "tools/list", json!({})).await.map_err(|e| anyhow!("{e:?}"))?
+        } else {
+            let s = self.open(&c.url, bearer).await.map_err(|e| anyhow!("{e:?}"))?;
+            self.rpc(&s, Some(1), "tools/list", json!({}), &[]).await.map_err(|e| anyhow!("{e:?}"))?.unwrap_or_default()
+        };
         Ok(r["tools"]
             .as_array()
             .into_iter()
@@ -186,8 +256,8 @@ impl Mcp {
             .collect())
     }
 
-    pub async fn call(&self, url: &str, bearer: Option<&str>, tool: &str, args: &Value, key: Option<&str>) -> Result<CallOutput, CallError> {
-        match self.call_raw(url, bearer, tool, args, key).await {
+    pub async fn call(&self, c: &Connector, bearer: Option<&str>, tool: &str, args: &Value, key: Option<&str>) -> Result<CallOutput, CallError> {
+        match self.call_raw(c, bearer, tool, args, key).await {
             Ok(o) => Ok(CallOutput {
                 text: Self::clean(&o.text, bearer),
                 structured: o.structured.map(|v| Self::clean_value(v, bearer)),
@@ -197,15 +267,19 @@ impl Mcp {
         }
     }
 
-    async fn call_raw(&self, url: &str, bearer: Option<&str>, tool: &str, args: &Value, key: Option<&str>) -> Result<CallOutput, CallError> {
-        let s = self.open(url, bearer).await?;
+    async fn call_raw(&self, c: &Connector, bearer: Option<&str>, tool: &str, args: &Value, key: Option<&str>) -> Result<CallOutput, CallError> {
         let mut params = json!({ "name": tool, "arguments": args });
         let mut extra = vec![];
         if let Some(k) = key {
             params["_meta"] = json!({ "io.magnus/idempotency-key": k });
             extra.push(("idempotency-key", k));
         }
-        let r = self.rpc(&s, Some(2), "tools/call", params, &extra).await?.unwrap_or_default();
+        let r = if c.transport == "mcp_stdio" {
+            self.stdio_rpc(c, "tools/call", params).await?
+        } else {
+            let s = self.open(&c.url, bearer).await?;
+            self.rpc(&s, Some(2), "tools/call", params, &extra).await?.unwrap_or_default()
+        };
         let text = r["content"]
             .as_array()
             .into_iter()
@@ -226,4 +300,46 @@ pub fn definition_hash(t: &AppTool) -> String {
     use sha2::Digest;
     let canon = crate::boundary::canonical(&json!({ "name": t.name, "description": t.description, "input_schema": t.input_schema }));
     hex::encode(sha2::Sha256::digest(canon.as_bytes()))
+}
+
+impl Stdio {
+    async fn send(&mut self, msg: &Value) -> Result<(), CallError> {
+        let mut line = serde_json::to_vec(msg).map_err(|e| CallError::NotSent(e.to_string()))?;
+        line.push(b'\n');
+        self.stdin.write_all(&line).await.map_err(|e| CallError::NotSent(format!("the server is not running: {e}")))?;
+        self.stdin.flush().await.map_err(|e| CallError::Unknown(format!("the request may not have reached the server: {e}")))
+    }
+
+    async fn notify(&mut self, method: &str) -> Result<(), CallError> {
+        self.send(&json!({ "jsonrpc": "2.0", "method": method })).await
+    }
+
+    /// One request and its answer; lines that are not that answer (the
+    /// server's notifications, its requests to us) are skipped.
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
+        let id = self.next;
+        self.next += 1;
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await?;
+        let answer = tokio::time::timeout(STDIO_TIMEOUT, async {
+            loop {
+                match self.stdout.next_line().await {
+                    Ok(Some(line)) => {
+                        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                            if v.get("id") == Some(&json!(id)) && (v.get("result").is_some() || v.get("error").is_some()) {
+                                return Ok(v);
+                            }
+                        }
+                    }
+                    Ok(None) => return Err(CallError::Unknown("the server stopped before answering".into())),
+                    Err(e) => return Err(CallError::Unknown(format!("reading the answer failed: {e}"))),
+                }
+            }
+        })
+        .await
+        .map_err(|_| CallError::Unknown("the server did not answer in time".into()))??;
+        if let Some(err) = answer.get("error") {
+            return Err(CallError::NotSent(format!("app error: {}", err["message"].as_str().unwrap_or("unknown"))));
+        }
+        Ok(answer["result"].clone())
+    }
 }

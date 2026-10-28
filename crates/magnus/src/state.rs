@@ -308,6 +308,13 @@ pub struct State {
     pub cards: HashMap<String, CardState>,
     pub model: Option<(String, String)>,
     pub pins: HashMap<String, Pin>,
+    /// Connectors the owner added in the app, by name.
+    pub connectors: BTreeMap<String, crate::config::Connector>,
+    /// Tool classes the owner set at review, by tool; they override the
+    /// configuration file's.
+    pub classes: HashMap<String, crate::config::ToolClass>,
+    /// Who is signed in to which app: (connector, person).
+    pub signed_in: std::collections::BTreeSet<(String, String)>,
     /// Tools whose live definition differs from the pin, with the open item.
     pub changed: HashMap<String, (String, Pin)>,
     pub secrets: HashSet<String>,
@@ -376,6 +383,22 @@ impl State {
                 self.cards.insert(card.clone(), CardState::Declined);
             }
             Ev::MemoryForgotten { id } => self.memory.retain(|m| &m.id != id),
+            Ev::ConnectorSet { connector } => {
+                self.connectors.insert(connector.name.clone(), connector.clone());
+            }
+            Ev::ConnectorRemoved { name } => {
+                self.connectors.remove(name);
+                self.signed_in.retain(|(c, _)| c != name);
+            }
+            Ev::ToolClassified { tool, class } => {
+                self.classes.insert(tool.clone(), class.clone());
+            }
+            Ev::ConnectorSignedIn { connector, person } => {
+                self.signed_in.insert((connector.clone(), person.clone()));
+            }
+            Ev::ConnectorSignedOut { connector, person } => {
+                self.signed_in.remove(&(connector.clone(), person.clone()));
+            }
             Ev::ScheduleRemoved { id } => {
                 self.schedules.remove(id);
             }

@@ -37,7 +37,10 @@ pub struct Kernel {
     pub browser: crate::browser::Browser,
     drivers: Mutex<HashSet<String>>,
     pub(crate) leases: Mutex<HashMap<String, String>>,
+    /// Live tool lists, by `<connector>:<person>` (or the connector alone
+    /// for one shared credential).
     pub(crate) live_tools: tokio::sync::Mutex<HashMap<String, (Instant, Vec<AppTool>)>>,
+    pub(crate) connect: crate::connect::Flows,
     pub live_text: tokio::sync::broadcast::Sender<(String, String)>,
     /// How long each log append took since boot, in microseconds (V6).
     pub capture: Mutex<Capture>,
@@ -86,7 +89,7 @@ impl Kernel {
             web: Web::new(&cfg.web),
             sandboxes: Sandboxes::new(cfg.sandbox.clone(), &cfg.appliance.state_dir),
             browser: crate::browser::Browser::new(cfg.browser.clone(), &cfg.appliance.state_dir),
-            mcp: Mcp::new(),
+            mcp: Mcp::new(&cfg.appliance.state_dir),
             adapters,
             vault,
             accounts,
@@ -98,6 +101,7 @@ impl Kernel {
             drivers: Mutex::new(HashSet::new()),
             leases: Mutex::new(HashMap::new()),
             live_tools: tokio::sync::Mutex::new(HashMap::new()),
+            connect: Default::default(),
             live_text,
             capture: Mutex::new(Capture::default()),
             cfg,

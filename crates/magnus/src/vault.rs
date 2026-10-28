@@ -29,6 +29,10 @@ impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn new(value: String) -> Secret {
+        Secret(value)
+    }
 }
 
 impl std::fmt::Debug for Secret {
@@ -104,6 +108,17 @@ impl Vault {
             .decrypt(XNonce::from_slice(&blob[..24]), &blob[24..])
             .map_err(|_| anyhow::anyhow!("vault entry {name} does not decrypt"))?;
         Ok(Some(Secret(String::from_utf8(pt)?)))
+    }
+
+    /// Remove an entry; whether there was one.
+    pub fn delete(&self, name: &str) -> Result<bool> {
+        let _g = self.lock.lock().unwrap();
+        let mut all = self.read_all()?;
+        if all.remove(name).is_none() {
+            return Ok(false);
+        }
+        write_private(&self.path(), &serde_json::to_vec(&all)?)?;
+        Ok(true)
     }
 
     pub fn names(&self) -> Result<Vec<String>> {

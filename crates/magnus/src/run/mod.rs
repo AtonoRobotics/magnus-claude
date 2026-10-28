@@ -169,21 +169,43 @@ impl Kernel {
             specs.extend(tools::chat_specs());
         }
         let Some(person) = self.person(&run.person).cloned() else { return specs };
-        for c in self.cfg.connectors.clone() {
-            let live = self.live_app_tools(&c).await;
-            let mut fresh = vec![];
-            for (remote, class) in &c.tools {
-                let name = format!("{}__{remote}", c.name);
-                let Some(f) = boundary::facts(self, &name) else { continue };
-                if Risk::parse(&class.risk) == Some(Risk::Prohibited) || !boundary::has_rights(&person, &f) || (chat && f.risk != Risk::Read) {
+        for c in self.connectors() {
+            if !boundary::may_use(&person, &c) {
+                continue;
+            }
+            // An app the person is not signed in to offers nothing.
+            let cred = match self.connector_cred(&c, &person.id).await {
+                Ok(crate::connect::Cred::None) => None,
+                Ok(crate::connect::Cred::Bearer(s)) => Some(s),
+                Ok(crate::connect::Cred::Missing(_)) => continue,
+                Err(e) => {
+                    tracing::warn!("credential for {}: {e:#}", c.name);
                     continue;
                 }
-                if let Some(t) = live.as_ref().and_then(|l| l.iter().find(|t| &t.name == remote)) {
-                    match self.pin(&name, t).await {
-                        Ok(true) => fresh.push(name.clone()),
-                        Ok(false) => {}
-                        Err(e) => tracing::warn!("pin {name}: {e:#}"),
-                    }
+            };
+            let live = self.live_app_tools(&c, &person.id, cred.as_ref()).await;
+            // Every tool is pinned on first sight; the owner classifies the
+            // new ones when they review them, and until then none is offered.
+            let mut fresh = vec![];
+            for t in live.iter().flatten() {
+                let name = format!("{}__{}", c.name, t.name);
+                match self.pin(&name, t).await {
+                    Ok(true) => fresh.push(name),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("pin {name}: {e:#}"),
+                }
+            }
+            let prefix = format!("{}__", c.name);
+            let mut names: Vec<String> = self.read(|s| s.pins.keys().filter(|t| t.starts_with(&prefix)).cloned().collect());
+            names.sort();
+            for name in names {
+                let remote = &name[prefix.len()..];
+                if live.as_ref().is_some_and(|l| !l.iter().any(|t| t.name == remote)) {
+                    continue;
+                }
+                let Some(f) = boundary::facts(self, &name) else { continue };
+                if f.risk == Risk::Prohibited || !boundary::has_rights(&person, &f) || (chat && f.risk != Risk::Read) {
+                    continue;
                 }
                 let usable = self.read(|s| s.pins.get(&name).cloned().filter(|_| !s.changed.contains_key(&name)));
                 if let Some(p) = usable {
@@ -191,7 +213,7 @@ impl Kernel {
                         ToolSpec { name, description: p.description, input_schema: p.input_schema }
                     } else {
                         ToolSpec {
-                            description: format!("{remote} on {} ({}). The app's own description awaits the owner's review.", c.name, class.risk),
+                            description: format!("{remote} on {} ({}). The app's own description awaits the owner's review.", c.name, f.risk.as_str()),
                             input_schema: strip_descriptions(&p.input_schema),
                             name,
                         }
@@ -210,12 +232,20 @@ impl Kernel {
 
     /// Ask the owner to review the text of newly seen tool definitions.
     pub(crate) async fn review_item(&self, app: &str, tools: &[String]) -> Result<()> {
-        let list: Vec<Value> = self.read(|s| {
-            tools
-                .iter()
-                .filter_map(|t| s.pins.get(t).map(|p| json!({ "tool": t, "hash": p.hash, "description": p.description, "input_schema": p.input_schema })))
-                .collect()
-        });
+        let pins: Vec<(String, crate::state::Pin)> = self.read(|s| tools.iter().filter_map(|t| s.pins.get(t).map(|p| (t.clone(), p.clone()))).collect());
+        let list: Vec<Value> = pins
+            .into_iter()
+            .map(|(t, p)| {
+                let remote = t.split_once("__").map(|(_, r)| r).unwrap_or_default().to_string();
+                // The owner sets the class here; an unclassified tool comes
+                // with a suggestion from its name and inputs.
+                let (class, suggested) = match self.class_of(&t) {
+                    Some(c) => (c, false),
+                    None => (crate::connect::suggest(&remote, &p.input_schema), true),
+                };
+                json!({ "tool": t, "hash": p.hash, "description": p.description, "input_schema": p.input_schema, "class": class, "suggested": suggested })
+            })
+            .collect();
         let owner = self.owners().first().map(|p| p.id.clone()).unwrap_or_default();
         self.emit(
             "kernel",
@@ -233,20 +263,19 @@ impl Kernel {
         Ok(())
     }
 
-    async fn live_app_tools(&self, c: &crate::config::Connector) -> Option<Vec<crate::apps::AppTool>> {
+    async fn live_app_tools(&self, c: &crate::config::Connector, person: &str, cred: Option<&crate::vault::Secret>) -> Option<Vec<crate::apps::AppTool>> {
+        let key = if c.per_person() { format!("{}:{person}", c.name) } else { c.name.clone() };
         {
             let cache = self.live_tools.lock().await;
-            if let Some((at, tools)) = cache.get(&c.name) {
+            if let Some((at, tools)) = cache.get(&key) {
                 if at.elapsed() < Duration::from_secs(2) {
                     return Some(tools.clone());
                 }
             }
         }
-        let secret = c.credential.as_ref().and_then(|n| self.vault.get(n).ok().flatten());
-        let secret = secret?;
-        match self.mcp.list_tools(&c.url, Some(secret.expose())).await {
+        match self.mcp.list_tools(c, cred.map(|s| s.expose())).await {
             Ok(t) => {
-                self.live_tools.lock().await.insert(c.name.clone(), (Instant::now(), t.clone()));
+                self.live_tools.lock().await.insert(key, (Instant::now(), t.clone()));
                 Some(t)
             }
             Err(e) => {

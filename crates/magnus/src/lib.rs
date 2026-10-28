@@ -15,6 +15,7 @@ pub mod chat;
 pub mod cli;
 pub mod compose;
 pub mod config;
+pub mod connect;
 pub mod conformance;
 pub mod dev;
 pub mod events;

@@ -285,8 +285,29 @@ impl Kernel {
                 .await?;
             }
             ("tool_review", "approve") => {
+                // The owner's classes, where they changed what the card
+                // proposed; the card's class otherwise.
+                let tools = item.details["tools"].as_array().cloned().unwrap_or_default();
+                let mut classes = vec![];
+                for t in &tools {
+                    let name = t["tool"].as_str().unwrap_or_default();
+                    let given = body["classes"].get(name).filter(|v| !v.is_null());
+                    let class: crate::config::ToolClass = match serde_json::from_value(given.unwrap_or(&t["class"]).clone()) {
+                        Ok(c) => c,
+                        Err(e) => return Ok(Answer::Invalid(format!("the class for {name} is not one: {e}"))),
+                    };
+                    if let Err(e) = class.validate(name) {
+                        return Ok(Answer::Invalid(e));
+                    }
+                    if given.is_some() || t["suggested"] == true {
+                        classes.push((name.to_string(), class));
+                    }
+                }
                 self.emit(&actor, resolve(None)).await?;
-                for t in item.details["tools"].as_array().cloned().unwrap_or_default() {
+                for (tool, class) in classes {
+                    self.emit(&actor, Ev::ToolClassified { tool, class }).await?;
+                }
+                for t in tools {
                     let name = t["tool"].as_str().unwrap_or_default().to_string();
                     // Approve only definitions that are still the pinned ones.
                     let current = self.read(|s| s.pins.get(&name).map(|p| p.hash.clone()));

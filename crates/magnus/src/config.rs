@@ -1,6 +1,6 @@
 //! The appliance configuration file (TOML), written by the installer.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -253,14 +253,28 @@ pub struct Person {
     pub roles: Vec<String>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+/// One of the person's apps, reached over MCP: from this file, or added by
+/// the owner in the app (`Ev::ConnectorSet`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Connector {
     pub name: String,
+    /// What the app shows; the name when absent.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// `mcp_http` (streamable HTTP at `url`) or `mcp_stdio` (`command`, run
+    /// on the appliance).
     #[serde(default = "mcp_http")]
     pub transport: String,
+    #[serde(default)]
     pub url: String,
     #[serde(default)]
+    pub command: Vec<String>,
+    /// A vault entry shared by everyone who uses the app.
+    #[serde(default)]
     pub credential: Option<String>,
+    /// How each person signs in to the app; their tokens go to the vault.
+    #[serde(default)]
+    pub auth: Option<ConnectorAuth>,
     pub audience: String,
     pub label: String,
     #[serde(default)]
@@ -269,6 +283,31 @@ pub struct Connector {
     pub idempotency: String,
     #[serde(default)]
     pub tools: BTreeMap<String, ToolClass>,
+}
+
+/// A person's sign-in to an app.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ConnectorAuth {
+    /// `device` (RFC 8628), `loopback` (authorization code with PKCE,
+    /// redirected to the person's own machine), or `api_key`.
+    pub kind: String,
+    #[serde(default)]
+    pub client_id: String,
+    /// The vault entry of a client secret, for providers whose desktop
+    /// clients carry one.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    #[serde(default)]
+    pub device_authorization_endpoint: Option<String>,
+    #[serde(default)]
+    pub authorization_endpoint: Option<String>,
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Extra parameters for the authorization request (`access_type`, …).
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
 }
 
 fn mcp_http() -> String {
@@ -280,12 +319,101 @@ fn header() -> String {
     "none".into()
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ToolClass {
     pub risk: String,
     /// Overrides the app's inbound label for this tool's results.
     #[serde(default)]
     pub label: Option<String>,
+    /// The input field holding the text of a message this tool sends; the
+    /// kernel signs it as Magnus, for the person (E6).
+    #[serde(default)]
+    pub sends: Option<String>,
+}
+
+impl ToolClass {
+    pub fn validate(&self, what: &str) -> Result<(), String> {
+        if crate::tools::Risk::parse(&self.risk).is_none() {
+            return Err(format!("{what}: unknown risk class {}", self.risk));
+        }
+        if let Some(l) = &self.label {
+            if crate::tools::Label::parse(l).is_none() {
+                return Err(format!("{what}: unknown label {l}"));
+            }
+        }
+        if self.sends.as_ref().is_some_and(|f| f.trim().is_empty()) {
+            return Err(format!("{what}: sends names no input field"));
+        }
+        Ok(())
+    }
+}
+
+/// An endpoint the appliance talks to: https, or http on this machine.
+pub fn endpoint_ok(url: &str) -> bool {
+    let Ok(u) = url::Url::parse(url) else { return false };
+    let local = matches!(u.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback()) || matches!(u.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback()) || u.host_str() == Some("localhost");
+    u.scheme() == "https" || (u.scheme() == "http" && local)
+}
+
+impl Connector {
+    pub fn title(&self) -> String {
+        self.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| self.name.clone())
+    }
+
+    /// Whether each person signs in for themselves.
+    pub fn per_person(&self) -> bool {
+        self.auth.is_some()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let c = self;
+        if c.name.is_empty() || c.name.contains("__") || !c.name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+            return Err(format!("connector name {:?} must be letters, digits, '-' or '_' and must not contain '__'", c.name));
+        }
+        match c.transport.as_str() {
+            "mcp_http" if !(c.url.starts_with("http://") || c.url.starts_with("https://")) || url::Url::parse(&c.url).is_err() => {
+                return Err(format!("connector {}: url must be an http or https address", c.name))
+            }
+            "mcp_stdio" if c.command.is_empty() || c.command[0].trim().is_empty() => return Err(format!("connector {}: mcp_stdio needs a command", c.name)),
+            "mcp_http" | "mcp_stdio" => {}
+            other => return Err(format!("connector {}: unknown transport {other}", c.name)),
+        }
+        for (t, class) in &c.tools {
+            class.validate(&format!("tool {}.{t}", c.name))?;
+        }
+        if crate::tools::Label::parse(&c.label).is_none() {
+            return Err(format!("connector {}: unknown label {}", c.name, c.label));
+        }
+        if crate::tools::Audience::parse(&c.audience).is_none() {
+            return Err(format!("connector {}: unknown audience {}", c.name, c.audience));
+        }
+        if let Some(a) = &c.auth {
+            if c.credential.is_some() {
+                return Err(format!("connector {}: a shared credential and per-person sign-in exclude each other", c.name));
+            }
+            let need = |v: &Option<String>, what: &str| match v {
+                Some(u) if endpoint_ok(u) => Ok(()),
+                Some(u) => Err(format!("connector {}: {what} {u} must be https", c.name)),
+                None => Err(format!("connector {}: {} sign-in needs {what}", c.name, a.kind)),
+            };
+            match a.kind.as_str() {
+                "device" => {
+                    need(&a.device_authorization_endpoint, "device_authorization_endpoint")?;
+                    need(&a.token_endpoint, "token_endpoint")?;
+                }
+                "loopback" => {
+                    need(&a.authorization_endpoint, "authorization_endpoint")?;
+                    need(&a.token_endpoint, "token_endpoint")?;
+                }
+                "api_key" => {}
+                other => return Err(format!("connector {}: unknown sign-in kind {other} (device, loopback or api_key)", c.name)),
+            }
+            if a.kind != "api_key" && a.client_id.trim().is_empty() {
+                return Err(format!("connector {}: {} sign-in needs the client ID of the app registered with the provider", c.name, a.kind));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Config {
@@ -293,16 +421,7 @@ impl Config {
         let text = std::fs::read_to_string(path)?;
         let cfg: Config = toml::from_str(&text)?;
         for c in &cfg.connectors {
-            anyhow::ensure!(
-                !c.name.contains("__") && c.name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),
-                "connector name {:?} must be letters, digits, '-' or '_' and must not contain '__'",
-                c.name
-            );
-            for (t, class) in &c.tools {
-                anyhow::ensure!(crate::tools::Risk::parse(&class.risk).is_some(), "tool {}.{t}: unknown risk class {}", c.name, class.risk);
-            }
-            anyhow::ensure!(crate::tools::Label::parse(&c.label).is_some(), "connector {}: unknown label {}", c.name, c.label);
-            anyhow::ensure!(crate::tools::Audience::parse(&c.audience).is_some(), "connector {}: unknown audience {}", c.name, c.audience);
+            c.validate().map_err(|e| anyhow::anyhow!(e))?;
         }
         Ok(cfg)
     }

@@ -3,6 +3,9 @@
 //! with a password, and a fake identity provider for sign-in through one.
 
 use axum::{body::Body, extract::State, http::HeaderMap, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
+pub mod oauth;
+pub use oauth::FakeOAuth;
+
 use magnus_invariants::appliance::bin;
 use magnus_invariants::*;
 use serde_json::{json, Value};

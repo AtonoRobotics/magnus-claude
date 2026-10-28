@@ -1,0 +1,108 @@
+# Connectors the owner can add from the app. Each preset is a connector with
+# the fields the owner fills in named in `asks`; `{client_id}`, `{url}` and
+# `{folder}` in its strings are replaced with what they enter. Endpoints,
+# scopes and caveats come from docs/research/connectors.md. No server version
+# is written here: the owner's install reads it at install time.
+#
+# Labels follow what the apps hold: the person's mail, calendar and files are
+# private; mail and invites are written by others, so their content is
+# untrusted too.
+
+[[preset]]
+id = "gmail"
+about = "Google's Gmail MCP server (Developer Preview: needs the Workspace Developer Preview Program). Register a Google Cloud OAuth client of type Desktop app; sign-in opens the person's browser and returns to their own machine."
+asks = ["client_id"]
+[preset.connector]
+name = "gmail"
+title = "Gmail"
+url = "https://gmailmcp.googleapis.com/mcp/v1"
+audience = "public"
+label = "private+untrusted"
+[preset.connector.auth]
+kind = "loopback"
+client_id = "{client_id}"
+authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
+token_endpoint = "https://oauth2.googleapis.com/token"
+scopes = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.compose"]
+params = { access_type = "offline", prompt = "consent" }
+
+[[preset]]
+id = "google_calendar"
+about = "Google's Calendar MCP server (Developer Preview). Uses the same Desktop-app OAuth client as Gmail."
+asks = ["client_id"]
+[preset.connector]
+name = "calendar"
+title = "Google Calendar"
+url = "https://calendarmcp.googleapis.com/mcp/v1"
+audience = "public"
+label = "private+untrusted"
+[preset.connector.auth]
+kind = "loopback"
+client_id = "{client_id}"
+authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
+token_endpoint = "https://oauth2.googleapis.com/token"
+scopes = ["https://www.googleapis.com/auth/calendar.calendarlist.readonly", "https://www.googleapis.com/auth/calendar.events"]
+params = { access_type = "offline", prompt = "consent" }
+
+[[preset]]
+id = "google_drive"
+about = "Google's Drive MCP server (Developer Preview). Uses the same Desktop-app OAuth client as Gmail."
+asks = ["client_id"]
+[preset.connector]
+name = "drive"
+title = "Google Drive"
+url = "https://drivemcp.googleapis.com/mcp/v1"
+audience = "internal"
+label = "private"
+[preset.connector.auth]
+kind = "loopback"
+client_id = "{client_id}"
+authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
+token_endpoint = "https://oauth2.googleapis.com/token"
+scopes = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file"]
+params = { access_type = "offline", prompt = "consent" }
+
+[[preset]]
+id = "microsoft365"
+about = "Outlook mail, calendar and OneDrive through softeria/ms-365-mcp-server run on the appliance in --http mode (community server). Register an Entra app with public client flows allowed; people sign in with a code."
+asks = ["client_id", "url"]
+[preset.connector]
+name = "outlook"
+title = "Microsoft 365"
+url = "{url}"
+audience = "public"
+label = "private+untrusted"
+[preset.connector.auth]
+kind = "device"
+client_id = "{client_id}"
+device_authorization_endpoint = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
+token_endpoint = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+scopes = ["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send", "Calendars.ReadWrite", "Files.ReadWrite"]
+
+[[preset]]
+id = "github"
+about = "GitHub's hosted MCP server. Register a GitHub App with device flow enabled and expiring user tokens; people sign in with a code."
+asks = ["client_id"]
+[preset.connector]
+name = "github"
+title = "GitHub"
+url = "https://api.githubcopilot.com/mcp/"
+audience = "public"
+label = "private+untrusted"
+[preset.connector.auth]
+kind = "device"
+client_id = "{client_id}"
+device_authorization_endpoint = "https://github.com/login/device/code"
+token_endpoint = "https://github.com/login/oauth/access_token"
+
+[[preset]]
+id = "files"
+about = "A folder on the appliance, through the reference filesystem MCP server (stdio, run with npx). Everyone who uses this connector shares the folder."
+asks = ["folder"]
+[preset.connector]
+name = "files"
+title = "Files"
+transport = "mcp_stdio"
+command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "{folder}"]
+audience = "private"
+label = "private"

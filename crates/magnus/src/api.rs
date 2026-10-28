@@ -134,6 +134,11 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/adapters/{id}/conformance", post(conformance))
         .route("/v1/adapters/{id}/sign-in", post(sign_in_begin))
         .route("/v1/adapters/{id}/sign-in/complete", post(sign_in_complete))
+        .route("/v1/connectors", get(connectors))
+        .route("/v1/connectors/{name}", axum::routing::put(set_connector).delete(remove_connector))
+        .route("/v1/connectors/{name}/tools/{tool}", axum::routing::put(classify_tool))
+        .route("/v1/connectors/{name}/sign-in", post(connector_sign_in).delete(connector_sign_out))
+        .route("/v1/connectors/{name}/sign-in/complete", post(connector_sign_in_complete))
         .route("/v1/memory", get(memory))
         .route("/v1/memory/{id}", axum::routing::delete(forget))
         .route("/v1/schedules", get(schedules).post(add_schedule))
@@ -1063,6 +1068,146 @@ async fn output(State(k): K, h: HeaderMap, Path((id, out)): Path<(String, String
             .body(axum::body::Body::from(bytes))
             .unwrap(),
         Ok(None) => err(StatusCode::NOT_FOUND, "no such file"),
+        Err(e) => internal(e),
+    }
+}
+
+// ---------- connectors ----------
+
+/// The apps the person can use, with their sign-in state; the owner also
+/// gets each connector's settings and the presets to add one from.
+async fn connectors(State(k): K, h: HeaderMap) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let owner = p.is_owner();
+    let list: Vec<Value> = k.connectors().iter().filter(|c| owner || crate::boundary::may_use(&p, c)).map(|c| k.connector_view(c, &p.id, owner)).collect();
+    let mut v = json!({ "connectors": list });
+    if owner {
+        v["presets"] = json!(crate::connect::presets());
+    }
+    Json(v).into_response()
+}
+
+async fn set_connector(State(k): K, h: HeaderMap, Path(name): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if k.cfg.connectors.iter().any(|c| c.name == name) {
+        return err(StatusCode::CONFLICT, "this connector is set in the appliance's configuration file; change it there");
+    }
+    let c: crate::config::Connector = match serde_json::from_value(b) {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("not a connector: {e}")),
+    };
+    if c.name != name {
+        return err(StatusCode::BAD_REQUEST, "the connector's name must match the address");
+    }
+    if let Err(e) = c.validate() {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::ConnectorSet { connector: c }).await {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// Remove an app added in the app, with everyone's sign-in to it.
+async fn remove_connector(State(k): K, h: HeaderMap, Path(name): Path<String>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if !k.read(|s| s.connectors.contains_key(&name)) {
+        return err(StatusCode::NOT_FOUND, "no such connector added in the app");
+    }
+    let prefix = crate::connect::vault_name(&name, "");
+    let removed = k.vault.names().map(|ns| ns.into_iter().filter(|n| n.starts_with(&prefix)).map(|n| k.vault.delete(&n)).collect::<Result<Vec<_>, _>>());
+    if let Err(e) = removed.and_then(|r| r) {
+        return internal(e);
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::ConnectorRemoved { name }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// The owner sets or changes how one of an app's tools is classified.
+async fn classify_tool(State(k): K, h: HeaderMap, Path((name, tool)): Path<(String, String)>, Json(b): Json<Value>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let full = format!("{name}__{tool}");
+    if k.connector(&name).is_none() || !k.read(|s| s.pins.contains_key(&full)) {
+        return err(StatusCode::NOT_FOUND, "no such tool has been seen on this connector");
+    }
+    let class: crate::config::ToolClass = match serde_json::from_value(b) {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("not a tool class: {e}")),
+    };
+    if let Err(e) = class.validate(&full) {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::ToolClassified { tool: full, class }).await {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+fn usable_connector(k: &Kernel, p: &Person, name: &str) -> Result<crate::config::Connector, Response> {
+    match k.connector(name) {
+        Some(c) if crate::boundary::may_use(p, &c) => Ok(c),
+        _ => Err(err(StatusCode::NOT_FOUND, "no such connector")),
+    }
+}
+
+/// A person starts signing in to an app; tokens go to the vault, never to
+/// the app that asked.
+async fn connector_sign_in(State(k): K, h: HeaderMap, Path(name): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let c = match usable_connector(&k, &p, &name) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    match k.connector_sign_in(&c, &p.id, b["redirect_uri"].as_str()).await {
+        Ok(v) => Json(v).into_response(),
+        Err(m) => err(StatusCode::BAD_REQUEST, m),
+    }
+}
+
+async fn connector_sign_in_complete(State(k): K, h: HeaderMap, Path(name): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = usable_connector(&k, &p, &name) {
+        return r;
+    }
+    match k.connector_sign_in_complete(b["flow"].as_str().unwrap_or_default(), &p.id, &b["input"]).await {
+        Ok(crate::connect::Polled::Pending) => Json(json!({ "status": "pending" })).into_response(),
+        Ok(crate::connect::Polled::Done) => Json(json!({ "status": "done" })).into_response(),
+        Ok(crate::connect::Polled::Failed(m)) => Json(json!({ "status": "failed", "message": m })).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn connector_sign_out(State(k): K, h: HeaderMap, Path(name): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let c = match usable_connector(&k, &p, &name) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    match k.connector_sign_out(&c, &p.id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),
     }
 }
