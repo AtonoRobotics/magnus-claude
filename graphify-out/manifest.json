@@ -10,8 +10,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/lib.rs": {
-    "mtime": 1793166573.0355263,
-    "ast_hash": "b9ece2317ec1219f9503758607279b16",
+    "mtime": 1793197239.7642324,
+    "ast_hash": "a1ae1ab80b75fb17d118b4c66971053a",
     "semantic_hash": ""
   },
   "crates/magnus/src/main.rs": {
@@ -115,8 +115,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/instructions/tools.json": {
-    "mtime": 1793166421.2992058,
-    "ast_hash": "e203227923f0b0ae826dc4abb7dbec10",
+    "mtime": 1793203507.3298576,
+    "ast_hash": "c078ff933af6da22e3631d5d83e380a0",
     "semantic_hash": ""
   },
   "crates/magnus/src/adapters.rs": {
@@ -125,8 +125,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/api.rs": {
-    "mtime": 1793167747.1365273,
-    "ast_hash": "f950a622ba76459925115ae774beb670",
+    "mtime": 1793203778.9310086,
+    "ast_hash": "94abf3f629ff59dc09c804bde01cd2c7",
     "semantic_hash": ""
   },
   "crates/magnus/src/apps.rs": {
@@ -135,8 +135,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/boundary.rs": {
-    "mtime": 1793166434.49374,
-    "ast_hash": "196ff2d05e173d29944a9e11a2339ca3",
+    "mtime": 1793204030.2608619,
+    "ast_hash": "d2574fd43ff597c530e282d49d97520a",
     "semantic_hash": ""
   },
   "crates/magnus/src/cli.rs": {
@@ -145,23 +145,23 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/config.rs": {
-    "mtime": 1793166573.0354235,
-    "ast_hash": "23d9b5250743d53c91e00c36949e70bb",
+    "mtime": 1793197958.852232,
+    "ast_hash": "81ac3884f8dc3db7f4903f6cfdfd0c06",
     "semantic_hash": ""
   },
   "crates/magnus/src/events.rs": {
-    "mtime": 1793166908.3707592,
-    "ast_hash": "9cb504644887460ee7098f621c2ca68c",
+    "mtime": 1793203394.2857366,
+    "ast_hash": "1dad3c9e3b7c529d15785f25ea05076b",
     "semantic_hash": ""
   },
   "crates/magnus/src/inbox.rs": {
-    "mtime": 1793166931.4087877,
-    "ast_hash": "3ddcf30d64079a1da05c72b2e635bb7f",
+    "mtime": 1793204060.6927378,
+    "ast_hash": "23439cbc96582f6eb4353600e728b0d2",
     "semantic_hash": ""
   },
   "crates/magnus/src/kernel.rs": {
-    "mtime": 1793166908.3708496,
-    "ast_hash": "ba186ea26df19e2f25fcee293c9f9fd7",
+    "mtime": 1793197239.7636278,
+    "ast_hash": "1d09925ecf6565cf7ed16c69f47a567a",
     "semantic_hash": ""
   },
   "crates/magnus/src/log.rs": {
@@ -180,8 +180,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/run/mod.rs": {
-    "mtime": 1793168199.066177,
-    "ast_hash": "05b7f5b06771c4310fdc9003fcdb1081",
+    "mtime": 1793203935.9253561,
+    "ast_hash": "4242d35595637d245cae810d2d92b4f6",
     "semantic_hash": ""
   },
   "crates/magnus/src/sandbox.rs": {
@@ -195,8 +195,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/state.rs": {
-    "mtime": 1793166908.3714592,
-    "ast_hash": "186811d38160d203601ad6258a163a3c",
+    "mtime": 1793203561.9758754,
+    "ast_hash": "07064c879848e32305036c37ed21d7d3",
     "semantic_hash": ""
   },
   "crates/magnus/src/tools.rs": {
@@ -225,8 +225,8 @@
     "semantic_hash": ""
   },
   "tests/scratch/src/lib.rs": {
-    "mtime": 1793168677.210057,
-    "ast_hash": "ac48a9c854154bc47f491fd463af97ed",
+    "mtime": 1793197436.8653204,
+    "ast_hash": "b03bc0307077236e90aaeedec01f05b7",
     "semantic_hash": ""
   },
   "tests/scratch/tests/debug.rs": {
@@ -240,18 +240,18 @@
     "semantic_hash": ""
   },
   "DECISIONS.md": {
-    "mtime": 1793169013.4499526,
-    "ast_hash": "803801a993ca2918e7ea9333f34753b4",
+    "mtime": 1793204358.1205978,
+    "ast_hash": "a8b89b442575e5fab34ffc3d8d44a183",
     "semantic_hash": ""
   },
   "PROGRESS.md": {
-    "mtime": 1793169038.1376646,
-    "ast_hash": "932b48bd5f16380b32f1500176de7ac8",
+    "mtime": 1793204358.127257,
+    "ast_hash": "cc153ac716d03d070db44d52aee483ff",
     "semantic_hash": ""
   },
   "crates/magnus/instructions/agent.md": {
-    "mtime": 1793108467.1027212,
-    "ast_hash": "072d5a11debceabeab1261688de3187c",
+    "mtime": 1793203507.3301866,
+    "ast_hash": "5c021f7cacb5e8c92a5194cba9d6ac81",
     "semantic_hash": ""
   },
   "docs/research/providers-and-tac.md": {
@@ -380,8 +380,8 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/accounts.rs": {
-    "mtime": 1793167066.706532,
-    "ast_hash": "52bf2e15ef53451158240f317fa8e24f",
+    "mtime": 1793197192.6498115,
+    "ast_hash": "7a84d1d0cff2add4f0956971ba979759",
     "semantic_hash": ""
   },
   "crates/magnus/src/compose.rs": {
@@ -390,33 +390,33 @@
     "semantic_hash": ""
   },
   "crates/magnus/src/dev.rs": {
-    "mtime": 1793167186.0323436,
-    "ast_hash": "ae55d5976d50d8cc0b3ce17cc4672e6e",
+    "mtime": 1793203587.8636165,
+    "ast_hash": "eed8d23d174d3e17c358bfe288fc4f02",
     "semantic_hash": ""
   },
   "crates/magnus/src/tls.rs": {
-    "mtime": 1793166195.7764943,
-    "ast_hash": "6105a0b31ea863a898175a3044a8cabf",
+    "mtime": 1793199923.9083123,
+    "ast_hash": "6f2368a65e997dade05f8a225a59d584",
     "semantic_hash": ""
   },
   "tests/scratch/tests/app.rs": {
-    "mtime": 1793167226.1842787,
-    "ast_hash": "fcdbc6e3c29890d852ae45fd7b828873",
+    "mtime": 1793199923.9094222,
+    "ast_hash": "af11a6c2da82c2db598a89dfaeb3bdf7",
     "semantic_hash": ""
   },
   "desktop/tests/flow.mjs": {
-    "mtime": 1793168269.3635566,
-    "ast_hash": "81412fe772345e0daf0fc4eca086b7e4",
+    "mtime": 1793204204.6264763,
+    "ast_hash": "696e1831f66d1bc37b0004f503190d01",
     "semantic_hash": ""
   },
   "desktop/ui/app.js": {
-    "mtime": 1793168269.3636687,
-    "ast_hash": "9e2fd37eb68d792f4ab8602459e80e6f",
+    "mtime": 1793204327.2090936,
+    "ast_hash": "e7733d5179bd5d4e7bfe2181ca2275b6",
     "semantic_hash": ""
   },
   "desktop/ui/bridge.js": {
-    "mtime": 1793167639.4958758,
-    "ast_hash": "4096a3c30f30733ff5a8e6d6d33e76f8",
+    "mtime": 1793197335.8927252,
+    "ast_hash": "a0a9a867ed89d9c5f085b62949fe14c7",
     "semantic_hash": ""
   },
   "desktop/ui/compose.js": {
@@ -430,8 +430,8 @@
     "semantic_hash": ""
   },
   "tests/scratch/tests/desktop_flow.rs": {
-    "mtime": 1793168684.8259134,
-    "ast_hash": "447e1a7745e44eb24e2c47270b0a19e9",
+    "mtime": 1793197473.3608377,
+    "ast_hash": "069dca50c1c00fb7a8bca06e9870b96f",
     "semantic_hash": ""
   },
   "desktop/ui/fonts/LICENSE-IBM-Plex-Mono.txt": {
@@ -460,8 +460,8 @@
     "semantic_hash": ""
   },
   "desktop/src-tauri/src/lib.rs": {
-    "mtime": 1793168469.802662,
-    "ast_hash": "acaf37109f02febecdfda8e4d1af9c0f",
+    "mtime": 1793197312.456467,
+    "ast_hash": "f63592997695fd9115cedb559c91165c",
     "semantic_hash": ""
   },
   "desktop/src-tauri/src/main.rs": {
@@ -490,13 +490,13 @@
     "semantic_hash": ""
   },
   "desktop/tests/app.mjs": {
-    "mtime": 1793168623.0726912,
-    "ast_hash": "9be984cc91558c54a29bc9613508626c",
+    "mtime": 1793197524.455192,
+    "ast_hash": "d893a0d6cc545903c10eb96966403e80",
     "semantic_hash": ""
   },
   "tests/scratch/tests/desktop_app.rs": {
-    "mtime": 1793168677.4590588,
-    "ast_hash": "77613271c41a9d1f573372e81f758bff",
+    "mtime": 1793197524.4553,
+    "ast_hash": "b61265eeca44136c0baf608431b38af8",
     "semantic_hash": ""
   },
   "desktop/src-tauri/icons/128x128.png": {
@@ -525,8 +525,23 @@
     "semantic_hash": ""
   },
   "desktop/README.md": {
-    "mtime": 1793168999.6502638,
-    "ast_hash": "feb49a44ac069621998f22bb2a5160f4",
+    "mtime": 1793197951.550544,
+    "ast_hash": "ec17aa4354329e35710810ec26d9603e",
+    "semantic_hash": ""
+  },
+  "config/keycloak-client.py": {
+    "mtime": 1793197816.3990567,
+    "ast_hash": "143927a409f4ab6a9d782db691778ec1",
+    "semantic_hash": ""
+  },
+  "crates/magnus/src/oidc.rs": {
+    "mtime": 1793197232.8292067,
+    "ast_hash": "6dabc3cae494de4f62ecf81a76709047",
+    "semantic_hash": ""
+  },
+  "tests/scratch/tests/contract_freeze.rs": {
+    "mtime": 1793203805.0655866,
+    "ast_hash": "ff6ec94a6c801cd8d4e727b9fe109f00",
     "semantic_hash": ""
   }
 }
