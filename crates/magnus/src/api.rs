@@ -113,6 +113,9 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/me", get(me))
         .route("/v1/versions", get(versions))
         .route("/v1/tasks", post(submit).get(list_tasks))
+        .route("/v1/chat", post(chat_post).get(chat_threads))
+        .route("/v1/chat/{thread}", get(chat_thread))
+        .route("/v1/chat/cards/{card}", post(chat_card))
         .route("/v1/tasks/{id}", get(task))
         .route("/v1/tasks/{id}/timeline", get(timeline))
         .route("/v1/tasks/{id}/resume", post(resume))
@@ -295,6 +298,7 @@ async fn versions(State(k): K, h: HeaderMap) -> Response {
         json!({
             "harness": crate::kernel::HARNESS_VERSION,
             "instructions": crate::run::instructions_version(),
+            "chat_instructions": crate::run::chat_instructions_version(),
             "model": s.model.as_ref().map(|(a, m)| format!("{a}/{m}")),
             "playbook": s.playbook_version,
             "latest_seq": s.version_changes.last().map(|c| c.0),
@@ -366,6 +370,7 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Va
         "status": status_str(run.status),
         "waiting_on": run.reason,
         "summary": run.summary,
+        "thread": task.chat.as_ref().map(|c| c.thread.clone()),
     });
     if full {
         let criteria: Vec<Value> = run
@@ -457,11 +462,63 @@ async fn list_tasks(State(k): K, h: HeaderMap) -> Response {
     let tasks: Vec<Value> = k.read(|s| {
         s.tasks
             .values()
-            .filter(|t| visible_task(&p, t))
+            .filter(|t| visible_task(&p, t) && !t.is_chat_turn())
             .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_json(&k, t, r, false)))
             .collect()
     });
     Json(json!({ "tasks": tasks })).into_response()
+}
+
+/// The person writes in chat: a new thread, or one of theirs.
+async fn chat_post(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let text = b["text"].as_str().unwrap_or_default().trim().to_string();
+    if text.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "the message has no text");
+    }
+    match k.chat_say(&p.id, text, b["thread"].as_str().map(String::from)).await {
+        Ok(Some((thread, task))) => (StatusCode::CREATED, Json(json!({ "thread": thread, "task_id": task }))).into_response(),
+        Ok(None) => err(StatusCode::NOT_FOUND, "no such thread"),
+        Err(e) => internal(e),
+    }
+}
+
+async fn chat_threads(State(k): K, h: HeaderMap) -> Response {
+    match who(&k, &h) {
+        Ok(p) => Json(json!({ "threads": k.threads(&p.id) })).into_response(),
+        Err(r) => r,
+    }
+}
+
+/// A thread is its starter's alone.
+async fn chat_thread(State(k): K, h: HeaderMap, Path(thread): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match k.thread_entries(&p.id, &thread) {
+        Some(entries) => Json(json!({ "thread": thread, "entries": entries })).into_response(),
+        None => err(StatusCode::NOT_FOUND, "no such thread"),
+    }
+}
+
+/// Confirm or decline a schedule card; only the person it was proposed to.
+async fn chat_card(State(k): K, h: HeaderMap, Path(card): Path<String>, Json(b): Json<Value>) -> Response {
+    use crate::chat::CardRefusal;
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match k.decide_card(&p.id, &card, b["decision"].as_str().unwrap_or_default()).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(CardRefusal::NotFound)) => err(StatusCode::NOT_FOUND, "no such card"),
+        Ok(Err(CardRefusal::Decided)) => err(StatusCode::CONFLICT, "this card has been decided"),
+        Ok(Err(CardRefusal::Invalid(m))) => err(StatusCode::BAD_REQUEST, &m),
+        Err(e) => internal(e),
+    }
 }
 
 fn find(k: &Kernel, p: &Person, id: &str) -> Option<(crate::state::Task, Run)> {
@@ -964,7 +1021,7 @@ async fn add_schedule(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respon
         Err(m) => return err(StatusCode::BAD_REQUEST, m),
     };
     let id = new_id("sched");
-    match k.emit(&format!("person:{}", p.id), Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at }).await {
+    match k.emit(&format!("person:{}", p.id), Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at, budget: None, card: None, label: None }).await {
         Ok(_) => (StatusCode::CREATED, Json(json!({ "id": id }))).into_response(),
         Err(e) => internal(e),
     }

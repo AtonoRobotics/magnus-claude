@@ -76,6 +76,7 @@ function nav() {
   return `
     <div class="brand">Magnus</div>
     ${link("#/home", "Home")}
+    ${link("#/chat", "Chat")}
     ${link("#/inbox", "Inbox", `<span>${badges}</span>`)}
     ${link("#/new", "New task")}
     ${link("#/tasks", "Tasks")}
@@ -330,6 +331,101 @@ route(/^#\/new$/, async main => {
   };
 });
 
+// ---------- Chat ----------
+
+// A message is answered, or becomes a task or a schedule to confirm: the
+// model decides. Approvals and questions stay in the inbox; the thread
+// links to them.
+function composer(placeholder) {
+  return `<form id="say" class="say"><label for="msg" class="sr">Message</label><textarea id="msg" rows="2" data-draft="chat-${esc(location.hash)}" placeholder="${esc(placeholder)}" required></textarea>
+    <button class="primary" id="send">Send</button></form>`;
+}
+function wireComposer(thread) {
+  const box = $("#msg");
+  box.focus();
+  box.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#say").requestSubmit(); } };
+  $("#say").onsubmit = async e => {
+    e.preventDefault();
+    const text = box.value.trim();
+    if (!text) return;
+    $("#send").disabled = true;
+    try {
+      const r = await api("POST", "/v1/chat", thread ? { text, thread } : { text });
+      delete drafts[`chat-${location.hash}`];
+      box.value = "";
+      if (!thread) location.hash = `#/chat/${enc(r.thread)}`;
+      else await App.redraw?.();
+    } catch (err) { toast(err.message); }
+    $("#send").disabled = false;
+  };
+}
+
+route(/^#\/chat$/, async main => {
+  const { threads } = await api("GET", "/v1/chat");
+  paint(main, `<h1>Chat</h1><p class="muted">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm.</p>
+    ${composer("For example: What changed in the EU AI Act this month? Or: Every Monday, summarise my open invoices.")}
+    ${threads.length ? `<h3>Conversations</h3><table class="t"><tbody>${threads.map(t => `<tr class="click" data-href="#/chat/${enc(t.thread)}"><td>${esc(t.title)}</td><td class="small faint n">${esc(when(t.updated_at))}</td></tr>`).join("")}</tbody></table>` : ""}`);
+  main.onclick = e => { const r = e.target.closest("[data-href]"); if (r) location.hash = r.dataset.href; };
+  wireComposer(null);
+});
+
+function rule(e) {
+  if (e.every_minutes) return `Every ${e.every_minutes} minutes`;
+  if (e.daily_at) return `Every day at ${e.daily_at}`;
+  return "";
+}
+function waitingLink(e) {
+  if (!e.waiting_item) return "";
+  return ` · <a href="#/inbox" data-waiting="${esc(e.waiting_item)}">${esc(WAITING[e.waiting_on] || "waiting for you")}: open the inbox</a>`;
+}
+function entry(e) {
+  switch (e.kind) {
+    case "message": return `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div></div>`;
+    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div></div>`;
+    case "turn": return e.status === "failed" || e.status === "cancelled"
+      ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
+      : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}${waitingLink(e)}</div></div>`;
+    case "task": return `<div class="card flat chatcard" data-chat-task="${esc(e.task_id)}"><div class="spread"><span class="kind">Task started</span>${chip(e.status)}</div>
+      <p><a href="#/task/${enc(e.task_id)}">${esc(e.text)}</a></p><div class="small muted">It is in Tasks and will post its result here${waitingLink(e)}</div></div>`;
+    case "result": return `<div class="msg magnus" data-result="${esc(e.task_id)}"><div class="small faint">Task ${esc(STATUS[e.status]?.[1] || e.status)} · <a href="#/task/${enc(e.task_id)}">${esc(e.text)}</a></div><div class="pre">${esc(e.summary || "")}</div></div>`;
+    case "schedule_card": {
+      const b = e.budget || {};
+      const decided = e.state === "confirmed" ? `<p class="small"><span class="chip ok">Scheduled</span></p>` : e.state === "declined" ? `<p class="small"><span class="chip">Declined</span></p>` : "";
+      return `<div class="card flat chatcard" data-card="${esc(e.card)}"><div class="kind">Recurring task: confirm to schedule it</div>
+        <p><strong>${esc(e.text)}</strong></p>
+        <div class="what">
+          <div class="field"><span>When</span><span>${esc(rule(e))}</span></div>
+          <div class="field"><span>Scope</span><span>${esc(e.scope || "")}</span></div>
+          <div class="field"><span>Budget per run</span><span>up to $${esc(b.max_usd)}, ${esc(b.max_model_calls)} model calls, ${esc(b.max_actions)} actions</span></div>
+          <div class="field"><span>Acts for</span><span>you (${esc(e.acts_for)}), with your access; approvals come to your inbox</span></div>
+        </div>${taintNote(e.taint)}
+        ${e.state === "open" ? `<div class="row" style="margin-top:10px"><button class="primary" data-decide="confirm">Confirm</button><button data-decide="decline">Decline</button></div>` : decided}</div>`;
+    }
+    default: return "";
+  }
+}
+
+route(/^#\/chat\/([^/]+)$/, async (main, thread) => {
+  paint(main, `<p class="small"><a href="#/chat">Chat</a></p><div id="thread" class="thread" aria-live="polite"></div>${composer("Reply")}`);
+  const draw = async () => {
+    const { entries } = await api("GET", `/v1/chat/${enc(thread)}`);
+    if (paint($("#thread", main), entries.map(entry).join(""))) $("#thread", main).lastElementChild?.scrollIntoView({ block: "end" });
+  };
+  App.redraw = draw;
+  onLeave(() => { App.redraw = null; });
+  $("#thread", main).onclick = async e => {
+    const b = e.target.closest("[data-decide]");
+    if (!b) return;
+    const card = b.closest("[data-card]").dataset.card;
+    b.disabled = true;
+    try { await api("POST", `/v1/chat/cards/${enc(card)}`, { decision: b.dataset.decide }); await draw(); }
+    catch (err) { toast(err.message); b.disabled = false; }
+  };
+  wireComposer(thread);
+  await draw();
+  every(2000, draw);
+});
+
 // ---------- Inbox ----------
 
 const KIND = {
@@ -383,6 +479,7 @@ function assuranceChip(cr) {
 function contractView(c, label) {
   if (!c) return `<div class="small faint">${esc(label)}: none</div>`;
   return `<div aria-label="${esc(label)}"><div class="small muted">${esc(label)}</div><p><strong>${esc(c.goal || "")}</strong></p>
+    ${c.conversation?.length ? `<details class="small"><summary>From the chat</summary>${c.conversation.map(m => `<div><span class="muted">${esc(m.role)}:</span> ${esc(m.text)}</div>`).join("")}</details>` : ""}
     <ol class="small">${(c.criteria || []).map(cr => `<li><div>${esc(cr.description || cr.id)} <span class="faint mono">${esc(cr.id)}</span>${assuranceChip(cr)}</div>${checkText(cr.check)}</li>`).join("")}</ol></div>`;
 }
 
@@ -628,7 +725,7 @@ route(/^#\/task\/([^/]+)$/, async (main, id) => {
       ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
       ${t.outputs?.length ? `<h3>Files</h3>${t.outputs.map(o => `<div class="row"><button class="link" data-act="download" data-out="${esc(o.id)}" data-name="${esc(o.name)}">${esc(o.name)}</button><span class="small faint">${esc(o.media_type)} · ${Math.max(1, Math.round(o.size / 1024))} KB</span></div>`).join("")}` : ""}
       <h3>Evidence</h3>${criteria(t)}`;
-    const html = `<p class="small"><a href="#/tasks">Tasks</a></p>
+    const html = `<p class="small"><a href="#/tasks">Tasks</a>${t.thread ? ` · <a href="#/chat/${enc(t.thread)}">From a chat</a>` : ""}</p>
       <div class="spread"><h1 style="max-width:44ch">${esc(t.text)}</h1><div class="row">${chip(t.status)}</div></div>
       <p class="muted">${esc(WAITING[t.waiting_on] || "")}${t.waiting_on && glance(t) ? " · " : ""}${esc(glance(t))}</p>
       ${open.length ? `<div class="banner">${open.length === 1 ? "A decision for this task is" : `${open.length} decisions for this task are`} in your <a href="#/inbox">inbox</a>.</div>` : ""}

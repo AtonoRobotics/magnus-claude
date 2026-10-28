@@ -20,9 +20,30 @@ use std::time::{Duration, Instant};
 pub const INSTRUCTIONS: &str = include_str!("../../instructions/agent.md");
 pub(crate) const MAX_RESULT_IN_CONTEXT: usize = 40_000;
 
+/// What a chat turn runs under: answer, start a task, propose a schedule,
+/// or ask.
+pub const CHAT_INSTRUCTIONS: &str = include_str!("../../instructions/chat.md");
+
 pub fn instructions_version() -> String {
+    version_of("agent.md", INSTRUCTIONS)
+}
+
+pub fn chat_instructions_version() -> String {
+    version_of("chat.md", CHAT_INSTRUCTIONS)
+}
+
+fn version_of(name: &str, text: &str) -> String {
     use sha2::Digest;
-    format!("agent.md@{}", &hex::encode(sha2::Sha256::digest(INSTRUCTIONS.as_bytes()))[..12])
+    format!("{name}@{}", &hex::encode(sha2::Sha256::digest(text.as_bytes()))[..12])
+}
+
+/// A conversation as the model reads it: who said what, in order.
+fn transcript(conversation: &[Value]) -> String {
+    conversation
+        .iter()
+        .map(|e| format!("{}: {}", e["role"].as_str().unwrap_or("?"), e["text"].as_str().unwrap_or_default()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn clip(s: &str) -> String {
@@ -41,7 +62,22 @@ impl Kernel {
     /// It only grows at the end, so provider prompt caches stay valid (C1).
     pub fn context(&self, run: &Run) -> (String, Vec<Message>) {
         let (task, attachments) = self.read(|s| (s.tasks.get(&run.task).cloned(), s.attachments.get(&run.task).cloned().unwrap_or_default()));
-        let mut first = vec![Block::Text { text: task.map(|t| t.text).unwrap_or_default() }];
+        let chat = task.as_ref().and_then(|t| t.chat.clone());
+        let mut first = vec![];
+        // A chat turn sees the thread so far, as recorded when the person
+        // wrote; a task from chat, the conversation that started it.
+        match &chat {
+            Some(c) if c.turn && !c.conversation.is_empty() => {
+                first.push(Block::Text { text: format!("The conversation so far (answers and task results are yours):\n\n{}\n\nThe person's new message follows.", transcript(&c.conversation)) });
+            }
+            _ => {}
+        }
+        first.push(Block::Text { text: task.map(|t| t.text).unwrap_or_default() });
+        if let Some(c) = chat.as_ref().filter(|c| !c.turn && !c.conversation.is_empty()) {
+            first.push(Block::Text {
+                text: format!("This task was started from a chat with the person. Write its contract from what they said there:\n\n{}", transcript(&c.conversation)),
+            });
+        }
         for a in &attachments {
             let name = a["name"].as_str().unwrap_or("file").to_string();
             let media = a["media_type"].as_str().unwrap_or("application/octet-stream").to_string();
@@ -88,13 +124,34 @@ impl Kernel {
                 msgs.push(Message { role: Role::User, content: user, state: None });
             }
         }
-        (INSTRUCTIONS.to_string(), msgs)
+        let system = if chat.is_some_and(|c| c.turn) { CHAT_INSTRUCTIONS } else { INSTRUCTIONS };
+        (system.to_string(), msgs)
+    }
+
+    /// A task from chat keeps the conversation it came from with its
+    /// contract, for the person to see beside it.
+    fn with_conversation(&self, run: &Run, mut contract: Value) -> Value {
+        if let Some(c) = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.clone())).filter(|c| !c.turn) {
+            contract["conversation"] = json!(c.conversation);
+        }
+        contract
+    }
+
+    /// Whether the run is a chat turn.
+    pub fn is_chat_turn(&self, run: &Run) -> bool {
+        self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.is_chat_turn()))
     }
 
     /// Tools offered to the run's next model call: run records, built-ins,
     /// and the person's classified app tools with pinned definitions.
+    /// A chat turn is offered only the tools that read, and the chat tools.
     pub async fn tools_for(&self, run: &Run) -> Vec<ToolSpec> {
+        let chat = self.is_chat_turn(run);
         let mut specs = tools::builtin_specs(self.sandboxes.available(), self.web.can_search(), self.browser.available());
+        if chat {
+            specs.retain(|t| tools::builtin(&t.name).is_some_and(|b| b.risk == Risk::Read));
+            specs.extend(tools::chat_specs());
+        }
         let Some(person) = self.person(&run.person).cloned() else { return specs };
         for c in self.cfg.connectors.clone() {
             let live = self.live_app_tools(&c).await;
@@ -102,7 +159,7 @@ impl Kernel {
             for (remote, class) in &c.tools {
                 let name = format!("{}__{remote}", c.name);
                 let Some(f) = boundary::facts(self, &name) else { continue };
-                if Risk::parse(&class.risk) == Some(Risk::Prohibited) || !boundary::has_rights(&person, &f) {
+                if Risk::parse(&class.risk) == Some(Risk::Prohibited) || !boundary::has_rights(&person, &f) || (chat && f.risk != Risk::Read) {
                     continue;
                 }
                 if let Some(t) = live.as_ref().and_then(|l| l.iter().find(|t| &t.name == remote)) {
@@ -279,6 +336,11 @@ impl Kernel {
 
     pub(crate) async fn record_call(self: &Arc<Self>, run: &Run, call_id: &str, step_id: &str, name: &str, input: &Value) -> Result<Flow> {
         let rid = run.id.as_str();
+        // A chat turn has no contract, plan or Done: it ends with its answer.
+        if self.is_chat_turn(run) {
+            self.result(rid, call_id, format!("{name} is not available in chat. Reply with your answer as text, or start a task with create_task."), true).await?;
+            return Ok(Flow::Continue);
+        }
         match name {
             "task_contract" => match self.validate_contract_tools(input).await {
                 // Work has started: the change goes to the person, old and new
@@ -289,7 +351,7 @@ impl Kernel {
                             run,
                             "contract_change",
                             format!("The agent asks to change the done-criteria of: {}", run.contract.as_ref().and_then(|c| c["goal"].as_str()).unwrap_or("the task")),
-                            json!({ "call_id": call_id, "version": run.contract_version, "old": run.contract, "new": labelled }),
+                            json!({ "call_id": call_id, "version": run.contract_version, "old": run.contract, "new": self.with_conversation(run, labelled) }),
                         )
                         .await?;
                     self.suspend(rid, "contract_change", Some(item)).await?;
@@ -298,6 +360,7 @@ impl Kernel {
                 Ok(labelled) => {
                     let version = run.contract_version + 1;
                     let note = self_checked_note(&labelled);
+                    let labelled = self.with_conversation(run, labelled);
                     self.emit("model", Ev::Contract { run: rid.into(), version, contract: labelled, approved_by: None }).await?;
                     let frozen = if run.work_started {
                         self.emit("kernel", Ev::ContractFrozen { run: rid.into(), version }).await?;
@@ -393,16 +456,14 @@ impl Kernel {
         Ok(Flow::Continue)
     }
 
-    /// The contract's shape, then its checks' tools: every sandbox command a
-    /// check runs is resolved in a fresh VM booted from the image with an empty
-    /// workspace, so a check can use only the image's tools, and workspace code
-    /// only as what a tool runs (K42). The image does not change during a run,
-    /// so the answer still holds when the contract freezes.
     /// Validate a contract and label each criterion by where its verdict
     /// comes from: "appliance-verified" when the image's tools or the
     /// kernel's comparison against the frozen expectations decide it,
     /// "self-checked" when the check executes a workspace file. The labels
-    /// are the kernel's, whatever the model sent.
+    /// are the kernel's, whatever the model sent. Each sandbox command is
+    /// resolved in a fresh VM booted from the image with an empty workspace
+    /// (K42); the image does not change during a run, so the answer still
+    /// holds when the contract freezes.
     async fn validate_contract_tools(&self, c: &Value) -> std::result::Result<Value, String> {
         self.validate_contract(c)?;
         let mut c = c.clone();

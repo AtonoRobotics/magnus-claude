@@ -245,6 +245,9 @@ impl Kernel {
                         text: item.details["text"].as_str().unwrap_or_default().into(),
                         every_minutes: item.details["every_minutes"].as_u64().map(|m| m as u32),
                         daily_at: item.details["daily_at"].as_str().map(String::from),
+                        budget: None,
+                        card: None,
+                        label: None,
                     },
                 )
                 .await?;

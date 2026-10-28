@@ -138,6 +138,10 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "memory_write", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_search", app: "memory", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "playbook_update", app: "playbook", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    // Chat only: start a task for the person, or show them a schedule to
+    // confirm. Neither leaves the appliance; the task carries the turn's taint.
+    Builtin { name: "create_task", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "create_schedule", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
 ];
 
 pub fn builtin(name: &str) -> Option<&'static Builtin> {
@@ -148,8 +152,6 @@ fn obj(props: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": props, "required": required })
 }
 
-/// Specs for run records and built-in actions. Descriptions are part of the
-/// versioned instructions (X11): they live in `instructions/tools.json`.
 /// Whether a contract check may call this tool: anything that only reads, and
 /// of the sandbox tools only running a command and reading a file, which a
 /// check does in a VM of its own.
@@ -157,6 +159,29 @@ pub fn checkable(name: &str, risk: Risk) -> bool {
     risk == Risk::Read || (risk == Risk::Sandbox && matches!(name, "sandbox_exec" | "sandbox_read_file"))
 }
 
+/// The tools a chat turn may call besides reads: start a task, or propose a
+/// schedule the person confirms in the thread.
+pub fn chat_specs() -> Vec<ToolSpec> {
+    let desc: Value = serde_json::from_str(include_str!("../instructions/tools.json")).expect("tools.json");
+    let d = |n: &str| desc[n].as_str().unwrap_or_default().to_string();
+    let budget = json!({ "type": "object", "description": d("create_schedule.budget"), "properties": {
+        "max_usd": { "type": "number" }, "max_model_calls": { "type": "integer" }, "max_actions": { "type": "integer" }
+    } });
+    vec![
+        ToolSpec { name: "create_task".into(), description: d("create_task"), input_schema: obj(json!({ "text": { "type": "string" } }), &["text"]) },
+        ToolSpec {
+            name: "create_schedule".into(),
+            description: d("create_schedule"),
+            input_schema: obj(
+                json!({ "text": { "type": "string" }, "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" }, "scope": { "type": "string" }, "budget": budget }),
+                &["text", "scope"],
+            ),
+        },
+    ]
+}
+
+/// Specs for run records and built-in actions. Descriptions are part of the
+/// versioned instructions (X11): they live in `instructions/tools.json`.
 pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec> {
     let desc: Value = serde_json::from_str(include_str!("../instructions/tools.json")).expect("tools.json");
     let d = |n: &str| desc[n].as_str().unwrap_or_default().to_string();

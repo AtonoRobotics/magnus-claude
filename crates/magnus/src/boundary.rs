@@ -91,6 +91,12 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
     })
 }
 
+/// The appliance's own chat tools (`create_task`, `create_schedule`), never
+/// a connector's, whatever the connector is called.
+fn is_chat_tool(f: &Facts) -> bool {
+    f.connector.is_none() && f.app == "chat"
+}
+
 pub fn has_rights(person: &Person, f: &Facts) -> bool {
     match &f.connector {
         Some(c) if !c.access_groups.is_empty() => c.access_groups.iter().any(|g| person.groups.contains(g)),
@@ -305,7 +311,7 @@ impl Kernel {
         // 8. Execute: intent first, then the call, then the result. The
         // agent's first action that changes anything starts the work, and
         // freezes the contract in force (invariant 7).
-        if a.issuer == Issuer::Model && f.risk != Risk::Read && !run.work_started {
+        if a.issuer == Issuer::Model && f.risk != Risk::Read && !is_chat_tool(&f) && !run.work_started {
             self.emit("kernel", Ev::WorkStarted { run: a.run.clone() }).await?;
             if run.contract.is_some() && run.contract_frozen.is_none() {
                 self.emit("kernel", Ev::ContractFrozen { run: a.run.clone(), version: run.contract_version }).await?;
@@ -427,7 +433,17 @@ impl Kernel {
             let why = format!("{} does not have access to {} (identity-provider groups)", person.id, f.app);
             return Ok(Err(self.deny(a, "policy", &why, false, None).await?));
         }
-        if f.risk.changes_state() && run.contract.is_none() && a.issuer == Issuer::Model {
+        // A chat turn may only read, and start a task or propose a schedule;
+        // those two belong to chat alone.
+        let chat_turn = self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.is_chat_turn()));
+        if is_chat_tool(f) && !chat_turn {
+            return Ok(Err(self.deny(a, "policy", &format!("{} is for chat; in a task, do the work, or propose a schedule with propose_schedule", a.tool), false, None).await?));
+        }
+        if chat_turn && f.risk != Risk::Read && !is_chat_tool(f) {
+            let why = format!("in chat you may only read; {} changes something, so start a task with create_task to do it", a.tool);
+            return Ok(Err(self.deny(a, "policy", &why, false, None).await?));
+        }
+        if f.risk.changes_state() && run.contract.is_none() && a.issuer == Issuer::Model && !chat_turn {
             let why = "record a task contract with task_contract before changing anything; then retry";
             return Ok(Err(self.deny(a, "policy", why, true, None).await?));
         }
@@ -449,7 +465,9 @@ impl Kernel {
         // A call carries data out if it changes state, fetches from the web, or
         // reaches an app whose audience is wider than the person (its inputs
         // travel there even when it only reads).
-        let transmits = f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private);
+        // Starting a task from chat sends nothing out: the task carries the
+        // turn's taint, and the rules apply to what it sends.
+        let transmits = !is_chat_tool(f) && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private));
         // These override a policy ask: the approval must then cover this exact
         // action, not a broader scope granted for policy reasons.
         if transmits && untrusted && private {
@@ -547,7 +565,9 @@ impl Kernel {
             let text = err_text(&format!("{} was interrupted by a restart; its outcome is unknown. Check the workspace before doing it again.", a.tool), false);
             return Ok(Gate::Stop(self.record(a, Some(key.into()), "unknown", text, true, f.label, None).await?));
         }
-        if f.risk == Risk::Read {
+        // A chat call's ids come from its key, so resending finds what the
+        // first call made.
+        if f.risk == Risk::Read || is_chat_tool(f) {
             return Ok(Gate::Pass);
         }
         if f.connector.as_ref().is_some_and(|c| c.idempotency == "header") {
@@ -596,7 +616,7 @@ impl Kernel {
         Ok(Gate::Stop(Verdict::Suspended))
     }
 
-    async fn call(&self, a: &Action, f: &Facts, bearer: Option<&str>, key: &str) -> std::result::Result<(String, bool, Option<Value>), CallFailure> {
+    async fn call(self: &Arc<Self>, a: &Action, f: &Facts, bearer: Option<&str>, key: &str) -> std::result::Result<(String, bool, Option<Value>), CallFailure> {
         if let Some(c) = &f.connector {
             let k = (c.idempotency == "header").then_some(key);
             return match self.mcp.call(&c.url, bearer, &f.remote, &a.input, k).await {
@@ -613,6 +633,8 @@ impl Kernel {
                     Ok((text, false, Some(json!({ "content_type": ctype }))))
                 }
                 "web_search" => Ok((self.web.search(&s("query")).await?, false, None)),
+                "create_task" => self.chat_task(a, key).await,
+                "create_schedule" => Ok(self.chat_card(a, key)),
                 "sandbox_exec" => {
                     let t = a.input["timeout_s"].as_u64().unwrap_or(120);
                     let v = if a.issuer == Issuer::Check {

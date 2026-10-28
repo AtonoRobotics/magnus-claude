@@ -9,6 +9,8 @@
 //                    (the person approves on the provider's page)
 // MAGNUS_API_KEY   the key to paste when connecting Claude
 // MAGNUS_TASK      the task to type
+// MAGNUS_CHAT_QUESTION, MAGNUS_CHAT_ANSWER  optionally, a question to ask in
+//                  chat and the answer the model gives
 // MAGNUS_CHROMIUM  Chrome to drive; MAGNUS_SHOTS  where to keep screenshots
 import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
@@ -138,6 +140,19 @@ await step("see the outcome with its evidence", async () => {
   if (states.some(s => s === "active" || s === "pending")) throw new Error(`a finished task shows plan units as ${states.join(", ")}`);
   await page.getByRole("tab", { name: "Full trace" }).click();
   await page.locator(".call").first().waitFor({ timeout: T });
+});
+
+const [question, answer] = [process.env.MAGNUS_CHAT_QUESTION, process.env.MAGNUS_CHAT_ANSWER];
+if (question) await step("ask in chat and see the answer", async () => {
+  await page.getByRole("link", { name: "Chat", exact: true }).click();
+  await page.getByLabel("Message").fill(question);
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.locator("[data-answer]", { hasText: answer }).waitFor({ timeout: T });
+  await shot("chat thread");
+  // A chat turn is a conversation, not a task.
+  await page.getByRole("link", { name: "Tasks", exact: true }).click();
+  await page.locator("table.t").waitFor({ timeout: T });
+  if (await page.getByText(question).count()) throw new Error("the chat message is listed as a task");
 });
 
 if (errors.length) { console.error(`FAIL page errors:\n${errors.join("\n")}`); await browser.close(); process.exit(1); }

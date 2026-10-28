@@ -70,6 +70,7 @@ impl Kernel {
             return Ok(Flow::Stop);
         }
         let (system, messages) = self.context(&run);
+        let chat = self.is_chat_turn(&run);
         let tools = self.tools_for(&run).await;
         let tools_hash = {
             use sha2::Digest;
@@ -110,6 +111,17 @@ impl Kernel {
             match out {
                 Ok(t) => {
                     let has_call = t.blocks.iter().any(|b| matches!(b, magnus_adapter_proto::Block::ToolCall { .. }));
+                    let answer: String = t
+                        .blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            magnus_adapter_proto::Block::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .trim()
+                        .to_string();
                     self.emit(
                         "model",
                         Ev::ModelReply {
@@ -123,6 +135,13 @@ impl Kernel {
                         },
                     )
                     .await?;
+                    // A chat turn ends with its answer: no contract, no Done
+                    // check. What it did on the way went through execute().
+                    if !has_call && chat {
+                        self.emit("kernel", Ev::Completed { run: run_id.into(), summary: answer, view: None, spoken: None }).await?;
+                        self.on_stop(run_id, true).await;
+                        return Ok(Flow::Stop);
+                    }
                     if !has_call {
                         self.emit(
                             "kernel",

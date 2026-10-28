@@ -6,6 +6,21 @@ use magnus_adapter_proto::{Block, ErrorClass, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A run's place in a chat thread.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ChatOrigin {
+    pub thread: String,
+    /// A chat turn (the person's message, answered without a contract), or a
+    /// task started from chat.
+    pub turn: bool,
+    /// For a task: the chat turn that started it.
+    #[serde(default)]
+    pub from_run: Option<String>,
+    /// For a task: the conversation that led to it, carried into its contract.
+    #[serde(default)]
+    pub conversation: Vec<Value>,
+}
+
 /// A run's pinned configuration (K9), recorded at its start.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RunConfig {
@@ -79,6 +94,19 @@ pub enum Ev {
         /// Local time "HH:MM" for a daily run.
         #[serde(default)]
         daily_at: Option<String>,
+        /// Each run's limits, when they are tighter than the appliance's.
+        #[serde(default)]
+        budget: Option<crate::config::Budget>,
+        /// The chat card the person confirmed to create it.
+        #[serde(default)]
+        card: Option<String>,
+        /// The taint of the chat turn that proposed it; its tasks start with it.
+        #[serde(default)]
+        label: Option<Label>,
+    },
+    /// The person declined a schedule proposed in chat.
+    CardDeclined {
+        card: String,
     },
     ScheduleRemoved {
         id: String,
@@ -121,6 +149,13 @@ pub enum Ev {
         config: RunConfig,
         #[serde(default)]
         experiment: Option<ExperimentTag>,
+        /// Where in chat it comes from: a chat turn, or a task started there.
+        #[serde(default)]
+        chat: Option<ChatOrigin>,
+        /// Taint the run starts with: that of the chat turn or proposal that
+        /// started it (the person's own words carry none).
+        #[serde(default)]
+        label: Option<Label>,
     },
     ModelCall {
         run: String,

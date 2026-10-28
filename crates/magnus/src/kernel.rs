@@ -55,6 +55,17 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
 }
 
+/// How a new run differs from a plain task.
+#[derive(Default)]
+pub struct NewRun {
+    pub experiment: Option<crate::events::ExperimentTag>,
+    pub chat: Option<crate::events::ChatOrigin>,
+    pub label: Option<crate::tools::Label>,
+    pub budget: Option<crate::config::Budget>,
+    /// Fixed ids, so a resent request finds the task it already created.
+    pub ids: Option<(String, String)>,
+}
+
 impl Kernel {
     pub async fn boot(cfg: Config) -> Result<Arc<Kernel>> {
         std::fs::create_dir_all(&cfg.appliance.state_dir)?;
@@ -199,7 +210,15 @@ impl Kernel {
         attachments: Vec<serde_json::Value>,
         experiment: Option<crate::events::ExperimentTag>,
     ) -> Result<(String, String)> {
-        let (task, run) = (new_id("task"), new_id("run"));
+        self.create_run(actor, person, text, attachments, NewRun { experiment, ..Default::default() }).await
+    }
+
+    /// Create a task or a chat turn and start it.
+    pub async fn create_run(self: &Arc<Self>, actor: &str, person: &str, text: String, attachments: Vec<serde_json::Value>, o: NewRun) -> Result<(String, String)> {
+        let (task, run) = match &o.ids {
+            Some((t, r)) => (t.clone(), r.clone()),
+            None => (new_id("task"), new_id("run")),
+        };
         let m = &self.cfg.model;
         let (adapter, model) = self.read(|s| s.model.clone()).unwrap_or_else(|| (m.adapter.clone(), m.name.clone()));
         let config = crate::events::RunConfig {
@@ -207,13 +226,17 @@ impl Kernel {
             model,
             max_retries: m.max_retries,
             max_tokens: m.max_tokens,
-            budget: self.cfg.budget.clone(),
+            budget: o.budget.unwrap_or_else(|| self.cfg.budget.clone()),
             verifier: self.cfg.verifier.enabled,
-            instructions: crate::run::instructions_version(),
+            instructions: if o.chat.as_ref().is_some_and(|c| c.turn) { crate::run::chat_instructions_version() } else { crate::run::instructions_version() },
             harness: HARNESS_VERSION.into(),
             playbook: self.read(|s| s.playbook_version),
         };
-        self.emit(actor, Ev::TaskCreated { task: task.clone(), run: run.clone(), person: person.into(), text, attachments, config, experiment }).await?;
+        self.emit(
+            actor,
+            Ev::TaskCreated { task: task.clone(), run: run.clone(), person: person.into(), text, attachments, config, experiment: o.experiment, chat: o.chat, label: o.label },
+        )
+        .await?;
         self.wake(&run);
         Ok((task, run))
     }
@@ -226,8 +249,10 @@ impl Kernel {
             let due_schedules: Vec<crate::state::Schedule> =
                 self.read(|s| if s.kill_switch { vec![] } else { s.schedules.values().filter(|x| x.next_due().is_some_and(|t| t <= now)).cloned().collect() });
             for sc in due_schedules {
-                // A scheduled task acts for the person who set it up (K54).
-                match self.create_task(&format!("schedule:{}", sc.id), &sc.person, sc.text.clone(), vec![]).await {
+                // A scheduled task acts for the person who set it up (K54),
+                // within the schedule's budget.
+                let o = NewRun { budget: sc.budget.clone(), label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label), ..Default::default() };
+                match self.create_run(&format!("schedule:{}", sc.id), &sc.person, sc.text.clone(), vec![], o).await {
                     Ok((task, _)) => {
                         let _ = self.emit("kernel", Ev::ScheduleFired { id: sc.id.clone(), task }).await;
                     }

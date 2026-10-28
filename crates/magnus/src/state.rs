@@ -165,6 +165,14 @@ pub struct Task {
     pub person: String,
     pub text: String,
     pub created_at: DateTime<Utc>,
+    pub chat: Option<crate::events::ChatOrigin>,
+}
+
+impl Task {
+    /// A chat turn: answered in the thread, not listed as a task.
+    pub fn is_chat_turn(&self) -> bool {
+        self.chat.as_ref().is_some_and(|c| c.turn)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -249,6 +257,16 @@ pub struct Schedule {
     pub daily_at: Option<String>,
     pub created: DateTime<Utc>,
     pub last_fired: Option<DateTime<Utc>>,
+    pub budget: Option<crate::config::Budget>,
+    pub card: Option<String>,
+    pub label: Label,
+}
+
+/// What became of a schedule proposed in chat.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CardState {
+    Confirmed(String),
+    Declined,
 }
 
 impl Schedule {
@@ -282,6 +300,8 @@ pub struct State {
     pub policies: BTreeMap<String, String>,
     pub kill_switch: bool,
     pub schedules: BTreeMap<String, Schedule>,
+    /// Schedule cards from chat the person answered, by card id.
+    pub cards: HashMap<String, CardState>,
     pub model: Option<(String, String)>,
     pub pins: HashMap<String, Pin>,
     /// Tools whose live definition differs from the pin, with the open item.
@@ -328,11 +348,28 @@ impl State {
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
             Ev::SignedIn { .. } | Ev::SignedOut { .. } => {}
-            Ev::ScheduleSet { id, person, text, every_minutes, daily_at } => {
+            Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label } => {
                 self.schedules.insert(
                     id.clone(),
-                    Schedule { id: id.clone(), person: person.clone(), text: text.clone(), every_minutes: *every_minutes, daily_at: daily_at.clone(), created: e.at, last_fired: None },
+                    Schedule {
+                        id: id.clone(),
+                        person: person.clone(),
+                        text: text.clone(),
+                        every_minutes: *every_minutes,
+                        daily_at: daily_at.clone(),
+                        created: e.at,
+                        last_fired: None,
+                        budget: budget.clone(),
+                        card: card.clone(),
+                        label: label.unwrap_or_default(),
+                    },
                 );
+                if let Some(c) = card {
+                    self.cards.insert(c.clone(), CardState::Confirmed(id.clone()));
+                }
+            }
+            Ev::CardDeclined { card } => {
+                self.cards.insert(card.clone(), CardState::Declined);
             }
             Ev::MemoryForgotten { id } => self.memory.retain(|m| &m.id != id),
             Ev::ScheduleRemoved { id } => {
@@ -360,16 +397,17 @@ impl State {
                     (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: false }),
                 );
             }
-            Ev::TaskCreated { task, run, person, text, config, attachments, experiment } => {
+            Ev::TaskCreated { task, run, person, text, config, attachments, experiment, chat, label } => {
                 // Playbook items the run starts with carry the taint of the
-                // runs that wrote them (I2, M1).
-                let pb = self.playbook_at(person, config.playbook).into_iter().fold(Label::PRINCIPAL, |l, i| l.join(i.label));
+                // runs that wrote them (I2, M1), and a task from chat that of
+                // the turn that started it.
+                let pb = self.playbook_at(person, config.playbook).into_iter().fold(label.unwrap_or_default(), |l, i| l.join(i.label));
                 if !attachments.is_empty() {
                     self.attachments.insert(task.clone(), attachments.clone());
                 }
                 self.tasks.insert(
                     task.clone(),
-                    Task { task_id: task.clone(), run_id: run.clone(), person: person.clone(), text: text.clone(), created_at: e.at },
+                    Task { task_id: task.clone(), run_id: run.clone(), person: person.clone(), text: text.clone(), created_at: e.at, chat: chat.clone() },
                 );
                 self.runs.insert(
                     run.clone(),

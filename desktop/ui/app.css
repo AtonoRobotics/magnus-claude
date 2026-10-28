@@ -146,3 +146,13 @@ iframe.composed { width: 100%; border: 0; display: block; background: var(--surf
 .sidebyside { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px; }
 .sidebyside > div { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
 @media (max-width: 720px) { .sidebyside { grid-template-columns: 1fr; } }
+
+/* Chat */
+.thread { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 16px; }
+.msg { max-width: 72ch; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line); }
+.msg.me { align-self: flex-end; background: var(--raised); }
+.msg.magnus { align-self: flex-start; background: var(--surface); }
+.msg .pre { white-space: pre-wrap; }
+.chatcard { max-width: 72ch; }
+.say { display: flex; gap: 10px; align-items: flex-end; }
+.say textarea { flex: 1; }

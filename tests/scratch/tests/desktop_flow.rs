@@ -33,6 +33,8 @@ async fn run(how: Sign) {
         .env("MAGNUS_PERSON", PERSON)
         .env("MAGNUS_API_KEY", &key)
         .env("MAGNUS_TASK", TASK)
+        .env("MAGNUS_CHAT_QUESTION", CHAT_QUESTION)
+        .env("MAGNUS_CHAT_ANSWER", CHAT_ANSWER)
         .env("MAGNUS_CHROMIUM", chromium())
         .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
         .output()

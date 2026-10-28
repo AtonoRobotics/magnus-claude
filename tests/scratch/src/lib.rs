@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 
 pub const PERSON: &str = "alice";
 pub const PASSWORD: &str = "correct horse battery";
+pub const CHAT_QUESTION: &str = "What was Q3 revenue?";
+pub const CHAT_ANSWER: &str = "Q3 revenue was 41.7M.";
 pub const TASK: &str = "Write me a one-line summary of Q3 revenue (41.7M, Q2 was 38.2M) and send me the file.";
 
 /// `/v1/models` answered here, since connecting a key checks it there;
@@ -89,7 +91,19 @@ pub fn set_password(app: &Appliance, person: &str, pw: &str) -> bool {
 impl Flow {
     pub async fn start() -> Flow {
         let web = FakeWeb::start(&[("/finance/q3", "<p>Q3 revenue: 41.7M. Q2 revenue: 38.2M.</p>")]).await;
-        let mut model = FakeModel::start(steps(replies(web.url("/finance/q3")))).await;
+        // Chat turns answer; tasks follow the script.
+        let task = steps(replies(web.url("/finance/q3")));
+        let mut model = FakeModel::start(script(move |c| {
+            let task = task.clone();
+            async move {
+                if c.body["system"].to_string().contains("in a chat") {
+                    Reply::Text(CHAT_ANSWER.into())
+                } else {
+                    task(c).await
+                }
+            }
+        }))
+        .await;
         model.url = provider(&model).await;
         let app = Appliance::start(Spec::default(), &model).await;
         // Ask before any file leaves a task, so the flow has an approval.
