@@ -61,7 +61,11 @@ async fn serve(args: &[String]) -> Result<()> {
 async fn conformance(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let id = arg(args, "--adapter").context("--adapter is required")?;
-    let model = arg(args, "--model").unwrap_or_else(|| cfg.model.name.clone());
+    let model = match arg(args, "--model") {
+        Some(m) => m,
+        None if cfg.model.adapter == id => cfg.model.name.clone(),
+        None => anyhow::bail!("--model is required: the configured model belongs to adapter {}", cfg.model.adapter),
+    };
     let vault = std::sync::Arc::new(crate::vault::Vault::open(&cfg.appliance.state_dir)?);
     let a = cfg.adapters.iter().find(|a| a.id == id).context("no such adapter in the config")?.clone();
     let adapters = crate::adapters::Adapters::new(&cfg.appliance.state_dir, vault, &cfg.adapters);

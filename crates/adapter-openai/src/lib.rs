@@ -7,6 +7,9 @@
 //! - `auth`: `{ "kind": "api_key" }`, `{ "kind": "oauth_device", ... }` or
 //!   `{ "kind": "oauth_openai_device", ... }` (see `auth.rs`)
 //! - `headers`: extra request headers
+//! - `client_version_url`: where the provider publishes its own client's
+//!   current version; fills `{client_version}` in `models_path` and `headers`,
+//!   read again every `client_version_refresh_s` seconds
 //! - `max_tokens_field`: the request field for the output limit, or null to omit
 //! - `store`, `include`: Responses options (stateless use: `store: false`,
 //!   `include: ["reasoning.encrypted_content"]`)
@@ -119,7 +122,70 @@ pub(crate) fn cost(settings: &Value, model: &str, u: &Usage) -> f64 {
     (uncached * g("input") + u.cache_read_tokens as f64 * g("cache_read") + u.output_tokens as f64 * g("output")) / 1_000_000.0
 }
 
-async fn handle(http: reqwest::Client, req: Request, mut sink: Sink) -> anyhow::Result<()> {
+/// `{client_version}` in `models_path` and `headers` becomes the current
+/// release of the provider's own client, read from `client_version_url`
+/// (plain text, or JSON with `version` as npm serves it). Some backends refuse
+/// or filter requests by client version; looking it up keeps the adapter
+/// current with no pinned number. Read again after `client_version_refresh_s`;
+/// a failed lookup falls back to the last version read.
+async fn with_client_version(http: &reqwest::Client, settings: &mut Value) -> Result<(), String> {
+    let Some(url) = settings["client_version_url"].as_str().map(String::from) else { return Ok(()) };
+    let refresh = settings["client_version_refresh_s"].as_u64().ok_or("client_version_url needs client_version_refresh_s")?;
+    let version = client_version(http, &url, refresh).await?;
+    if let Some(p) = settings["models_path"].as_str() {
+        settings["models_path"] = p.replace("{client_version}", &version).into();
+    }
+    if let Some(hs) = settings["headers"].as_object_mut() {
+        for v in hs.values_mut() {
+            if let Some(s) = v.as_str() {
+                *v = s.replace("{client_version}", &version).into();
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn client_version(http: &reqwest::Client, url: &str, refresh_s: u64) -> Result<String, String> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, (String, Instant)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let cached = cache.lock().unwrap().get(url).cloned();
+    if let Some((v, at)) = &cached {
+        if at.elapsed() < Duration::from_secs(refresh_s) {
+            return Ok(v.clone());
+        }
+    }
+    let fetched = async {
+        let body = http.get(url).send().await.ok()?.error_for_status().ok()?.text().await.ok()?;
+        let v = match serde_json::from_str::<Value>(&body) {
+            Ok(j) => j["version"].as_str()?.to_string(),
+            Err(_) => body.lines().next()?.trim().to_string(),
+        };
+        (v.split('.').count() >= 3 && v.starts_with(|c: char| c.is_ascii_digit())).then_some(v)
+    }
+    .await;
+    match (fetched, cached) {
+        (Some(v), _) => {
+            cache.lock().unwrap().insert(url.to_string(), (v.clone(), Instant::now()));
+            Ok(v)
+        }
+        (None, Some((v, _))) => Ok(v),
+        (None, None) => Err(format!("could not read the provider's current client version from {url}")),
+    }
+}
+
+async fn handle(http: reqwest::Client, mut req: Request, mut sink: Sink) -> anyhow::Result<()> {
+    let settings = match &mut req {
+        Request::Hello {} => None,
+        Request::Catalog { settings, .. } | Request::AuthBegin { settings } | Request::AuthComplete { settings, .. } => Some(settings),
+        Request::Complete(p) => Some(&mut p.settings),
+    };
+    if let Some(s) = settings {
+        if let Err(m) = with_client_version(&http, s).await {
+            return sink.error(ErrorClass::Unavailable, m).await;
+        }
+    }
     match req {
         Request::Hello {} => {
             sink.send(&Event::Hello { contract: proto::CONTRACT.into(), adapter: "openai-compatible".into(), version: env!("CARGO_PKG_VERSION").into() })

@@ -16,6 +16,9 @@ use magnus_adapter_proto::{ErrorClass, Event, Sink};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
+/// RFC 8628 §3.2: poll every 5 seconds when the provider names no interval.
+const DEFAULT_INTERVAL_S: u64 = 5;
+
 /// Seconds given as a number or a numeric string (OpenAI sends `"5"`).
 fn secs(v: &Value) -> Option<u64> {
     v.as_u64().or_else(|| v.as_str()?.trim().parse().ok())
@@ -114,11 +117,11 @@ pub async fn begin(http: &reqwest::Client, settings: &Value, sink: &mut Sink) ->
                 Ok(r) => r.json().await.unwrap_or(Value::Null),
                 Err(e) => return sink.error(ErrorClass::Unavailable, format!("device endpoint unreachable: {e}")).await,
             };
-            let Some(device) = v["device_code"].as_str() else {
+            let (Some(device), Some(wait_s)) = (v["device_code"].as_str(), secs(&v["expires_in"])) else {
                 return sink.error(ErrorClass::AuthExpired, format!("the provider refused the sign-in request: {v}")).await;
             };
             sink.send(&Event::AuthStep {
-                flow: json!({ "kind": "oauth_device", "device_code": device, "interval": secs(&v["interval"]).unwrap_or(5), "wait_s": secs(&v["expires_in"]).unwrap_or(900) }),
+                flow: json!({ "kind": "oauth_device", "device_code": device, "interval": secs(&v["interval"]).unwrap_or(DEFAULT_INTERVAL_S), "wait_s": wait_s }),
                 url: v["verification_uri_complete"].as_str().or_else(|| v["verification_uri"].as_str()).map(String::from),
                 user_code: v["user_code"].as_str().map(String::from),
                 instructions: "Open the link and approve the sign-in; check that it shows this code. Magnus finishes by itself.".into(),
@@ -139,9 +142,16 @@ pub async fn begin(http: &reqwest::Client, settings: &Value, sink: &mut Sink) ->
             let (Some(id), Some(code)) = (v["device_auth_id"].as_str(), v["user_code"].as_str().or_else(|| v["usercode"].as_str())) else {
                 return sink.error(ErrorClass::AuthExpired, format!("the provider's answer has no sign-in code: {v}")).await;
             };
-            // codex-rs waits 15 minutes for the approval.
+            // Wait as long as the code is valid (`expires_at`, RFC 3339).
+            let Some(wait_s) = v["expires_at"]
+                .as_str()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| (t.timestamp() - chrono::Utc::now().timestamp()).max(0) as u64)
+            else {
+                return sink.error(ErrorClass::AuthExpired, format!("the provider's answer has no expiry: {v}")).await;
+            };
             sink.send(&Event::AuthStep {
-                flow: json!({ "kind": "oauth_openai_device", "device_auth_id": id, "user_code": code, "interval": secs(&v["interval"]).unwrap_or(5), "wait_s": 900 }),
+                flow: json!({ "kind": "oauth_openai_device", "device_auth_id": id, "user_code": code, "interval": secs(&v["interval"]).unwrap_or(DEFAULT_INTERVAL_S), "wait_s": wait_s }),
                 url: a["verification_url"].as_str().map(String::from),
                 user_code: Some(code.to_string()),
                 instructions: "Open the link, sign in, and enter the code shown. Magnus finishes by itself.".into(),
@@ -174,13 +184,13 @@ pub async fn complete(http: &reqwest::Client, settings: &Value, flow: &Value, in
         }
         "oauth_device" => {
             let device = flow["device_code"].as_str().unwrap_or_default();
-            let mut interval = flow["interval"].as_u64().unwrap_or(5).max(1);
+            let mut interval = flow["interval"].as_u64().unwrap_or(DEFAULT_INTERVAL_S).max(1);
             let form = [
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("device_code", device),
                 ("client_id", a["client_id"].as_str().unwrap_or_default()),
             ];
-            let deadline = Instant::now() + Duration::from_secs(flow["wait_s"].as_u64().unwrap_or(900));
+            let deadline = Instant::now() + Duration::from_secs(flow["wait_s"].as_u64().unwrap_or_default());
             loop {
                 match token_request(http, a, &form).await {
                     Ok(t) => return sink.send(&Event::AuthDone { credential: credential_from(a, &t, None).to_string() }).await,
@@ -199,8 +209,8 @@ pub async fn complete(http: &reqwest::Client, settings: &Value, flow: &Value, in
         "oauth_openai_device" => {
             let poll = a["poll_url"].as_str().unwrap_or_default();
             let body = json!({ "device_auth_id": flow["device_auth_id"], "user_code": flow["user_code"] });
-            let interval = flow["interval"].as_u64().unwrap_or(5).max(1);
-            let deadline = Instant::now() + Duration::from_secs(flow["wait_s"].as_u64().unwrap_or(900));
+            let interval = flow["interval"].as_u64().unwrap_or(DEFAULT_INTERVAL_S).max(1);
+            let deadline = Instant::now() + Duration::from_secs(flow["wait_s"].as_u64().unwrap_or_default());
             let granted: Value = loop {
                 match http.post(poll).json(&body).send().await {
                     Ok(r) if r.status().is_success() => break r.json().await.unwrap_or(Value::Null),

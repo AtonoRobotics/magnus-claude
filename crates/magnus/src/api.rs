@@ -423,7 +423,10 @@ async fn put_adapter(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b):
     };
     let info = json!({ "adapter": candidate.adapter, "version": candidate.version });
     if b["skip_conformance"].as_bool() != Some(true) {
-        let model = b["model"].as_str().map(String::from).unwrap_or_else(|| k.cfg.model.name.clone());
+        let model = match conformance_model(&k, &id, &b["model"]).await {
+            Ok(m) => m,
+            Err(m) => return err(StatusCode::BAD_GATEWAY, m),
+        };
         let report = k.adapters.conformance(&candidate, &model).await;
         let rv = serde_json::to_value(&report).unwrap_or_default();
         let ev = Ev::AdapterVerified {
@@ -445,6 +448,27 @@ async fn put_adapter(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b):
     Json(json!({ "installed": true, "running": info })).into_response()
 }
 
+/// The model a conformance run uses when none is named: the appliance's model
+/// if this adapter serves it, otherwise the first model the adapter lists
+/// (a fixed version first). Another provider's model would fail every check.
+async fn conformance_model(k: &Kernel, id: &str, asked: &Value) -> Result<String, String> {
+    if let Some(m) = asked.as_str() {
+        return Ok(m.to_string());
+    }
+    let (adapter, model) = k.read(|s| s.model.clone()).unwrap_or_else(|| (k.cfg.model.adapter.clone(), k.cfg.model.name.clone()));
+    if adapter == id {
+        return Ok(model);
+    }
+    match k.adapters.catalog(id).await {
+        Ok(magnus_adapter_proto::Event::Catalog { models }) => {
+            models.iter().find(|m| m.fixed_version).or(models.first()).map(|m| m.id.clone()).ok_or_else(|| format!("adapter {id} lists no models; name one to test"))
+        }
+        Ok(magnus_adapter_proto::Event::Error { message, .. }) => Err(format!("could not list adapter {id}'s models: {message}")),
+        Ok(other) => Err(format!("unexpected answer to the model list: {other:?}")),
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
 async fn conformance(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
     let p = match owner(&k, &h) {
         Ok(p) => p,
@@ -454,7 +478,10 @@ async fn conformance(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b):
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     };
-    let model = b["model"].as_str().map(String::from).unwrap_or_else(|| k.cfg.model.name.clone());
+    let model = match conformance_model(&k, &id, &b["model"]).await {
+        Ok(m) => m,
+        Err(m) => return err(StatusCode::BAD_GATEWAY, m),
+    };
     let report = k.adapters.conformance(&running, &model).await;
     let rv = serde_json::to_value(&report).unwrap_or_default();
     let ev = Ev::AdapterVerified { adapter_id: id, adapter: report.adapter.clone(), version: report.version.clone(), model, passed: report.passed, report: rv.clone() };

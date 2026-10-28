@@ -41,6 +41,10 @@ command = ["/opt/magnus/bin/magnus-adapter-openai"]
 credential = "codex_oauth"
 api = "responses"
 base_url = "https://chatgpt.com/backend-api/codex"
+# The model list is filtered by client version: send the current Codex CLI release.
+client_version_url = "https://registry.npmjs.org/@openai/codex/latest"
+client_version_refresh_s = 21600
+models_path = "/models?client_version={client_version}"
 max_tokens_field = false
 headers = { originator = "codex_cli_rs", "OpenAI-Beta" = "responses=experimental" }
 [adapters.settings.auth]
@@ -62,6 +66,10 @@ command = ["/opt/magnus/bin/magnus-adapter-openai"]
 credential = "grok_oauth"
 api = "chat"
 base_url = "https://cli-chat-proxy.grok.com/v1"
+# The proxy refuses old Grok CLI versions: send the current stable release.
+client_version_url = "https://x.ai/cli/stable"
+client_version_refresh_s = 21600
+headers = { "x-grok-client-version" = "{client_version}" }
 models_path = "/models-v2"
 fixed_models = ["grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning"]
 prices = { "grok-4" = { input = 2.0, output = 6.0, cache_read = 0.5 } }

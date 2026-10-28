@@ -233,14 +233,26 @@ async function streamLive(id) {
     for (;;) { const { value, done } = await rd.read(); if (done) break; buf += dec.decode(value, { stream: true }); let i; while ((i = buf.indexOf("\n\n")) >= 0) { const f = buf.slice(0, i); buf = buf.slice(i + 2); const d = f.split("\n").filter(l => l.startsWith("data:")).map(l => l.slice(5).trim()).join(""); if (!d) continue; const el = $("#live"); if (el) { el.textContent += JSON.parse(d).text; } } } } catch {}
 }
 
+// The model picker lists the chosen adapter's catalog, fetched once per
+// adapter (again after a sign-in) rather than on every refresh.
+let modelPick = null;
+const catalogs = {};
+async function catalog(adapter) {
+  if (!catalogs[adapter]) catalogs[adapter] = await api("GET", `/v1/adapters/${adapter}/catalog`)
+    .then(c => c.models ? { ids: c.models.map(m => m.id) } : { error: c.message || "the adapter sent no list" }).catch(e => ({ error: e.message }));
+  return catalogs[adapter];
+}
 async function settingsView() {
   const [{ adapters }, pol, sec, cur] = await Promise.all([api("GET", "/v1/adapters"), api("GET", "/v1/policies"), api("GET", "/v1/secrets"), api("GET", "/v1/model")]);
   const kill = (await api("GET", "/v1/health")).kill_switch;
+  const pick = modelPick || cur.adapter, models = await catalog(pick);
+  const chosen = pick === cur.adapter ? cur.model : null;
+  const options = models.ids ? [...(chosen && !models.ids.includes(chosen) ? [`<option value="${esc(chosen)}" selected>${esc(chosen)} (not offered by ${esc(pick)})</option>`] : []), ...models.ids.map(m => `<option ${m === chosen ? "selected" : ""}>${esc(m)}</option>`)].join("") : "";
   return `<h1>Settings</h1>
     <div class="card"><div class="spread"><div><strong>Kill switch</strong><p class="small muted">Stops every task at once and refuses every action until you release it. Released tasks stay paused until you continue them.</p></div>
       ${kill ? `<button data-act="kill-off">Release</button>` : `<button class="danger" data-act="kill-on">Stop everything</button>`}</div></div>
     <h2>Models</h2><div class="card"><strong>New tasks run on</strong> <code>${esc(cur.adapter)}</code> · <code>${esc(cur.model)}</code>
-      <div class="row" style="margin-top:8px"><select id="madapter" aria-label="Adapter">${adapters.map(a => `<option ${a.id === cur.adapter ? "selected" : ""}>${esc(a.id)}</option>`).join("")}</select><input type="text" id="mname" value="${esc(cur.model)}" aria-label="Model id" style="max-width:260px"><button data-act="set-model">Use</button></div></div>
+      <div class="row" style="margin-top:8px"><select id="madapter" aria-label="Adapter">${adapters.map(a => `<option ${a.id === pick ? "selected" : ""}>${esc(a.id)}</option>`).join("")}</select>${models.ids ? `<select id="mname" aria-label="Model">${options}</select><button data-act="set-model">Use</button>` : ""}</div>${models.error ? `<p class="small muted">No model list for ${esc(pick)}: ${esc(models.error)}</p>` : ""}</div>
     ${adapters.map(a => `<div class="card"><div class="spread"><strong>${esc(a.id)}</strong><span class="row">${a.conformance ? `<span class="chip ${a.conformance.passed ? "ok" : "bad"}">conformance ${a.conformance.passed ? "passed" : "failed"} (${esc(a.conformance.model)})</span>` : `<span class="chip warn">not verified</span>`}</span></div>
       <div class="small muted">${a.running ? esc(a.running.adapter + " " + a.running.version) : "not running"}</div>
       <div class="row" style="margin-top:10px"><button data-act="signin" data-adapter="${esc(a.id)}">Sign in</button><button data-act="conformance" data-adapter="${esc(a.id)}">Run conformance</button></div><div id="signin-${esc(a.id)}">${signins[a.id] || ""}</div><div id="conf-${esc(a.id)}"></div></div>`).join("")}
@@ -251,6 +263,7 @@ async function settingsView() {
 }
 
 function wire(main) {
+  const ma = $("#madapter", main); if (ma) ma.onchange = () => { modelPick = ma.value; render(); };
   main.querySelectorAll("[data-task]").forEach(el => el.onclick = e => { e.preventDefault(); view = { page: "task", task: el.dataset.task }; render(); });
   main.querySelectorAll("[data-dl]").forEach(b => b.onclick = async () => {
     const r = await fetch(`/v1/tasks/${b.dataset.taskId}/outputs/${b.dataset.dl}`, { headers: { authorization: "Bearer " + token } });
@@ -299,7 +312,7 @@ async function signIn(adapter) {
   const kind = step.flow.kind;
   const head = `<div style="margin-top:10px"><p class="small">${esc(step.instructions)}</p>${step.url ? `<p><a href="${esc(step.url)}" target="_blank" rel="noopener">Open the sign-in page</a></p>` : ""}${step.user_code ? `<p>Code: <code>${esc(step.user_code)}</code></p>` : ""}`;
   const finish = async input => {
-    try { await api("POST", `/v1/adapters/${adapter}/sign-in/complete`, { flow: step.flow, input }); showSignin(adapter, `<p class="small" style="color:var(--ok)">Signed in.</p>`); }
+    try { await api("POST", `/v1/adapters/${adapter}/sign-in/complete`, { flow: step.flow, input }); delete catalogs[adapter]; showSignin(adapter, `<p class="small" style="color:var(--ok)">Signed in.</p>`); }
     catch (e) { showSignin(adapter, `<p class="small" style="color:var(--bad)">${esc(e.message)}</p>`); }
   };
   if (kind !== "api_key") { showSignin(adapter, head + `<p class="small muted">Waiting for you to approve…</p></div>`); await finish({}); return; }
