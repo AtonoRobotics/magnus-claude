@@ -82,6 +82,18 @@ impl Listener {
                 };
                 let (acceptor, tx) = (acceptor.clone(), tx.clone());
                 tokio::spawn(async move {
+                    // A TLS connection starts with a handshake record (0x16).
+                    // Anything else is a browser that was given the address
+                    // without https://: send it there instead of TLS bytes.
+                    let mut first = [0u8; 1];
+                    match tokio::time::timeout(Duration::from_secs(10), sock.peek(&mut first)).await {
+                        Ok(Ok(1)) if first[0] != 0x16 => {
+                            let here = sock.local_addr().unwrap_or(local);
+                            return redirect_to_https(sock, here).await;
+                        }
+                        Ok(Ok(1)) => {}
+                        _ => return,
+                    }
                     match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(sock)).await {
                         Ok(Ok(s)) => {
                             let _ = tx.send((s, peer)).await;
@@ -94,6 +106,42 @@ impl Listener {
         });
         Ok(Listener { rx, local })
     }
+}
+
+/// Answer a plain HTTP request on the HTTPS port with a redirect to the
+/// same address over https. The host comes from the request (the address
+/// the person typed) when it looks like a host, else the address the
+/// connection came in on.
+async fn redirect_to_https(mut sock: TcpStream, local: SocketAddr) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut head = Vec::new();
+    let mut buf = [0u8; 1024];
+    let read = async {
+        while head.len() < 8192 && !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            match sock.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => head.extend_from_slice(&buf[..n]),
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(10), read).await;
+    let location = https_location(&String::from_utf8_lossy(&head), local);
+    let reply = format!("HTTP/1.1 308 Permanent Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let _ = sock.write_all(reply.as_bytes()).await;
+    let _ = sock.shutdown().await;
+}
+
+fn https_location(head: &str, local: SocketAddr) -> String {
+    let mut lines = head.split("\r\n");
+    let path = lines.next().and_then(|l| l.split(' ').nth(1)).filter(|p| p.starts_with('/') && !p.starts_with("//")).unwrap_or("/");
+    let host = lines
+        .filter_map(|l| l.split_once(':'))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)))
+        .unwrap_or_else(|| local.to_string());
+    let path: String = path.chars().filter(|c| c.is_ascii_graphic()).collect();
+    format!("https://{host}{path}")
 }
 
 impl axum::serve::Listener for Listener {
@@ -112,5 +160,20 @@ impl axum::serve::Listener for Listener {
 
     fn local_addr(&self) -> std::io::Result<Self::Addr> {
         Ok(self.local)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_http_is_sent_to_the_same_address_over_https() {
+        let local: SocketAddr = "0.0.0.0:7700".parse().unwrap();
+        assert_eq!(https_location("GET /#/inbox HTTP/1.1\r\nHost: 192.168.0.50:7700\r\n\r\n", local), "https://192.168.0.50:7700/#/inbox");
+        assert_eq!(https_location("GET / HTTP/1.1\r\nhost: magnus.local:7700\r\n\r\n", local), "https://magnus.local:7700/");
+        // No usable host: the listener's own address; no way to point elsewhere.
+        assert_eq!(https_location("GET //evil.example/x HTTP/1.1\r\nHost: a b\r\n\r\n", local), "https://0.0.0.0:7700/");
+        assert_eq!(https_location("", local), "https://0.0.0.0:7700/");
     }
 }

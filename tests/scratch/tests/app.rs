@@ -216,6 +216,23 @@ async fn a_provider_sign_in_refuses_strangers_other_clients_and_declines() {
     assert!(!app.db.dump().await.contains("signed_in"), "a refused sign-in was recorded as one");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_http_on_the_https_port_is_sent_to_https() {
+    let mut f = magnus_scratch::Flow::start().await;
+    let (url, _) = f.with_tls().await;
+    let addr = url.trim_start_matches("https://").to_string();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    s.write_all(format!("GET /#/inbox HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes()).await.unwrap();
+    let mut reply = String::new();
+    s.read_to_string(&mut reply).await.unwrap();
+    assert!(reply.starts_with("HTTP/1.1 308"), "{reply:?}");
+    assert!(reply.contains(&format!("Location: https://{addr}/#/inbox\r\n")), "{reply:?}");
+    // HTTPS on the same port still works.
+    let me = reqwest::Client::builder().danger_accept_invalid_certs(true).build().unwrap().get(format!("{url}/v1/sign-in")).send().await.unwrap();
+    assert_eq!(me.status(), 200);
+}
+
 /// The whole operator flow: plan, an approval that blocks, a review card,
 /// and an outcome with its composition and evidence.
 #[tokio::test(flavor = "multi_thread")]

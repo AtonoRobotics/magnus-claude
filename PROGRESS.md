@@ -13,7 +13,8 @@
 - The dev appliance serves HTTPS on all interfaces, port 7700 (https://192.168.0.50:7700; certificate fingerprint printed in `~/.magnus-appliance/serve.log`). Plain HTTP is on loopback only, at 127.0.0.1:7701. The owner opened 7700/tcp in ufw (2026-10-27).
   - The owner has the `developer` role.
   - A `user/samuel` policy layer asks before `deliver_file`, so the recorded run has an approval. Clear that layer to stop it.
-  - Previous config and binaries are kept as `magnus.toml.bak-20261028073104` and `bin/prev-20261028073104/` (before Keycloak sign-in), and `...-20261027232730` (before HTTPS).
+  - Plain `http://` on port 7700 redirects to `https://` (live since 2026-10-28). Browsers still warn about the self-signed certificate (Advanced, then continue); the desktop app pins it instead. A trusted name (Cloudflare tunnel or Tailscale) would remove the warning; that is the owner's call.
+  - Previous config and binaries are kept as `bin/prev-20261028080553/` (before the redirect), `magnus.toml.bak-20261028073104` and `bin/prev-20261028073104/` (before Keycloak sign-in), and `...-20261027232730` (before HTTPS).
 - TheAgentCompany preparation is with a background agent: service stack, three sample tasks, and a runner design in `eval/tac/`.
 
 ## Done
