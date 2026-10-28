@@ -20,5 +20,7 @@ fi
 cargo build --release -p magnus-guest --target x86_64-unknown-linux-musl --manifest-path "$root/Cargo.toml"
 cp "$root/target/x86_64-unknown-linux-musl/release/magnus-guest" "$cache/magnus-guest"
 cp "$here/Dockerfile" "$cache/Dockerfile"
+cp "$here/sitecustomize.py" "$cache/sitecustomize.py"
+cp "$here/check_tools.py" "$cache/check_tools.py"
 DOCKER_BUILDKIT=1 docker build --target export --output "type=local,dest=$out" "$cache"
 ls -la "$out"

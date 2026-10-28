@@ -431,7 +431,7 @@ impl Kernel {
             let why = "record a task contract with task_contract before changing anything; then retry";
             return Ok(Err(self.deny(a, "policy", why, true, None).await?));
         }
-        if a.issuer == Issuer::Check && !matches!(f.risk, Risk::Read | Risk::Sandbox) {
+        if a.issuer == Issuer::Check && !crate::tools::checkable(&f.name, f.risk) {
             return Ok(Err(self.deny(a, "policy", "contract checks may only read or run in the sandbox", false, None).await?));
         }
         // A check's input was written with the contract, so it is judged by
@@ -615,7 +615,11 @@ impl Kernel {
                 "web_search" => Ok((self.web.search(&s("query")).await?, false, None)),
                 "sandbox_exec" => {
                     let t = a.input["timeout_s"].as_u64().unwrap_or(120);
-                    let v = self.sandboxes.exec(&a.run, &s("command"), t).await?;
+                    let v = if a.issuer == Issuer::Check {
+                        self.sandboxes.exec_check(&a.run, &s("command"), t).await?
+                    } else {
+                        self.sandboxes.exec(&a.run, &s("command"), t).await?
+                    };
                     if let Some(e) = v["error"].as_str() {
                         return Ok((e.to_string(), true, None));
                     }
@@ -642,7 +646,7 @@ impl Kernel {
                     }
                 }
                 "sandbox_read_file" => {
-                    let bytes = self.sandboxes.read(&a.run, &s("path")).await?;
+                    let bytes = if a.issuer == Issuer::Check { self.sandboxes.read_check(&a.run, &s("path")).await? } else { self.sandboxes.read(&a.run, &s("path")).await? };
                     match String::from_utf8(bytes) {
                         Ok(t) => Ok((t, false, None)),
                         Err(e) => {

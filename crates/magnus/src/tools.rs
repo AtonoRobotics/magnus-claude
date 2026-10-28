@@ -150,6 +150,13 @@ fn obj(props: Value, required: &[&str]) -> Value {
 
 /// Specs for run records and built-in actions. Descriptions are part of the
 /// versioned instructions (X11): they live in `instructions/tools.json`.
+/// Whether a contract check may call this tool: anything that only reads, and
+/// of the sandbox tools only running a command and reading a file, which a
+/// check does in a VM of its own.
+pub fn checkable(name: &str, risk: Risk) -> bool {
+    risk == Risk::Read || (risk == Risk::Sandbox && matches!(name, "sandbox_exec" | "sandbox_read_file"))
+}
+
 pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec> {
     let desc: Value = serde_json::from_str(include_str!("../instructions/tools.json")).expect("tools.json");
     let d = |n: &str| desc[n].as_str().unwrap_or_default().to_string();

@@ -2,6 +2,12 @@
 //! up loopback (the only interface; the VM has no network device), and runs the
 //! agent: a vsock server on port 52 that runs commands and moves files for the
 //! kernel, one JSON request per connection. It holds no credentials.
+//!
+//! Booted for a contract check (`magnus.check=1` on the kernel command line),
+//! it mounts the workspace without exec, gives commands a fresh home instead
+//! of /workspace, and has Python ignore user site-packages and put paths from
+//! outside the image after the image's own (`sitecustomize.py` in the image),
+//! so the checking tool is the image's, never one the work put there.
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -47,6 +53,10 @@ fn loopback_up() {
     }
 }
 
+fn check_vm() -> bool {
+    std::fs::read_to_string("/proc/cmdline").is_ok_and(|c| c.split_whitespace().any(|a| a == "magnus.check=1"))
+}
+
 fn init() {
     mount("proc", "/proc", "proc", 0, "");
     mount("sysfs", "/sys", "sysfs", 0, "");
@@ -54,7 +64,11 @@ fn init() {
     mount("devpts", "/dev/pts", "devpts", 0, "");
     mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777");
     mount("tmpfs", "/run", "tmpfs", 0, "mode=755");
-    mount("/dev/vdb", "/workspace", "ext4", 0, "");
+    if check_vm() {
+        mount("/dev/vdb", "/workspace", "ext4", libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_NODEV, "");
+    } else {
+        mount("/dev/vdb", "/workspace", "ext4", 0, "");
+    }
     loopback_up();
     let _ = std::fs::write("/proc/sys/kernel/hostname", "sandbox");
 }
@@ -83,15 +97,20 @@ fn truncate(mut b: Vec<u8>) -> (String, bool) {
 fn exec(req: &Value) -> Value {
     let command = req["command"].as_str().unwrap_or_default();
     let timeout = Duration::from_secs(req["timeout_s"].as_u64().unwrap_or(120).clamp(1, 3600));
-    let mut child = match Command::new("/bin/sh")
-        .arg("-c")
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c")
         .arg(command)
         .current_dir("/workspace")
         .env_clear()
         .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         .env("HOME", "/workspace")
         .env("LANG", "C.UTF-8")
-        .env("DISPLAY", ":0")
+        .env("DISPLAY", ":0");
+    if check_vm() {
+        let _ = std::fs::create_dir_all("/tmp/home");
+        cmd.env("HOME", "/tmp/home").env("PYTHONNOUSERSITE", "1").env("PYTHONSAFEPATH", "1").env("MAGNUS_CHECK", "1");
+    }
+    let mut child = match cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

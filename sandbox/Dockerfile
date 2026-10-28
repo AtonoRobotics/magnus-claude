@@ -11,9 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir \
       python-docx openpyxl xlsxwriter python-pptx reportlab pypdf pdfplumber pymupdf \
       pandas numpy matplotlib pillow markdown beautifulsoup4 lxml tabulate jinja2 \
-      scipy scikit-learn
+      scipy scikit-learn pytest
 RUN mkdir -p /workspace /sbin
 COPY magnus-guest /sbin/magnus-guest
+COPY sitecustomize.py /usr/local/lib/python3.12/site-packages/sitecustomize.py
+COPY check_tools.py /usr/local/lib/magnus/check_tools.py
 
 FROM debian:bookworm-slim AS pack
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs && rm -rf /var/lib/apt/lists/*

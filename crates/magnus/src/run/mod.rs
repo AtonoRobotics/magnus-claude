@@ -280,7 +280,7 @@ impl Kernel {
     pub(crate) async fn record_call(self: &Arc<Self>, run: &Run, call_id: &str, step_id: &str, name: &str, input: &Value) -> Result<Flow> {
         let rid = run.id.as_str();
         match name {
-            "task_contract" => match self.validate_contract(input) {
+            "task_contract" => match self.validate_contract_tools(input).await {
                 // Work has started: the change goes to the person, old and new
                 // side by side, and only an approved version counts (K37).
                 Ok(()) if run.contract_frozen.is_some() => {
@@ -392,6 +392,33 @@ impl Kernel {
         Ok(Flow::Continue)
     }
 
+    /// The contract's shape, then its checks' tools: every sandbox command a
+    /// check runs is resolved in a fresh VM booted from the image with an empty
+    /// workspace, so a check can use only the image's tools, and workspace code
+    /// only as what a tool runs (K42). The image does not change during a run,
+    /// so the answer still holds when the contract freezes.
+    async fn validate_contract_tools(&self, c: &Value) -> std::result::Result<(), String> {
+        self.validate_contract(c)?;
+        let checks: Vec<(String, String)> = c["criteria"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|cr| cr["check"]["tool"] == "sandbox_exec")
+            .map(|cr| (cr["id"].as_str().unwrap_or_default().to_string(), cr["check"]["input"]["command"].as_str().unwrap_or_default().to_string()))
+            .collect();
+        if checks.is_empty() {
+            return Ok(());
+        }
+        let commands: Vec<String> = checks.iter().map(|(_, cmd)| cmd.clone()).collect();
+        let found = self.sandboxes.resolve_check_tools(&commands).await.map_err(|e| format!("the tools its checks run could not be looked up in the sandbox image ({e})"))?;
+        let problems: Vec<String> = checks.iter().zip(found).flat_map(|((id, _), ps)| ps.into_iter().map(move |p| format!("criterion {id}: {p}"))).collect();
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("a check may run only tools from the sandbox image, with workspace files as what they run: {}", problems.join("; ")))
+        }
+    }
+
     fn validate_contract(&self, c: &Value) -> std::result::Result<(), String> {
         if c["goal"].as_str().map(str::trim).unwrap_or_default().is_empty() {
             return Err("it has no goal".into());
@@ -415,8 +442,8 @@ impl Kernel {
             if let Some(check) = cr.get("check").filter(|v| !v.is_null()) {
                 let tool = check["tool"].as_str().ok_or(format!("criterion {id}: the check names no tool"))?;
                 let f = boundary::facts(self, tool).ok_or(format!("criterion {id}: {tool} is not a usable tool"))?;
-                if !matches!(f.risk, Risk::Read | Risk::Sandbox) {
-                    return Err(format!("criterion {id}: checks must read or run in the sandbox, and {tool} is {}", f.risk.as_str()));
+                if !crate::tools::checkable(&f.name, f.risk) {
+                    return Err(format!("criterion {id}: checks must read, or run a command or read a file in the sandbox (sandbox_exec, sandbox_read_file), and {tool} is {}", f.risk.as_str()));
                 }
                 if f.app == "memory" {
                     return Err(format!("criterion {id}: a check must look at the world, not at your own notes"));
