@@ -33,19 +33,31 @@ function when(t) {
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
   return d.toLocaleString();
 }
+function until(t) {
+  if (!t) return "";
+  const d = new Date(t), s = (d.getTime() - Date.now()) / 1000;
+  if (s < 60) return "now";
+  if (s < 3600) return `in ${Math.ceil(s / 60)} min`;
+  if (s < 86400) return `in ${Math.round(s / 3600)} h`;
+  return d.toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+const firstLine = s => (s || "").split("\n").find(l => l.trim()) || "";
 
 const isOwner = () => App.me?.roles?.includes("owner");
 const isDev = () => App.me?.roles?.includes("developer");
 
 // Replace a region's markup only when it changed, keeping what the person
-// was typing (anything marked data-draft) and where the focus was.
+// was typing (anything marked data-draft), where the focus was, and which
+// sections they opened (details marked data-key).
 const drafts = {};
 function paint(el, html) {
   if (!el || el._html === html) return false;
   $$("[data-draft]", el).forEach(i => { drafts[i.dataset.draft] = i.value; });
+  const opened = new Set($$("details[data-key]", el).filter(d => d.open).map(d => d.dataset.key));
   const focused = document.activeElement?.dataset?.draft;
   el.innerHTML = html;
   el._html = html;
+  $$("details[data-key]", el).forEach(d => { if (opened.has(d.dataset.key)) d.open = true; });
   $$("[data-draft]", el).forEach(i => { if (drafts[i.dataset.draft] !== undefined) i.value = drafts[i.dataset.draft]; });
   if (focused) $(`[data-draft="${CSS.escape(focused)}"]`, el)?.focus();
   return true;
@@ -80,6 +92,7 @@ function nav() {
     ${link("#/inbox", "Inbox", `<span>${badges}</span>`)}
     ${link("#/new", "New task")}
     ${link("#/tasks", "Tasks")}
+    ${link("#/schedules", "Schedules")}
     ${isOwner() ? link("#/models", "Models") : ""}
     ${isDev() ? `<div class="group">Developer</div>
       ${link("#/dev/runs", "Runs")}
@@ -238,7 +251,11 @@ async function pollInbox() {
     for (const i of fresh) Magnus.notify("A task needs you", i.summary);
     if (fresh.length) save("told", [...told, ...fresh.map(i => i.id)].slice(-500));
     paint($("nav.side"), nav());
-  } catch (e) { if (e.status === 401 && App.me) { stop(); start(); } }
+  } catch (e) {
+    // A dead session must land on sign-in once. Calling start() again
+    // restores the same session and boots forever.
+    if (e.status === 401 && App.me) { stop(); signInScreen("Your session ended. Sign in again."); }
+  }
 }
 
 async function pollVersions() {
@@ -300,13 +317,98 @@ route(/^#\/home$/, async main => {
   every(4000, draw);
 });
 
+// Where a task stands for the person looking: waiting on them, working,
+// waiting on something else (a set time), done, or failed or cancelled.
+const STATE = t => t.needs_you ? "needs" : t.status === "running" ? "running" : t.status === "suspended" ? "waiting" : t.status === "completed" ? "done" : "failed";
+const SECTIONS = [["needs", "Needs you"], ["running", "Running"], ["waiting", "Waiting"], ["done", "Done"], ["failed", "Failed"]];
+
+// Tasks grouped by the request that started them: a chat message or a
+// schedule; a task started on its own is a group of one. A group sits in the
+// section of its most pressing task.
+function groupTasks(tasks) {
+  const by = new Map();
+  for (const t of tasks) {
+    const key = t.group ? `${t.group.kind}:${t.group.id}` : `task:${t.task_id}`;
+    if (!by.has(key)) by.set(key, { key, group: t.group, tasks: [] });
+    by.get(key).tasks.push(t);
+  }
+  const groups = [...by.values()];
+  for (const g of groups) {
+    g.tasks.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+    g.count = Object.fromEntries(SECTIONS.map(([s]) => [s, g.tasks.filter(t => STATE(t) === s).length]));
+    g.section = ["needs", "running", "waiting", "failed"].find(s => g.count[s]) || "done";
+    g.latest = g.tasks.map(t => t.ended_at || t.created_at || "").sort().pop();
+  }
+  groups.sort((a, b) => b.latest.localeCompare(a.latest));
+  return SECTIONS.map(([state, label]) => ({ state, label, groups: groups.filter(g => g.section === state) })).filter(x => x.groups.length);
+}
+
+function progress(g) {
+  const c = g.count, cancelled = g.tasks.filter(t => t.status === "cancelled").length;
+  const parts = [`${c.done} of ${g.tasks.length} done`];
+  if (c.needs) parts.push(`${c.needs} need${c.needs === 1 ? "s" : ""} you`);
+  if (c.running) parts.push(`${c.running} running`);
+  if (c.waiting) parts.push(`${c.waiting} waiting`);
+  if (c.failed - cancelled) parts.push(`${c.failed - cancelled} failed`);
+  if (cancelled) parts.push(`${cancelled} cancelled`);
+  return parts.join(" · ");
+}
+
+function taskRow(t) {
+  const why = t.status === "suspended" ? WAITING[t.waiting_on] || (t.needs_you ? "waiting for you" : "") : "";
+  return `<li class="trow" data-state="${STATE(t)}"><a href="#/task/${enc(t.task_id)}"><span class="ttl" title="${esc(t.text)}">${esc(t.title)}</span>${chip(t.status)}<span class="small muted why">${esc(why)}</span><span class="small faint when">${esc(when(t.ended_at || t.created_at))}</span></a></li>`;
+}
+
+// A group: its request and progress, the tasks that need the person in
+// view, the rest folded away.
+function groupBlock(g, section) {
+  if (!g.group && g.tasks.length === 1) return `<ul class="tlist">${taskRow(g.tasks[0])}</ul>`;
+  const href = g.group.kind === "chat" ? `#/chat/${enc(g.group.thread)}` : "#/schedules";
+  const shown = section === "needs" ? g.tasks.filter(t => t.needs_you) : [];
+  const rest = g.tasks.filter(t => !shown.includes(t));
+  return `<div class="tgroup" data-group="${esc(g.key)}"><div class="ghead"><a class="ttl" href="${href}" title="${esc(g.group.title)}">${g.group.kind === "schedule" ? "Schedule: " : ""}${esc(g.group.title)}</a><span class="small muted">${esc(progress(g))}</span></div>
+    ${shown.length ? `<ul class="tlist">${shown.map(taskRow).join("")}</ul>` : ""}
+    ${rest.length ? `<details data-key="${esc(g.key)}"><summary class="small muted">${shown.length ? `The other ${rest.length}` : `${rest.length} task${rest.length === 1 ? "" : "s"}`}</summary><ul class="tlist">${rest.map(taskRow).join("")}</ul></details>` : ""}</div>`;
+}
+
 route(/^#\/tasks$/, async main => {
+  const LIMIT = { done: 15, failed: 15 };
+  const more = new Set();
   const draw = async () => {
     const { tasks } = await api("GET", "/v1/tasks");
-    tasks.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
-    paint(main, `<h1>Tasks</h1>${tasks.length ? `<table class="t"><thead><tr><th>Task</th><th>Status</th><th></th><th class="n">Started</th></tr></thead><tbody>${tasks.map(t => `<tr class="click" data-href="#/task/${enc(t.task_id)}"><td>${esc(t.title)}</td><td>${chip(t.status)}</td><td class="small muted">${esc(WAITING[t.waiting_on] || t.summary || "")}</td><td class="small faint n">${esc(when(t.created_at))}</td></tr>`).join("")}</tbody></table>` : `<p class="empty">No tasks yet.</p>`}`);
+    const sections = groupTasks(tasks);
+    paint(main, `<h1>Tasks</h1>${sections.length ? sections.map(sec => {
+      const n = sec.groups.reduce((k, g) => k + g.count[sec.state], 0);
+      const cap = LIMIT[sec.state] && !more.has(sec.state) ? LIMIT[sec.state] : Infinity;
+      const left = sec.groups.length - Math.min(cap, sec.groups.length);
+      return `<section class="tsec" data-section="${sec.state}"><h2>${esc(sec.label)} <span class="count">${n}</span></h2>
+        ${sec.groups.slice(0, cap).map(g => groupBlock(g, sec.state)).join("")}
+        ${left ? `<button class="link small" data-more="${sec.state}">Show ${left} more</button>` : ""}</section>`;
+    }).join("") : `<p class="empty">No tasks yet.</p>`}`);
   };
-  main.onclick = e => { const r = e.target.closest("[data-href]"); if (r) location.hash = r.dataset.href; };
+  main.onclick = e => { const b = e.target.closest("[data-more]"); if (b) { more.add(b.dataset.more); draw(); } };
+  await draw();
+  every(4000, draw);
+});
+
+// ---------- Schedules ----------
+
+// Each schedule with its next run and last result; its runs fold beneath,
+// except those waiting on the person.
+route(/^#\/schedules$/, async main => {
+  const draw = async () => {
+    const { schedules } = await api("GET", "/v1/schedules");
+    schedules.sort((a, b) => (a.next || "").localeCompare(b.next || ""));
+    paint(main, `<h1>Schedules</h1>${schedules.length ? schedules.map(sc => {
+      const waiting = sc.runs.filter(r => r.needs_you), last = sc.last;
+      return `<div class="card sched" data-schedule="${esc(sc.id)}">
+        <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))}</span></div>
+        <div class="small muted">Next run ${esc(until(sc.next))} · ${last ? `Last result: ${chip(last.status)} <a href="#/task/${enc(last.task_id)}">${esc(firstLine(last.summary) || last.title)}</a> <span class="faint">${esc(when(last.ended_at))}</span>` : "No results yet"}</div>
+        ${waiting.length ? `<ul class="tlist">${waiting.map(taskRow).join("")}</ul>` : ""}
+        ${sc.runs.length ? `<details data-key="sched:${esc(sc.id)}"><summary class="small muted">${sc.runs.length} run${sc.runs.length === 1 ? "" : "s"}</summary><ul class="tlist">${sc.runs.map(taskRow).join("")}</ul></details>` : ""}
+      </div>`;
+    }).join("") : `<p class="empty">No schedules yet. Ask in Chat for something done every day or every week.</p>`}`);
+  };
   await draw();
   every(5000, draw);
 });
@@ -404,20 +506,57 @@ async function chatLayout(main, thread) {
   return list();
 }
 
-// Chat opens the latest conversation; a new one starts only on request.
-route(/^#\/chat$/, async main => {
-  const { threads } = await api("GET", "/v1/chat");
-  if (threads.length) { location.replace(`#/chat/${enc(threads[0].thread)}`); return; }
-  location.replace("#/chat/new");
-});
-
-route(/^#\/chat\/new$/, async main => {
+async function showNewChat(main) {
   await chatLayout(main, null);
   paint($("#thread", main), `<p class="muted">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm.</p>`);
+}
+
+async function showThread(main, thread) {
+  await chatLayout(main, thread);
+  const draw = async () => {
+    const { entries } = await api("GET", `/v1/chat/${enc(thread)}`);
+    if (paint($("#thread", main), entries.map(entry).join(""))) $("#thread", main).lastElementChild?.scrollIntoView({ block: "end" });
+  };
+  App.redraw = draw;
+  onLeave(() => { App.redraw = null; });
+  $("#thread", main).onclick = async e => {
+    const b = e.target.closest("[data-decide]");
+    if (!b) return;
+    const card = b.closest("[data-card]").dataset.card;
+    b.disabled = true;
+    try { await api("POST", `/v1/chat/cards/${enc(card)}`, { decision: b.dataset.decide }); await draw(); }
+    catch (err) { toast(err.message); b.disabled = false; }
+  };
+  await draw();
+  every(2000, draw);
+}
+
+// Open the latest conversation in place. Replacing the window address
+// reloads this app on every entry to Chat.
+function showChat(main, hash, view) {
+  if (location.hash !== hash) history.replaceState(null, "", hash);
+  return view(main);
+}
+
+route(/^#\/chat$/, async main => {
+  const { threads } = await api("GET", "/v1/chat");
+  if (threads.length) {
+    const id = threads[0].thread;
+    return showChat(main, `#/chat/${enc(id)}`, m => showThread(m, id));
+  }
+  return showChat(main, "#/chat/new", showNewChat);
 });
 
+route(/^#\/chat\/new$/, showNewChat);
+
 function rule(e) {
-  if (e.every_minutes) return `Every ${e.every_minutes} minutes`;
+  const m = e.every_minutes;
+  if (m) {
+    for (const [size, one, many] of [[10080, "week", "weeks"], [1440, "day", "days"], [60, "hour", "hours"]]) {
+      if (m % size === 0) return m === size ? `Every ${one}` : `Every ${m / size} ${many}`;
+    }
+    return m === 1 ? "Every minute" : `Every ${m} minutes`;
+  }
   if (e.daily_at) return `Every day at ${e.daily_at}`;
   return "";
 }
@@ -432,9 +571,11 @@ function entry(e) {
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
       : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}${waitingLink(e)}</div></div>`;
-    case "task": return `<div class="card flat chatcard" data-chat-task="${esc(e.task_id)}"><div class="spread"><span class="kind">Task started</span>${chip(e.status)}</div>
-      <p><a href="#/task/${enc(e.task_id)}">${esc(e.text)}</a></p><div class="small muted">It is in Tasks and will post its result here${waitingLink(e)}</div></div>`;
-    case "result": return `<div class="msg magnus" data-result="${esc(e.task_id)}"><div class="small faint">Task ${esc(STATUS[e.status]?.[1] || e.status)} · <a href="#/task/${enc(e.task_id)}">${esc(e.text)}</a></div><div class="pre">${esc(e.summary || "")}</div></div>`;
+    case "tasks": return `<div class="card flat chatcard" data-chat-tasks="${esc(e.from_run)}"><div class="kind">${e.tasks.length === 1 ? "Started a task" : `Started ${e.tasks.length} tasks`}</div>
+      <ul class="tlist">${e.tasks.map(t => `<li class="crow" data-chat-task="${esc(t.task_id)}"><a class="ttl" href="#/task/${enc(t.task_id)}" title="${esc(t.text)}">${esc(t.title)}</a><span class="small why">${t.waiting_item ? `<a href="#/inbox" data-waiting="${esc(t.waiting_item)}">${esc(WAITING[t.waiting_on] || "waiting for you")}</a>` : ""}</span>${chip(t.status)}</li>`).join("")}</ul>
+      <div class="small muted">${e.tasks.length === 1 ? "It is" : "They are"} in Tasks; results post here.</div></div>`;
+    case "result": return `<details class="result" data-key="result:${esc(e.task_id)}" data-result="${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
+      <div class="pre">${esc(e.summary || "")}</div><a class="small" href="#/task/${enc(e.task_id)}">Open the task</a></details>`;
     case "schedule_card": {
       const b = e.budget || {};
       const decided = e.state === "confirmed" ? `<p class="small"><span class="chip ok">Scheduled</span></p>` : e.state === "declined" ? `<p class="small"><span class="chip">Declined</span></p>` : "";
@@ -453,23 +594,8 @@ function entry(e) {
 }
 
 route(/^#\/chat\/([^/]+)$/, async (main, thread) => {
-  await chatLayout(main, thread);
-  const draw = async () => {
-    const { entries } = await api("GET", `/v1/chat/${enc(thread)}`);
-    if (paint($("#thread", main), entries.map(entry).join(""))) $("#thread", main).lastElementChild?.scrollIntoView({ block: "end" });
-  };
-  App.redraw = draw;
-  onLeave(() => { App.redraw = null; });
-  $("#thread", main).onclick = async e => {
-    const b = e.target.closest("[data-decide]");
-    if (!b) return;
-    const card = b.closest("[data-card]").dataset.card;
-    b.disabled = true;
-    try { await api("POST", `/v1/chat/cards/${enc(card)}`, { decision: b.dataset.decide }); await draw(); }
-    catch (err) { toast(err.message); b.disabled = false; }
-  };
-  await draw();
-  every(2000, draw);
+  if (thread === "new") return showNewChat(main);
+  return showThread(main, thread);
 });
 
 // ---------- Inbox ----------

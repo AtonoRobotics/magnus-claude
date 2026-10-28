@@ -161,7 +161,7 @@ if (question) await step("ask in chat and see the answer", async () => {
   await shot("chat thread");
   // A chat turn is a conversation, not a task.
   await page.getByRole("link", { name: "Tasks", exact: true }).click();
-  await page.locator("table.t").waitFor({ timeout: T });
+  await page.locator("section.tsec").first().waitFor({ timeout: T });
   if (await page.getByText(question).count()) throw new Error("the chat message is listed as a task");
   // Chat reopens the latest conversation, not a blank one.
   await page.getByRole("link", { name: "Chat", exact: true }).click();

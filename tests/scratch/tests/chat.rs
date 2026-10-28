@@ -214,7 +214,7 @@ async fn a_chat_turn_may_only_read() {
 async fn a_task_from_chat_starts_carries_the_conversation_and_posts_its_result() {
     let m = FakeModel::start(model(
         |said, turn| match (said, turn) {
-            ("Compare the three cheapest EU cloud GPU offers for me.", 0) => tool("create_task", json!({ "text": "Compare the three cheapest EU cloud GPU offers." })),
+            ("Compare the three cheapest EU cloud GPU offers for me.", 0) => tool("create_task", json!({ "title": "Compare EU GPU offers", "text": "Compare the three cheapest EU cloud GPU offers." })),
             (_, 0) => say("Noted."),
             _ => say("Started: I'll post the comparison here."),
         },
@@ -225,7 +225,7 @@ async fn a_task_from_chat_starts_carries_the_conversation_and_posts_its_result()
     let alice = app.api("alice");
     let (thread, turn) = chat(&alice, "Compare the three cheapest EU cloud GPU offers for me.", None).await;
     alice.wait_settled(&turn).await;
-    let task = wait_entry(&alice, &thread, |e| e["kind"] == "task").await;
+    let task = wait_entry(&alice, &thread, |e| e["kind"] == "tasks").await["tasks"][0].clone();
     let id = task["task_id"].as_str().unwrap().to_string();
     let listed = alice.tasks().await;
     assert!(listed["tasks"].as_array().unwrap().iter().any(|t| t["task_id"] == id.as_str() && t["thread"] == thread.as_str()), "{listed}");
@@ -254,7 +254,7 @@ async fn a_task_from_chat_inherits_the_turns_taint() {
     let m = FakeModel::start(model(
         move |_, turn| match turn {
             0 => tool("web_fetch", json!({ "url": url })),
-            1 => tool("create_task", json!({ "text": "Summarise the page and email it to me." })),
+            1 => tool("create_task", json!({ "title": "Summarise and email page", "text": "Summarise the page and email it to me." })),
             _ => say("Started."),
         },
         vec![
@@ -268,13 +268,13 @@ async fn a_task_from_chat_inherits_the_turns_taint() {
     let alice = app.api("alice");
     let (thread, turn) = chat(&alice, "Read this page and mail me a summary.", None).await;
     alice.wait_settled(&turn).await;
-    let task = wait_entry(&alice, &thread, |e| e["kind"] == "task").await;
+    let task = wait_entry(&alice, &thread, |e| e["kind"] == "tasks").await["tasks"][0].clone();
     let id = task["task_id"].as_str().unwrap();
     let t = alice.wait_status(id, &["suspended"]).await;
     assert_eq!(t["waiting_on"], "approval", "the tainted task sent without approval: {t}");
     assert_eq!(mail.effects("send"), 0);
-    let waiting = wait_entry(&alice, &thread, |e| e["kind"] == "task" && e["waiting_item"].is_string()).await;
-    let item = waiting["waiting_item"].as_str().unwrap();
+    let waiting = wait_entry(&alice, &thread, |e| e["kind"] == "tasks" && e["tasks"][0]["waiting_item"].is_string()).await;
+    let item = waiting["tasks"][0]["waiting_item"].as_str().unwrap();
     assert!(alice.inbox().await.iter().any(|i| i["id"] == item), "the thread does not link to the inbox item");
 }
 
@@ -324,7 +324,7 @@ async fn a_chat_task_running_at_a_restart_resumes() {
         let first = first.clone();
         async move {
             if is_chat(&c) {
-                return if c.turn() == 0 { tool("create_task", json!({ "text": "Write the report." })) } else { say("Started.") };
+                return if c.turn() == 0 { tool("create_task", json!({ "title": "Write the report", "text": "Write the report." })) } else { say("Started.") };
             }
             match c.turn() {
                 0 => simple_contract(),
@@ -344,7 +344,7 @@ async fn a_chat_task_running_at_a_restart_resumes() {
     let alice = app.api("alice");
     let (thread, turn) = chat(&alice, "Write me the report.", None).await;
     alice.wait_settled(&turn).await;
-    let id = wait_entry(&alice, &thread, |e| e["kind"] == "task").await["task_id"].as_str().unwrap().to_string();
+    let id = wait_entry(&alice, &thread, |e| e["kind"] == "tasks").await["tasks"][0]["task_id"].as_str().unwrap().to_string();
     for _ in 0..300 {
         if stalled.load(Ordering::SeqCst) {
             break;
@@ -368,7 +368,7 @@ async fn a_chat_task_running_at_a_restart_resumes() {
 async fn a_chat_task_waiting_for_approval_at_a_restart_resumes() {
     let mail = mcp::mail().start().await;
     let m = FakeModel::start(model(
-        |_, turn| if turn == 0 { tool("create_task", json!({ "text": "Email Bob the agenda." })) } else { say("Started.") },
+        |_, turn| if turn == 0 { tool("create_task", json!({ "title": "Email Bob the agenda", "text": "Email Bob the agenda." })) } else { say("Started.") },
         vec![
             simple_contract(),
             tool("mail__send", json!({ "to": "bob@corp.example", "subject": "Agenda", "body": "1. Budget" })),
@@ -380,12 +380,12 @@ async fn a_chat_task_waiting_for_approval_at_a_restart_resumes() {
     let alice = app.api("alice");
     let (thread, turn) = chat(&alice, "Email Bob the agenda.", None).await;
     alice.wait_settled(&turn).await;
-    let id = wait_entry(&alice, &thread, |e| e["kind"] == "task").await["task_id"].as_str().unwrap().to_string();
+    let id = wait_entry(&alice, &thread, |e| e["kind"] == "tasks").await["tasks"][0]["task_id"].as_str().unwrap().to_string();
     let item = alice.wait_item(&id, "approval").await;
     app.restart().await;
     let alice = app.api("alice");
-    let waiting = wait_entry(&alice, &thread, |e| e["kind"] == "task" && e["waiting_item"] == item["id"]).await;
-    assert_eq!(waiting["waiting_on"], "approval");
+    let waiting = wait_entry(&alice, &thread, |e| e["kind"] == "tasks" && e["tasks"][0]["waiting_item"] == item["id"]).await;
+    assert_eq!(waiting["tasks"][0]["waiting_on"], "approval");
     assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
     let t = alice.wait_settled(&id).await;
     assert_eq!(t["status"], "completed", "{t}");
@@ -430,6 +430,29 @@ async fn a_schedule_from_chat_fires_after_a_restart() {
     assert!(created >= minute, "fired at {created}, before {at} ({minute})");
     let done = alice.wait_settled(t["task_id"].as_str().unwrap()).await;
     assert_eq!(done["status"], "completed", "{done}");
+    // The run is grouped under its schedule, which shows it as its last result.
+    let row = alice.tasks().await["tasks"].as_array().unwrap().iter().find(|r| r["task_id"] == t["task_id"]).cloned().unwrap();
+    assert_eq!(row["group"]["kind"], "schedule", "{row}");
+    let (_, v) = alice.get("/v1/schedules").await;
+    let sc = &v["schedules"][0];
+    assert_eq!(sc["runs"].as_array().map(|r| r.len()), Some(1), "{v}");
+    assert_eq!(sc["runs"][0]["task_id"], t["task_id"]);
+    assert_eq!(sc["last"]["summary"], "All systems normal.", "{v}");
+    assert!(sc["next"].as_str().is_some_and(|n| n > t["created_at"].as_str().unwrap()), "no next run after this one: {v}");
+}
+
+/// A task from chat needs a short title for the person's lists; without one
+/// it is refused and nothing starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_from_chat_needs_a_title() {
+    let m = FakeModel::start(model(|_, turn| if turn == 0 { tool("create_task", json!({ "text": "Write the report." })) } else { say("Done.") }, vec![])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (_, turn) = chat(&alice, "Write me the report.", None).await;
+    alice.wait_settled(&turn).await;
+    let r = m.requests().into_iter().find(|c| is_chat(c) && c.turn() == 1).unwrap().last_results();
+    assert!(r[0].is_error && r[0].text.contains("short title"), "{}", r[0].text);
+    assert!(alice.tasks().await["tasks"].as_array().unwrap().is_empty(), "a task started without a title");
 }
 
 use chrono::Timelike;
@@ -441,7 +464,7 @@ use chrono::Timelike;
 async fn a_person_chooses_the_model_for_a_task_and_a_chat_message() {
     let mut m = FakeModel::start(model(
         |said, turn| match (said, turn) {
-            ("Look into it properly.", 0) => tool("create_task", json!({ "text": "Research it." })),
+            ("Look into it properly.", 0) => tool("create_task", json!({ "title": "Research it", "text": "Research it." })),
             _ => say("Done."),
         },
         vec![simple_contract(), tool("task_complete", json!({ "summary": "done" }))],
@@ -477,7 +500,7 @@ async fn a_person_chooses_the_model_for_a_task_and_a_chat_message() {
     assert_eq!(st.as_u16(), 201, "{v}");
     let thread = v["thread"].as_str().unwrap().to_string();
     carol.wait_settled(v["task_id"].as_str().unwrap()).await;
-    let task = wait_entry(&carol, &thread, |e| e["kind"] == "task").await;
+    let task = wait_entry(&carol, &thread, |e| e["kind"] == "tasks").await["tasks"][0].clone();
     let tid = task["task_id"].as_str().unwrap();
     carol.wait_settled(tid).await;
     assert_eq!(carol.task(tid).await["model"]["name"], "claude-other", "the task did not keep the turn's model");

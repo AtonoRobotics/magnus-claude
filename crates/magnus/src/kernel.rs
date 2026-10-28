@@ -66,6 +66,8 @@ pub struct NewRun {
     pub ids: Option<(String, String)>,
     /// The adapter and model the person chose; the appliance's otherwise.
     pub model: Option<(String, String)>,
+    /// A short title the model wrote when starting it.
+    pub title: Option<String>,
 }
 
 impl Kernel {
@@ -274,7 +276,7 @@ impl Kernel {
         };
         self.emit(
             actor,
-            Ev::TaskCreated { task: task.clone(), run: run.clone(), person: person.into(), text, attachments, config, experiment: o.experiment, chat: o.chat, label: o.label },
+            Ev::TaskCreated { task: task.clone(), run: run.clone(), person: person.into(), text, attachments, config, experiment: o.experiment, chat: o.chat, label: o.label, title: o.title },
         )
         .await?;
         self.wake(&run);

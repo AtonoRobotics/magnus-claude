@@ -168,13 +168,13 @@ pub fn chat_specs() -> Vec<ToolSpec> {
         "max_usd": { "type": "number" }, "max_model_calls": { "type": "integer" }, "max_actions": { "type": "integer" }
     } });
     vec![
-        ToolSpec { name: "create_task".into(), description: d("create_task"), input_schema: obj(json!({ "text": { "type": "string" } }), &["text"]) },
+        ToolSpec { name: "create_task".into(), description: d("create_task"), input_schema: obj(json!({ "title": { "type": "string" }, "text": { "type": "string" } }), &["title", "text"]) },
         ToolSpec {
             name: "create_schedule".into(),
             description: d("create_schedule"),
             input_schema: obj(
-                json!({ "text": { "type": "string" }, "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" }, "scope": { "type": "string" }, "budget": budget }),
-                &["text", "scope"],
+                json!({ "title": { "type": "string" }, "text": { "type": "string" }, "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" }, "scope": { "type": "string" }, "budget": budget }),
+                &["title", "text", "scope"],
             ),
         },
     ]
@@ -213,9 +213,10 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
                     "goal": { "type": "string" },
                     "assumptions": { "type": "array", "items": { "type": "string" } },
                     "criteria": { "type": "array", "items": criterion, "minItems": 1 },
-                    "irreversible_actions": { "type": "array", "items": { "type": "string" } }
+                    "irreversible_actions": { "type": "array", "items": { "type": "string" } },
+                    "title": { "type": "string" }
                 }),
-                &["goal", "criteria"],
+                &["title", "goal", "criteria"],
             ),
         },
         ToolSpec {

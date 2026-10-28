@@ -166,6 +166,10 @@ pub struct Task {
     pub text: String,
     pub created_at: DateTime<Utc>,
     pub chat: Option<crate::events::ChatOrigin>,
+    /// The short title the model gave it when starting it, if any.
+    pub title: Option<String>,
+    /// The schedule that started it, if any.
+    pub schedule: Option<String>,
 }
 
 impl Task {
@@ -260,6 +264,7 @@ pub struct Schedule {
     pub budget: Option<crate::config::Budget>,
     pub card: Option<String>,
     pub label: Label,
+    pub title: Option<String>,
 }
 
 /// What became of a schedule proposed in chat.
@@ -348,7 +353,7 @@ impl State {
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
             Ev::SignedIn { .. } | Ev::SignedOut { .. } => {}
-            Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label } => {
+            Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title } => {
                 self.schedules.insert(
                     id.clone(),
                     Schedule {
@@ -362,6 +367,7 @@ impl State {
                         budget: budget.clone(),
                         card: card.clone(),
                         label: label.unwrap_or_default(),
+                        title: title.clone(),
                     },
                 );
                 if let Some(c) = card {
@@ -375,9 +381,12 @@ impl State {
             Ev::ScheduleRemoved { id } => {
                 self.schedules.remove(id);
             }
-            Ev::ScheduleFired { id, .. } => {
+            Ev::ScheduleFired { id, task } => {
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.last_fired = Some(e.at);
+                }
+                if let Some(t) = self.tasks.get_mut(task) {
+                    t.schedule = Some(id.clone());
                 }
             }
             Ev::ModelSet { adapter, model } => {
@@ -397,7 +406,7 @@ impl State {
                     (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: false }),
                 );
             }
-            Ev::TaskCreated { task, run, person, text, config, attachments, experiment, chat, label } => {
+            Ev::TaskCreated { task, run, person, text, config, attachments, experiment, chat, label, title } => {
                 // Playbook items the run starts with carry the taint of the
                 // runs that wrote them (I2, M1), and a task from chat that of
                 // the turn that started it.
@@ -407,7 +416,7 @@ impl State {
                 }
                 self.tasks.insert(
                     task.clone(),
-                    Task { task_id: task.clone(), run_id: run.clone(), person: person.clone(), text: text.clone(), created_at: e.at, chat: chat.clone() },
+                    Task { task_id: task.clone(), run_id: run.clone(), person: person.clone(), text: text.clone(), created_at: e.at, chat: chat.clone(), title: title.clone(), schedule: None },
                 );
                 self.runs.insert(
                     run.clone(),

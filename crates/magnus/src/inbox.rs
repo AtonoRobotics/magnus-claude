@@ -248,6 +248,7 @@ impl Kernel {
                         budget: None,
                         card: None,
                         label: None,
+                        title: None,
                     },
                 )
                 .await?;

@@ -360,13 +360,44 @@ pub(crate) fn status_str(s: Status) -> &'static str {
     }
 }
 
+/// The short title the model gave the task (when starting it, or in its
+/// contract), else the start of what the person wrote.
+pub(crate) fn title_of(task: &crate::state::Task, run: &Run) -> String {
+    task.title
+        .clone()
+        .or_else(|| run.contract.as_ref().and_then(|c| c["title"].as_str()).map(str::trim).filter(|t| !t.is_empty()).map(String::from))
+        .unwrap_or_else(|| task.text.chars().take(80).collect())
+}
+
+/// Whether the task waits on an inbox item this person can answer.
+fn needs(s: &crate::state::State, p: &Person, run: &Run) -> bool {
+    run.status == Status::Suspended && s.items.values().any(|i| i.run.as_deref() == Some(run.id.as_str()) && i.resolution.is_none() && inbox::may_respond(p, i))
+}
+
+/// A task in a list: what it is, where it stands, whether it needs this
+/// person, and the request it came from (a chat message or a schedule).
+fn task_row(k: &Kernel, s: &crate::state::State, p: &Person, t: &crate::state::Task, r: &Run) -> Value {
+    let mut v = task_json(k, t, r, false);
+    v["needs_you"] = json!(needs(s, p, r));
+    v["waiting_item"] = json!(r.waiting_item);
+    v["ended_at"] = json!(r.ended_at);
+    v["group"] = if let Some(sc) = t.schedule.as_ref().and_then(|id| s.schedules.get(id)) {
+        json!({ "kind": "schedule", "id": sc.id, "title": sc.title.clone().unwrap_or_else(|| sc.text.clone()) })
+    } else if let Some((c, turn)) = t.chat.as_ref().and_then(|c| c.from_run.as_ref().and_then(|f| s.runs.get(f)).and_then(|r| s.tasks.get(&r.task)).map(|turn| (c, turn))) {
+        json!({ "kind": "chat", "id": turn.task_id, "title": turn.text, "thread": c.thread })
+    } else {
+        Value::Null
+    };
+    v
+}
+
 fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Value {
     let mut v = json!({
         "task_id": task.task_id,
         "run_id": run.id,
         "person": task.person,
         "text": task.text,
-        "title": task.text.chars().take(80).collect::<String>(),
+        "title": title_of(task, run),
         "created_at": task.created_at,
         "status": status_str(run.status),
         "waiting_on": run.reason,
@@ -484,7 +515,7 @@ async fn list_tasks(State(k): K, h: HeaderMap) -> Response {
         s.tasks
             .values()
             .filter(|t| visible_task(&p, t) && !t.is_chat_turn())
-            .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_json(&k, t, r, false)))
+            .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(&k, s, &p, t, r)))
             .collect()
     });
     Json(json!({ "tasks": tasks })).into_response()
@@ -1026,7 +1057,19 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
         s.schedules
             .values()
             .filter(|x| x.person == p.id || p.is_owner())
-            .map(|x| json!({ "id": x.id, "person": x.person, "text": x.text, "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due() }))
+            .map(|x| {
+                // Its runs, newest first; the last result is the newest that ended.
+                let mut runs: Vec<(&crate::state::Task, &Run)> =
+                    s.tasks.values().filter(|t| t.schedule.as_deref() == Some(x.id.as_str())).filter_map(|t| s.runs.get(&t.run_id).map(|r| (t, r))).collect();
+                runs.sort_by(|a, b| b.0.created_at.cmp(&a.0.created_at));
+                let rows: Vec<Value> = runs.iter().map(|(t, r)| task_row(&k, s, &p, t, r)).collect();
+                let last = rows.iter().find(|r| !r["ended_at"].is_null()).cloned();
+                json!({
+                    "id": x.id, "person": x.person, "text": x.text, "title": x.title.clone().unwrap_or_else(|| x.text.clone()),
+                    "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due(), "last_fired": x.last_fired,
+                    "last": last, "runs": rows,
+                })
+            })
             .collect()
     });
     Json(json!({ "schedules": list })).into_response()
@@ -1057,7 +1100,7 @@ async fn add_schedule(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respon
         Err(m) => return err(StatusCode::BAD_REQUEST, m),
     };
     let id = new_id("sched");
-    match k.emit(&format!("person:{}", p.id), Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at, budget: None, card: None, label: None }).await {
+    match k.emit(&format!("person:{}", p.id), Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at, budget: None, card: None, label: None, title: None }).await {
         Ok(_) => (StatusCode::CREATED, Json(json!({ "id": id }))).into_response(),
         Err(e) => internal(e),
     }

@@ -82,6 +82,11 @@ impl Kernel {
             return None;
         }
         let mut out: Vec<(DateTime<Utc>, i64, Value)> = vec![];
+        // The tasks one message started, as one card in the order they began.
+        let mut started: std::collections::BTreeMap<String, (DateTime<Utc>, Vec<Value>)> = Default::default();
+        // A task's result follows the reply of the message that started it,
+        // even when the task finished first.
+        let answered: std::collections::HashMap<String, DateTime<Utc>> = runs.iter().filter(|(t, _)| t.is_chat_turn()).filter_map(|(_, r)| r.ended_at.map(|e| (r.id.clone(), e))).collect();
         for (t, r) in &runs {
             let turn = t.is_chat_turn();
             let status = crate::api::status_str(r.status);
@@ -117,11 +122,18 @@ impl Kernel {
                     )),
                 }
             } else {
-                out.push((t.created_at, 0, json!({ "kind": "task", "task_id": t.task_id, "text": t.text, "status": status, "waiting_on": r.reason, "waiting_item": r.waiting_item, "at": t.created_at })));
+                let title = crate::api::title_of(t, r);
+                let from = t.chat.as_ref().and_then(|c| c.from_run.clone()).unwrap_or_else(|| t.task_id.clone());
+                let e = started.entry(from).or_insert((t.created_at, vec![]));
+                e.1.push(json!({ "task_id": t.task_id, "title": title, "text": t.text, "status": status, "waiting_on": r.reason, "waiting_item": r.waiting_item }));
                 if let Some(end) = r.ended_at {
-                    out.push((end, 0, json!({ "kind": "result", "task_id": t.task_id, "text": t.text, "status": status, "summary": r.summary, "at": end })));
+                    let after = t.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| answered.get(f)).map_or(end, |a| end.max(*a));
+                    out.push((after, i64::MAX, json!({ "kind": "result", "task_id": t.task_id, "title": title, "text": t.text, "status": status, "summary": r.summary, "at": end })));
                 }
             }
+        }
+        for (from, (at, tasks)) in started {
+            out.push((at, 1, json!({ "kind": "tasks", "from_run": from, "tasks": tasks, "at": at })));
         }
         out.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
         Some(out.into_iter().map(|(.., v)| v).collect())
@@ -137,8 +149,8 @@ impl Kernel {
                 let (role, said) = match e["kind"].as_str()? {
                     "message" => ("person", text("text")),
                     "answer" => ("you", text("text")),
-                    "task" => ("you", format!("Started a task: {}", text("text"))),
-                    "result" => ("task result", format!("{} ({}): {}", text("text"), text("status"), text("summary"))),
+                    "tasks" => ("you", format!("Started tasks: {}", e["tasks"].as_array().into_iter().flatten().map(|t| format!("{} ({})", t["title"].as_str().unwrap_or_default(), t["text"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("; "))),
+                    "result" => ("task result", format!("{} ({}): {}", text("title"), text("status"), text("summary"))),
                     "schedule_card" => ("you", format!("Proposed a schedule ({}): {}", text("state"), text("text"))),
                     _ => return None,
                 };
@@ -152,8 +164,9 @@ impl Kernel {
     /// model, and posts its result to the thread.
     pub(crate) async fn chat_task(self: &Arc<Self>, a: &Action, key: &str) -> Result<(String, bool, Option<Value>)> {
         let text = a.input["text"].as_str().map(str::trim).unwrap_or_default().to_string();
-        if text.is_empty() {
-            return Ok(("create_task needs the task's text. A retry without it will not help.".into(), true, None));
+        let title = a.input["title"].as_str().map(str::trim).unwrap_or_default().to_string();
+        if text.is_empty() || title.is_empty() {
+            return Ok(("create_task needs the task's text and a short title. A retry without them will not help.".into(), true, None));
         }
         let Some((task, run)) = self.read(|s| s.runs.get(&a.run).and_then(|r| s.tasks.get(&r.task).map(|t| (t.clone(), r.clone())))) else {
             anyhow::bail!("unknown run {}", a.run)
@@ -170,11 +183,12 @@ impl Kernel {
                 label: Some(Label { untrusted: run.untrusted, private: run.private }),
                 ids: Some((task_id.clone(), run_id)),
                 model: Some((run.config.adapter.clone(), run.config.model.clone())),
+                title: Some(title.clone()),
                 ..Default::default()
             };
             self.create_run(&format!("chat:{}", a.run), &run.person, text.clone(), vec![], o).await?;
         }
-        Ok((format!("Started task {task_id}: {text}. It is in the person's Tasks and will post its result to this thread."), false, Some(json!({ "task": task_id }))))
+        Ok((format!("Started task {task_id} ({title}): {text}. It is in the person's Tasks and will post its result to this thread."), false, Some(json!({ "task": task_id }))))
     }
 
     /// `create_schedule` from a chat turn: a card in the thread with the
@@ -198,7 +212,8 @@ impl Kernel {
             Err(m) => return (format!("{m}. A retry with the same budget will not help."), true, None),
         };
         let card = derived("card", key);
-        let data = json!({ "card": card, "text": text, "every_minutes": every, "daily_at": daily, "scope": scope, "budget": budget });
+        let title = a.input["title"].as_str().map(str::trim).filter(|t| !t.is_empty());
+        let data = json!({ "card": card, "text": text, "title": title, "every_minutes": every, "daily_at": daily, "scope": scope, "budget": budget });
         (format!("A card for this schedule ({card}) is in the thread. Nothing is scheduled until the person confirms it."), false, Some(data))
     }
 
@@ -257,6 +272,7 @@ impl Kernel {
                         budget,
                         card: Some(card.into()),
                         label: Some(Label { untrusted: run.untrusted, private: run.private }),
+                        title: d["title"].as_str().map(String::from),
                     },
                 )
                 .await?;

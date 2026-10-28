@@ -103,6 +103,9 @@ pub enum Ev {
         /// The taint of the chat turn that proposed it; its tasks start with it.
         #[serde(default)]
         label: Option<Label>,
+        /// A short title the model wrote for it.
+        #[serde(default)]
+        title: Option<String>,
     },
     /// The person declined a schedule proposed in chat.
     CardDeclined {
@@ -156,6 +159,9 @@ pub enum Ev {
         /// started it (the person's own words carry none).
         #[serde(default)]
         label: Option<Label>,
+        /// A short title the model wrote when it started the task.
+        #[serde(default)]
+        title: Option<String>,
     },
     ModelCall {
         run: String,
