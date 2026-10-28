@@ -3,6 +3,24 @@
 ## Now (2026-10-28)
 
 - The invariant tests pass: 45 of 45, on three consecutive full runs and again after every later change.
+- **Connectors and the browser (2026-10-28).** Branch `connectors`, PR #2 (stacked on #1).
+  - **Connectors:** the owner adds MCP apps in the app (Connectors), from presets (Gmail, Google Calendar, Google Drive, Microsoft 365, GitHub, Files) or by hand.
+    - Each person signs in: device code, loopback with PKCE, or API key. Tokens are kept in the vault and renewed.
+    - Tools are pinned and classified on the review card. Labels: mail and calendar private+untrusted, files private.
+    - Sent messages are signed "Sent by Magnus, a digital worker, on behalf of <name>" (E6). Stdio apps run with a cleared environment.
+    - Tests: `connectors.rs` (6), and `connectors_flow.rs` with `desktop/tests/connectors.mjs`, the whole thing in Chromium through the app. Screenshots from that run were sent to the owner.
+  - **Browser:** each run's browser is a microVM whose only exit is the kernel's egress proxy, which applies site rules, adds credentials and holds cookies.
+    - Tests: `browser_egress.rs` (4) drive real Chromium on a development host through the proxy: a denied site, an injected credential the model never sees, the network Rule of Two, method limits.
+    - **Not run here: the browser VM itself**, because this container has no KVM. On the dev machine:
+      - run `sandbox/build.sh`, which now also writes `browser-rootfs.ext4`;
+      - set `[browser] rootfs` to it;
+      - run a browser task and watch for the guest's forwarder and the sidecar starting.
+  - **Owner's steps for live apps:**
+    - register OAuth clients (Google Desktop app; Entra public client; GitHub App with device flow), per `docs/research/connectors.md`;
+    - add the apps from presets in Connectors;
+    - sign in;
+    - review each app's tools.
+  - The reference Files server test (`--ignored`) is written but not run, since npx was not allowed in this session. The Tauri loopback listener's tests pass on their own; the app was not built here (no GTK).
 - **Memory and ontology (2026-10-28).** Memory checked against M1–M4:
   - Writes go through execute() with the run's taint (M1). Search-only retrieval (M2) and rebuild from the log (M4) already held.
   - Fixed: a search's taint now comes from the same lookup as its text. Facts now keep where their untrusted content came from (M3).
@@ -74,7 +92,7 @@
 1. Owner signs in, then: conformance suite per adapter (live), plain-language run (`python3 eval/plain/run.py`), first TheAgentCompany tasks, then a spend cap for the full 175.
 2. TheAgentCompany runner and connectors to its services (GitLab, RocketChat, ownCloud, Plane).
 3. Context compaction (C5) and context reset (A5) for long tasks; verifier module (removable, off by default).
-4. Jailer for the root-run appliance. MCP servers for the person's mail, calendar and files (needs the owner's choice of servers and OAuth apps).
+4. Jailer for the root-run appliance. Live mail, calendar and files: the owner registers OAuth clients, then adds the apps from presets (see Now). Boot the browser VM on the dev machine.
 5. Voice: install whisper.cpp and a model (`MAGNUS_WHISPER`, `MAGNUS_WHISPER_MODEL`).
 
 ## How to resume
@@ -89,6 +107,8 @@
   - It is not a system service; the owner declined persistence.
 - Tests:
   - `cargo test -p magnus-invariants --no-fail-fast` (the contract)
+  - `python3 -I sandbox/test_check_tools.py` (the check resolver)
+  - Browser tests need Chromium: `MAGNUS_CHROMIUM=<chrome>`; without browser/node_modules, `MAGNUS_NODE_PATH=<dir with playwright-core>` and `MAGNUS_PLAYWRIGHT=<playwright>` for the app flows.
   - `cargo test -p magnus-scratch` (regressions)
   - `cargo test -p magnus --test tools` (browser and desktop)
 - Desktop app: see `desktop/README.md`. Build in `desktop/src-tauri` with `cargo tauri build`. Tests: `cargo test -p magnus-scratch --test desktop_flow`, and `--test desktop_app -- --ignored`.

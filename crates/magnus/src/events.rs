@@ -422,6 +422,13 @@ pub enum Ev {
         connector: String,
         person: String,
     },
+    /// The owner's rule for a browser destination.
+    BrowserSiteSet {
+        site: crate::config::BrowserSite,
+    },
+    BrowserSiteRemoved {
+        host: String,
+    },
 }
 
 impl Ev {

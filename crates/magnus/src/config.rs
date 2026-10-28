@@ -197,13 +197,28 @@ pub struct Web {
     /// Optional search endpoint (SearXNG JSON API).
     #[serde(default)]
     pub search_url: Option<String>,
+    /// Certificates (PEM) the browser's egress proxy also trusts for sites,
+    /// such as an organization's own CA.
+    #[serde(default)]
+    pub extra_ca: Vec<PathBuf>,
 }
 
-/// The browser sidecar: Chromium on the host, behind the boundary.
+/// The browser: Chromium driven by a sidecar, whose only network is the
+/// boundary's egress proxy. With `rootfs`, each run's browser is a microVM
+/// of its own (the appliance's way, which needs `[sandbox]` for Firecracker
+/// and its kernel); without, the sidecar runs on this host, for development.
 #[derive(Deserialize, Clone, Debug)]
 pub struct Browser {
+    #[serde(default)]
     pub command: Vec<String>,
-    pub chromium: PathBuf,
+    #[serde(default)]
+    pub chromium: Option<PathBuf>,
+    /// Where the sidecar finds playwright-core, when not in browser/node_modules.
+    #[serde(default)]
+    pub node_path: Option<PathBuf>,
+    /// The browser VM's image (`sandbox/build.sh` writes it).
+    #[serde(default)]
+    pub rootfs: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -283,6 +298,76 @@ pub struct Connector {
     pub idempotency: String,
     #[serde(default)]
     pub tools: BTreeMap<String, ToolClass>,
+}
+
+/// The owner's rule for a destination of the browser: whether it may go
+/// there, with which methods, and the credential the boundary adds for it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BrowserSite {
+    /// `host.example`, or `*.example` for every host under it.
+    pub host: String,
+    /// `allow` or `deny`.
+    #[serde(default = "allow")]
+    pub access: String,
+    /// The only methods allowed, when set; by default any, except that a
+    /// task holding private and untrusted content may only fetch.
+    #[serde(default)]
+    pub methods: Option<Vec<String>>,
+    #[serde(default)]
+    pub credential: Option<SiteCredential>,
+}
+
+fn allow() -> String {
+    "allow".into()
+}
+
+/// A credential the boundary adds to requests to a site, over https only.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SiteCredential {
+    /// The request header it goes in, such as `Authorization`.
+    pub header: String,
+    /// The header's value, with `{secret}` where the vault's value goes.
+    #[serde(default = "secret_only")]
+    pub value: String,
+    /// A vault entry shared by everyone, or
+    #[serde(default)]
+    pub vault: Option<String>,
+    /// each person's own (`browser:<host>:<person>`).
+    #[serde(default)]
+    pub per_person: bool,
+}
+
+fn secret_only() -> String {
+    "{secret}".into()
+}
+
+impl BrowserSite {
+    pub fn validate(&self) -> Result<(), String> {
+        let h = self.host.strip_prefix("*.").unwrap_or(&self.host);
+        if h.is_empty() || !h.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') || h.starts_with('.') || h.ends_with('.') || self.host != self.host.to_ascii_lowercase() {
+            return Err(format!("{:?} is not a host name (lower case, or *.domain)", self.host));
+        }
+        if !matches!(self.access.as_str(), "allow" | "deny") {
+            return Err(format!("access is allow or deny, not {}", self.access));
+        }
+        for m in self.methods.iter().flatten() {
+            if !m.chars().all(|c| c.is_ascii_uppercase()) || m.is_empty() {
+                return Err(format!("{m:?} is not an HTTP method"));
+            }
+        }
+        if let Some(c) = &self.credential {
+            if reqwest::header::HeaderName::from_bytes(c.header.as_bytes()).is_err() {
+                return Err(format!("{:?} is not a header name", c.header));
+            }
+            if !c.value.contains("{secret}") {
+                return Err("the credential's value must contain {secret}".into());
+            }
+            if c.per_person == c.vault.is_some() {
+                return Err("a credential is either a shared vault entry or each person's own".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A person's sign-in to an app.

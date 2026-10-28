@@ -26,6 +26,8 @@ pub struct Resolved {
     pub self_checked: Vec<String>,
 }
 
+type BrowserVm = (Arc<Vm>, tokio::task::JoinHandle<()>);
+
 pub struct Vm {
     child: Mutex<Child>,
     vsock: PathBuf,
@@ -44,6 +46,8 @@ pub struct Sandboxes {
     root: PathBuf,
     vms: tokio::sync::Mutex<HashMap<String, Arc<Vm>>>,
     inputs: Mutex<HashMap<String, Vec<(String, Vec<u8>)>>>,
+    /// Each run's browser VM, with the task serving its egress connections.
+    browsers: tokio::sync::Mutex<HashMap<String, BrowserVm>>,
 }
 
 /// The Firecracker configuration for a run's VM, or for a check's (`check`
@@ -70,7 +74,7 @@ pub fn vm_config(cfg: &Cfg, workspace: &Path, vsock: &Path, check: bool) -> Valu
 
 impl Sandboxes {
     pub fn new(cfg: Option<Cfg>, state_dir: &Path) -> Sandboxes {
-        Sandboxes { cfg, root: state_dir.join("runs"), vms: tokio::sync::Mutex::new(HashMap::new()), inputs: Mutex::new(HashMap::new()) }
+        Sandboxes { cfg, root: state_dir.join("runs"), vms: tokio::sync::Mutex::new(HashMap::new()), inputs: Mutex::new(HashMap::new()), browsers: Default::default() }
     }
 
     pub fn available(&self) -> bool {
@@ -106,39 +110,115 @@ impl Sandboxes {
             anyhow::ensure!(out.status.success(), "mkfs.ext4 failed: {}", String::from_utf8_lossy(&out.stderr));
         }
         let vsock = dir.join("vsock.sock");
-        let api = dir.join("api.sock");
         let _ = std::fs::remove_file(&vsock);
-        let _ = std::fs::remove_file(&api);
         let config = vm_config(cfg, &workspace, &vsock, check);
-        anyhow::ensure!(config.get("network-interfaces").is_none(), "refusing a sandbox with a network device");
-        let config_path = dir.join("vm.json");
-        std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
-        let console = std::fs::File::create(dir.join("console.log"))?;
-        let mut cmd = Command::new(&cfg.firecracker);
-        cmd.arg("--api-sock").arg(&api).arg("--config-file").arg(&config_path).arg("--level").arg("Error");
-        cmd.env_clear();
-        cmd.stdin(Stdio::null()).stdout(Stdio::from(console.try_clone()?)).stderr(Stdio::from(console));
-        let child = crate::spawn::spawn(cmd).context("start firecracker")?;
-        let vm = Arc::new(Vm { child: Mutex::new(child), vsock });
-        // Wait for the guest agent.
-        let start = std::time::Instant::now();
-        loop {
-            if let Ok(v) = request(&vm.vsock, &json!({ "op": "ping" }), Duration::from_secs(2)).await {
-                if v["ok"] == true {
-                    return Ok(vm);
-                }
+        boot(cfg, dir, config, vsock).await
+    }
+
+    /// The agent request of a VM the caller holds.
+    pub async fn guest(&self, vm: &Vm, req: &Value, timeout: Duration) -> Result<Value> {
+        request(&vm.vsock, req, timeout).await
+    }
+
+    /// A run's browser VM: the browser image read-only, no workspace, no
+    /// network device. Before it boots, the kernel listens where the guest's
+    /// connections to vsock `port` arrive, and hands each to `on_conn`.
+    /// Returns the VM and whether it was just booted.
+    pub async fn browser_vm<F>(&self, run: &str, rootfs: &Path, port: u32, on_conn: F) -> Result<(Arc<Vm>, bool)>
+    where
+        F: Fn(UnixStream) + Send + 'static,
+    {
+        let mut b = self.browsers.lock().await;
+        if let Some((vm, _)) = b.get(run) {
+            if vm.child.lock().unwrap().try_wait().ok().flatten().is_none() {
+                return Ok((vm.clone(), false));
             }
-            if let Ok(Some(st)) = vm.child.lock().unwrap().try_wait() {
-                let log = std::fs::read_to_string(dir.join("console.log")).unwrap_or_default();
-                return Err(anyhow!("the sandbox VM exited during boot ({st}): {}", log.chars().rev().take(800).collect::<String>().chars().rev().collect::<String>()));
+        }
+        if let Some((_, task)) = b.remove(run) {
+            task.abort();
+        }
+        let cfg = self.cfg.as_ref().ok_or_else(|| anyhow!("a browser VM needs [sandbox] (Firecracker and its kernel)"))?;
+        let dir = self.browser_dir(run);
+        std::fs::create_dir_all(&dir)?;
+        let vsock = dir.join("v.sock");
+        let _ = std::fs::remove_file(&vsock);
+        let egress = PathBuf::from(format!("{}_{port}", vsock.display()));
+        let _ = std::fs::remove_file(&egress);
+        let listener = tokio::net::UnixListener::bind(&egress)?;
+        let task = tokio::spawn(async move {
+            while let Ok((s, _)) = listener.accept().await {
+                on_conn(s);
             }
-            if start.elapsed() > Duration::from_secs(30) {
-                return Err(anyhow!("the sandbox VM did not come up within 30s"));
+        });
+        let config = json!({
+            "boot-source": { "kernel_image_path": cfg.kernel_image, "boot_args": "console=ttyS0 reboot=k panic=1 pci=off quiet loglevel=3 init=/sbin/magnus-guest magnus.role=browser" },
+            "drives": [{ "drive_id": "rootfs", "path_on_host": rootfs, "is_root_device": true, "is_read_only": true }],
+            "machine-config": { "vcpu_count": cfg.vcpus.max(2), "mem_size_mib": cfg.memory_mib.max(2048) },
+            "vsock": { "guest_cid": 3, "uds_path": vsock }
+        });
+        match boot(cfg, &dir, config, vsock).await {
+            Ok(vm) => {
+                b.insert(run.to_string(), (vm.clone(), task));
+                Ok((vm, true))
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            Err(e) => {
+                task.abort();
+                Err(e)
+            }
         }
     }
 
+    /// Stop a run's browser VM and remove its files.
+    pub async fn browser_vm_stop(&self, run: &str) {
+        if let Some((vm, task)) = self.browsers.lock().await.remove(run) {
+            task.abort();
+            drop(vm);
+        }
+        let _ = std::fs::remove_dir_all(self.browser_dir(run));
+    }
+
+    /// A browser VM's folder, short: Unix socket paths are limited to about
+    /// a hundred bytes.
+    fn browser_dir(&self, run: &str) -> PathBuf {
+        self.root.join(format!("brw-{}", run.trim_start_matches("run_").chars().take(12).collect::<String>()))
+    }
+}
+
+/// Boot Firecracker with a configuration and wait for the guest agent. A
+/// configuration with a network device is refused.
+async fn boot(cfg: &Cfg, dir: &Path, config: Value, vsock: PathBuf) -> Result<Arc<Vm>> {
+    let api = dir.join("api.sock");
+    let _ = std::fs::remove_file(&api);
+    anyhow::ensure!(config.get("network-interfaces").is_none(), "refusing a VM with a network device");
+    let config_path = dir.join("vm.json");
+    std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
+    let console = std::fs::File::create(dir.join("console.log"))?;
+    let mut cmd = Command::new(&cfg.firecracker);
+    cmd.arg("--api-sock").arg(&api).arg("--config-file").arg(&config_path).arg("--level").arg("Error");
+    cmd.env_clear();
+    cmd.stdin(Stdio::null()).stdout(Stdio::from(console.try_clone()?)).stderr(Stdio::from(console));
+    let child = crate::spawn::spawn(cmd).context("start firecracker")?;
+    let vm = Arc::new(Vm { child: Mutex::new(child), vsock });
+    // Wait for the guest agent.
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(v) = request(&vm.vsock, &json!({ "op": "ping" }), Duration::from_secs(2)).await {
+            if v["ok"] == true {
+                return Ok(vm);
+            }
+        }
+        if let Ok(Some(st)) = vm.child.lock().unwrap().try_wait() {
+            let log = std::fs::read_to_string(dir.join("console.log")).unwrap_or_default();
+            return Err(anyhow!("the sandbox VM exited during boot ({st}): {}", log.chars().rev().take(800).collect::<String>().chars().rev().collect::<String>()));
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            return Err(anyhow!("the sandbox VM did not come up within 30s"));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+impl Sandboxes {
     /// Files to place in /workspace/inputs when a run's workspace is created.
     pub fn set_inputs(&self, run: &str, files: Vec<(String, Vec<u8>)>) {
         self.inputs.lock().unwrap().insert(run.to_string(), files);

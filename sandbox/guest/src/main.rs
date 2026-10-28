@@ -8,6 +8,12 @@
 //! of /workspace, and has Python ignore user site-packages and put paths from
 //! outside the image after the image's own (`sitecustomize.py` in the image),
 //! so the checking tool is the image's, never one the work put there.
+//!
+//! Booted as a run's browser (`magnus.role=browser`, the browser image), it
+//! has no workspace. It starts the browser sidecar when the kernel asks,
+//! with Chromium's proxy at 127.0.0.1:3128: a forwarder that carries each
+//! connection over vsock to the kernel's egress proxy (host port 1080), the
+//! VM's only way out. It passes the kernel's requests to the sidecar.
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -53,6 +59,16 @@ fn loopback_up() {
     }
 }
 
+/// Where Chromium's proxy listens in the browser VM, and the host's vsock
+/// port the forwarder carries its connections to.
+const BROWSER_PROXY: &str = "127.0.0.1:3128";
+const EGRESS_PORT: u32 = 1080;
+const SIDECAR_SOCKET: &str = "/run/browser.sock";
+
+fn browser_vm() -> bool {
+    std::fs::read_to_string("/proc/cmdline").is_ok_and(|c| c.split_whitespace().any(|a| a == "magnus.role=browser"))
+}
+
 fn check_vm() -> bool {
     std::fs::read_to_string("/proc/cmdline").is_ok_and(|c| c.split_whitespace().any(|a| a == "magnus.check=1"))
 }
@@ -64,7 +80,9 @@ fn init() {
     mount("devpts", "/dev/pts", "devpts", 0, "");
     mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777");
     mount("tmpfs", "/run", "tmpfs", 0, "mode=755");
-    if check_vm() {
+    if browser_vm() {
+        let _ = std::fs::create_dir_all("/tmp/home");
+    } else if check_vm() {
         mount("/dev/vdb", "/workspace", "ext4", libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_NODEV, "");
     } else {
         mount("/dev/vdb", "/workspace", "ext4", 0, "");
@@ -170,10 +188,111 @@ fn resolve(path: &str) -> std::path::PathBuf {
     if p.is_absolute() { p.to_path_buf() } else { std::path::Path::new("/workspace").join(p) }
 }
 
+/// A stream to the host over vsock.
+fn vsock_to_host(port: u32) -> std::io::Result<std::fs::File> {
+    unsafe {
+        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+        addr.svm_port = port;
+        addr.svm_cid = libc::VMADDR_CID_HOST;
+        if libc::connect(fd, &addr as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_vm>() as u32) != 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(e);
+        }
+        Ok(std::fs::File::from_raw_fd(fd))
+    }
+}
+
+/// Copy bytes one way until either side closes.
+fn pipe(mut from: impl Read, mut to: impl Write) {
+    let mut buf = [0u8; 16384];
+    while let Ok(n) = from.read(&mut buf) {
+        if n == 0 || to.write_all(&buf[..n]).is_err() {
+            break;
+        }
+    }
+}
+
+/// Chromium's proxy: every connection goes to the kernel's egress proxy.
+fn forwarder() -> std::io::Result<()> {
+    let l = std::net::TcpListener::bind(BROWSER_PROXY)?;
+    std::thread::spawn(move || {
+        for c in l.incoming().flatten() {
+            std::thread::spawn(move || {
+                let Ok(host) = vsock_to_host(EGRESS_PORT) else { return };
+                let (Ok(c2), Ok(h2)) = (c.try_clone(), host.try_clone()) else { return };
+                let up = std::thread::spawn(move || pipe(c2, h2));
+                pipe(host, c);
+                let _ = up.join();
+            });
+        }
+    });
+    Ok(())
+}
+
+static BROWSER: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+/// Start the forwarder and the sidecar once, with Chromium's arguments
+/// from the kernel (its proxy and the egress CA it trusts).
+fn browser_start(req: &Value) -> Value {
+    let mut started = BROWSER.lock().unwrap();
+    if *started {
+        return json!({ "ok": true });
+    }
+    if let Err(e) = forwarder() {
+        return json!({ "error": format!("the proxy forwarder did not start: {e}") });
+    }
+    let args = req["args"].to_string();
+    let spawned = Command::new("/usr/bin/node")
+        .args(["/opt/magnus/sidecar.js", "--socket", SIDECAR_SOCKET])
+        .env_clear()
+        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("HOME", "/tmp/home")
+        .env("NODE_PATH", "/opt/magnus/node_modules")
+        .env("MAGNUS_CHROMIUM", "/usr/bin/chromium")
+        .env("MAGNUS_CHROMIUM_ARGS", args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn();
+    if let Err(e) = spawned {
+        return json!({ "error": format!("the browser sidecar did not start: {e}") });
+    }
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(30) {
+        if std::os::unix::net::UnixStream::connect(SIDECAR_SOCKET).is_ok() {
+            *started = true;
+            return json!({ "ok": true });
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    json!({ "error": "the browser sidecar did not come up within 30s" })
+}
+
+/// Pass one request to the sidecar and return its answer.
+fn browser(req: &Value) -> Value {
+    let go = || -> std::io::Result<Value> {
+        let s = std::os::unix::net::UnixStream::connect(SIDECAR_SOCKET)?;
+        s.set_read_timeout(Some(Duration::from_secs(110)))?;
+        (&s).write_all(format!("{}\n", req["request"]).as_bytes())?;
+        let mut line = String::new();
+        BufReader::new(&s).read_line(&mut line)?;
+        serde_json::from_str(&line).map_err(|e| std::io::Error::other(e.to_string()))
+    };
+    go().unwrap_or_else(|e| json!({ "error": format!("the browser did not answer: {e}") }))
+}
+
 fn handle(req: Value) -> Value {
     let b64 = base64::engine::general_purpose::STANDARD;
     match req["op"].as_str().unwrap_or_default() {
         "ping" => json!({ "ok": true }),
+        "browser_start" if browser_vm() => browser_start(&req),
+        "browser" if browser_vm() => browser(&req),
         "exec" => exec(&req),
         "write" => {
             let p = resolve(req["path"].as_str().unwrap_or_default());

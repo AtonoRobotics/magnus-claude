@@ -4,7 +4,9 @@
 
 use axum::{body::Body, extract::State, http::HeaderMap, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
 pub mod oauth;
+pub mod site;
 pub use oauth::FakeOAuth;
+pub use site::TestSite;
 
 use magnus_invariants::appliance::bin;
 use magnus_invariants::*;

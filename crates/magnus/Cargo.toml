@@ -24,6 +24,10 @@ cedar-policy = "4"
 chacha20poly1305 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 hex = "0.4"
 html2text = "0.14"
 libc = "0.2"

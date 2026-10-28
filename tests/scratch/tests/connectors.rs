@@ -310,12 +310,12 @@ async fn a_stdio_app_runs_on_the_appliance_with_a_cleared_environment() {
     alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "classes": classes })).await;
     let t = alice.submit("Read the plan.").await;
     alice.wait_settled(&t).await;
-    let r = m.requests().into_iter().filter(|c| c.turn() == 2).last().unwrap().last_results();
+    let r = m.requests().into_iter().rev().find(|c| c.turn() == 2).unwrap().last_results();
     assert_eq!(r[0].text, "Ship on Friday.", "{:?}", r[0]);
     let who: Value = serde_json::from_str(&r[1].text).unwrap();
     // Python sets LC_CTYPE itself when the locale is unset (PEP 538).
     assert!(who["env"].as_array().unwrap().iter().all(|k| k == "PATH" || k == "HOME" || k == "LC_CTYPE"), "the server saw the appliance's environment: {who}");
-    let later = m.requests().into_iter().filter(|c| c.turn() == 3).last().unwrap().last_results();
+    let later = m.requests().into_iter().rev().find(|c| c.turn() == 3).unwrap().last_results();
     let again: Value = serde_json::from_str(&later[0].text).unwrap();
     assert_eq!(again["pid"], who["pid"], "the server was not kept running");
     let task = alice.task(&t).await;
@@ -354,6 +354,6 @@ async fn the_reference_files_server_works_as_a_stdio_app() {
     alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve" })).await;
     let t = alice.submit("Read the plan.").await;
     alice.wait_settled(&t).await;
-    let r = m.requests().into_iter().filter(|c| c.turn() == 2).last().unwrap().last_results();
+    let r = m.requests().into_iter().rev().find(|c| c.turn() == 2).unwrap().last_results();
     assert!(r[0].text.contains("Ship on Friday."), "{:?}", r[0]);
 }

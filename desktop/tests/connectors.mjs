@@ -102,7 +102,9 @@ await step("sign in to the calendar through the browser", async () => {
 // then wait in the inbox, and nothing of theirs is offered until decided.
 const start = async text => {
   await page.getByRole("link", { name: "New task" }).click();
-  await page.getByRole("textbox").fill(text);
+  // Wait for the page itself: the one being left may have text boxes too.
+  await page.getByRole("heading", { name: "New task" }).waitFor({ timeout: T });
+  await page.getByLabel("Task", { exact: true }).fill(text);
   await page.getByRole("button", { name: "Start" }).click();
   await page.waitForURL(/#\/task\//, { timeout: T });
   return page.url();

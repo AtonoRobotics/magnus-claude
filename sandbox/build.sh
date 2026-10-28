@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the sandbox guest: kernel image and root filesystem, into sandbox/out.
+# Build the sandbox guest: kernel image, the sandbox root filesystem and the
+# browser VM's (browser-rootfs.ext4), into sandbox/out.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$here/.."
@@ -22,5 +23,7 @@ cp "$root/target/x86_64-unknown-linux-musl/release/magnus-guest" "$cache/magnus-
 cp "$here/Dockerfile" "$cache/Dockerfile"
 cp "$here/sitecustomize.py" "$cache/sitecustomize.py"
 cp "$here/check_tools.py" "$cache/check_tools.py"
+mkdir -p "$cache/browser"
+cp "$root/browser/package.json" "$root/browser/package-lock.json" "$root/browser/sidecar.js" "$cache/browser/"
 DOCKER_BUILDKIT=1 docker build --target export --output "type=local,dest=$out" "$cache"
 ls -la "$out"

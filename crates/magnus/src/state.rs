@@ -313,6 +313,8 @@ pub struct State {
     /// Tool classes the owner set at review, by tool; they override the
     /// configuration file's.
     pub classes: HashMap<String, crate::config::ToolClass>,
+    /// The owner's rules for the browser's destinations, by host.
+    pub browser_sites: BTreeMap<String, crate::config::BrowserSite>,
     /// Who is signed in to which app: (connector, person).
     pub signed_in: std::collections::BTreeSet<(String, String)>,
     /// Tools whose live definition differs from the pin, with the open item.
@@ -398,6 +400,12 @@ impl State {
             }
             Ev::ConnectorSignedOut { connector, person } => {
                 self.signed_in.remove(&(connector.clone(), person.clone()));
+            }
+            Ev::BrowserSiteSet { site } => {
+                self.browser_sites.insert(site.host.clone(), site.clone());
+            }
+            Ev::BrowserSiteRemoved { host } => {
+                self.browser_sites.remove(host);
             }
             Ev::ScheduleRemoved { id } => {
                 self.schedules.remove(id);

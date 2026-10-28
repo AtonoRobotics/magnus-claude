@@ -380,11 +380,24 @@ impl Kernel {
             let hits = self.memory_hits(&a.run, a.input["query"].as_str().unwrap_or_default());
             (Ok((memory_text(&hits), false, None)), memory_origin(&hits))
         } else {
-            (self.call(a, &f, secret.as_ref().map(|s| s.expose()), &key).await, Origin { label: f.label, sources: vec![f.app.clone()], untrusted_from: None })
+            let out = self.call(a, &f, secret.as_ref().map(|s| s.expose()), &key).await;
+            // What the browser shows after a credentialed fetch is the
+            // person's own content.
+            let label = if f.app == "browser" && self.egress.take_credentialed(&a.run) { f.label.join(Label::PRIVATE) } else { f.label };
+            (out, Origin { label, sources: vec![f.app.clone()], untrusted_from: None })
         };
-        let clean = |t: &str| match &secret {
-            Some(s) => redact(t, s.expose()),
-            None => t.to_string(),
+        // Credentials the egress proxy added for this run's browser, and the
+        // cookies it holds, never come back in a result.
+        let browser_secrets = if f.app == "browser" { self.egress.secrets(&a.run) } else { vec![] };
+        let clean = |t: &str| {
+            let mut t = match &secret {
+                Some(s) => redact(t, s.expose()),
+                None => t.to_string(),
+            };
+            for s in &browser_secrets {
+                t = redact(&t, s);
+            }
+            t
         };
         match out {
             Ok((text, is_error, data)) => {
@@ -728,7 +741,7 @@ impl Kernel {
                     let op = t.trim_start_matches("browser_");
                     let mut req = a.input.clone();
                     req["op"] = json!(op);
-                    let v = self.browser.request(&a.run, req).await?;
+                    let v = self.browse(&a.run, req).await?;
                     let text = v["text"].as_str().unwrap_or_default().to_string();
                     let data = v["image_b64"].as_str().map(|i| json!({ "image_b64": i }));
                     Ok((text, false, data))

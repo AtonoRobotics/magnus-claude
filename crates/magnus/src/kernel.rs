@@ -41,6 +41,8 @@ pub struct Kernel {
     /// for one shared credential).
     pub(crate) live_tools: tokio::sync::Mutex<HashMap<String, (Instant, Vec<AppTool>)>>,
     pub(crate) connect: crate::connect::Flows,
+    /// The browser's only way out.
+    pub egress: crate::egress::Egress,
     pub live_text: tokio::sync::broadcast::Sender<(String, String)>,
     /// How long each log append took since boot, in microseconds (V6).
     pub capture: Mutex<Capture>,
@@ -102,6 +104,7 @@ impl Kernel {
             leases: Mutex::new(HashMap::new()),
             live_tools: tokio::sync::Mutex::new(HashMap::new()),
             connect: Default::default(),
+            egress: crate::egress::Egress::open(&cfg.appliance.state_dir, cfg.web.allow_private_networks, &cfg.web.extra_ca)?,
             live_text,
             capture: Mutex::new(Capture::default()),
             cfg,
@@ -300,7 +303,7 @@ impl Kernel {
     pub async fn on_stop(&self, run: &str, terminal: bool) {
         self.leases.lock().unwrap().retain(|_, holder| holder != run);
         if terminal {
-            self.browser.close(run).await;
+            self.browse_close(run).await;
             self.sandboxes.destroy(run).await;
         } else {
             self.sandboxes.stop(run).await;

@@ -27,22 +27,27 @@ async fn browser_navigates_clicks_types_and_screenshots() {
     });
     let dir = tempfile::tempdir().unwrap();
     let b = Browser::new(
-        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium }),
+        Some(config::Browser {
+            command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()],
+            chromium: Some(chromium),
+            node_path: std::env::var("MAGNUS_NODE_PATH").ok().map(PathBuf::from),
+            rootfs: None,
+        }),
         dir.path(),
     );
     let url = page_server().await;
-    let v = b.request("r1", json!({ "op": "navigate", "url": url })).await.unwrap();
+    let v = b.request("r1", json!({ "op": "navigate", "url": url }), &[]).await.unwrap();
     let snap = v["text"].as_str().unwrap();
     assert!(snap.contains("Title: Shop") && snap.contains("Welcome"), "{snap}");
     assert!(snap.contains("[e1] link \"Go next\""), "{snap}");
-    let v = b.request("r1", json!({ "op": "type", "target": "e2", "text": "Dana" })).await.unwrap();
+    let v = b.request("r1", json!({ "op": "type", "target": "e2", "text": "Dana" }), &[]).await.unwrap();
     assert!(v["text"].as_str().unwrap().contains("= \"Dana\""), "{}", v["text"]);
-    let v = b.request("r1", json!({ "op": "click", "target": "Go next" })).await.unwrap();
+    let v = b.request("r1", json!({ "op": "click", "target": "Go next" }), &[]).await.unwrap();
     assert!(v["text"].as_str().unwrap().contains("Second page"), "{}", v["text"]);
-    let v = b.request("r1", json!({ "op": "screenshot" })).await.unwrap();
+    let v = b.request("r1", json!({ "op": "screenshot" }), &[]).await.unwrap();
     assert!(v["image_b64"].as_str().unwrap().starts_with("iVBOR"), "not a PNG");
     // Runs are isolated: a second run starts blank.
-    let v = b.request("r2", json!({ "op": "snapshot" })).await.unwrap();
+    let v = b.request("r2", json!({ "op": "snapshot" }), &[]).await.unwrap();
     assert!(v["text"].as_str().unwrap().contains("about:blank"));
 }
 

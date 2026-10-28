@@ -139,6 +139,9 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/connectors/{name}/tools/{tool}", axum::routing::put(classify_tool))
         .route("/v1/connectors/{name}/sign-in", post(connector_sign_in).delete(connector_sign_out))
         .route("/v1/connectors/{name}/sign-in/complete", post(connector_sign_in_complete))
+        .route("/v1/browser/sites", get(browser_sites))
+        .route("/v1/browser/sites/{host}", axum::routing::put(set_browser_site).delete(remove_browser_site))
+        .route("/v1/browser/sites/{host}/credential", axum::routing::put(set_site_credential))
         .route("/v1/memory", get(memory))
         .route("/v1/memory/{id}", axum::routing::delete(forget))
         .route("/v1/schedules", get(schedules).post(add_schedule))
@@ -1207,6 +1210,72 @@ async fn connector_sign_out(State(k): K, h: HeaderMap, Path(name): Path<String>)
         Err(r) => return r,
     };
     match k.connector_sign_out(&c, &p.id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+// ---------- the browser's destinations ----------
+
+/// The owner's rules for where the browser may go and what it carries there.
+async fn browser_sites(State(k): K, h: HeaderMap) -> Response {
+    if let Err(r) = who(&k, &h) {
+        return r;
+    }
+    let sites: Vec<crate::config::BrowserSite> = k.read(|s| s.browser_sites.values().cloned().collect());
+    Json(json!({ "sites": sites })).into_response()
+}
+
+async fn set_browser_site(State(k): K, h: HeaderMap, Path(host): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let site: crate::config::BrowserSite = match serde_json::from_value(b) {
+        Ok(s) => s,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("not a site rule: {e}")),
+    };
+    if site.host != host {
+        return err(StatusCode::BAD_REQUEST, "the rule's host must match the address");
+    }
+    if let Err(e) = site.validate() {
+        return err(StatusCode::BAD_REQUEST, e);
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::BrowserSiteSet { site }).await {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn remove_browser_site(State(k): K, h: HeaderMap, Path(host): Path<String>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if !k.read(|s| s.browser_sites.contains_key(&host)) {
+        return err(StatusCode::NOT_FOUND, "no rule for this host");
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::BrowserSiteRemoved { host }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// A person stores their own credential for a site whose rule asks for
+/// each person's; it goes to the vault, and the browser never holds it.
+async fn set_site_credential(State(k): K, h: HeaderMap, Path(host): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if !k.read(|s| s.browser_sites.get(&host).is_some_and(|r| r.credential.as_ref().is_some_and(|c| c.per_person))) {
+        return err(StatusCode::NOT_FOUND, "this site takes no credential of each person's");
+    }
+    let value = b["value"].as_str().map(str::trim).unwrap_or_default();
+    if value.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "the credential is empty");
+    }
+    match k.vault.put(&format!("browser:{host}:{}", p.id), value) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),
     }

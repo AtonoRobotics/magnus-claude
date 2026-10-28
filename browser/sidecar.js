@@ -1,5 +1,9 @@
-// Browser sidecar for the Magnus kernel. Chromium runs here, on the host and
-// outside the code sandbox, and is reached only through the kernel's boundary.
+// Browser sidecar for the Magnus kernel. It drives Chromium, in the run's
+// browser microVM on the appliance (or on a development host), and is reached
+// only through the kernel's boundary. Chromium's only network is the
+// boundary's egress proxy: MAGNUS_CHROMIUM_ARGS (JSON) carries the proxy and
+// the appliance CA it trusts, and a request's `proxy` the run's proxy
+// credential on a development host.
 // Protocol: one JSON request per connection on --socket, one JSON reply.
 // Requests: { op, run, ... }. Each run gets its own isolated browser context.
 'use strict';
@@ -16,11 +20,13 @@ let browser;
 const runs = new Map(); // run -> { context, page }
 const MAX_TEXT = 40000;
 
-async function page(run) {
-  if (!browser) browser = await chromium.launch({ executablePath, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+const extraArgs = JSON.parse(process.env.MAGNUS_CHROMIUM_ARGS || '[]');
+
+async function page(run, proxy) {
+  if (!browser) browser = await chromium.launch({ executablePath, args: ['--no-sandbox', '--disable-dev-shm-usage', ...extraArgs] });
   let r = runs.get(run);
   if (!r) {
-    const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, acceptDownloads: false });
+    const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, acceptDownloads: false, ...(proxy ? { proxy } : {}) });
     const p = await context.newPage();
     r = { context, page: p };
     runs.set(run, r);
@@ -72,7 +78,7 @@ function locate(p, target) {
 async function handle(req) {
   const { op, run } = req;
   if (op === 'close') { const r = runs.get(run); if (r) { await r.context.close(); runs.delete(run); } return { ok: true }; }
-  const p = await page(run);
+  const p = await page(run, req.proxy);
   switch (op) {
     case 'navigate': {
       const resp = await p.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
