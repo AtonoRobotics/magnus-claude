@@ -285,7 +285,9 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
                     None => records.push(json!({ "seq": e.seq, "kind": "record_result", "call_id": call_id, "tool": tool, "issuer": who, "result": res })),
                 }
             }
-            Ev::Contract { version, contract, .. } => records.push(json!({ "seq": e.seq, "kind": "contract", "version": version, "issuer": who, "body": contract })),
+            Ev::Contract { version, contract, approved_by, .. } => records.push(json!({ "seq": e.seq, "kind": "contract", "version": version, "issuer": who, "body": contract, "approved_by": approved_by })),
+            Ev::WorkStarted { .. } => harness.push(json!({ "seq": e.seq, "kind": "work_started", "issuer": who })),
+            Ev::ContractFrozen { version, .. } => harness.push(json!({ "seq": e.seq, "kind": "contract_frozen", "issuer": who, "text": format!("version {version}") })),
             Ev::Plan { version, plan, .. } => records.push(json!({ "seq": e.seq, "kind": "plan", "version": version, "issuer": who, "body": plan })),
             Ev::Verification { criterion, passed, evidence, by, .. } => {
                 harness.push(json!({ "seq": e.seq, "kind": "verification", "issuer": issuer_of(by), "criterion": criterion, "passed": passed, "evidence": evidence }))

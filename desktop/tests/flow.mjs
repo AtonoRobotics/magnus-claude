@@ -128,6 +128,11 @@ await step("see the outcome with its evidence", async () => {
   const files = await page.locator("button[data-act=download]").count();
   if (!files) throw new Error("the delivered file is not offered");
   await shot("outcome");
+  // The plan left u1 active; once the task is done, nothing shows as active.
+  await page.getByRole("tab", { name: "Contract and plan" }).click();
+  await page.locator("[data-unit-status]").first().waitFor({ timeout: T });
+  const states = await page.locator("[data-unit-status]").evaluateAll(els => els.map(e => e.dataset.unitStatus));
+  if (states.some(s => s === "active" || s === "pending")) throw new Error(`a finished task shows plan units as ${states.join(", ")}`);
   await page.getByRole("tab", { name: "Full trace" }).click();
   await page.locator(".call").first().waitFor({ timeout: T });
 });

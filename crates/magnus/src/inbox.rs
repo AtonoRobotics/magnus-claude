@@ -200,6 +200,23 @@ impl Kernel {
                 self.reply(&run, &call_id, msg, true, Label::PRINCIPAL).await?;
                 self.resume_after(&run).await?;
             }
+            ("contract_change", "approve") => {
+                let version = self.read(|s| s.runs.get(&run).map(|r| r.contract_version)).unwrap_or(0) + 1;
+                self.emit(&actor, resolve(None)).await?;
+                self.emit(&actor, Ev::Contract { run: run.clone(), version, contract: item.details["new"].clone(), approved_by: Some(actor.clone()) }).await?;
+                self.reply(&run, &call_id, format!("The person approved the contract change. Version {version} is in force, and frozen."), false, Label::PRINCIPAL).await?;
+                self.resume_after(&run).await?;
+            }
+            ("contract_change", "reject") => {
+                self.emit(&actor, resolve(None)).await?;
+                let msg = format!(
+                    "The person kept the contract (version {}){}. Its criteria still decide when the task is done: finish against them, or call task_fail.",
+                    item.details["version"],
+                    text.as_ref().map(|t| format!(": {t}")).unwrap_or_default()
+                );
+                self.reply(&run, &call_id, msg, true, Label::PRINCIPAL).await?;
+                self.resume_after(&run).await?;
+            }
             ("question", "answer") => {
                 self.emit(&actor, resolve(None)).await?;
                 self.reply(&run, &call_id, format!("The person answered: {}", text.clone().unwrap_or_default()), false, Label::PRINCIPAL).await?;
@@ -305,6 +322,7 @@ impl Kernel {
                 label,
                 data: None,
                 sources: vec![],
+                check: false,
             },
         )
         .await?;

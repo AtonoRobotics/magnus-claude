@@ -1,6 +1,6 @@
 {
-  "task_contract": "Record or revise the task contract: goal, assumptions, done-criteria (each with an optional executable check), and the irreversible actions you expect. Required before any action that changes something, and before completing.",
-  "task_complete": "Report the task done. Every criterion is then checked against the world; if a check fails you get the failure back and the task stays open.",
+  "task_contract": "Record the task contract: goal, assumptions, done-criteria (each with an optional executable check: a read-only tool or a sandbox command such as your tests or demo, and the values its result must show), and the irreversible actions you expect. Required before any action that changes something, and before completing. You may revise it until the work starts (your first action that changes anything, or your first task_complete); after that it is frozen, and calling this again asks the person to approve the change, old and new side by side.",
+  "task_complete": "Report the task done. Every frozen or approved criterion is then checked against the world; if a check fails you get back which expectation failed and the task stays open. A criterion whose check cannot run goes to the person for review.",
   "task_fail": "Declare that you cannot finish the task, with the reason and what you observed.",
   "ask_principal": "Ask the person a question and wait for the answer. Use only when an assumption changes the outcome or an action cannot be undone.",
   "propose_policy": "Propose a policy change (Cedar rules for a layer such as org or user/<id>) to the person who owns that layer, citing evidence. It changes nothing until they accept it.",

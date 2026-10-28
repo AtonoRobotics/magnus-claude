@@ -79,6 +79,16 @@ pub struct Run {
     pub notices: Vec<(u32, i64, String)>,
     pub contract: Option<Value>,
     pub contract_version: u32,
+    /// The agent has started the work (its first action that changes anything).
+    pub work_started: bool,
+    /// The version frozen when work started; later changes need approval.
+    pub contract_frozen: Option<u32>,
+    /// The run's taint when the contract in force was written: its checks
+    /// were written then, so the Rule of Two judges them by it. A version a
+    /// person approved carries none.
+    pub contract_taint: (bool, bool),
+    /// Who approved the contract in force, when it was a change.
+    pub contract_approved_by: Option<String>,
     pub verified: BTreeMap<String, (bool, Value, String)>,
     pub untrusted: bool,
     pub private: bool,
@@ -374,6 +384,10 @@ impl State {
                         notices: vec![],
                         contract: None,
                         contract_version: 0,
+                        work_started: false,
+                        contract_frozen: None,
+                        contract_taint: (false, false),
+                        contract_approved_by: None,
                         verified: BTreeMap::new(),
                         // Attached files are content from elsewhere: data, not instructions.
                         untrusted: !attachments.is_empty() || pb.untrusted,
@@ -444,7 +458,7 @@ impl State {
                     r.decisions.push(DecisionRec { seq: e.seq, call_id: call_id.clone(), tool: tool.clone(), stage: stage.clone(), outcome: outcome.clone(), rule: rule.clone() });
                 }
             }
-            Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, sources } => {
+            Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, sources, check } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     let rec = ResultRec { seq: e.seq, text: text.clone(), is_error: *is_error, status: status.clone(), data: data.clone() };
                     if let Some(k) = key {
@@ -455,10 +469,12 @@ impl State {
                     if !call_id.is_empty() {
                         r.results.insert(call_id.clone(), rec);
                     }
-                    if label.untrusted {
+                    // A check's result is compared, never read by the model:
+                    // taint limits authority, not reading.
+                    if label.untrusted && !*check {
                         r.untrusted = true;
                     }
-                    if label.private {
+                    if label.private && !*check {
                         r.private = true;
                         r.private_from.extend(sources.iter().cloned());
                         if sources.is_empty() {
@@ -467,11 +483,26 @@ impl State {
                     }
                 }
             }
-            Ev::Contract { run, version, contract } => {
+            Ev::Contract { run, version, contract, approved_by } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.contract = Some(contract.clone());
                     r.contract_version = *version;
                     r.verified.clear();
+                    r.contract_taint = if approved_by.is_some() { (false, false) } else { (r.untrusted, r.private) };
+                    if approved_by.is_some() {
+                        r.contract_frozen = Some(*version);
+                    }
+                    r.contract_approved_by = approved_by.clone();
+                }
+            }
+            Ev::WorkStarted { run } => {
+                if let Some(r) = self.runs.get_mut(run) {
+                    r.work_started = true;
+                }
+            }
+            Ev::ContractFrozen { run, version } => {
+                if let Some(r) = self.runs.get_mut(run) {
+                    r.contract_frozen = Some(*version);
                 }
             }
             Ev::Plan { run, version, plan } => {

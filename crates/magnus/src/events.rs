@@ -188,11 +188,30 @@ pub enum Ev {
         /// The apps the content came from, for the audience rule.
         #[serde(default)]
         sources: Vec<String>,
+        /// The result of a contract check: compared by the kernel, never
+        /// given to the model as content, so it taints nothing.
+        #[serde(default)]
+        check: bool,
     },
     Contract {
         run: String,
         version: u32,
         contract: Value,
+        /// Set when a person approved this version as a change to a frozen
+        /// contract.
+        #[serde(default)]
+        approved_by: Option<String>,
+    },
+    /// The agent's first action that changes anything: from here on the
+    /// contract in force is frozen.
+    WorkStarted {
+        run: String,
+    },
+    /// The contract at this version is frozen: a later change needs a
+    /// person's approval, and only frozen or approved criteria count.
+    ContractFrozen {
+        run: String,
+        version: u32,
     },
     /// The agent's plan (K36): ordered units, each with an id, a goal and
     /// when it is done. A revision is a new version.
@@ -348,6 +367,8 @@ impl Ev {
             | Decision { run, .. }
             | ToolResult { run, .. }
             | Contract { run, .. }
+            | WorkStarted { run }
+            | ContractFrozen { run, .. }
             | Plan { run, .. }
             | Playbook { run, .. }
             | Graded { run, .. }

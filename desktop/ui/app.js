@@ -59,6 +59,7 @@ const STATUS = {
 };
 const WAITING = {
   approval: "waiting for an approval", review: "waiting for your review", question: "waiting for your answer", budget: "paused: budget reached",
+  contract_change: "waiting for you to decide on a change to its done-criteria",
   provider: "paused: the model provider is unavailable", usage_limit: "paused: model usage limit", auth: "paused: sign in to the model again",
   kill_switch: "stopped by the kill switch", timer: "waiting until a set time", invalid_request: "paused: the model rejected the request",
 };
@@ -334,6 +335,7 @@ route(/^#\/new$/, async main => {
 const KIND = {
   approval: "Approval", question: "Question", review: "Review", notice: "Stopped", message: "Note from the agent",
   policy_proposal: "Policy proposal", schedule_proposal: "Recurring task proposal", tool_change: "Changed tool", tool_review: "New app's tools",
+  contract_change: "Contract change",
 };
 const TIER = { read: "reads", sandbox: "workspace only", reversible_write: "can be undone", irreversible: "cannot be undone", financial: "money", prohibited: "prohibited" };
 const AUDIENCE = { private: "only you", org: "people in your organization", public: "anyone" };
@@ -362,6 +364,19 @@ function taintNote(t) {
   if (t.untrusted) parts.push("has read content from outside sources, which could be steering it");
   if (t.private) parts.push("has read private data");
   return `<p class="small muted">This task ${parts.join(" and ")}.</p>`;
+}
+
+// A contract as the person reads it: the goal, then each criterion with the
+// check the appliance will run for it, in full.
+function checkText(ch) {
+  if (!ch) return `<span class="faint">no check: you review it</span>`;
+  const exp = (ch.expect || []).map(e => `${e.pointer || "(whole result)"} ${"equals" in e ? `equals ${JSON.stringify(e.equals)}` : `contains ${JSON.stringify(e.contains)}`}`).join("; ");
+  return `<span class="mono">${esc(ch.tool)}</span> ${fieldValue(ch.input)}<div class="small">expects ${esc(exp)}</div>`;
+}
+function contractView(c, label) {
+  if (!c) return `<div class="small faint">${esc(label)}: none</div>`;
+  return `<div aria-label="${esc(label)}"><div class="small muted">${esc(label)}</div><p><strong>${esc(c.goal || "")}</strong></p>
+    <ol class="small">${(c.criteria || []).map(cr => `<li><div>${esc(cr.description || cr.id)} <span class="faint mono">${esc(cr.id)}</span></div>${checkText(cr.check)}</li>`).join("")}</ol></div>`;
 }
 
 function buttons(i, list) {
@@ -402,10 +417,17 @@ function card(i, composed) {
         <div class="row" style="margin-top:8px"><button class="primary" data-item="${esc(i.id)}" data-decision="answer">Send answer</button></div>` : buttons(i, [])}`;
       break;
     }
+    case "contract_change":
+      body = `<p class="small">The work has started, so the criteria are frozen. The agent wants to replace them. Only criteria you approve decide when the task is done.</p>
+        <div class="sidebyside">${contractView(d.old, `Now (version ${d.version})`)}${contractView(d.new, "Proposed")}</div>
+        ${taintNote(d.taint)}
+        ${i.can_respond ? `<textarea rows="2" data-draft="cc-${esc(i.id)}" placeholder="If you keep the current contract, say why (the agent sees this)" style="margin-top:10px"></textarea>` : ""}
+        ${buttons(i, [["approve", "Approve the change", "primary"], ["reject", "Keep the current contract"]])}`;
+      break;
     case "review": {
-      const crit = (d.criteria || []).map(c => `<li>${esc(c.description || c.id || c)}</li>`).join("");
+      const crit = (d.criteria || []).map(c => `<li>${esc(c.description || c.id || c)}${c.unchecked_reason ? `<div class="small faint">Its check could not run: ${esc(c.unchecked_reason)}</div>` : ""}</li>`).join("");
       body = `<p>${esc(d.summary)}</p>
-        <div class="evidence none"><div class="small muted">These have no check the appliance could run. Check them yourself:</div><ul>${crit}</ul></div>
+        <div class="evidence none"><div class="small muted">The appliance could not check these. Check them yourself:</div><ul>${crit}</ul></div>
         ${d.view ? `<iframe class="composed" sandbox="allow-same-origin" title="The outcome" data-view="${esc(i.id)}"></iframe>` : ""}
         ${taintNote(d.taint)}
         ${i.can_respond ? `<textarea rows="2" data-draft="rev-${esc(i.id)}" placeholder="If you send it back, say what is wrong" style="margin-top:10px"></textarea>` : ""}
@@ -481,14 +503,14 @@ async function respond(btn, root) {
   const body = { decision };
   if (scope) body.scope = scope;
   if (scope === "window") body.minutes = 60;
-  const box = $(`[data-draft="ans-${CSS.escape(id)}"]`, root) || $(`[data-draft="rev-${CSS.escape(id)}"]`, root);
+  const box = $(`[data-draft="ans-${CSS.escape(id)}"]`, root) || $(`[data-draft="rev-${CSS.escape(id)}"]`, root) || $(`[data-draft="cc-${CSS.escape(id)}"]`, root);
   if (btn.dataset.text) body.text = btn.dataset.text;
   else if (box && box.value.trim()) body.text = box.value.trim();
   if (decision === "answer" && !body.text) { toast("Write an answer first."); return; }
   btn.disabled = true;
   try {
     await api("POST", `/v1/inbox/${enc(id)}`, body);
-    delete drafts[`ans-${id}`]; delete drafts[`rev-${id}`];
+    delete drafts[`ans-${id}`]; delete drafts[`rev-${id}`]; delete drafts[`cc-${id}`];
     toast({ approve: "Approved.", reject: decision === "reject" ? "Done." : "Done.", accept: "Accepted.", answer: "Sent.", dismiss: "Dismissed.", resume: "Continuing.", extend: "Budget doubled." }[decision] || "Done.");
     await pollInbox();
   } catch (e) { toast(e.message); btn.disabled = false; }
@@ -551,8 +573,18 @@ function plan(t) {
   const units = t.plan?.units || [];
   if (!units.length) return `<p class="empty">The agent has not written a plan.</p>`;
   const mark = { done: "ok", active: "run", dropped: "", pending: "" };
+  // Once the task has ended nothing is in progress: a unit the agent left
+  // active or pending was simply not marked done.
+  const ended = ["completed", "failed", "cancelled"].includes(t.status);
+  const status = u => (ended && (!u.status || u.status === "active" || u.status === "pending")) ? ["", "not marked done"] : [mark[u.status] || "", u.status || "pending"];
   return `<p class="small faint">Version ${esc(t.plan_version)}. Statuses are the agent's own account; the contract's checks are the evidence.</p>
-    <table class="t"><tbody>${units.map(u => `<tr><td class="mono small">${esc(u.id)}</td><td>${esc(u.goal)}<div class="small muted">Done when ${esc(u.done_when)}</div></td><td><span class="chip ${mark[u.status] || ""}">${esc(u.status || "pending")}</span></td></tr>`).join("")}</tbody></table>`;
+    <table class="t"><tbody>${units.map(u => { const [cls, label] = status(u); return `<tr><td class="mono small">${esc(u.id)}</td><td>${esc(u.goal)}<div class="small muted">Done when ${esc(u.done_when)}</div></td><td><span class="chip ${cls}" data-unit-status="${esc(label)}">${esc(label)}</span></td></tr>`; }).join("")}</tbody></table>`;
+}
+
+function contractSection(t) {
+  if (!t.contract) return `<p class="empty">The agent has not written a contract.</p>`;
+  const state = t.contract_approved_by ? `approved by ${String(t.contract_approved_by).replace(/^person:/, "")}` : t.contract_frozen ? "frozen when the work started" : "not frozen yet: the work has not started";
+  return `<p class="small faint">Version ${esc(t.contract_version)} · ${esc(state)}</p>${contractView(t.contract, "Done-criteria and their checks")}`;
 }
 
 function trace(tl) {
@@ -585,7 +617,7 @@ route(/^#\/task\/([^/]+)$/, async (main, id) => {
       ${open.length ? `<div class="banner">${open.length === 1 ? "A decision for this task is" : `${open.length} decisions for this task are`} in your <a href="#/inbox">inbox</a>.</div>` : ""}
       ${running ? `<div class="live" id="live" aria-live="polite">${esc(liveText) || `<span class="faint">Working…</span>`}</div>` : ""}
       <div class="layers" role="tablist">${[["outcome", "Outcome"], ["plan", "Contract and plan"], ["trace", "Full trace"]].map(([k, l]) => `<button role="tab" aria-selected="${layer === k}" class="${layer === k ? "on" : ""}" data-layer="${k}">${l}</button>`).join("")}</div>
-      <section>${layer === "outcome" ? outcome : layer === "plan" ? `<h3>Task</h3><p>${esc(t.text)}</p><h3>Goal</h3><p>${esc(t.contract?.goal || "")}</p><h3>Plan</h3>${plan(t)}` : trace(tl)}</section>
+      <section>${layer === "outcome" ? outcome : layer === "plan" ? `<h3>Task</h3><p>${esc(t.text)}</p><h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}` : trace(tl)}</section>
       <hr><p class="small faint">${esc(t.model?.adapter)} · ${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} model calls · ${t.usage?.actions ?? 0} actions · $${(t.usage?.cost_usd ?? 0).toFixed(2)}</p>
       <div class="row">${!["completed", "failed", "cancelled"].includes(t.status) ? `<button data-act="cancel">Cancel task</button>` : ""}${t.status === "suspended" && !t.waiting_item ? `<button data-act="resume">Resume</button>` : ""}</div>`;
     if (paint(main, html) && t.outcome_view) fill($("#view", main), t.outcome_view, id);

@@ -240,6 +240,7 @@ impl Kernel {
                 label: Label::PRINCIPAL,
                 data: None,
                 sources: vec![],
+                check: false,
             },
         )
         .await?;
@@ -280,10 +281,30 @@ impl Kernel {
         let rid = run.id.as_str();
         match name {
             "task_contract" => match self.validate_contract(input) {
+                // Work has started: the change goes to the person, old and new
+                // side by side, and only an approved version counts (K37).
+                Ok(()) if run.contract_frozen.is_some() => {
+                    let item = self
+                        .item(
+                            run,
+                            "contract_change",
+                            format!("The agent asks to change the done-criteria of: {}", run.contract.as_ref().and_then(|c| c["goal"].as_str()).unwrap_or("the task")),
+                            json!({ "call_id": call_id, "version": run.contract_version, "old": run.contract, "new": input }),
+                        )
+                        .await?;
+                    self.suspend(rid, "contract_change", Some(item)).await?;
+                    return Ok(Flow::Stop);
+                }
                 Ok(()) => {
                     let version = run.contract_version + 1;
-                    self.emit("model", Ev::Contract { run: rid.into(), version, contract: input.clone() }).await?;
-                    self.result(rid, call_id, format!("Contract recorded (version {version})."), false).await?;
+                    self.emit("model", Ev::Contract { run: rid.into(), version, contract: input.clone(), approved_by: None }).await?;
+                    let frozen = if run.work_started {
+                        self.emit("kernel", Ev::ContractFrozen { run: rid.into(), version }).await?;
+                        " Work has started, so it is frozen: a later change goes to the person for approval."
+                    } else {
+                        ""
+                    };
+                    self.result(rid, call_id, format!("Contract recorded (version {version}).{frozen}"), false).await?;
                 }
                 Err(why) => {
                     self.result(rid, call_id, format!("The contract was not recorded: {why}. Fix it and call task_contract again; a retry with the same contract will not help."), true)
@@ -394,8 +415,8 @@ impl Kernel {
             if let Some(check) = cr.get("check").filter(|v| !v.is_null()) {
                 let tool = check["tool"].as_str().ok_or(format!("criterion {id}: the check names no tool"))?;
                 let f = boundary::facts(self, tool).ok_or(format!("criterion {id}: {tool} is not a usable tool"))?;
-                if f.risk != Risk::Read {
-                    return Err(format!("criterion {id}: checks must use a read-only tool, and {tool} is {}", f.risk.as_str()));
+                if !matches!(f.risk, Risk::Read | Risk::Sandbox) {
+                    return Err(format!("criterion {id}: checks must read or run in the sandbox, and {tool} is {}", f.risk.as_str()));
                 }
                 if f.app == "memory" {
                     return Err(format!("criterion {id}: a check must look at the world, not at your own notes"));
@@ -432,6 +453,13 @@ impl Kernel {
             self.result(rid, call_id, "There is no task contract, so completion cannot be checked. Record one with task_contract, then retry.", true).await?;
             return Ok(Flow::Continue);
         };
+        // Reporting completion is work: the contract checked now is frozen.
+        if !run.work_started {
+            self.emit("kernel", Ev::WorkStarted { run: rid.into() }).await?;
+        }
+        if run.contract_frozen.is_none() {
+            self.emit("kernel", Ev::ContractFrozen { run: rid.into(), version: run.contract_version }).await?;
+        }
         let mut failures = vec![];
         let mut unchecked = vec![];
         for (n, cr) in contract["criteria"].as_array().cloned().unwrap_or_default().iter().enumerate() {
@@ -451,10 +479,18 @@ impl Kernel {
                     issuer: Issuer::Check,
                 })
                 .await?;
+            // A check that could not run says nothing about the work: the
+            // person reviews the criterion, and it is never replaced (K37).
+            let check_call = format!("check:{call_id}:{id}");
+            let denied = self.read(|s| s.runs.get(rid).and_then(|r| r.results.get(&check_call)).is_some_and(|r| r.status == "denied"));
             let Verdict::Done { text, is_error, data } = v else {
-                failures.push(format!("{id}: the check could not run"));
+                unchecked.push(with_reason(cr, "the check could not run"));
                 continue;
             };
+            if denied {
+                unchecked.push(with_reason(cr, &text));
+                continue;
+            }
             // A check sees the structured result and the text beside it: a
             // fetched page's structured part holds only its content type.
             let observed = match data {
@@ -486,7 +522,16 @@ impl Kernel {
             let evidence = json!({ "tool": tool, "input": check["input"], "error": is_error, "observations": seen });
             self.emit("kernel", Ev::Verification { run: rid.into(), criterion: id.clone(), passed: ok, evidence: evidence.clone(), by: "kernel".into() }).await?;
             if !ok {
-                failures.push(format!("{id}: {}", serde_json::to_string(&seen).unwrap_or_default()));
+                // What the check saw is data the model must not read as
+                // content: say which expectation failed, not what was there.
+                let why: Vec<String> = seen
+                    .iter()
+                    .map(|o| {
+                        let what = if o["observed"].is_null() { "is missing" } else { "does not match" };
+                        format!("{} {what} (expected {})", o["pointer"].as_str().unwrap_or_default(), o["expected"])
+                    })
+                    .collect();
+                failures.push(format!("{id}: {}{}", if is_error { "the check's tool reported an error; " } else { "" }, why.join(", ")));
             }
         }
         if !failures.is_empty() {
@@ -494,7 +539,7 @@ impl Kernel {
                 rid,
                 call_id,
                 format!(
-                    "Not complete. These criteria do not hold in the world: {}. The task stays open: fix the work or revise the contract, then call task_complete again; a retry without changes will not help.",
+                    "Not complete. These criteria do not hold in the world: {}. The task stays open: fix the work, then call task_complete again; a retry without changes will not help. The criteria are frozen; a task_contract call now asks the person to approve a change.",
                     failures.join("; ")
                 ),
                 true,
@@ -521,6 +566,13 @@ impl Kernel {
         self.on_stop(rid, true).await;
         Ok(Flow::Stop)
     }
+}
+
+/// A criterion with why it could not be checked, for the review card.
+fn with_reason(cr: &Value, why: &str) -> Value {
+    let mut c = cr.clone();
+    c["unchecked_reason"] = json!(why);
+    c
 }
 
 /// Shape only, never content (K36).

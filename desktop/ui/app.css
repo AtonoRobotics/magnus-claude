@@ -142,3 +142,7 @@ iframe.composed { width: 100%; border: 0; display: block; background: var(--surf
   nav.side .group, nav.side .who { display: none; }
   main { padding: 18px 16px 48px; }
 }
+
+.sidebyside { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 8px; }
+.sidebyside > div { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+@media (max-width: 720px) { .sidebyside { grid-template-columns: 1fr; } }

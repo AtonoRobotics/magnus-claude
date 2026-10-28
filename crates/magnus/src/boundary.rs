@@ -158,6 +158,7 @@ impl Kernel {
                     label,
                     data: data.clone(),
                     sources,
+                    check: a.issuer == Issuer::Check,
                 },
             )
             .await?;
@@ -301,7 +302,15 @@ impl Kernel {
             None => None,
         };
 
-        // 8. Execute: intent first, then the call, then the result.
+        // 8. Execute: intent first, then the call, then the result. The
+        // agent's first action that changes anything starts the work, and
+        // freezes the contract in force (invariant 7).
+        if a.issuer == Issuer::Model && f.risk != Risk::Read && !run.work_started {
+            self.emit("kernel", Ev::WorkStarted { run: a.run.clone() }).await?;
+            if run.contract.is_some() && run.contract_frozen.is_none() {
+                self.emit("kernel", Ev::ContractFrozen { run: a.run.clone(), version: run.contract_version }).await?;
+            }
+        }
         if !resend {
             self.emit(
                 "kernel",
@@ -422,12 +431,15 @@ impl Kernel {
             let why = "record a task contract with task_contract before changing anything; then retry";
             return Ok(Err(self.deny(a, "policy", why, true, None).await?));
         }
-        if a.issuer == Issuer::Check && f.risk != Risk::Read {
-            return Ok(Err(self.deny(a, "policy", "contract checks may only use read-only tools", false, None).await?));
+        if a.issuer == Issuer::Check && !matches!(f.risk, Risk::Read | Risk::Sandbox) {
+            return Ok(Err(self.deny(a, "policy", "contract checks may only read or run in the sandbox", false, None).await?));
         }
+        // A check's input was written with the contract, so it is judged by
+        // the taint the run had then; reading its result taints nothing.
+        let (untrusted, private) = if a.issuer == Issuer::Check { run.contract_taint } else { (run.untrusted, run.private) };
         let policies = self.read(|s| s.policies.clone());
         let facts = ToolFacts { name: &f.name, app: &f.app, risk: f.risk, audience: f.audience };
-        let outcome = policy::decide(&policies, person, &facts, run.untrusted, run.private)?;
+        let outcome = policy::decide(&policies, person, &facts, untrusted, private)?;
         let mut ask = match outcome {
             Outcome::Deny { reason, rule } => return Ok(Err(self.deny(a, "policy", &reason, false, rule).await?)),
             Outcome::Ask { rule } => Some((format!("policy asks before {}", a.tool), Some(rule))),
@@ -440,7 +452,7 @@ impl Kernel {
         let transmits = f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private);
         // These override a policy ask: the approval must then cover this exact
         // action, not a broader scope granted for policy reasons.
-        if transmits && run.untrusted && run.private {
+        if transmits && untrusted && private {
             ask = Some((
                 "this task has read untrusted content and private data, so anything it sends out needs approval (Rule of Two)".into(),
                 Some("kernel:rule_of_two".into()),

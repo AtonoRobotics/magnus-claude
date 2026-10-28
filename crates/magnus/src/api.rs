@@ -388,6 +388,8 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Va
             .collect();
         v["contract"] = run.contract.clone().unwrap_or(Value::Null);
         v["contract_version"] = json!(run.contract_version);
+        v["contract_frozen"] = json!(run.contract_frozen.is_some());
+        v["contract_approved_by"] = json!(run.contract_approved_by);
         v["criteria"] = json!(criteria);
         v["model"] = json!({ "adapter": run.config.adapter, "name": run.config.model });
         v["usage"] = json!({ "model_calls": run.model_calls, "actions": run.actions, "cost_usd": run.usd });
