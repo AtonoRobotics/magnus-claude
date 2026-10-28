@@ -45,7 +45,7 @@ One line per choice the brief left open, with its reason. The brief and the owne
 ## Identity
 
 - In v1 the appliance config lists people with their groups and roles (`owner`, `approver:<risk>`, `policy:user`, `policy:group:<id>`); each person has an API token for the desktop app. Reason: K46 requires groups from an identity provider, the appliance needs a local one to start, and OIDC can replace it behind the same interface.
-- The appliance listens on all interfaces (`listen = "0.0.0.0:7700"`); its helpers (browser sidecar, search, Postgres) stay on loopback. Reason: owner instruction (2026-10-27); people's desktop apps run on their own machines and reach the appliance over the network.
+- The appliance is reachable on all interfaces at port 7700, now over HTTPS (`tls_listen = "0.0.0.0:7700"`); plain HTTP moved to loopback (`listen = "127.0.0.1:7701"`) for scripts on the appliance itself. Its helpers (browser sidecar, search, Postgres) stay on loopback. Reason: owner instruction (2026-10-27) that people's apps reach the appliance over the network; HTTPS on the same port keeps the firewall rule and stops passwords and tokens crossing the LAN in clear.
 
 ## Models
 
@@ -106,4 +106,9 @@ One line per choice the brief left open, with its reason. The brief and the owne
 - Failure tags come from the log: grader disagrees, verification, boundary, provider, agent, budget, waiting on a person, kill switch, cancelled, stalled (no event for `observability.stall_minutes`). Reason: V2 asks where failures happen; each tag is a fact in the log, not a guess.
 - An inbox item is blocking when a run is paused waiting on it; apps interrupt only for those and batch the rest. Approval cards state the consequence of irreversible, financial and repeat-unknown actions on the card itself. Reason: U3, U6.
 - Version changes (harness, instructions, model, playbook, each policy layer) are listed at `/v1/versions` from the log; apps notify when they change. Reason: U5.
+- Where the OS has no keyring (no Secret Service), the app keeps the session token in a file readable only by the user, in its settings folder. Reason: a session must survive a restart, and headless or minimal desktops have no keyring; the token is revocable by signing out.
+- The app makes an OS notification only for blocking inbox items and for version changes; everything else waits in the inbox. Approve buttons exist only on the inbox card, never in a notification or the task view. Reason: U3, U8.
+- A contract check observes a tool's structured result with the result's text beside it (`/text`). Reason: a fetched page's structured result holds only its content type, so a check could never see the page.
+- Windows installers are cross-built on Linux for `x86_64-pc-windows-gnu` and bundled with NSIS (per-user install, WebView2 bootstrapper); Linux ships as .deb and AppImage. Reason: one build box, no MSVC toolchain or licence download.
+- The app is tested by behavior: the shared frontend in Chromium against a real appliance (`desktop_flow`), and the built Linux app through tauri-driver over HTTPS (`desktop_app`). The Windows build runs its unit tests under Wine; its WebView2 window cannot run there, so the owner's recorded run is its end-to-end test. Reason: U7; test what a person does, not what the page looks like.
 - Web search is a local SearXNG instance. Reason: no API key or third-party search account, and queries stay under the appliance's control.

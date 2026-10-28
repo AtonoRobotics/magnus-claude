@@ -4,8 +4,15 @@
 
 - The invariant tests pass: 45 of 45, on three consecutive full runs and again after every later change.
 - A clean-context security review found 14 kernel holes the tests did not catch. All are fixed and covered by `tests/scratch/tests/review.rs` (7 regressions, passing). The test weaknesses it found are proposed as contract changes in `docs/proposals/invariant-tests-v2.md`; these need the owner's approval.
-- **Live models.** The owner signed in to Codex and Grok (device sign-in). Both pass the full conformance suite against the live provider (2026-10-27): Codex with `gpt-6.1-sol`, Grok with `grok-4.7`. Claude, GLM and Muse are not signed in. Next: a plain-language run. The task model is currently set to `grok`/`4.7`, which Grok does not offer; pick `grok-4.7` (or a Codex model) in Settings → Models first.
-- The dev appliance listens on all interfaces, port 7700 (http://192.168.0.50:7700 on the LAN). The owner opened 7700/tcp in ufw (2026-10-27).
+- **Live models.** The owner signed in to Codex and Grok (device sign-in). Both pass the full conformance suite against the live provider (2026-10-27): Codex with `gpt-6.1-sol`, Grok with `grok-4.7`. Claude, GLM and Muse are not signed in. Next: a plain-language run. The task model is currently set to `grok`/`4.7`, which Grok does not offer; pick `grok-4.7` (or a Codex model) in Models first.
+- **Desktop app (2026-10-27).** It is built and tested; the owner's recorded runs (one on Linux, one on Windows) are still to do. Steps are in `desktop/README.md`.
+  - Installers: `desktop/src-tauri/target/release/bundle/deb/Magnus_0.1.0_amd64.deb`, `.../appimage/Magnus_0.1.0_amd64.AppImage`, and `desktop/src-tauri/target/x86_64-pc-windows-gnu/release/bundle/nsis/Magnus_0.1.0_x64-setup.exe`.
+  - Tested by behavior: the shared frontend in Chromium (`desktop_flow`) and the built Linux app through tauri-driver over HTTPS (`desktop_app`, `--ignored`). Both pass. The Windows build passes its unit tests under Wine; its window is untested until the owner's run.
+  - Before the recorded run, the owner sets a password: `~/.magnus-appliance/bin/magnus password --config ~/.magnus-appliance/magnus.toml --person samuel`. Claude needs an Anthropic API key, pasted in Models.
+- The dev appliance serves HTTPS on all interfaces, port 7700 (https://192.168.0.50:7700; certificate fingerprint printed in `~/.magnus-appliance/serve.log`). Plain HTTP is on loopback only, at 127.0.0.1:7701. The owner opened 7700/tcp in ufw (2026-10-27).
+  - The owner has the `developer` role.
+  - A `user/samuel` policy layer asks before `deliver_file`, so the recorded run has an approval. Clear that layer to stop it.
+  - Previous config and binaries are kept as `magnus.toml.bak-20261027232730` and `bin/prev-20261027232730/`.
 - TheAgentCompany preparation is with a background agent: service stack, three sample tasks, and a runner design in `eval/tac/`.
 
 ## Done
@@ -27,9 +34,14 @@
   - `anthropic`: Messages API.
   - `openai`: Chat Completions and Responses, with API key or device sign-in (Codex and Grok: approve on the provider's site, Magnus finishes by itself). Presets for GLM, Muse, Codex and Grok in `config/providers.toml`. Codex and Grok client versions are read from each CLI's published release, not stored.
   - Conformance suite: `magnus conformance`, `POST /v1/adapters/{id}/conformance`.
-- Desktop app (`desktop/`, Electron): inbox, task list, task view with evidence and downloads, settings, OS notifications.
+- Sign-in and sessions (Argon2id, held outside the log), HTTPS with a self-signed certificate that apps pin, the `developer` role.
+- Developer API (`/v1/dev/*`): run inspector, raw log, experiments (pass@k, pass^k, paired comparison, failure tags), live panels, policy history with reliability, playbook. Also plans (`task_plan`), playbook items with taint (`playbook_update`), composed outcomes with a spoken script, blocking and tier flags on inbox items, and `/v1/versions`.
+- Desktop app (`desktop/`, Tauri, Linux and Windows):
+  - operator view: Home, Inbox, New task, Tasks, Task detail, Models
+  - developer view: Runs, Experiments, System, Policy, Playbook
+  - The appliance serves the same frontend to browsers.
 - Evaluation:
-  - `eval/plain`: 14 plain-language tasks, graders, runner. The graders have not been checked against known correct and wrong answers; there is no record of that check.
+  - `eval/plain`: 14 plain-language tasks, graders, runner. With a developer token the runner records each trial as an experiment and posts its grade, so the developer view compares configurations. The graders have not been checked against known correct and wrong answers; there is no record of that check.
   - `eval/tac`: in progress.
 
 ## Next
@@ -47,12 +59,14 @@
 - Sandbox assets: `sandbox/build.sh` writes `sandbox/out/{vmlinux,rootfs.ext4}` (gitignored). Grader image: `docker build --target rootfs -t magnus-grader sandbox/cache`.
 - Dev appliance: config, state and binaries in `~/.magnus-appliance/`.
   - Start: `~/.magnus-appliance/bin/magnus serve --config ~/.magnus-appliance/magnus.toml`.
-  - The owner's access key is the `token` in that config.
-  - It serves plain HTTP, so access keys cross the network unencrypted. TLS is not built yet.
+  - The owner's access key is the `token` in that config. It works on the loopback port (7701) for scripts such as `eval/plain/run.py`, which reads the address from the config.
+  - People sign in with passwords over HTTPS (port 7700).
   - It is not a system service; the owner declined persistence.
 - Tests:
   - `cargo test -p magnus-invariants --no-fail-fast` (the contract)
   - `cargo test -p magnus-scratch` (regressions)
   - `cargo test -p magnus --test tools` (browser and desktop)
-- Desktop app: `cd desktop && npm install && npx electron .` (add `--no-sandbox` on a dev box without the setuid helper).
+- Desktop app: see `desktop/README.md`. Build in `desktop/src-tauri` with `cargo tauri build`. Tests: `cargo test -p magnus-scratch --test desktop_flow`, and `--test desktop_app -- --ignored`.
+  - The app test needs `tauri-driver`, `xvfb-run` and WebKitWebDriver. WebKitWebDriver is not installed system-wide. Get it with `apt download webkit2gtk-driver && dpkg-deb -x` and set `MAGNUS_WEBKIT_DRIVER`.
+- The scratch tests start the appliance binary from `magnus-invariants`. Run `cargo build -p magnus-invariants --bins` first, or they use a stale kernel.
 - Read `DECISIONS.md` before changing behavior. Do not edit `tests/invariants/` without the owner's approval.
