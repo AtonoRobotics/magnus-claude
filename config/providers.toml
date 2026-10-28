@@ -33,7 +33,7 @@ auth = { kind = "api_key" }
 include = ["reasoning.encrypted_content"]
 prices = { "muse-spark" = { input = 1.25, output = 4.25, cache_read = 0.15 }, "muse-wonder" = { input = 4.0, output = 20.0, cache_read = 0.2 } }
 
-# ChatGPT sign-in, as the Codex CLI does it. Subscription usage; no per-token price.
+# ChatGPT device sign-in, as `codex login --device-auth` does it. Subscription usage; no per-token price.
 [[adapters]]
 id = "codex"
 command = ["/opt/magnus/bin/magnus-adapter-openai"]
@@ -44,18 +44,17 @@ base_url = "https://chatgpt.com/backend-api/codex"
 max_tokens_field = false
 headers = { originator = "codex_cli_rs", "OpenAI-Beta" = "responses=experimental" }
 [adapters.settings.auth]
-kind = "oauth_pkce"
-authorize_url = "https://auth.openai.com/oauth/authorize"
+kind = "oauth_openai_device"
+device_url = "https://auth.openai.com/api/accounts/deviceauth/usercode"
+poll_url = "https://auth.openai.com/api/accounts/deviceauth/token"
+verification_url = "https://auth.openai.com/codex/device"
 token_url = "https://auth.openai.com/oauth/token"
+redirect_uri = "https://auth.openai.com/deviceauth/callback"
 client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
-redirect_uri = "http://localhost:1455/auth/callback"
-scopes = "openid profile email offline_access"
 account_claim = "/https:~1~1api.openai.com~1auth/chatgpt_account_id"
 account_header = "chatgpt-account-id"
-extra_params = { id_token_add_organizations = "true", codex_cli_simplified_flow = "true", originator = "codex_cli_rs" }
 
-# xAI sign-in with a device code. The client id is not published by xAI; set it
-# before use (see docs/research/providers-and-tac.md).
+# xAI device sign-in with the Grok CLI's client (as `grok login --device-auth`).
 [[adapters]]
 id = "grok"
 command = ["/opt/magnus/bin/magnus-adapter-openai"]
@@ -70,5 +69,5 @@ prices = { "grok-4" = { input = 2.0, output = 6.0, cache_read = 0.5 } }
 kind = "oauth_device"
 device_url = "https://auth.x.ai/oauth2/device/code"
 token_url = "https://auth.x.ai/oauth2/token"
-client_id = "SET-ME"
-scopes = "openid offline_access"
+client_id = "b1a00492-073a-47ea-816f-4c329264a828"
+scopes = "openid profile email offline_access grok-cli:access api:access"

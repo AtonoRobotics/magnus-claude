@@ -4,8 +4,8 @@
 //! One adapter, configured per provider by settings (see `presets.json`):
 //! - `api`: `chat` (POST {base}/chat/completions) or `responses` (POST {base}/responses)
 //! - `base_url`
-//! - `auth`: `{ "kind": "api_key" }`, `{ "kind": "oauth_pkce", ... }` or
-//!   `{ "kind": "oauth_device", ... }` (see `auth.rs`)
+//! - `auth`: `{ "kind": "api_key" }`, `{ "kind": "oauth_device", ... }` or
+//!   `{ "kind": "oauth_openai_device", ... }` (see `auth.rs`)
 //! - `headers`: extra request headers
 //! - `max_tokens_field`: the request field for the output limit, or null to omit
 //! - `store`, `include`: Responses options (stateless use: `store: false`,

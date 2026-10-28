@@ -1,28 +1,24 @@
-//! Sign-in and token refresh.
+//! Sign-in and token refresh. Both OAuth kinds are device sign-ins: the person
+//! approves on the provider's site, and completion polls until they have, so
+//! nothing is pasted back into Magnus.
 //!
-//! `oauth_pkce` (ChatGPT for Codex): settings `auth` = { kind, authorize_url,
-//! token_url, client_id, redirect_uri, scopes, extra_params, account_claim
-//! (JSON pointer into the id token's claims), account_header }. The person
-//! opens the link, signs in, and pastes back the address the browser lands on.
+//! `oauth_device` (RFC 8628, xAI for Grok): settings `auth` = { kind,
+//! device_url, token_url, client_id, scopes }.
 //!
-//! `oauth_device` (xAI for Grok): { kind, device_url, token_url, client_id,
-//! scopes }. The person opens the link and enters the code; completion polls
-//! the token endpoint.
+//! `oauth_openai_device` (ChatGPT for Codex, as codex-rs `device_code_auth.rs` does
+//! it): { kind, device_url (user code), poll_url, verification_url, token_url,
+//! redirect_uri, client_id, account_claim (JSON pointer into the id token's
+//! claims), account_header }. The poll returns an authorization code and its
+//! PKCE verifier, which are exchanged at the token endpoint.
 
 use base64::Engine;
 use magnus_adapter_proto::{ErrorClass, Event, Sink};
-use rand::RngCore;
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-fn b64url(b: &[u8]) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
-}
-
-fn random(n: usize) -> String {
-    let mut b = vec![0u8; n];
-    rand::rngs::OsRng.fill_bytes(&mut b);
-    b64url(&b)
+/// Seconds given as a number or a numeric string (OpenAI sends `"5"`).
+fn secs(v: &Value) -> Option<u64> {
+    v.as_u64().or_else(|| v.as_str()?.trim().parse().ok())
 }
 
 fn claims(id_token: &str) -> Value {
@@ -107,35 +103,6 @@ pub async fn begin(http: &reqwest::Client, settings: &Value, sink: &mut Sink) ->
             })
             .await
         }
-        "oauth_pkce" => {
-            let verifier = random(48);
-            let challenge = {
-                use sha2::Digest;
-                b64url(&sha2::Sha256::digest(verifier.as_bytes()))
-            };
-            let state = random(24);
-            let mut url = url::Url::parse(a["authorize_url"].as_str().unwrap_or_default())?;
-            {
-                let mut q = url.query_pairs_mut();
-                q.append_pair("response_type", "code")
-                    .append_pair("client_id", a["client_id"].as_str().unwrap_or_default())
-                    .append_pair("redirect_uri", a["redirect_uri"].as_str().unwrap_or_default())
-                    .append_pair("scope", a["scopes"].as_str().unwrap_or_default())
-                    .append_pair("code_challenge", &challenge)
-                    .append_pair("code_challenge_method", "S256")
-                    .append_pair("state", &state);
-                for (k, v) in a["extra_params"].as_object().into_iter().flatten() {
-                    q.append_pair(k, v.as_str().unwrap_or_default());
-                }
-            }
-            sink.send(&Event::AuthStep {
-                flow: json!({ "kind": "oauth_pkce", "verifier": verifier, "state": state }),
-                url: Some(url.to_string()),
-                user_code: None,
-                instructions: "Open the link and sign in. Your browser then lands on a page that may not load; copy that page's full address and paste it here.".into(),
-            })
-            .await
-        }
         "oauth_device" => {
             let url = a["device_url"].as_str().unwrap_or_default();
             let resp = http
@@ -151,10 +118,33 @@ pub async fn begin(http: &reqwest::Client, settings: &Value, sink: &mut Sink) ->
                 return sink.error(ErrorClass::AuthExpired, format!("the provider refused the sign-in request: {v}")).await;
             };
             sink.send(&Event::AuthStep {
-                flow: json!({ "kind": "oauth_device", "device_code": device, "interval": v["interval"].as_u64().unwrap_or(5) }),
+                flow: json!({ "kind": "oauth_device", "device_code": device, "interval": secs(&v["interval"]).unwrap_or(5), "wait_s": secs(&v["expires_in"]).unwrap_or(900) }),
                 url: v["verification_uri_complete"].as_str().or_else(|| v["verification_uri"].as_str()).map(String::from),
                 user_code: v["user_code"].as_str().map(String::from),
-                instructions: "Open the link, confirm the code shown, and sign in. Then press Done.".into(),
+                instructions: "Open the link and approve the sign-in; check that it shows this code. Magnus finishes by itself.".into(),
+            })
+            .await
+        }
+        "oauth_openai_device" => {
+            let url = a["device_url"].as_str().unwrap_or_default();
+            let v: Value = match http.post(url).json(&json!({ "client_id": a["client_id"] })).send().await {
+                Ok(r) if r.status().is_success() => r.json().await.unwrap_or(Value::Null),
+                Ok(r) => {
+                    let st = r.status().as_u16();
+                    let body: String = r.text().await.unwrap_or_default().chars().take(200).collect();
+                    return sink.error(ErrorClass::AuthExpired, format!("the provider refused the sign-in request: {st} {body}")).await;
+                }
+                Err(e) => return sink.error(ErrorClass::Unavailable, format!("device endpoint unreachable: {e}")).await,
+            };
+            let (Some(id), Some(code)) = (v["device_auth_id"].as_str(), v["user_code"].as_str().or_else(|| v["usercode"].as_str())) else {
+                return sink.error(ErrorClass::AuthExpired, format!("the provider's answer has no sign-in code: {v}")).await;
+            };
+            // codex-rs waits 15 minutes for the approval.
+            sink.send(&Event::AuthStep {
+                flow: json!({ "kind": "oauth_openai_device", "device_auth_id": id, "user_code": code, "interval": secs(&v["interval"]).unwrap_or(5), "wait_s": 900 }),
+                url: a["verification_url"].as_str().map(String::from),
+                user_code: Some(code.to_string()),
+                instructions: "Open the link, sign in, and enter the code shown. Magnus finishes by itself.".into(),
             })
             .await
         }
@@ -182,53 +172,58 @@ pub async fn complete(http: &reqwest::Client, settings: &Value, flow: &Value, in
                 Err(e) => sink.error(ErrorClass::Unavailable, format!("could not reach the provider: {e}")).await,
             }
         }
-        "oauth_pkce" => {
-            let pasted = input["callback_url"].as_str().or_else(|| input["code"].as_str()).unwrap_or_default().trim().to_string();
-            let (code, state) = match url::Url::parse(&pasted) {
-                Ok(u) => {
-                    let q: std::collections::HashMap<_, _> = u.query_pairs().into_owned().collect();
-                    (q.get("code").cloned().unwrap_or_default(), q.get("state").cloned())
-                }
-                Err(_) => (pasted.clone(), None),
-            };
-            if code.is_empty() {
-                return sink.error(ErrorClass::AuthExpired, "the pasted address has no sign-in code").await;
-            }
-            if let Some(s) = state {
-                if Some(s.as_str()) != flow["state"].as_str() {
-                    return sink.error(ErrorClass::AuthExpired, "the pasted address belongs to a different sign-in; start again").await;
-                }
-            }
-            let form = [
-                ("grant_type", "authorization_code"),
-                ("code", code.as_str()),
-                ("redirect_uri", a["redirect_uri"].as_str().unwrap_or_default()),
-                ("client_id", a["client_id"].as_str().unwrap_or_default()),
-                ("code_verifier", flow["verifier"].as_str().unwrap_or_default()),
-            ];
-            match token_request(http, a, &form).await {
-                Ok(t) => sink.send(&Event::AuthDone { credential: credential_from(a, &t, None).to_string() }).await,
-                Err((c, m)) => sink.error(c, m).await,
-            }
-        }
         "oauth_device" => {
             let device = flow["device_code"].as_str().unwrap_or_default();
-            let interval = flow["interval"].as_u64().unwrap_or(5).max(1);
+            let mut interval = flow["interval"].as_u64().unwrap_or(5).max(1);
             let form = [
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("device_code", device),
                 ("client_id", a["client_id"].as_str().unwrap_or_default()),
             ];
-            let start = std::time::Instant::now();
+            let deadline = Instant::now() + Duration::from_secs(flow["wait_s"].as_u64().unwrap_or(900));
             loop {
                 match token_request(http, a, &form).await {
                     Ok(t) => return sink.send(&Event::AuthDone { credential: credential_from(a, &t, None).to_string() }).await,
-                    Err((ErrorClass::Unavailable, m)) if start.elapsed() < Duration::from_secs(120) => {
-                        let _ = m;
+                    // Not approved yet, or a passing outage.
+                    Err((ErrorClass::Unavailable, m)) if Instant::now() < deadline => {
+                        if m.ends_with("slow_down") {
+                            interval += 5; // RFC 8628 §3.5
+                        }
                         tokio::time::sleep(Duration::from_secs(interval)).await;
                     }
+                    Err((ErrorClass::Unavailable, _)) => return sink.error(ErrorClass::AuthExpired, "the sign-in was not approved in time; start again").await,
                     Err((c, m)) => return sink.error(c, m).await,
                 }
+            }
+        }
+        "oauth_openai_device" => {
+            let poll = a["poll_url"].as_str().unwrap_or_default();
+            let body = json!({ "device_auth_id": flow["device_auth_id"], "user_code": flow["user_code"] });
+            let interval = flow["interval"].as_u64().unwrap_or(5).max(1);
+            let deadline = Instant::now() + Duration::from_secs(flow["wait_s"].as_u64().unwrap_or(900));
+            let granted: Value = loop {
+                match http.post(poll).json(&body).send().await {
+                    Ok(r) if r.status().is_success() => break r.json().await.unwrap_or(Value::Null),
+                    // 403 and 404 mean not approved yet (codex-rs); a send error is a passing outage.
+                    Ok(r) if matches!(r.status().as_u16(), 403 | 404) => {}
+                    Ok(r) => return sink.error(ErrorClass::AuthExpired, format!("the provider refused the sign-in: {}", r.status())).await,
+                    Err(_) => {}
+                }
+                if Instant::now() >= deadline {
+                    return sink.error(ErrorClass::AuthExpired, "the sign-in was not approved in time; start again").await;
+                }
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+            };
+            let form = [
+                ("grant_type", "authorization_code"),
+                ("code", granted["authorization_code"].as_str().unwrap_or_default()),
+                ("redirect_uri", a["redirect_uri"].as_str().unwrap_or_default()),
+                ("client_id", a["client_id"].as_str().unwrap_or_default()),
+                ("code_verifier", granted["code_verifier"].as_str().unwrap_or_default()),
+            ];
+            match token_request(http, a, &form).await {
+                Ok(t) => sink.send(&Event::AuthDone { credential: credential_from(a, &t, None).to_string() }).await,
+                Err((c, m)) => sink.error(c, m).await,
             }
         }
         k => sink.error(ErrorClass::InvalidRequest, format!("unknown sign-in flow {k}")).await,

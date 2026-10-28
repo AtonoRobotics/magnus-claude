@@ -112,8 +112,7 @@ async function render() {
   wire(main);
   clearTimeout(timer); timer = setTimeout(refresh, 4000);
 }
-// Desktop app: notify about new items that need this person, and finish
-// a ChatGPT sign-in when the desktop catches its redirect.
+// Desktop app: notify about new items that need this person.
 let seen = null;
 function notifyNew(items) {
   if (!window.magnusDesktop) return;
@@ -121,11 +120,6 @@ function notifyNew(items) {
   if (seen) for (const i of mine) if (!seen.has(i.id)) window.magnusDesktop.notify("Magnus needs you", i.summary || i.kind);
   seen = new Set(mine.map(i => i.id));
 }
-let pendingOAuth = null;
-if (window.magnusDesktop) window.magnusDesktop.onOAuthCallback(async url => {
-  if (!pendingOAuth) { toast("Sign-in address received, but no sign-in is in progress."); return; }
-  try { await api("POST", `/v1/adapters/${pendingOAuth.adapter}/sign-in/complete`, { flow: pendingOAuth.flow, input: { callback_url: url } }); toast("Signed in."); pendingOAuth = null; render(); } catch (e) { toast(e.message); }
-});
 async function refresh() { if (document.activeElement && ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) { timer = setTimeout(refresh, 4000); return; } if (token) render(); }
 
 function loginView() {
@@ -241,7 +235,7 @@ async function settingsView() {
       <div class="row" style="margin-top:8px"><select id="madapter" aria-label="Adapter">${adapters.map(a => `<option ${a.id === cur.adapter ? "selected" : ""}>${esc(a.id)}</option>`).join("")}</select><input type="text" id="mname" value="${esc(cur.model)}" aria-label="Model id" style="max-width:260px"><button data-act="set-model">Use</button></div></div>
     ${adapters.map(a => `<div class="card"><div class="spread"><strong>${esc(a.id)}</strong><span class="row">${a.conformance ? `<span class="chip ${a.conformance.passed ? "ok" : "bad"}">conformance ${a.conformance.passed ? "passed" : "failed"} (${esc(a.conformance.model)})</span>` : `<span class="chip warn">not verified</span>`}</span></div>
       <div class="small muted">${a.running ? esc(a.running.adapter + " " + a.running.version) : "not running"}</div>
-      <div class="row" style="margin-top:10px"><button data-act="signin" data-adapter="${esc(a.id)}">Sign in</button><button data-act="conformance" data-adapter="${esc(a.id)}">Run conformance</button></div><div id="signin-${esc(a.id)}"></div><div id="conf-${esc(a.id)}"></div></div>`).join("")}
+      <div class="row" style="margin-top:10px"><button data-act="signin" data-adapter="${esc(a.id)}">Sign in</button><button data-act="conformance" data-adapter="${esc(a.id)}">Run conformance</button></div><div id="signin-${esc(a.id)}">${signins[a.id] || ""}</div><div id="conf-${esc(a.id)}"></div></div>`).join("")}
     <h2>Policy</h2><div class="card"><p class="small muted">What the worker may do on its own (execute) and what it must ask about (request_approval), written in Cedar. Lower layers can only narrow the organization's.</p>
       <label class="small" for="orgpol">Organization layer</label><textarea id="orgpol" style="min-height:160px;font-family:var(--mono)">${esc(pol.layers.org ?? pol.default_org)}</textarea><div class="row" style="margin-top:8px"><button class="primary" data-act="save-policy">Save</button></div></div>
     <h2>App credentials</h2><div class="card"><p class="small muted">Stored encrypted. The worker never sees them. Stored now: ${sec.names.map(n => `<code>${esc(n)}</code>`).join(", ") || "none"}.</p>
@@ -280,20 +274,29 @@ function wire(main) {
       if (act === "save-policy") { await api("PUT", "/v1/policies/org", { cedar: $("#orgpol").value }); toast("Policy saved."); }
       if (act === "save-secret") { await api("PUT", "/v1/secrets/" + encodeURIComponent($("#secname").value.trim()), { value: $("#secval").value }); toast("Stored."); }
       if (act === "signin") { await signIn(b.dataset.adapter); return; }
+      if (act === "signin-key") { await keyFinish[b.dataset.adapter]?.(); return; }
       if (act === "conformance") { const el = $("#conf-" + b.dataset.adapter); el.innerHTML = `<p class="small muted">Running the suite against the live provider…</p>`; const r = await api("POST", `/v1/adapters/${b.dataset.adapter}/conformance`, {}); el.innerHTML = `<pre>${esc(r.checks.map(c => `${c.passed ? "PASS" : "FAIL"} ${c.name}${c.simulated ? " (simulated)" : ""}: ${c.detail}`).join("\n"))}</pre>`; b.disabled = false; return; }
       render();
     } catch (e) { toast(e.message); b.disabled = false; }
   });
 }
+// Sign-in progress per adapter, kept across the page's periodic re-render.
+// OAuth sign-ins are device sign-ins: the person approves on the provider's
+// site and the appliance finishes by itself, so the page only waits.
+const signins = {}, keyFinish = {};
+function showSignin(adapter, html) { signins[adapter] = html; const el = $("#signin-" + adapter); if (el) el.innerHTML = html; }
 async function signIn(adapter) {
-  const el = $("#signin-" + adapter); const step = await api("POST", `/v1/adapters/${adapter}/sign-in`, {});
-  if (step.event === "error") { el.innerHTML = `<p class="small" style="color:var(--bad)">${esc(step.message)}</p>`; return; }
+  const step = await api("POST", `/v1/adapters/${adapter}/sign-in`, {});
+  if (step.event === "error") { showSignin(adapter, `<p class="small" style="color:var(--bad)">${esc(step.message)}</p>`); return; }
   const kind = step.flow.kind;
-  if (kind === "oauth_pkce") pendingOAuth = { adapter, flow: step.flow };
-  el.innerHTML = `<div style="margin-top:10px"><p class="small">${esc(step.instructions)}</p>${step.url ? `<p><a href="${esc(step.url)}" target="_blank" rel="noopener">Open the sign-in page</a></p>` : ""}${step.user_code ? `<p>Code: <code>${esc(step.user_code)}</code></p>` : ""}
-    ${kind === "api_key" ? `<input type="password" id="si-${adapter}" placeholder="API key">` : kind === "oauth_pkce" ? `<input type="text" id="si-${adapter}" placeholder="Paste the address here">` : ""}<div class="row" style="margin-top:8px"><button class="primary" id="sid-${adapter}">${kind === "oauth_device" ? "Done" : "Finish sign-in"}</button></div></div>`;
-  $("#sid-" + adapter).onclick = async () => { const v = $("#si-" + adapter)?.value || ""; const input = kind === "api_key" ? { api_key: v } : { callback_url: v };
-    try { await api("POST", `/v1/adapters/${adapter}/sign-in/complete`, { flow: step.flow, input }); el.innerHTML = `<p class="small" style="color:var(--ok)">Signed in.</p>`; } catch (e) { toast(e.message); } };
+  const head = `<div style="margin-top:10px"><p class="small">${esc(step.instructions)}</p>${step.url ? `<p><a href="${esc(step.url)}" target="_blank" rel="noopener">Open the sign-in page</a></p>` : ""}${step.user_code ? `<p>Code: <code>${esc(step.user_code)}</code></p>` : ""}`;
+  const finish = async input => {
+    try { await api("POST", `/v1/adapters/${adapter}/sign-in/complete`, { flow: step.flow, input }); showSignin(adapter, `<p class="small" style="color:var(--ok)">Signed in.</p>`); }
+    catch (e) { showSignin(adapter, `<p class="small" style="color:var(--bad)">${esc(e.message)}</p>`); }
+  };
+  if (kind !== "api_key") { showSignin(adapter, head + `<p class="small muted">Waiting for you to approve…</p></div>`); await finish({}); return; }
+  keyFinish[adapter] = () => finish({ api_key: $("#si-" + adapter).value });
+  showSignin(adapter, head + `<input type="password" id="si-${adapter}" placeholder="API key"><div class="row" style="margin-top:8px"><button class="primary" data-act="signin-key" data-adapter="${esc(adapter)}">Finish sign-in</button></div></div>`);
 }
 render();
 </script>
