@@ -94,6 +94,7 @@ pub fn render(s: &State, p: &Person, i: &Item) -> Value {
 
 impl Kernel {
     pub async fn respond(self: &Arc<Self>, p: &Person, item_id: &str, body: &Value) -> Result<Answer> {
+        let _decide = self.decide.lock().await;
         let Some(item) = self.read(|s| s.items.get(item_id).cloned()) else { return Ok(Answer::NotFound) };
         if !visible(p, &item) {
             return Ok(Answer::NotFound);

@@ -38,7 +38,15 @@ impl Kernel {
             None => new_id("thread"),
         };
         let conversation = self.conversation(person, &thread);
-        let o = NewRun { chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation }), ..Default::default() };
+        // The turn reads the thread so far, so it starts with the taint of
+        // every turn and task in it (I2): an earlier answer or a task's
+        // result may carry what was read there.
+        let label = self.thread(person, &thread).iter().fold(Label::PRINCIPAL, |l, (_, r)| l.join(Label { untrusted: r.untrusted, private: r.private }));
+        let o = NewRun {
+            chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation }),
+            label: (label != Label::PRINCIPAL).then_some(label),
+            ..Default::default()
+        };
         let (task, _) = self.create_run(&format!("person:{person}"), person, text, vec![], o).await?;
         Ok(Some((thread, task)))
     }
@@ -224,6 +232,7 @@ impl Kernel {
     /// card. A confirmed schedule acts for them (K54), within the card's
     /// budget, and its runs start with the taint the turn had.
     pub async fn decide_card(&self, person: &str, card: &str, decision: &str) -> Result<std::result::Result<Value, CardRefusal>> {
+        let _decide = self.decide.lock().await;
         let found = self.read(|s| {
             s.runs.values().find_map(|r| {
                 let t = s.tasks.get(&r.task).filter(|t| t.is_chat_turn() && t.person == person)?;
@@ -240,12 +249,17 @@ impl Kernel {
             "confirm" => {
                 let id = new_id("sched");
                 let budget = serde_json::from_value(d["budget"].clone()).ok();
+                // The person agreed to the card's scope, so each run is told it.
+                let text = match (d["text"].as_str().unwrap_or_default(), d["scope"].as_str().filter(|s| !s.is_empty())) {
+                    (t, Some(scope)) => format!("{t}\n\nThe person confirmed this schedule for this scope; keep to it: {scope}"),
+                    (t, None) => t.to_string(),
+                };
                 self.emit(
                     &actor,
                     Ev::ScheduleSet {
                         id: id.clone(),
                         person: task.person.clone(),
-                        text: d["text"].as_str().unwrap_or_default().into(),
+                        text,
                         every_minutes: d["every_minutes"].as_u64().map(|m| m as u32),
                         daily_at: d["daily_at"].as_str().map(String::from),
                         budget,
