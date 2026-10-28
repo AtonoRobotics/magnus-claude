@@ -672,7 +672,7 @@ async fn put_policy(State(k): K, h: HeaderMap, Path(layer): Path<String>, Json(b
     }
     let cedar = b["cedar"].as_str().unwrap_or_default().to_string();
     if let Err(e) = crate::policy::validate(&cedar) {
-        return err(StatusCode::BAD_REQUEST, format!("the policy does not parse: {e}"));
+        return err(StatusCode::BAD_REQUEST, format!("the policy was refused: {e}"));
     }
     match k.emit(&format!("person:{}", p.id), Ev::PolicySet { layer, cedar }).await {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
@@ -878,7 +878,7 @@ async fn memory(State(k): K, h: HeaderMap) -> Response {
         s.memory
             .iter()
             .filter(|m| m.person == p.id)
-            .map(|m| json!({ "id": m.id, "fact": m.fact, "topic": m.topic, "label": m.label, "run": m.run, "at": m.at }))
+            .map(|m| json!({ "id": m.id, "fact": m.fact, "topic": m.topic, "label": m.label, "run": m.run, "at": m.at, "sources": m.sources, "untrusted_from": m.untrusted_from }))
             .collect()
     });
     Json(json!({ "memory": items })).into_response()

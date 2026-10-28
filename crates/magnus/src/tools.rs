@@ -19,6 +19,8 @@ pub enum Risk {
 }
 
 impl Risk {
+    pub const ALL: [Risk; 6] = [Risk::Read, Risk::Sandbox, Risk::ReversibleWrite, Risk::Irreversible, Risk::Financial, Risk::Prohibited];
+
     pub fn parse(s: &str) -> Option<Risk> {
         Some(match s {
             "read" => Risk::Read,
@@ -87,6 +89,8 @@ pub enum Audience {
 }
 
 impl Audience {
+    pub const ALL: [Audience; 3] = [Audience::Private, Audience::Internal, Audience::Public];
+
     pub fn parse(s: &str) -> Option<Audience> {
         Some(match s {
             "private" => Audience::Private,
@@ -305,7 +309,7 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
         ToolSpec {
             name: "memory_write".into(),
             description: d("memory_write"),
-            input_schema: obj(json!({ "fact": { "type": "string" }, "topic": { "type": "string" } }), &["fact"]),
+            input_schema: crate::ontology::input_schema(crate::ontology::FACT),
         },
         ToolSpec {
             name: "memory_search".into(),

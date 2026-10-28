@@ -3,6 +3,13 @@
 ## Now (2026-10-28)
 
 - The invariant tests pass: 45 of 45, on three consecutive full runs and again after every later change.
+- **Memory and ontology (2026-10-28).** Memory checked against M1–M4:
+  - Writes go through execute() with the run's taint (M1). Search-only retrieval (M2) and rebuild from the log (M4) already held.
+  - Fixed: a search's taint now comes from the same lookup as its text. Facts now keep where their untrusted content came from (M3).
+  - Tests: `tests/scratch/tests/memory.rs` (3 tests). On the previous kernel only the M3 source check fails.
+  - New `crates/magnus/src/ontology.rs` (O1). It generates the Cedar schema and the memory_write input schema, and checks policies, entities and requests against the schema. It also checks built-in tool schemas, and contract checks against their tools (O2).
+  - Tests: 6 unit tests in `ontology.rs`, including `every_term_is_used` (O4), and `tests/scratch/tests/ontology.rs` (2).
+  - Stored policy layers are not re-checked. A layer written before this that does not fit the schema still evaluates as before, but accepting a proposal for it is refused until it is fixed.
 - **Review fixes (2026-10-28).** A review of the chat and check-label work found five problems, all fixed with tests:
   - A later chat turn started clean although it reads the thread, so a task it started could send private data on instructions an earlier turn fetched. Turns now start with the thread's taint. `chat.rs: a_later_turn_carries_the_taint_of_the_thread` (on the old kernel the mail was sent).
   - The check resolver labelled stdin-fed interpreters (`sh < run.sh`, `python3 < t.py`), `from os import system`, getattr, `unittest.main`, posix_spawn and awk's `system()` appliance-verified. It is now an allowlist; `sandbox/test_check_tools.py` (67 cases; the old resolver fails 26). Run it with `python3 -I sandbox/test_check_tools.py`. The sandbox image must be rebuilt (`sandbox/build.sh`) for the appliance to use it.

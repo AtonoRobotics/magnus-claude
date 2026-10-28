@@ -231,7 +231,7 @@ impl Kernel {
                 });
                 let next = format!("{current}\n{add}\n");
                 if let Err(e) = crate::policy::validate(&next) {
-                    return Ok(Answer::Invalid(format!("the combined policy does not parse: {e}")));
+                    return Ok(Answer::Invalid(format!("the combined policy was refused: {e}")));
                 }
                 self.emit(&actor, resolve(None)).await?;
                 self.emit(&actor, Ev::PolicySet { layer, cedar: next }).await?;
@@ -326,6 +326,7 @@ impl Kernel {
                 label,
                 data: None,
                 sources: vec![],
+                untrusted_from: None,
                 check: false,
             },
         )

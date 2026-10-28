@@ -94,6 +94,8 @@ pub struct Run {
     pub private: bool,
     /// Apps whose private content this run has read.
     pub private_from: std::collections::BTreeSet<String>,
+    /// Apps whose untrusted content this run has read.
+    pub untrusted_from: std::collections::BTreeSet<String>,
     pub model_calls: u32,
     pub actions: u32,
     pub usd: f64,
@@ -220,6 +222,8 @@ pub struct MemoryEntry {
     pub topic: Option<String>,
     pub label: Label,
     pub sources: Vec<String>,
+    /// Where the writing run's untrusted content came from.
+    pub untrusted_from: Vec<String>,
     pub at: DateTime<Utc>,
 }
 
@@ -432,6 +436,7 @@ impl State {
                         untrusted: !attachments.is_empty() || pb.untrusted,
                         private: pb.private,
                         private_from: Default::default(),
+                        untrusted_from: Default::default(),
                         model_calls: 0,
                         actions: 0,
                         usd: 0.0,
@@ -497,7 +502,7 @@ impl State {
                     r.decisions.push(DecisionRec { seq: e.seq, call_id: call_id.clone(), tool: tool.clone(), stage: stage.clone(), outcome: outcome.clone(), rule: rule.clone() });
                 }
             }
-            Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, sources, check } => {
+            Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, sources, untrusted_from, check } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     let rec = ResultRec { seq: e.seq, text: text.clone(), is_error: *is_error, status: status.clone(), data: data.clone() };
                     if let Some(k) = key {
@@ -512,6 +517,7 @@ impl State {
                     // taint limits authority, not reading.
                     if label.untrusted && !*check {
                         r.untrusted = true;
+                        r.untrusted_from.extend(untrusted_from.as_ref().unwrap_or(sources).iter().cloned());
                     }
                     if label.private && !*check {
                         r.private = true;
@@ -705,7 +711,7 @@ impl State {
             Ev::AdapterVerified { adapter_id, version, model, passed, report, .. } => {
                 self.conformance.insert(adapter_id.clone(), (version.clone(), model.clone(), *passed, report.clone()));
             }
-            Ev::Memory { id, person, run, fact, topic, label, sources } => self.memory.push(MemoryEntry {
+            Ev::Memory { id, person, run, fact, topic, label, sources, untrusted_from } => self.memory.push(MemoryEntry {
                 id: id.clone(),
                 person: person.clone(),
                 run: run.clone(),
@@ -713,6 +719,7 @@ impl State {
                 topic: topic.clone(),
                 label: *label,
                 sources: sources.clone(),
+                untrusted_from: untrusted_from.clone(),
                 at: e.at,
             }),
         }

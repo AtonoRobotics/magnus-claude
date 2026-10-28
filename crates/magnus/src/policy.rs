@@ -3,7 +3,10 @@
 //! Entities: `Person::"<id>"` in `Group::"<id>"`; `Tool::"<app>__<tool>"` in
 //! `App::"<app>"` with attributes `risk` and `audience`. Context: `untrusted`
 //! and `private`, the run's taint. Actions: `Action::"execute"` (act without
-//! asking) and `Action::"request_approval"`.
+//! asking) and `Action::"request_approval"`. These terms are the ontology's
+//! (`crate::ontology`): the Cedar schema is generated from it, policies are
+//! checked against that schema when written, and the entities and requests
+//! built here are checked against it when a policy is evaluated.
 //!
 //! An action is permitted only if the organization layer permits it and no
 //! lower layer (each of the person's groups, then the user) forbids it. Lower
@@ -41,10 +44,43 @@ pub enum Outcome {
     Deny { reason: String, rule: Option<String> },
 }
 
-/// Parse a layer's policy text, so a bad policy is refused when written.
+/// Check a layer's policy text against the ontology, so a policy that
+/// does not parse, or names what the ontology lacks, is refused when written.
 pub fn validate(cedar: &str) -> Result<()> {
-    PolicySet::from_str(cedar).map_err(|e| anyhow!("{e}"))?;
-    Ok(())
+    crate::ontology::check_policy(cedar).map_err(|e| anyhow!("{e}"))
+}
+
+/// The actions decided for each call: may it run, and may it ask.
+const DECIDED: [&str; 2] = ["execute", "request_approval"];
+
+fn context(untrusted: bool, private: bool) -> Result<Context> {
+    Context::from_pairs([
+        ("untrusted".to_string(), RestrictedExpression::new_bool(untrusted)),
+        ("private".to_string(), RestrictedExpression::new_bool(private)),
+    ])
+    .map_err(|e| anyhow!("{e}"))
+}
+
+/// Every term the kernel builds for a decision, sorted: entity types,
+/// attributes, actions and context fields. The ontology must declare exactly
+/// these (O4).
+pub fn terms_built() -> Vec<String> {
+    let person = Person { id: "p".into(), name: String::new(), token: None, groups: vec!["g".into()], roles: vec![] };
+    let tool = ToolFacts { name: "a__t", app: "a", risk: Risk::Read, audience: Audience::Private };
+    let mut out = std::collections::BTreeSet::new();
+    for e in entities(&person, &tool).expect("entities") {
+        let ty = e.uid().type_name().to_string();
+        // The schema adds the actions as entities; they are counted below.
+        if ty == "Action" {
+            continue;
+        }
+        let (_, attrs, _) = e.into_inner();
+        out.extend(attrs.keys().map(|a| format!("{ty}.{a}")));
+        out.insert(ty);
+    }
+    out.extend(DECIDED.iter().map(|a| format!("Action::{a}")));
+    out.extend(context(false, false).expect("context").into_iter().map(|(k, _)| format!("context.{k}")));
+    out.into_iter().collect()
 }
 
 fn uid(kind: &str, id: &str) -> Result<EntityUid> {
@@ -70,7 +106,7 @@ fn entities(person: &Person, t: &ToolFacts) -> Result<Entities> {
     .into_iter()
     .collect();
     list.push(Entity::new(uid("Tool", t.name)?, attrs, [app].into_iter().collect()).map_err(|e| anyhow!("{e}"))?);
-    Entities::from_entities(list, None).map_err(|e| anyhow!("{e}"))
+    Entities::from_entities(list, Some(crate::ontology::cedar_schema())).map_err(|e| anyhow!("{e}"))
 }
 
 /// The evaluation of one policy set: whether it allows, and the rules that
@@ -111,16 +147,12 @@ pub fn decide(
 ) -> Result<Outcome> {
     let ents = entities(person, tool)?;
     let layers = layers_for(policies, person);
-    let ctx = Context::from_pairs([
-        ("untrusted".to_string(), RestrictedExpression::new_bool(untrusted)),
-        ("private".to_string(), RestrictedExpression::new_bool(private)),
-    ])
-    .map_err(|e| anyhow!("{e}"))?;
+    let ctx = context(untrusted, private)?;
 
     let mut forbidden: Option<String> = None;
     let mut results = vec![];
-    for action in ["execute", "request_approval"] {
-        let req = Request::new(uid("Person", &person.id)?, uid("Action", action)?, uid("Tool", tool.name)?, ctx.clone(), None)
+    for action in DECIDED {
+        let req = Request::new(uid("Person", &person.id)?, uid("Action", action)?, uid("Tool", tool.name)?, ctx.clone(), Some(crate::ontology::cedar_schema()))
             .map_err(|e| anyhow!("{e}"))?;
         let (org_ok, org_rules) = eval(&layers[0].1, "org", &req, &ents)?;
         let mut ok = org_ok;

@@ -143,6 +143,16 @@ impl Kernel {
         contract
     }
 
+    /// A tool's input schema: a built-in's own, or an app tool's pinned one.
+    pub fn input_schema(&self, tool: &str) -> Option<Value> {
+        let mut specs = tools::builtin_specs(true, true, true);
+        specs.extend(tools::chat_specs());
+        if let Some(t) = specs.into_iter().find(|t| t.name == tool) {
+            return Some(t.input_schema);
+        }
+        self.read(|s| s.pins.get(tool).map(|p| p.input_schema.clone()))
+    }
+
     /// Whether the run is a chat turn.
     pub fn is_chat_turn(&self, run: &Run) -> bool {
         self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.is_chat_turn()))
@@ -303,6 +313,7 @@ impl Kernel {
                 label: Label::PRINCIPAL,
                 data: None,
                 sources: vec![],
+                untrusted_from: None,
                 check: false,
             },
         )
@@ -421,7 +432,7 @@ impl Kernel {
                             .await?;
                     }
                     (false, _) => self.result(rid, call_id, "Unknown layer: use org, group/<id> or user/<id>. A retry with the same layer will not help.", true).await?,
-                    (_, Err(e)) => self.result(rid, call_id, format!("The policy does not parse: {e}. A retry with the same text will not help."), true).await?,
+                    (_, Err(e)) => self.result(rid, call_id, format!("The policy was refused: {e}. A retry with the same text will not help."), true).await?,
                 }
             }
             "propose_schedule" => match crate::api::rule_for(input) {
@@ -531,6 +542,11 @@ impl Kernel {
                 }
                 if f.app == "memory" {
                     return Err(format!("criterion {id}: a check must look at the world, not at your own notes"));
+                }
+                // A check is a query the model wrote: it must fit the tool's
+                // input schema, or it could never run (O2).
+                if let Some(schema) = self.input_schema(tool) {
+                    crate::ontology::check_value(&schema, &check["input"]).map_err(|e| format!("criterion {id}: its check does not fit {tool}'s input: {e}"))?;
                 }
                 let expect = check["expect"].as_array().filter(|a| !a.is_empty()).ok_or(format!("criterion {id}: the check expects nothing"))?;
                 for e in expect {

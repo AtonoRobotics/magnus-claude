@@ -223,6 +223,11 @@ pub enum Ev {
         /// The apps the content came from, for the audience rule.
         #[serde(default)]
         sources: Vec<String>,
+        /// The apps its untrusted content came from, when not `sources` (a
+        /// memory search), so a run knows where its untrusted content came
+        /// from (M3).
+        #[serde(default)]
+        untrusted_from: Option<Vec<String>>,
         /// The result of a contract check: compared by the kernel, never
         /// given to the model as content, so it taints nothing.
         #[serde(default)]
@@ -386,6 +391,9 @@ pub enum Ev {
         label: Label,
         #[serde(default)]
         sources: Vec<String>,
+        /// The apps the writing run's untrusted content came from (M3).
+        #[serde(default)]
+        untrusted_from: Vec<String>,
     },
     /// The person had a memory forgotten; it is never read back again.
     MemoryForgotten {
