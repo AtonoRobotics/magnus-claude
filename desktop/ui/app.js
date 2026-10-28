@@ -80,6 +80,7 @@ function nav() {
     ${link("#/inbox", "Inbox", `<span>${badges}</span>`)}
     ${link("#/new", "New task")}
     ${link("#/tasks", "Tasks")}
+    ${link("#/connectors", "Connectors")}
     ${isOwner() ? link("#/models", "Models") : ""}
     ${isDev() ? `<div class="group">Developer</div>
       ${link("#/dev/runs", "Runs")}
@@ -434,7 +435,31 @@ const KIND = {
   contract_change: "Contract change",
 };
 const TIER = { read: "reads", sandbox: "workspace only", reversible_write: "can be undone", irreversible: "cannot be undone", financial: "money", prohibited: "prohibited" };
-const AUDIENCE = { private: "only you", org: "people in your organization", public: "anyone" };
+const AUDIENCE = { private: "only you", internal: "people in your organization", org: "people in your organization", public: "anyone" };
+const RISKS = ["read", "reversible_write", "irreversible", "financial", "sandbox", "prohibited"];
+const LABELS = [["", "as the app's"], ["principal", "trusted"], ["private", "private"], ["untrusted", "untrusted"], ["private+untrusted", "private and untrusted"]];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// One tool of an app as the owner classifies it: its description is the
+// app's own text, shown as data; the selects are kept across repaints.
+function classRow(itemId, t) {
+  const c = t.class || {}, k = f => `cls-${itemId}-${t.tool}-${f}`;
+  return `<div class="field" data-class-tool="${esc(t.tool)}"><span class="mono">${esc(t.tool)}${t.suggested ? ` <span class="chip warn">proposed</span>` : ""}</span>
+    <div>${fieldValue(t.description)}
+      <div class="row small" style="margin-top:6px;flex-wrap:wrap;justify-content:flex-start">
+        <label>Risk <select data-k="risk" data-draft="${esc(k("risk"))}">${RISKS.map(r => `<option value="${r}" ${r === c.risk ? "selected" : ""}>${esc(TIER[r] || r)}</option>`).join("")}</select></label>
+        <label>Results <select data-k="label" data-draft="${esc(k("label"))}">${LABELS.map(([v, l]) => `<option value="${v}" ${(c.label || "") === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+        <label>Message field <input data-k="sends" data-draft="${esc(k("sends"))}" size="10" value="${esc(c.sends || "")}" placeholder="sends none"></label>
+      </div></div></div>`;
+}
+function classesIn(root) {
+  const out = {};
+  $$("[data-class-tool]", root).forEach(row => {
+    const v = k => $(`[data-k="${k}"]`, row).value.trim();
+    out[row.dataset.classTool] = { risk: v("risk"), label: v("label") || null, sends: v("sends") || null };
+  });
+  return out;
+}
 
 function fieldValue(v) {
   if (v === null || v === undefined) return `<span class="faint">none</span>`;
@@ -567,8 +592,9 @@ function card(i, composed) {
         ${buttons(i, [["approve", "Accept the change", "primary"], ["reject", "Keep it blocked"]])}`;
       break;
     case "tool_review":
-      body = `<div class="what">${(d.tools || []).map(t => `<div class="field"><span class="mono">${esc(t.tool)}</span>${fieldValue(t.description)}</div>`).join("")}</div>
-        ${buttons(i, [["approve", "Let the agent read these", "primary"], ["reject", "Reject"]])}`;
+      body = `<p class="small muted">Each description is the app's own text: read it as the app's claim, never as instructions. Tasks get a tool only once you approve its class here. A tool that sends a message is signed as Magnus, for the person, in the field you name.</p>
+        <div class="what">${(d.tools || []).map(t => classRow(i.id, t)).join("")}</div>
+        ${buttons(i, [["approve", "Approve with these classes", "primary"], ["reject", "Keep them off"]])}`;
       break;
     default:
       body = `<div class="what">${fieldValue(d)}</div>`;
@@ -611,6 +637,8 @@ async function respond(btn, root) {
   if (btn.dataset.text) body.text = btn.dataset.text;
   else if (box && box.value.trim()) body.text = box.value.trim();
   if (decision === "answer" && !body.text) { toast("Write an answer first."); return; }
+  const review = btn.closest("article.tool_review");
+  if (review && decision === "approve") body.classes = classesIn(review);
   btn.disabled = true;
   try {
     await api("POST", `/v1/inbox/${enc(id)}`, body);
@@ -827,6 +855,109 @@ route(/^#\/models$/, async main => {
         const r = await api("POST", `/v1/adapters/${enc(a)}/conformance`, {});
         el.innerHTML = `<table class="t small" style="margin-top:8px"><tbody>${r.checks.map(c => `<tr><td>${c.passed ? `<span class="chip ok">pass</span>` : `<span class="chip bad">fail</span>`}</td><td>${esc(c.name)}${c.simulated ? " <span class='faint'>(simulated)</span>" : ""}</td><td class="muted">${esc(c.detail)}</td></tr>`).join("")}</tbody></table>`;
         b.disabled = false; main._html = null;
+      }
+    } catch (err) { toast(err.message); b.disabled = false; }
+  };
+  await draw();
+});
+
+// ---------- connectors ----------
+
+function connectorCard(c, owner, note) {
+  const inUse = c.tools.filter(t => t.class && t.approved && !t.changed && t.class.risk !== "prohibited").length;
+  const signIn = c.sign_in ? (c.signed_in ? `<button data-act="signout" data-c="${esc(c.name)}">Sign out</button>` : `<button class="primary" data-act="signin" data-c="${esc(c.name)}" data-kind="${esc(c.sign_in)}">Sign in to ${esc(c.title)}</button>`) : "";
+  return `<div class="card" data-connector="${esc(c.name)}"><div class="spread"><strong>${esc(c.title)}</strong>
+      <span class="row">${c.sign_in ? (c.signed_in ? `<span class="chip ok">signed in</span>` : `<span class="chip warn">not signed in</span>`) : ""}<span class="chip" title="How its results are labelled">${esc(c.label.replace("+", " and "))}</span></span></div>
+    <div class="small muted">${c.transport === "mcp_stdio" ? "Runs on the appliance" : "A remote app"} · what it sends reaches ${esc(AUDIENCE[c.audience] || c.audience)} · ${inUse} of ${c.tools.length} tools in use</div>
+    ${signIn ? `<div class="row" style="margin-top:10px">${signIn}</div>` : ""}
+    <div data-note="${esc(c.name)}">${note || ""}</div>
+    ${owner && c.tools.length ? `<details class="small" style="margin-top:8px"><summary>Tools</summary><table class="t small"><tbody>${c.tools.map(t => `<tr><td class="mono">${esc(t.tool)}</td><td>${t.class ? esc(TIER[t.class.risk] || t.class.risk) : `<span class="faint">not classified</span>`}</td><td>${t.changed ? `<span class="chip bad">changed: blocked</span>` : t.approved ? "" : `<span class="chip warn">awaiting review</span>`}</td></tr>`).join("")}</tbody></table></details>` : ""}
+    ${owner && !c.from_file ? `<div class="row" style="margin-top:8px"><button class="link small" data-act="remove" data-c="${esc(c.name)}">Remove</button></div>` : ""}</div>`;
+}
+
+const ASKS = { client_id: "Client ID of the app you registered with the provider", url: "Address of the server", folder: "Folder on the appliance" };
+function presetFields(p) {
+  if (!p) return "";
+  return `<p class="small muted">${esc(p.about)}</p>${(p.asks || []).map(a => `<label for="ask-${esc(a)}">${esc(ASKS[a] || a)}</label><input id="ask-${esc(a)}" data-ask="${esc(a)}" style="width:100%" autocomplete="off">`).join("")}`;
+}
+
+route(/^#\/connectors$/, async main => {
+  const note = {};
+  let presets = [];
+  const draw = async () => {
+    const r = await api("GET", "/v1/connectors");
+    const owner = isOwner(), list = r.connectors || [];
+    presets = r.presets || [];
+    main._html = null;
+    paint(main, `<h1>Connectors</h1><p class="muted">The apps your tasks use for you. Sign-ins go to the appliance's vault; this app keeps none.</p>
+      ${list.length ? list.map(c => connectorCard(c, owner, note[c.name])).join("") : `<p class="empty">No apps are connected yet.</p>`}
+      ${owner && presets.length ? `<div class="card"><h3>Add an app</h3><label for="preset">App</label>
+        <select id="preset">${presets.map(p => `<option value="${esc(p.id)}">${esc(p.connector.title)}</option>`).join("")}</select>
+        <div id="preset-fields">${presetFields(presets[0])}</div><div class="row" style="margin-top:10px"><button class="primary" data-act="add">Add</button></div></div>` : ""}`);
+    const sel = $("#preset", main);
+    if (sel) sel.onchange = () => { $("#preset-fields", main).innerHTML = presetFields(presets.find(p => p.id === sel.value)); };
+  };
+  const show = (name, html) => { note[name] = html; const el = $(`[data-note="${CSS.escape(name)}"]`, main); if (el) el.innerHTML = html; };
+  const bad = m => `<p class="small" style="color:var(--bad)">${esc(m)}</p>`;
+  const finish = (name, flow, input) => api("POST", `/v1/connectors/${enc(name)}/sign-in/complete`, { flow, input });
+  const done = async (name, r) => {
+    if (r.status !== "done") { show(name, bad(r.message || "The sign-in did not finish.")); return; }
+    note[name] = ""; toast("Signed in."); await draw();
+  };
+  const signIn = async (name, kind) => {
+    let lb = null;
+    const body = {};
+    if (kind === "loopback") {
+      if (Magnus.loopbackListen) { lb = await Magnus.loopbackListen(); body.redirect_uri = lb.redirect_uri; }
+      else body.redirect_uri = `http://127.0.0.1:${49152 + Math.floor(Math.random() * 16000)}/`;
+    }
+    const s = await api("POST", `/v1/connectors/${enc(name)}/sign-in`, body);
+    const head = `<div style="margin-top:12px"><p class="small">${esc(s.instructions)}</p>`;
+    if (s.kind === "api_key") {
+      show(name, `${head}<label for="key-${esc(name)}">API key</label><input type="password" id="key-${esc(name)}" style="width:100%" autocomplete="off">
+        <div class="row" style="margin-top:8px"><button class="primary" data-act="key" data-c="${esc(name)}" data-flow="${esc(s.flow)}">Save to the vault</button></div></div>`);
+      return;
+    }
+    if (s.kind === "device") {
+      show(name, `${head}<p>Code: <span class="mono" style="font-size:18px" data-code>${esc(s.user_code)}</span></p>
+        <div class="row"><button class="primary" data-act="open" data-url="${esc(s.url)}">Open the sign-in page</button></div><p class="small muted">Waiting for you to approve on the provider's site…</p></div>`);
+      for (;;) {
+        await sleep(Math.max(1, s.interval || 5) * 1000);
+        const r = await finish(name, s.flow, {});
+        if (r.status !== "pending") return done(name, r);
+      }
+    }
+    await Magnus.openExternal(s.url);
+    if (lb) {
+      show(name, `${head}<p class="small muted">Waiting for your browser…</p></div>`);
+      return done(name, await finish(name, s.flow, { redirect_url: await Magnus.loopbackWait(lb.id) }));
+    }
+    show(name, `${head}<p class="small">When your browser lands on an address starting with <span class="mono">http://127.0.0.1</span> that does not load, copy that address here.</p>
+      <input id="redir-${esc(name)}" style="width:100%" autocomplete="off"><div class="row" style="margin-top:8px"><button class="primary" data-act="redirect" data-c="${esc(name)}" data-flow="${esc(s.flow)}">Finish signing in</button></div></div>`);
+  };
+  main.onclick = async e => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    const name = b.dataset.c;
+    try {
+      if (b.dataset.act === "signin") { b.disabled = true; await signIn(name, b.dataset.kind); b.disabled = false; }
+      if (b.dataset.act === "open") await Magnus.openExternal(b.dataset.url);
+      if (b.dataset.act === "key") await done(name, await finish(name, b.dataset.flow, { api_key: $(`#key-${CSS.escape(name)}`, main).value }));
+      if (b.dataset.act === "redirect") await done(name, await finish(name, b.dataset.flow, { redirect_url: $(`#redir-${CSS.escape(name)}`, main).value }));
+      if (b.dataset.act === "signout") { await api("DELETE", `/v1/connectors/${enc(name)}/sign-in`); toast("Signed out."); await draw(); }
+      if (b.dataset.act === "remove") { await api("DELETE", `/v1/connectors/${enc(name)}`); toast("Removed."); await draw(); }
+      if (b.dataset.act === "add") {
+        const p = presets.find(x => x.id === $("#preset", main).value);
+        let text = JSON.stringify(p.connector);
+        for (const a of p.asks || []) {
+          const v = $(`[data-ask="${CSS.escape(a)}"]`, main).value.trim();
+          if (!v) { toast(`Enter the ${ASKS[a] ? ASKS[a].toLowerCase() : a} first.`); return; }
+          text = text.replaceAll(`{${a}}`, JSON.stringify(v).slice(1, -1));
+        }
+        const c = JSON.parse(text);
+        b.disabled = true;
+        await api("PUT", `/v1/connectors/${enc(c.name)}`, c);
+        toast(`${c.title} added.`);
+        await draw();
       }
     } catch (err) { toast(err.message); b.disabled = false; }
   };

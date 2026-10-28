@@ -58,6 +58,13 @@ async fn device(State(st): State<FakeOAuth>, Form(_f): Form<HashMap<String, Stri
     Json(json!({ "device_code": dc, "user_code": uc, "verification_uri": format!("{}/activate", st.url), "expires_in": 600, "interval": 0 })).into_response()
 }
 
+/// The provider's page where the person enters the code and approves.
+async fn activate(State(st): State<FakeOAuth>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let code = q.get("user_code").cloned().unwrap_or_default();
+    st.decide(&code, true);
+    axum::response::Html(format!("<h1>Approved</h1><p>Magnus may use your account ({code}).</p>")).into_response()
+}
+
 async fn authorize(State(st): State<FakeOAuth>, Query(q): Query<HashMap<String, String>>) -> Response {
     let mut s = st.s.lock().unwrap();
     if q.get("code_challenge_method").map(String::as_str) != Some("S256") {
@@ -108,7 +115,7 @@ impl FakeOAuth {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", l.local_addr().unwrap());
         let me = FakeOAuth { url, s: Arc::new(Mutex::new(S { expires_in: 3600, ..Default::default() })) };
-        let app = Router::new().route("/device", post(device)).route("/authorize", get(authorize)).route("/token", post(token)).with_state(me.clone());
+        let app = Router::new().route("/device", post(device)).route("/activate", get(activate)).route("/authorize", get(authorize)).route("/token", post(token)).with_state(me.clone());
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
         me
     }

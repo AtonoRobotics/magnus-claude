@@ -43,6 +43,9 @@ const appBridge = tauri && {
   async stopSpeaking() { return this.invoke("stop_speaking").catch(() => {}); },
   async download(path, name) { return this.invoke("download", { path, name }); },
   async openExternal(url) { return this.invoke("open_url", { url }); },
+  // A browser sign-in to an app returns to a listener on this machine.
+  async loopbackListen() { return this.invoke("loopback_listen"); },
+  async loopbackWait(id) { return this.invoke("loopback_wait", { id }); },
   async dataUrl(path, mediaType) { const b64 = await this.invoke("fetch_bytes", { path }); return `data:${mediaType};base64,${b64}`; },
 };
 
@@ -101,6 +104,8 @@ const webBridge = {
     return name;
   },
   async openExternal(url) { window.open(url, "_blank", "noopener"); },
+  // A page cannot listen: the person pastes the address their browser opened.
+  loopbackListen: null,
   async dataUrl(path) {
     const r = await fetch(path, { credentials: "same-origin" });
     if (!r.ok) throw errorOf(r.status, await r.text());

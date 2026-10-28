@@ -3,6 +3,7 @@
 //! request itself, so the page never sees the token. It holds no provider
 //! or tool credentials; approvals are made here, outside the agent's context.
 
+mod loopback;
 mod pin;
 mod speech;
 mod store;
@@ -23,6 +24,7 @@ struct App {
     client: Mutex<Option<(String, Option<String>, reqwest::Client)>>,
     live: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     speech: speech::Speech,
+    loopback: loopback::Loopback,
 }
 
 impl App {
@@ -328,6 +330,24 @@ async fn stop_speaking(app: State<'_, App>) -> Res<()> {
     Ok(())
 }
 
+/// Listen on this machine for the return of a browser sign-in to an app.
+#[tauri::command]
+fn loopback_listen(app: State<'_, App>) -> Res<Value> {
+    let (id, redirect_uri) = app.loopback.listen()?;
+    Ok(json!({ "id": id, "redirect_uri": redirect_uri }))
+}
+
+/// Wait (up to ten minutes) for that sign-in's redirect.
+#[tauri::command]
+async fn loopback_wait(handle: AppHandle, id: String) -> Res<String> {
+    tokio::task::spawn_blocking(move || {
+        use tauri::Manager;
+        handle.state::<App>().loopback.wait(&id, std::time::Duration::from_secs(600))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Open a provider's sign-in page in the person's browser.
 #[tauri::command]
 fn open_url(handle: AppHandle, url: String) -> Res<()> {
@@ -343,8 +363,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default() })
-        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, device_start, device_poll, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url])
+        .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default(), loopback: loopback::Loopback::default() })
+        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, device_start, device_poll, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_listen, loopback_wait])
         .run(tauri::generate_context!())
         .expect("start the Magnus app");
 }
