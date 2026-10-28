@@ -56,6 +56,7 @@ nav.side .who { margin-top: auto; padding: 14px 10px 0; border-top: 1px solid va
 .badge { background: var(--accent); color: var(--accent-fg); border-radius: 10px; padding: 0 7px; font-size: 12px; font-weight: 650; min-width: 20px; text-align: center; }
 .badge.quiet { background: var(--line-strong); color: var(--fg); }
 main { padding: 28px 36px 64px; max-width: 980px; width: 100%; }
+main:has(> .chat) { max-width: 1240px; }
 
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 10px 0; }
 .card.flat { background: var(--raised); }
@@ -156,3 +157,21 @@ iframe.composed { width: 100%; border: 0; display: block; background: var(--surf
 .chatcard { max-width: 72ch; }
 .say { display: flex; gap: 10px; align-items: flex-end; }
 .say textarea { flex: 1; }
+.say-side { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+label.model { margin: 0; }
+label.model select { max-width: 220px; }
+
+/* Chat: the person's conversations beside the open one. */
+.chat { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 24px; align-items: start; }
+.convos { position: sticky; top: 0; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 56px); overflow-y: auto; }
+.convos ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.convos a { display: flex; flex-direction: column; gap: 2px; padding: 7px 10px; border-radius: 6px; color: var(--fg); }
+.convos a span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convos a:hover { background: var(--surface); text-decoration: none; }
+.convos a.on { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); }
+.conv { min-width: 0; }
+@media (max-width: 720px) {
+  .chat { grid-template-columns: 1fr; }
+  .convos { position: static; max-height: 40vh; }
+  .say { flex-direction: column; align-items: stretch; }
+}

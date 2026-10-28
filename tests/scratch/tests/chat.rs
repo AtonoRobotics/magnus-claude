@@ -433,3 +433,64 @@ async fn a_schedule_from_chat_fires_after_a_restart() {
 }
 
 use chrono::Timelike;
+
+/// A person picks the model for a task and for each chat message from what
+/// the adapters' providers offer; a task started from chat keeps the turn's
+/// model, and a model no adapter offers is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_chooses_the_model_for_a_task_and_a_chat_message() {
+    let mut m = FakeModel::start(model(
+        |said, turn| match (said, turn) {
+            ("Look into it properly.", 0) => tool("create_task", json!({ "text": "Research it." })),
+            _ => say("Done."),
+        },
+        vec![simple_contract(), tool("task_complete", json!({ "summary": "done" }))],
+    ))
+    .await;
+    m.url = magnus_scratch::provider_with(&m, &["claude-test", "claude-other"]).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let carol = app.api("carol");
+    let (st, v) = carol.get("/v1/models").await;
+    assert!(st.is_success(), "{v}");
+    assert_eq!(v["default"], json!({ "adapter": "anthropic", "model": "claude-test" }));
+    assert_eq!(v["adapters"], json!([{ "adapter": "anthropic", "models": ["claude-test", "claude-other"] }]));
+    let other = json!({ "adapter": "anthropic", "model": "claude-other" });
+    let served = |text: &'static str| {
+        let m = m.clone();
+        move || m.requests().into_iter().filter(|c| c.text().contains(text)).map(|c| c.body["model"].as_str().unwrap_or_default().to_string()).collect::<Vec<_>>()
+    };
+
+    // A task on the chosen model; without a choice, the default.
+    let (st, v) = carol.post("/v1/tasks", json!({ "text": "Task on the other model.", "model": other })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let id = v["task_id"].as_str().unwrap().to_string();
+    carol.wait_settled(&id).await;
+    assert_eq!(carol.task(&id).await["model"]["name"], "claude-other");
+    assert!(served("Task on the other model.")().iter().all(|s| s == "claude-other"), "{:?}", served("Task on the other model.")());
+    let plain = carol.submit("Task on the default.").await;
+    carol.wait_settled(&plain).await;
+    assert_eq!(carol.task(&plain).await["model"]["name"], "claude-test");
+
+    // A chat message on the chosen model; the task it starts keeps it, and
+    // the next message in the same conversation may choose again.
+    let (st, v) = carol.post("/v1/chat", json!({ "text": "Look into it properly.", "model": other })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let thread = v["thread"].as_str().unwrap().to_string();
+    carol.wait_settled(v["task_id"].as_str().unwrap()).await;
+    let task = wait_entry(&carol, &thread, |e| e["kind"] == "task").await;
+    let tid = task["task_id"].as_str().unwrap();
+    carol.wait_settled(tid).await;
+    assert_eq!(carol.task(tid).await["model"]["name"], "claude-other", "the task did not keep the turn's model");
+    let (_, v) = carol.post("/v1/chat", json!({ "text": "Thanks.", "thread": thread })).await;
+    carol.wait_settled(v["task_id"].as_str().unwrap()).await;
+    let answers: Vec<Value> = entries(&carol, &thread).await.into_iter().filter(|e| e["kind"] == "answer").map(|e| e["model"]["model"].clone()).collect();
+    assert_eq!(answers, [json!("claude-other"), json!("claude-test")], "each answer names the model it ran on");
+
+    // A model no adapter offers, or an unknown adapter, is refused.
+    for bad in [json!({ "adapter": "anthropic", "model": "nope" }), json!({ "adapter": "ghost", "model": "x" }), json!({ "adapter": "anthropic" })] {
+        let (st, v) = carol.post("/v1/tasks", json!({ "text": "x", "model": bad })).await;
+        assert_eq!(st.as_u16(), 400, "{bad}: {v}");
+        let (st, v) = carol.post("/v1/chat", json!({ "text": "x", "model": bad })).await;
+        assert_eq!(st.as_u16(), 400, "{bad}: {v}");
+    }
+}

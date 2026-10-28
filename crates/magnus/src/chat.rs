@@ -30,15 +30,16 @@ pub enum CardRefusal {
 }
 
 impl Kernel {
-    /// The person writes in a thread of theirs, or starts one.
-    pub async fn chat_say(self: &Arc<Self>, person: &str, text: String, thread: Option<String>) -> Result<Option<(String, String)>> {
+    /// The person writes in a thread of theirs, or starts one, with the
+    /// model they chose for this message (the appliance's when none).
+    pub async fn chat_say(self: &Arc<Self>, person: &str, text: String, thread: Option<String>, model: Option<(String, String)>) -> Result<Option<(String, String)>> {
         let thread = match thread {
             Some(t) if self.thread(person, &t).is_empty() => return Ok(None),
             Some(t) => t,
             None => new_id("thread"),
         };
         let conversation = self.conversation(person, &thread);
-        let o = NewRun { chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation }), ..Default::default() };
+        let o = NewRun { chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation }), model, ..Default::default() };
         let (task, _) = self.create_run(&format!("person:{person}"), person, text, vec![], o).await?;
         Ok(Some((thread, task)))
     }
@@ -104,7 +105,11 @@ impl Kernel {
                     out.push((t.created_at, seq, e));
                 }
                 match r.status {
-                    Status::Completed => out.push((r.ended_at.unwrap_or(t.created_at), i64::MAX, json!({ "kind": "answer", "text": r.summary, "at": r.ended_at, "task_id": t.task_id }))),
+                    Status::Completed => out.push((
+                        r.ended_at.unwrap_or(t.created_at),
+                        i64::MAX,
+                        json!({ "kind": "answer", "text": r.summary, "at": r.ended_at, "task_id": t.task_id, "model": { "adapter": r.config.adapter, "model": r.config.model } }),
+                    )),
                     _ => out.push((
                         r.ended_at.unwrap_or(t.created_at),
                         i64::MAX,
@@ -143,8 +148,8 @@ impl Kernel {
     }
 
     /// `create_task` from a chat turn: the task starts at once for the
-    /// person, carries the conversation and the turn's taint, and posts its
-    /// result to the thread.
+    /// person, carries the conversation, the turn's taint and the turn's
+    /// model, and posts its result to the thread.
     pub(crate) async fn chat_task(self: &Arc<Self>, a: &Action, key: &str) -> Result<(String, bool, Option<Value>)> {
         let text = a.input["text"].as_str().map(str::trim).unwrap_or_default().to_string();
         if text.is_empty() {
@@ -164,6 +169,7 @@ impl Kernel {
                 chat: Some(ChatOrigin { thread: chat.thread.clone(), turn: false, from_run: Some(a.run.clone()), conversation }),
                 label: Some(Label { untrusted: run.untrusted, private: run.private }),
                 ids: Some((task_id.clone(), run_id)),
+                model: Some((run.config.adapter.clone(), run.config.model.clone())),
                 ..Default::default()
             };
             self.create_run(&format!("chat:{}", a.run), &run.person, text.clone(), vec![], o).await?;
