@@ -25,11 +25,11 @@
   - image and PDF input; voice input (needs a whisper model, below)
 - Adapters:
   - `anthropic`: Messages API.
-  - `openai`: Chat Completions and Responses, with API key or device sign-in (Codex and Grok: approve on the provider's site, Magnus finishes by itself). Presets for GLM, Muse, Codex and Grok in `config/providers.toml`. No live sign-in has completed yet.
+  - `openai`: Chat Completions and Responses, with API key or device sign-in (Codex and Grok: approve on the provider's site, Magnus finishes by itself). Presets for GLM, Muse, Codex and Grok in `config/providers.toml`. Codex and Grok client versions are read from each CLI's published release, not stored.
   - Conformance suite: `magnus conformance`, `POST /v1/adapters/{id}/conformance`.
 - Desktop app (`desktop/`, Electron): inbox, task list, task view with evidence and downloads, settings, OS notifications.
 - Evaluation:
-  - `eval/plain`: 14 plain-language tasks, graders validated against correct and wrong answers, runner.
+  - `eval/plain`: 14 plain-language tasks, graders, runner. The graders have not been checked against known correct and wrong answers; there is no record of that check.
   - `eval/tac`: in progress.
 
 ## Next
