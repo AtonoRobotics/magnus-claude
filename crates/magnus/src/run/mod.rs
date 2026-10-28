@@ -534,6 +534,13 @@ impl Kernel {
                     if e.get("equals").is_some_and(|v| v.is_null()) || e.get("contains").is_some_and(|v| v.as_str().is_none_or(|t| t.is_empty())) {
                         return Err(format!("criterion {id}: an expectation must name a real value (not null, not an empty string)"));
                     }
+                    // A pointer the result never has fails every time: the
+                    // person would be asked to approve a check that cannot pass.
+                    let p = e["pointer"].as_str().unwrap_or_default();
+                    if let Some(fields) = crate::tools::check_fields(&f.name).filter(|fs| !p.is_empty() && !fs.iter().any(|x| p.strip_prefix('/') == Some(*x))) {
+                        let shown: Vec<String> = fields.iter().map(|x| format!("/{x}")).collect();
+                        return Err(format!("criterion {id}: {tool}'s result has no {p}; a check of it can read {}", shown.join(", ")));
+                    }
                 }
             }
         }
@@ -597,13 +604,15 @@ impl Kernel {
                 continue;
             }
             // A check sees the structured result and the text beside it: a
-            // fetched page's structured part holds only its content type.
+            // fetched page's structured part holds only its content type, a
+            // file read has only its text. A connector's read is its JSON.
             let observed = match data {
                 Some(Value::Object(mut m)) => {
                     m.entry("text").or_insert_with(|| Value::String(text.clone()));
                     Value::Object(m)
                 }
                 Some(other) => other,
+                None if crate::tools::check_fields(&tool).is_some() => json!({ "text": text }),
                 None => serde_json::from_str::<Value>(&text).ok().unwrap_or(Value::String(text.clone())),
             };
             let mut ok = !is_error;

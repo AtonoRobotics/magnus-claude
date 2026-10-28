@@ -159,6 +159,19 @@ pub fn checkable(name: &str, risk: Risk) -> bool {
     risk == Risk::Read || (risk == Risk::Sandbox && matches!(name, "sandbox_exec" | "sandbox_read_file"))
 }
 
+/// The fields a built-in tool's result shows a check: its structured part
+/// and `text`, nothing else. A connector's read shows the fields of the JSON
+/// it returns, known only when it runs.
+pub fn check_fields(name: &str) -> Option<&'static [&'static str]> {
+    Some(match name {
+        "sandbox_exec" => &["exit_code", "stdout", "stderr", "timed_out", "truncated", "text"],
+        "web_fetch" => &["content_type", "text"],
+        "sandbox_read_file" | "web_search" => &["text"],
+        n if n.starts_with("browser_") => &["image_b64", "text"],
+        _ => return None,
+    })
+}
+
 /// The tools a chat turn may call besides reads: start a task, or propose a
 /// schedule the person confirms in the thread.
 pub fn chat_specs() -> Vec<ToolSpec> {

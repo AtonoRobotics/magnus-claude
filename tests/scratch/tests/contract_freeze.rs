@@ -322,3 +322,47 @@ async fn a_criterion_whose_check_cannot_run_goes_to_review() {
     assert_eq!(ids(&t["contract"]), ["c1"], "the criterion was replaced: {t}");
     assert_ne!(t["status"], "completed");
 }
+
+fn flyer_contract(pointer: &str) -> Reply {
+    tool(
+        "task_contract",
+        json!({
+            "goal": "write the garage sale flyer",
+            "assumptions": [],
+            "irreversible_actions": [],
+            "criteria": [{
+                "id": "place",
+                "description": "the flyer names the neighbourhood",
+                "check": { "tool": "sandbox_read_file", "input": { "path": "/workspace/flyer.md" }, "expect": [{ "pointer": pointer, "contains": "Canyon Country" }] }
+            }]
+        }),
+    )
+}
+
+/// A check may only read fields its tool's result has. A change whose check
+/// reads a field that is never there (a file read has no /content) could
+/// never pass: approving it would only bring the person the same question
+/// again. It is refused when proposed, before any card, with the fields the
+/// tool shows; a file's words are checked at /text.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_of_a_field_its_tool_never_returns_is_refused_before_the_person_is_asked() {
+    let model = FakeModel::start(steps(vec![
+        flyer_contract("/text"),
+        tool("sandbox_write_file", json!({ "path": "/workspace/flyer.md", "content": "Garage sale, Saturday 8am.\n" })),
+        complete("wrote it"),
+        flyer_contract("/content"),
+        tool("sandbox_write_file", json!({ "path": "/workspace/flyer.md", "content": "Garage sale in Canyon Country, Saturday 8am.\n" })),
+        complete("fixed it"),
+    ]))
+    .await;
+    let app = Appliance::start(Spec::default(), &model).await;
+    let alice = app.api("alice");
+    let id = alice.submit("Write a flyer for my garage sale in Canyon Country.").await;
+    let t = alice.wait_settled(&id).await;
+    let refused = model.at_turn(4).unwrap().last_results()[0].clone();
+    assert!(refused.is_error && refused.text.contains("/content") && refused.text.contains("/text"), "the unworkable check was not refused with the fields it may read: {}", refused.text);
+    assert!(alice.inbox().await.iter().all(|i| i["kind"] != "contract_change"), "the person was asked to approve a check that can never pass");
+    assert_eq!(t["status"], "completed", "a file's words were not found at /text: {t}");
+    assert_eq!(t["criteria"][0]["verified"], true);
+    assert_eq!(t["contract_version"], 1, "{t}");
+}
