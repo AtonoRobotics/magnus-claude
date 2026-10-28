@@ -87,29 +87,37 @@ const statusChip = s => `<span class="chip ${s === "completed" ? "ok" : s === "f
 const when = t => t ? new Date(t).toLocaleString() : "";
 const waiting = w => ({ approval: "waiting for an approval", review: "waiting for your review", question: "waiting for your answer", budget: "paused: budget reached", provider: "paused: model provider unavailable", usage_limit: "paused: model usage limit", auth: "paused: sign in to the model again", kill_switch: "stopped by the kill switch", timer: "waiting until a set time", invalid_request: "paused: the model rejected the request" })[w] || w || "";
 
+// The page re-renders every few seconds to pick up changes, but only replaces
+// the nav or the main area when its markup changed: rebuilding unchanged parts
+// would reset scroll, open menus, streamed text and unsent attachments.
+let shown = {};
+function swap(el, key, html) { if (shown[key] === html) return false; shown[key] = html; el.innerHTML = html; return true; }
 async function render() {
   const root = $("#root");
-  if (!token) { root.innerHTML = loginView(); $("#login").onsubmit = async e => { e.preventDefault(); token = $("#tok").value.trim(); store.set("magnus.token", token); try { me = await api("GET", "/v1/me"); render(); } catch (err) { toast("That key did not work."); } }; return; }
+  if (!token) { shown = {}; root.innerHTML = loginView(); $("#login").onsubmit = async e => { e.preventDefault(); token = $("#tok").value.trim(); store.set("magnus.token", token); try { me = await api("GET", "/v1/me"); render(); } catch (err) { toast("That key did not work."); } }; return; }
   if (!me) { try { me = await api("GET", "/v1/me"); } catch { return; } }
   const owner = me.roles.includes("owner");
   let items = []; try { items = (await api("GET", "/v1/inbox")).items; } catch {}
   notifyNew(items);
   const open = items.filter(i => i.status === "open" && i.can_respond).length;
-  root.innerHTML = `<div class="app"><nav>
-      <div class="brand">Magnus</div>
+  if (!$("#main")) { shown = {}; root.innerHTML = `<div class="app"><nav id="nav"></nav><main id="main"></main></div>`; }
+  const nav = $("#nav");
+  if (swap(nav, "nav", `<div class="brand">Magnus</div>
       <a href="#" data-p="inbox" class="${view.page === "inbox" ? "on" : ""}">Inbox ${open ? `<span class="badge">${open}</span>` : ""}</a>
       <a href="#" data-p="tasks" class="${view.page === "tasks" || view.page === "task" ? "on" : ""}">Tasks</a>
       ${owner ? `<a href="#" data-p="settings" class="${view.page === "settings" ? "on" : ""}">Settings</a>` : ""}
-      <div class="who">${esc(me.name || me.id)}<br><a href="#" id="signout" class="small">Sign out</a></div>
-    </nav><main id="main"></main></div>`;
-  root.querySelectorAll("nav a[data-p]").forEach(a => a.onclick = e => { e.preventDefault(); view = { page: a.dataset.p }; render(); });
-  $("#signout").onclick = e => { e.preventDefault(); store.del("magnus.token"); token = null; me = null; render(); };
-  const main = $("#main");
-  if (view.page === "inbox") main.innerHTML = inboxView(items, owner);
-  if (view.page === "tasks") { main.innerHTML = await tasksView(); wireComposer(); }
-  if (view.page === "task") { main.innerHTML = await taskView(view.task); streamLive(view.task); }
-  if (view.page === "settings") main.innerHTML = await settingsView();
-  wire(main);
+      <div class="who">${esc(me.name || me.id)}<br><a href="#" id="signout" class="small">Sign out</a></div>`)) {
+    nav.querySelectorAll("a[data-p]").forEach(a => a.onclick = e => { e.preventDefault(); view = { page: a.dataset.p }; render(); });
+    $("#signout").onclick = e => { e.preventDefault(); store.del("magnus.token"); token = null; me = null; render(); };
+  }
+  const main = $("#main"), started = view;
+  const html = view.page === "inbox" ? inboxView(items, owner) : view.page === "tasks" ? await tasksView() : view.page === "task" ? await taskView(view.task) : view.page === "settings" ? await settingsView() : "";
+  if (view !== started) return; // the person moved on while this render was fetching
+  if (swap(main, "main", html)) {
+    if (view.page === "tasks") wireComposer();
+    if (view.page === "task") streamLive(view.task);
+    wire(main);
+  }
   clearTimeout(timer); timer = setTimeout(refresh, 4000);
 }
 // Desktop app: notify about new items that need this person.
@@ -277,7 +285,7 @@ function wire(main) {
       if (act === "signin-key") { await keyFinish[b.dataset.adapter]?.(); return; }
       if (act === "conformance") { const el = $("#conf-" + b.dataset.adapter); el.innerHTML = `<p class="small muted">Running the suite against the live provider…</p>`; const r = await api("POST", `/v1/adapters/${b.dataset.adapter}/conformance`, {}); el.innerHTML = `<pre>${esc(r.checks.map(c => `${c.passed ? "PASS" : "FAIL"} ${c.name}${c.simulated ? " (simulated)" : ""}: ${c.detail}`).join("\n"))}</pre>`; b.disabled = false; return; }
       render();
-    } catch (e) { toast(e.message); b.disabled = false; }
+    } catch (e) { toast(e.message); } finally { b.disabled = false; }
   });
 }
 // Sign-in progress per adapter, kept across the page's periodic re-render.
