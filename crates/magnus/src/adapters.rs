@@ -272,11 +272,18 @@ impl Adapters {
         }
     }
 
+    /// The adapter's model list. A credential it refreshed on the way goes
+    /// to the vault, never to the caller.
     pub async fn catalog(&self, id: &str) -> Result<Event> {
         let r = self.get(id).await?;
         let (settings, cred_name) = Self::split_settings(&r.cfg);
         let credential = self.credential(&cred_name);
         let mut call = proto::Call::open(&r.socket, Request::Catalog { settings, credential }).await?;
-        call.next().await?.ok_or_else(|| anyhow!("adapter closed the connection"))
+        loop {
+            match call.next().await?.ok_or_else(|| anyhow!("adapter closed the connection"))? {
+                Event::Credential { value } => self.store_refreshed(&cred_name, &value),
+                ev => return Ok(ev),
+            }
+        }
     }
 }

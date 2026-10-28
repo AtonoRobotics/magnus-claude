@@ -316,7 +316,7 @@ route(/^#\/tasks$/, async main => {
 route(/^#\/new$/, async main => {
   paint(main, `<h1>New task</h1><p class="muted">Say what you want done, the way you would to a colleague.</p>
     <form id="f"><label for="text" class="sr">Task</label><textarea id="text" rows="6" data-draft="new-task" placeholder="For example: Make a one-page summary of last month's sales from the attached sheet." required></textarea>
-    <div class="row" style="margin-top:12px"><button class="primary" id="go">Start</button></div></form>`);
+    <div class="row" style="margin-top:12px">${await modelPicker()}<button class="primary" id="go">Start</button></div></form>`);
   $("#text").focus();
   $("#f").onsubmit = async e => {
     e.preventDefault();
@@ -324,21 +324,46 @@ route(/^#\/new$/, async main => {
     if (!text) return;
     $("#go").disabled = true;
     try {
-      const r = await api("POST", "/v1/tasks", { text });
+      const r = await api("POST", "/v1/tasks", { text, model: chosenModel($("#f")) });
       delete drafts["new-task"];
       location.hash = `#/task/${enc(r.task_id)}`;
     } catch (err) { toast(err.message); $("#go").disabled = false; }
   };
 });
 
+// ---------- Model choice ----------
+
+// The models a person may run a task or a message on, as the adapters'
+// providers list them now. The choice is kept per viewer; the appliance's
+// default is used until they pick another.
+async function modelPicker() {
+  const { default: dflt, adapters } = await api("GET", "/v1/models").catch(() => ({ default: null, adapters: [] }));
+  const key = m => JSON.stringify([m.adapter, m.model]);
+  const opts = adapters.flatMap(a => a.models.map(model => ({ adapter: a.adapter, model })));
+  if (dflt && !opts.some(o => key(o) === key(dflt))) opts.unshift(dflt);
+  const saved = load("model-choice", null);
+  const pick = opts.find(o => saved && key(o) === key(saved)) || dflt || opts[0];
+  const groups = [...new Set(opts.map(o => o.adapter))];
+  return `<label class="model"><span class="sr">Model</span><select data-model aria-label="Model">${groups.map(g => `<optgroup label="${esc(g)}">${opts.filter(o => o.adapter === g).map(o =>
+    `<option value="${esc(key(o))}"${pick && key(o) === key(pick) ? " selected" : ""}>${esc(o.model)}${dflt && key(o) === key(dflt) ? " (default)" : ""}</option>`).join("")}</optgroup>`).join("")}</select></label>`;
+}
+function chosenModel(root) {
+  const sel = $("select[data-model]", root);
+  if (!sel || !sel.value) return undefined;
+  const [adapter, model] = JSON.parse(sel.value);
+  save("model-choice", { adapter, model });
+  return { adapter, model };
+}
+
 // ---------- Chat ----------
 
 // A message is answered, or becomes a task or a schedule to confirm: the
-// model decides. Approvals and questions stay in the inbox; the thread
-// links to them.
-function composer(placeholder) {
+// model decides. A conversation goes on until the person starts a new one;
+// opening Chat returns to the latest. Approvals and questions stay in the
+// inbox; the thread links to them.
+function composer(placeholder, picker) {
   return `<form id="say" class="say"><label for="msg" class="sr">Message</label><textarea id="msg" rows="2" data-draft="chat-${esc(location.hash)}" placeholder="${esc(placeholder)}" required></textarea>
-    <button class="primary" id="send">Send</button></form>`;
+    <div class="say-side">${picker}<button class="primary" id="send">Send</button></div></form>`;
 }
 function wireComposer(thread) {
   const box = $("#msg");
@@ -350,7 +375,9 @@ function wireComposer(thread) {
     if (!text) return;
     $("#send").disabled = true;
     try {
-      const r = await api("POST", "/v1/chat", thread ? { text, thread } : { text });
+      const body = { text, model: chosenModel($("#say")) };
+      if (thread) body.thread = thread;
+      const r = await api("POST", "/v1/chat", body);
       delete drafts[`chat-${location.hash}`];
       box.value = "";
       if (!thread) location.hash = `#/chat/${enc(r.thread)}`;
@@ -360,13 +387,33 @@ function wireComposer(thread) {
   };
 }
 
+// The person's conversations beside the open one, with a button for a new one.
+async function chatLayout(main, thread) {
+  paint(main, `<div class="chat">
+    <aside class="convos" aria-label="Conversations"><button class="primary" data-act="new-chat">New conversation</button><div id="convos"></div></aside>
+    <section class="conv"><h1 class="sr">Chat</h1><div id="thread" class="thread" aria-live="polite"></div><div id="composer"></div></section></div>`);
+  const list = async () => {
+    const { threads } = await api("GET", "/v1/chat");
+    paint($("#convos", main), threads.length ? `<ul>${threads.map(t => `<li><a href="#/chat/${enc(t.thread)}"${t.thread === thread ? ` class="on" aria-current="page"` : ""}><span>${esc(t.title)}</span><span class="small faint">${esc(when(t.updated_at))}</span></a></li>`).join("")}</ul>` : `<p class="small muted">No conversations yet.</p>`);
+    return threads;
+  };
+  $("[data-act=new-chat]", main).onclick = () => { location.hash = "#/chat/new"; };
+  paint($("#composer", main), composer(thread ? "Reply" : "Ask a question, or say what you want done. For example: Every Monday, summarise my open invoices.", await modelPicker()));
+  wireComposer(thread);
+  every(5000, list);
+  return list();
+}
+
+// Chat opens the latest conversation; a new one starts only on request.
 route(/^#\/chat$/, async main => {
   const { threads } = await api("GET", "/v1/chat");
-  paint(main, `<h1>Chat</h1><p class="muted">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm.</p>
-    ${composer("For example: What changed in the EU AI Act this month? Or: Every Monday, summarise my open invoices.")}
-    ${threads.length ? `<h3>Conversations</h3><table class="t"><tbody>${threads.map(t => `<tr class="click" data-href="#/chat/${enc(t.thread)}"><td>${esc(t.title)}</td><td class="small faint n">${esc(when(t.updated_at))}</td></tr>`).join("")}</tbody></table>` : ""}`);
-  main.onclick = e => { const r = e.target.closest("[data-href]"); if (r) location.hash = r.dataset.href; };
-  wireComposer(null);
+  if (threads.length) { location.replace(`#/chat/${enc(threads[0].thread)}`); return; }
+  location.replace("#/chat/new");
+});
+
+route(/^#\/chat\/new$/, async main => {
+  await chatLayout(main, null);
+  paint($("#thread", main), `<p class="muted">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm.</p>`);
 });
 
 function rule(e) {
@@ -381,7 +428,7 @@ function waitingLink(e) {
 function entry(e) {
   switch (e.kind) {
     case "message": return `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div></div>`;
-    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div></div>`;
+    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div></div>`;
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
       : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}${waitingLink(e)}</div></div>`;
@@ -406,7 +453,7 @@ function entry(e) {
 }
 
 route(/^#\/chat\/([^/]+)$/, async (main, thread) => {
-  paint(main, `<p class="small"><a href="#/chat">Chat</a></p><div id="thread" class="thread" aria-live="polite"></div>${composer("Reply")}`);
+  await chatLayout(main, thread);
   const draw = async () => {
     const { entries } = await api("GET", `/v1/chat/${enc(thread)}`);
     if (paint($("#thread", main), entries.map(entry).join(""))) $("#thread", main).lastElementChild?.scrollIntoView({ block: "end" });
@@ -421,7 +468,6 @@ route(/^#\/chat\/([^/]+)$/, async (main, thread) => {
     try { await api("POST", `/v1/chat/cards/${enc(card)}`, { decision: b.dataset.decide }); await draw(); }
     catch (err) { toast(err.message); b.disabled = false; }
   };
-  wireComposer(thread);
   await draw();
   every(2000, draw);
 });

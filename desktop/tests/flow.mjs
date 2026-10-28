@@ -85,6 +85,7 @@ await step("connect Claude", async () => {
 let taskUrl;
 await step("type a task", async () => {
   await page.getByRole("link", { name: "New task" }).click();
+  await page.getByLabel("Model").waitFor({ timeout: T });
   await page.getByRole("textbox").fill(task);
   await page.getByRole("button", { name: "Start" }).click();
   await page.waitForURL(/#\/task\//, { timeout: T });
@@ -144,15 +145,37 @@ await step("see the outcome with its evidence", async () => {
 
 const [question, answer] = [process.env.MAGNUS_CHAT_QUESTION, process.env.MAGNUS_CHAT_ANSWER];
 if (question) await step("ask in chat and see the answer", async () => {
+  const answers = n => page.locator("[data-answer]", { hasText: answer }).nth(n - 1).waitFor({ timeout: T });
+  const convos = () => page.locator(".convos li").count();
   await page.getByRole("link", { name: "Chat", exact: true }).click();
+  await page.getByRole("button", { name: "New conversation" }).waitFor({ timeout: T });
+  await page.getByLabel("Model").waitFor({ timeout: T });
   await page.getByLabel("Message").fill(question);
   await page.getByRole("button", { name: "Send" }).click();
-  await page.locator("[data-answer]", { hasText: answer }).waitFor({ timeout: T });
+  await answers(1);
+  // The conversation goes on: a reply stays in the same thread.
+  await page.getByLabel("Message").fill("And the quarter before?");
+  await page.getByRole("button", { name: "Send" }).click();
+  await answers(2);
+  if (await convos() !== 1) throw new Error(`a reply started a new conversation: ${await convos()} listed`);
   await shot("chat thread");
   // A chat turn is a conversation, not a task.
   await page.getByRole("link", { name: "Tasks", exact: true }).click();
   await page.locator("table.t").waitFor({ timeout: T });
   if (await page.getByText(question).count()) throw new Error("the chat message is listed as a task");
+  // Chat reopens the latest conversation, not a blank one.
+  await page.getByRole("link", { name: "Chat", exact: true }).click();
+  await answers(2);
+  // A new conversation starts only from its button, and both are listed.
+  await page.getByRole("button", { name: "New conversation" }).click();
+  await page.waitForURL(/#\/chat\/new$/, { timeout: T });
+  await page.getByText("Magnus answers, starts a task, or proposes a schedule").waitFor({ timeout: T });
+  if (await page.locator("[data-answer]").count()) throw new Error("a new conversation shows the old one's answers");
+  await page.getByLabel("Message").fill("Something else.");
+  await page.getByRole("button", { name: "Send" }).click();
+  await answers(1);
+  await page.waitForFunction(() => document.querySelectorAll(".convos li").length === 2, null, { timeout: T });
+  if (await page.locator("[data-answer]").count() !== 1) throw new Error("the new conversation carries the old one's turns");
 });
 
 if (errors.length) { console.error(`FAIL page errors:\n${errors.join("\n")}`); await browser.close(); process.exit(1); }

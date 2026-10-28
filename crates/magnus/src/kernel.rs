@@ -67,6 +67,8 @@ pub struct NewRun {
     pub budget: Option<crate::config::Budget>,
     /// Fixed ids, so a resent request finds the task it already created.
     pub ids: Option<(String, String)>,
+    /// The adapter and model the person chose; the appliance's otherwise.
+    pub model: Option<(String, String)>,
 }
 
 impl Kernel {
@@ -217,6 +219,44 @@ impl Kernel {
         self.create_run(actor, person, text, attachments, NewRun { experiment, ..Default::default() }).await
     }
 
+    /// The adapter and model new runs use unless the person chooses one.
+    pub fn default_model(&self) -> (String, String) {
+        let m = &self.cfg.model;
+        self.read(|s| s.model.clone()).unwrap_or_else(|| (m.adapter.clone(), m.name.clone()))
+    }
+
+    /// The models a person may choose for a task or a chat message: each
+    /// adapter's catalog as its provider lists it now. An adapter whose
+    /// provider does not answer (not signed in, unreachable) offers none.
+    pub async fn models(&self) -> Vec<(String, Vec<String>)> {
+        let ids: Vec<String> = self.adapters.list().await.into_iter().map(|(id, ..)| id).collect();
+        let lists = futures::future::join_all(ids.iter().map(|id| self.adapters.catalog(id))).await;
+        ids.into_iter()
+            .zip(lists)
+            .filter_map(|(id, ev)| match ev {
+                Ok(magnus_adapter_proto::Event::Catalog { models }) if !models.is_empty() => Some((id, models.into_iter().map(|m| m.id).collect())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A model the person chose, checked against its adapter's catalog. The
+    /// appliance's own default needs no check.
+    pub async fn check_model(&self, adapter: &str, model: &str) -> std::result::Result<(), String> {
+        if self.default_model() == (adapter.to_string(), model.to_string()) {
+            return Ok(());
+        }
+        if self.adapters.list().await.iter().all(|(id, ..)| id != adapter) {
+            return Err(format!("no adapter {adapter}"));
+        }
+        match self.adapters.catalog(adapter).await {
+            Ok(magnus_adapter_proto::Event::Catalog { models }) if models.iter().any(|m| m.id == model) => Ok(()),
+            Ok(magnus_adapter_proto::Event::Catalog { .. }) => Err(format!("{adapter} does not offer {model}")),
+            Ok(_) => Err(format!("{adapter} sent no model list")),
+            Err(e) => Err(format!("{adapter} cannot list its models: {e:#}")),
+        }
+    }
+
     /// Create a task or a chat turn and start it.
     pub async fn create_run(self: &Arc<Self>, actor: &str, person: &str, text: String, attachments: Vec<serde_json::Value>, o: NewRun) -> Result<(String, String)> {
         let (task, run) = match &o.ids {
@@ -224,7 +264,7 @@ impl Kernel {
             None => (new_id("task"), new_id("run")),
         };
         let m = &self.cfg.model;
-        let (adapter, model) = self.read(|s| s.model.clone()).unwrap_or_else(|| (m.adapter.clone(), m.name.clone()));
+        let (adapter, model) = o.model.clone().unwrap_or_else(|| self.default_model());
         let config = crate::events::RunConfig {
             adapter,
             model,
