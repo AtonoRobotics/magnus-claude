@@ -40,12 +40,13 @@ ipcMain.on('notify', (_e, { title, body }) => {
   n.show();
 });
 
-// The ChatGPT sign-in (used for Codex) returns to http://localhost:1455/auth/callback.
+// The ChatGPT sign-in (used for Codex) returns to http://localhost:1455/auth/callback,
+// the xAI sign-in (Grok) to http://127.0.0.1:1455/callback.
 // Catch it here and hand the address to the app, so nobody has to paste it.
 function oauthCatcher() {
   const server = http.createServer((req, res) => {
-    if (!req.url.startsWith('/auth/callback')) { res.writeHead(404); res.end(); return; }
-    const full = 'http://localhost:1455' + req.url;
+    if (!/^\/(auth\/)?callback\?/.test(req.url)) { res.writeHead(404); res.end(); return; }
+    const full = 'http://' + (req.headers.host || '127.0.0.1:1455') + req.url;
     if (win) { win.webContents.send('oauth-callback', full); win.show(); win.focus(); }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end('<html><body style="font-family:sans-serif;padding:40px"><h2>Signed in.</h2><p>You can close this tab and return to Magnus.</p></body></html>');

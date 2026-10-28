@@ -49,13 +49,15 @@ authorize_url = "https://auth.openai.com/oauth/authorize"
 token_url = "https://auth.openai.com/oauth/token"
 client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
 redirect_uri = "http://localhost:1455/auth/callback"
-scopes = "openid profile email offline_access"
+scopes = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 account_claim = "/https:~1~1api.openai.com~1auth/chatgpt_account_id"
 account_header = "chatgpt-account-id"
 extra_params = { id_token_add_organizations = "true", codex_cli_simplified_flow = "true", originator = "codex_cli_rs" }
 
-# xAI sign-in with a device code. The client id is not published by xAI; set it
-# before use (see docs/research/providers-and-tac.md).
+# xAI sign-in in the browser, as `grok login --oauth` (Grok CLI 1.0.70) does it:
+# its client id, scopes and a loopback callback; xAI serves no device flow
+# (`/v1/login-config` returns `{"device_flow":null}`). The desktop app catches
+# the callback on port 1455.
 [[adapters]]
 id = "grok"
 command = ["/opt/magnus/bin/magnus-adapter-openai"]
@@ -67,8 +69,9 @@ models_path = "/models-v2"
 fixed_models = ["grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning"]
 prices = { "grok-4" = { input = 2.0, output = 6.0, cache_read = 0.5 } }
 [adapters.settings.auth]
-kind = "oauth_device"
-device_url = "https://auth.x.ai/oauth2/device/code"
+kind = "oauth_pkce"
+authorize_url = "https://auth.x.ai/oauth2/authorize"
 token_url = "https://auth.x.ai/oauth2/token"
-client_id = "SET-ME"
-scopes = "openid offline_access"
+client_id = "b1a00492-073a-47ea-816f-4c329264a828"
+redirect_uri = "http://127.0.0.1:1455/callback"
+scopes = "openid profile email offline_access grok-cli:access api:access"
