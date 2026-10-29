@@ -1,4 +1,5 @@
-//! A fresh Postgres database per test, on the server named by `MAGNUS_TEST_PG`.
+//! A fresh Postgres database per test, on the server named by `MAGNUS_TEST_PG`,
+//! dropped with its roles when the test ends.
 
 use tokio_postgres::{Client, NoTls};
 
@@ -87,6 +88,39 @@ impl TestDb {
             }
         }
         out
+    }
+}
+
+/// The server is shared and outlives every test, so the test's database and
+/// the roles its kernel made go when the test ends, whether it passed or not.
+/// The roles are the kernel's own and any named after it (`{kernel_role}_...`).
+impl Drop for TestDb {
+    fn drop(&mut self) {
+        let (name, role) = (self.name.clone(), self.kernel_role.clone());
+        // Drop runs inside the test's runtime, which cannot be blocked on; the
+        // cleanup gets a thread and runtime of its own.
+        let dropped = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let c = connect(&server_url()).await;
+                // FORCE: the appliance may still be connected; its process is stopped after this.
+                c.batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")).await?;
+                let named_after = format!("{}\\_%", role.replace('_', "\\_"));
+                let roles = c
+                    .query("SELECT rolname FROM pg_roles WHERE rolname = $1 OR rolname LIKE $2", &[&role, &named_after])
+                    .await?;
+                for r in roles {
+                    c.batch_execute(&format!("DROP ROLE IF EXISTS {}", r.get::<_, String>(0))).await?;
+                }
+                Ok::<_, tokio_postgres::Error>(())
+            })
+        })
+        .join();
+        match dropped {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => eprintln!("could not drop test database {}: {e}", self.name),
+            Err(_) => eprintln!("could not drop test database {}", self.name),
+        }
     }
 }
 
