@@ -1,7 +1,7 @@
 //! The event log: one append-only Postgres table, the only source of truth.
 //!
 //! `migrate` runs with an administrator URL and creates the table and the
-//! kernel's role. The role may INSERT and SELECT and nothing else, so the
+//! kernel's role (and the knowledge base's index, `knowledge::migrate_sql`). The role may INSERT and SELECT and nothing else, so the
 //! database itself refuses rewrites of history. Everything else the kernel
 //! knows is a projection of these rows, rebuilt on boot.
 
@@ -71,6 +71,8 @@ pub async fn migrate(admin_url: &str, kernel_url: &str) -> Result<()> {
              GRANT SELECT, INSERT ON public.events TO {role};"
         ))
         .await?;
+    // The knowledge base's index, filtered for each reader by row security.
+    admin.batch_execute(&crate::knowledge::migrate_sql(&role)).await.context("create the knowledge index (pgvector must be installed)")?;
     Ok(())
 }
 

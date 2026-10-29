@@ -23,6 +23,7 @@ pub mod dev;
 pub mod events;
 pub mod inbox;
 pub mod kernel;
+pub mod knowledge;
 pub mod library;
 pub mod log;
 pub mod oidc;

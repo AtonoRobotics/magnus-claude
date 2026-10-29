@@ -146,6 +146,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .merge(crate::library::router())
         .merge(crate::update::router())
         .merge(crate::settings::router())
+        .merge(crate::knowledge::router())
         .merge(crate::chat_actions::router())
         .layer(axum::middleware::from_fn(cookie_guard))
         .layer(axum::middleware::from_fn(crate::update::app_version))
