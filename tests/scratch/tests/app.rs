@@ -233,6 +233,16 @@ async fn plain_http_on_the_https_port_is_sent_to_https() {
     assert_eq!(me.status(), 200);
 }
 
+/// A browser offers HTTP/2 first; whatever the appliance agrees to, it answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_prefers_http2_is_answered_over_https() {
+    let mut f = magnus_scratch::Flow::start().await;
+    let (url, _) = f.with_tls().await;
+    let browser = reqwest::Client::builder().danger_accept_invalid_certs(true).build().unwrap();
+    let r = browser.get(format!("{url}/v1/health")).send().await.expect("an answer over HTTPS");
+    assert_eq!(r.status(), 200);
+}
+
 /// The whole operator flow: plan, an approval that blocks, a review card,
 /// and an outcome with its composition and evidence.
 #[tokio::test(flavor = "multi_thread")]

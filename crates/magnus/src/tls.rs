@@ -43,7 +43,9 @@ pub fn load(state_dir: &Path, cert: Option<&Path>, key: Option<&Path>) -> Result
     let key = PrivateKeyDer::from_pem_file(&key_path).with_context(|| format!("read {}", key_path.display()))?;
     let fingerprint = fingerprint(&chain[0]);
     let mut cfg = rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(chain, key)?;
-    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    // HTTP/1.1 only: the server speaks nothing else (axum's `http2` is off),
+    // and a client that agreed to h2 got its connection closed.
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok((cfg, fingerprint))
 }
 
