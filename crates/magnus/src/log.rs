@@ -89,7 +89,7 @@ pub struct Log {
 }
 
 /// One kernel per log: a second one would break the single-writer rule.
-async fn hold(client: &Client) -> Result<()> {
+pub(crate) async fn hold(client: &Client) -> Result<()> {
     let got: bool = client.query_one("SELECT pg_try_advisory_lock(7239001)", &[]).await?.get(0);
     anyhow::ensure!(got, "another kernel holds this event log");
     Ok(())
@@ -139,6 +139,26 @@ impl Log {
         Ok(w.downgrade())
     }
 
+    /// The writer's appends are serialized, so the first seq of a new
+    /// append follows the last one this process applied. A gap that holds
+    /// events means an append committed whose caller never applied it (its
+    /// future was dropped mid-statement): start again from the log. A gap
+    /// without events is only the sequence skipping a failed insert.
+    async fn check_contiguous(&self, first: i64) -> Result<()> {
+        let last = self.last.load(std::sync::atomic::Ordering::SeqCst);
+        if !self.writer || first <= last + 1 {
+            return Ok(());
+        }
+        let c = self.client().await?;
+        let missed: i64 = c.query_one("SELECT count(*) FROM public.events WHERE seq > $1 AND seq < $2", &[&last, &first]).await?.get(0);
+        if missed > 0 {
+            tracing::error!("the log has {missed} events this process did not apply; restarting from the log");
+            c.batch_execute("SELECT pg_advisory_unlock_all()").await?;
+            crate::update::restart_in_place();
+        }
+        Ok(())
+    }
+
     fn saw(&self, seq: i64) {
         self.last.fetch_max(seq, std::sync::atomic::Ordering::SeqCst);
     }
@@ -176,6 +196,7 @@ impl Log {
             )
             .await
             .context("append to the event log")?;
+        self.check_contiguous(row.get(0)).await?;
         self.saw(row.get(0));
         Ok(Event { seq: row.get(0), at: row.get(1), actor: actor.into(), ev: ev.clone() })
     }
@@ -198,6 +219,9 @@ impl Log {
             .context("append to the event log")?;
         let mut at: Vec<(i64, chrono::DateTime<chrono::Utc>)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
         at.sort_by_key(|(seq, _)| *seq);
+        if let Some((seq, _)) = at.first() {
+            self.check_contiguous(*seq).await?;
+        }
         if let Some((seq, _)) = at.last() {
             self.saw(*seq);
         }
@@ -249,18 +273,49 @@ impl Log {
             let body: Value = r.get(3);
             let seq: i64 = r.get(0);
             self.saw(seq);
-            let ev: Ev = match serde_json::from_value(body.clone()) {
-                Ok(ev) => ev,
-                // Written by a later release this one was rolled back from:
-                // a kind of event it does not know, so nothing it acts on.
-                Err(e) if e.to_string().starts_with("unknown variant") => {
-                    tracing::warn!("event {seq} is a kind this release does not know ({}); skipped", body["kind"]);
-                    continue;
-                }
-                Err(e) => return Err(anyhow::Error::from(e).context(format!("event {seq} does not parse"))),
+            let Some(ev) = parse_event(&body).with_context(|| format!("event {seq} does not parse"))? else {
+                tracing::warn!("event {seq} is a kind this release does not know ({}); skipped", body["kind"]);
+                continue;
             };
             out.push(Event { seq, at: r.get(1), actor: r.get(2), ev });
         }
         Ok(out)
+    }
+}
+
+/// An event from the log: `None` when its kind is one this release does not
+/// know (written by a later release it was rolled back from, so nothing it
+/// acts on). Any other failure is an error, an unknown value inside a known
+/// kind included: serde words both "unknown variant", and skipping the
+/// second would drop part of a run's history.
+pub fn parse_event(body: &Value) -> Result<Option<Ev>> {
+    match serde_json::from_value::<Ev>(body.clone()) {
+        Ok(ev) => Ok(Some(ev)),
+        Err(e) => {
+            let kind_unknown = serde_json::from_value::<Ev>(serde_json::json!({ "kind": body["kind"] })).err().is_some_and(|k| k.to_string().starts_with("unknown variant"));
+            if kind_unknown {
+                Ok(None)
+            } else {
+                Err(e.into())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn only_an_unknown_kind_is_skipped() {
+        let known = serde_json::to_value(Ev::MemoryForgotten { id: "m1".into() }).unwrap();
+        assert!(matches!(parse_event(&known), Ok(Some(_))));
+        assert!(matches!(parse_event(&serde_json::json!({ "kind": "from_a_later_release", "x": 1 })), Ok(None)));
+        // A known kind holding a value this release does not know (a block
+        // type from a later release) stops the boot; serde words it the same.
+        let nested = serde_json::json!({ "kind": "memory_pass", "run": "r", "model": "m", "blocks": [{ "type": "thinking_v9", "text": "x" }], "usage": {} });
+        let err = serde_json::from_value::<Ev>(nested.clone()).unwrap_err().to_string();
+        assert!(err.starts_with("unknown variant"), "{err}");
+        assert!(parse_event(&nested).is_err());
     }
 }

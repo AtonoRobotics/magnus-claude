@@ -497,6 +497,7 @@ impl Config {
         let text = std::fs::read_to_string(path)?;
         let mut cfg: Config = toml::from_str(&text)?;
         cfg.path = path.canonicalize()?;
+        anyhow::ensure!(cfg.backup.keep_days >= 1, "[backup] keep_days must be at least 1: with 0 every backup is deleted as soon as it is made");
         for c in &cfg.connectors {
             anyhow::ensure!(
                 !c.name.contains("__") && c.name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),
