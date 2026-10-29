@@ -238,3 +238,7 @@ details.trace > summary { cursor: pointer; }
 .verdict .vnote { flex-basis: 100%; }
 .verdict .vnote summary { cursor: pointer; }
 .verdict textarea { width: 100%; max-width: 60ch; margin-top: 4px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.grid2 label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.grid2 label.row { flex-direction: row; align-items: center; }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }

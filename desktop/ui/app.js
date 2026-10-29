@@ -96,6 +96,7 @@ function nav() {
     ${link("#/library", "Library")}
     ${link("#/projects", "Projects")}
     ${isOwner() ? link("#/models", "Models") : ""}
+    ${isOwner() ? link("#/apps", "Apps") : ""}
     ${isDev() ? `<div class="group">Developer</div>
       ${link("#/dev/runs", "Runs")}
       ${link("#/dev/experiments", "Experiments")}
@@ -1282,6 +1283,89 @@ route(/^#\/models$/, async main => {
         const r = await api("POST", `/v1/adapters/${enc(a)}/conformance`, {});
         el.innerHTML = `<table class="t small" style="margin-top:8px"><tbody>${r.checks.map(c => `<tr><td>${c.passed ? `<span class="chip ok">pass</span>` : `<span class="chip bad">fail</span>`}</td><td>${esc(c.name)}${c.simulated ? " <span class='faint'>(simulated)</span>" : ""}</td><td class="muted">${esc(c.detail)}</td></tr>`).join("")}</tbody></table>`;
         b.disabled = false; main._html = null;
+      }
+    } catch (err) { toast(err.message); b.disabled = false; }
+  };
+  await draw();
+});
+
+// ---------- Apps ----------
+
+// The person's apps over MCP. The owner adds one by its address, signs in on
+// the app's own page (the code comes back to this computer), and decides
+// what each tool may do; a tool left "not offered" is never shown to the worker.
+const RISKS = [["", "Not offered"], ["read", "Reads only"], ["reversible_write", "Changes things (undoable)"], ["irreversible", "Changes things (cannot undo)"], ["financial", "Moves money"], ["prohibited", "Never"]];
+const AUDIENCES = [["private", "Only the person"], ["internal", "People in the organization"], ["public", "Anyone"]];
+route(/^#\/apps$/, async main => {
+  if (!isOwner()) { paint(main, `<h1>Apps</h1><p class="empty">Only the owner adds apps.</p>`); return; }
+  const note = {};
+  const draw = async () => {
+    const { connectors } = await api("GET", "/v1/connectors");
+    paint(main, `<h1>Apps</h1><p class="muted">The person's apps the worker can use: email, calendar, files, chat, business systems. Sign-ins go to the appliance's vault; this computer keeps none.</p>
+      ${connectors.map(c => `<div class="card" data-app="${esc(c.name)}"><div class="spread"><strong>${esc(c.name)}</strong>
+          <span class="row">${c.signed_in ? `<span class="chip ok">connected</span>` : `<span class="chip warn">${esc(c.problem || "not connected")}</span>`}
+          ${c.source === "config" ? `<span class="chip">set in the config file</span>` : ""}</span></div>
+        <div class="small muted mono">${esc(c.url)}</div>
+        <div class="small muted">What it sends reaches: ${esc((AUDIENCES.find(a => a[0] === c.audience) || [, c.audience])[1])} · what comes back: ${esc(c.label)}</div>
+        <div class="row" style="margin-top:10px">${c.auth === "oauth" ? `<button ${c.signed_in ? "" : `class="primary"`} data-act="signin" data-app="${esc(c.name)}">${c.signed_in ? "Sign in again" : "Sign in"}</button>` : ""}
+          ${c.source === "app" ? `<button class="link" data-act="remove" data-app="${esc(c.name)}">Remove</button>` : ""}</div>
+        <div data-note="${esc(c.name)}">${note[c.name] || ""}</div>
+        ${c.tools.length ? `<table class="t small" style="margin-top:10px"><thead><tr><th>Tool</th><th>What the app says it does</th><th>May</th></tr></thead><tbody>
+          ${c.tools.map(t => `<tr><td class="mono">${esc(t.name)}</td><td class="muted">${esc(t.description)}</td>
+            <td><select data-tool="${esc(t.name)}" data-app="${esc(c.name)}" aria-label="What ${esc(t.name)} may do" ${c.source === "app" ? "" : "disabled"}>
+              ${RISKS.map(([v, l]) => `<option value="${v}" ${(t.risk || "") === v ? "selected" : ""}>${esc(l)}${v && v === t.suggested && !t.risk ? " (the app's hint)" : ""}</option>`).join("")}</select></td></tr>`).join("")}</tbody></table>` : ""}
+      </div>`).join("") || `<p class="empty">No apps yet.</p>`}
+      <div class="card"><strong>Add an app</strong>
+        <div class="grid2" style="margin-top:8px"><label>Name<input id="aname" placeholder="calendar" autocomplete="off"></label>
+          <label>Address (MCP)<input id="aurl" placeholder="https://mcp.example.com/mcp" autocomplete="off"></label>
+          <label>What the worker sends there reaches<select id="aaud">${AUDIENCES.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}</select></label>
+          <div><div class="small">What comes back</div><label class="row small"><input type="checkbox" id="apriv" checked> is the person's private data</label>
+            <label class="row small"><input type="checkbox" id="auntr" checked> may hold text written by others</label></div></div>
+        <div class="row" style="margin-top:10px"><button class="primary" data-act="add">Add</button></div></div>`);
+  };
+  const say = (app, html) => { note[app] = html; const el = $(`[data-note="${CSS.escape(app)}"]`, main); if (el) el.innerHTML = html; };
+  const signIn = async app => {
+    if (!Magnus.loopbackOpen) { say(app, `<p class="small">Sign in to apps from the Magnus desktop app.</p>`); return; }
+    const redirect = await Magnus.loopbackOpen();
+    const r = await api("POST", `/v1/connectors/${enc(app)}/sign-in`, { redirect_uri: redirect });
+    say(app, `<div style="margin-top:10px"><p class="small">Sign in on ${esc(app)}'s page, then come back here.</p>
+      <div class="row"><button data-act="open" data-url="${esc(r.authorize_url)}" id="app-open">Open the sign-in page</button></div>
+      <p class="small muted">Waiting for the sign-in…</p></div>`);
+    try {
+      const got = await Magnus.loopbackWait();
+      if (got.state !== r.state) throw new Error("the sign-in came back for a different request; start again");
+      await api("POST", `/v1/connectors/${enc(app)}/sign-in/complete`, { state: got.state, code: got.code });
+      say(app, `<p class="small" style="color:var(--ok)">Connected.</p>`);
+      await draw();
+    } catch (e) { say(app, `<p class="small" style="color:var(--bad)">${esc(e.message)}</p>`); }
+  };
+  main.onchange = async e => {
+    const s = e.target.closest("select[data-tool]"); if (!s) return;
+    try {
+      await api("PUT", `/v1/connectors/${enc(s.dataset.app)}/tools/${enc(s.dataset.tool)}`, { risk: s.value || null });
+      toast(s.value ? `${s.dataset.tool}: ${RISKS.find(r => r[0] === s.value)[1].toLowerCase()}.` : `${s.dataset.tool} is not offered to the worker.`);
+    } catch (err) { toast(err.message); draw(); }
+  };
+  main.onclick = async e => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    const app = b.dataset.app;
+    try {
+      if (b.dataset.act === "add") {
+        const name = $("#aname", main).value.trim(), url = $("#aurl", main).value.trim();
+        if (!name || !url) return toast("Give the app a name and its address.");
+        const label = [$("#apriv", main).checked && "private", $("#auntr", main).checked && "untrusted"].filter(Boolean).join("+") || "principal";
+        b.disabled = true;
+        const r = await api("POST", "/v1/connectors", { name, url, audience: $("#aaud", main).value, label });
+        await draw();
+        if (r.sign_in) signIn(name);
+      }
+      if (b.dataset.act === "signin") signIn(app);
+      if (b.dataset.act === "open") await Magnus.openExternal(b.dataset.url);
+      if (b.dataset.act === "remove") {
+        if (!confirm(`Remove ${app}? Its sign-in is revoked and the worker can no longer use it.`)) return;
+        await api("DELETE", `/v1/connectors/${enc(app)}`);
+        delete note[app];
+        await draw();
       }
     } catch (err) { toast(err.message); b.disabled = false; }
   };

@@ -23,6 +23,8 @@ struct App {
     client: Mutex<Option<(String, Option<String>, reqwest::Client)>>,
     live: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     speech: speech::Speech,
+    /// The loopback address an app sign-in comes back to, open for one sign-in.
+    loopback: Mutex<Option<tokio::net::TcpListener>>,
 }
 
 impl App {
@@ -341,13 +343,67 @@ fn open_url(handle: AppHandle, url: String) -> Res<()> {
     handle.opener().open_url(u.as_str(), None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Open a loopback address on this computer for one sign-in to one of the
+/// person's apps (RFC 8252): the app's sign-in page sends its code here.
+#[tauri::command]
+async fn loopback_open(app: State<'_, App>) -> Res<String> {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| format!("cannot listen on this computer: {e}"))?;
+    let port = l.local_addr().map_err(|e| e.to_string())?.port();
+    *app.loopback.lock().unwrap() = Some(l);
+    Ok(format!("http://127.0.0.1:{port}/callback"))
+}
+
+/// How long a sign-in page may take before the app stops waiting.
+const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Wait for the sign-in page's redirect: its code and state, or its error.
+#[tauri::command]
+async fn loopback_wait(app: State<'_, App>) -> Res<Value> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = app.loopback.lock().unwrap().take().ok_or("no sign-in is waiting")?;
+    let wait = async {
+        loop {
+            let (mut s, _) = l.accept().await.map_err(|e| e.to_string())?;
+            let mut buf = vec![0u8; 8192];
+            let mut n = 0;
+            while n < buf.len() {
+                let k = s.read(&mut buf[n..]).await.map_err(|e| e.to_string())?;
+                if k == 0 {
+                    break;
+                }
+                n += k;
+                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&buf[..n]);
+            let target = head.lines().next().and_then(|l| l.strip_prefix("GET ")).and_then(|l| l.split(' ').next()).unwrap_or_default().to_string();
+            let Ok(u) = url::Url::parse(&format!("http://127.0.0.1{target}")) else { continue };
+            if u.path() != "/callback" {
+                let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                continue;
+            }
+            let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
+            let (title, result) = match (q.get("code"), q.get("state"), q.get("error")) {
+                (Some(code), Some(state), _) => ("Signed in. You can close this page and return to Magnus.", Ok(json!({ "code": code, "state": state }))),
+                (_, _, Some(e)) => ("The sign-in did not finish. Return to Magnus.", Err(format!("the app's sign-in page said: {}", q.get("error_description").unwrap_or(e)))),
+                _ => ("The sign-in did not finish. Return to Magnus.", Err("the app's sign-in page sent no code".to_string())),
+            };
+            let body = format!("<!doctype html><meta charset=utf-8><title>Magnus</title><p style=\"font:16px system-ui;margin:40px\">{title}</p>");
+            let _ = s.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+            return result;
+        }
+    };
+    tokio::time::timeout(SIGN_IN_WAIT, wait).await.map_err(|_| "the sign-in took too long; start again".to_string())?
+}
+
 pub fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default() })
-        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, device_start, device_poll, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url])
+        .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default(), loopback: Mutex::new(None) })
+        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, device_start, device_poll, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait])
         .run(tauri::generate_context!())
         .expect("start the Magnus app");
 }

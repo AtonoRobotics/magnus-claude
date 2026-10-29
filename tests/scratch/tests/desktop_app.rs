@@ -6,6 +6,8 @@
 //! - `desktop/tests/app-library.mjs`: download a file from the library.
 //! - `desktop/tests/app-people.mjs`: two people sign in on one app, one after
 //!   the other, each with their own rights.
+//! - `desktop/tests/app-apps.mjs`: the owner adds one of the person's apps
+//!   and signs in to it through a loopback address the shell opens.
 //!
 //! Needs the built app (`cargo tauri build` in desktop/src-tauri, or
 //! MAGNUS_DESKTOP_APP), `tauri-driver`, `WebKitWebDriver`
@@ -156,4 +158,21 @@ async fn two_people_sign_in_on_one_installed_app_each_with_their_own_rights() {
     let d = Driver::start().await;
     let (ok, log) = d.script("app-people.mjs", &url, &fingerprint, &[("MAGNUS_OTHER", "carol"), ("MAGNUS_TASK_TITLE", &title)]).await;
     assert!(ok, "two people on one app failed:\n{log}");
+}
+
+/// The app sign-in's code comes back to a loopback address the shell opens
+/// on this computer: only the installed app can catch it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn the_owner_adds_an_app_and_signs_in_to_it_from_the_installed_app() {
+    let (f, _idp, url, fingerprint) = appliance().await;
+    let cal = FakeOAuthApp::start(3600).await;
+    let d = Driver::start().await;
+    let (ok, log) = d.script("app-apps.mjs", &url, &fingerprint, &[("MAGNUS_APP_URL", &cal.url)]).await;
+    assert!(ok, "adding an app failed:\n{log}");
+    let (_, list) = f.app.api(PERSON).get("/v1/connectors").await;
+    let c = &list["connectors"][0];
+    assert_eq!((c["name"].as_str(), c["signed_in"].as_bool()), (Some("calendar"), Some(true)), "{list}");
+    let risk = |t: &str| c["tools"].as_array().unwrap().iter().find(|x| x["name"] == t).unwrap()["risk"].clone();
+    assert_eq!((risk("list_events"), risk("create_event")), (json!("read"), serde_json::Value::Null), "{list}");
 }
