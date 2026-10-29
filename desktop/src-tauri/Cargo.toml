@@ -1,7 +1,7 @@
 [package]
 name = "magnus-desktop"
 description = "Magnus desktop app: a client of the appliance."
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "UNLICENSED"
 publish = false
