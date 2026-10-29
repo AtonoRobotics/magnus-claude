@@ -139,6 +139,15 @@ fn exec_installed(how: &Value) -> Result<()> {
     Err(anyhow::anyhow!("start {}: {e}", path.display()))
 }
 
+/// Start this release again in this process (same pid and arguments), as
+/// when the log may hold an event its state lacks; if that fails, exit, so
+/// that nothing goes on from a state the log does not have.
+pub fn restart_in_place() -> ! {
+    let e = started_as().and_then(|how| exec_installed(&how));
+    tracing::error!("restart in place: {e:?}");
+    std::process::exit(1)
+}
+
 /// Exchange the running programs with the kept release.
 fn swap(dir: &Path, with: &Path, keep_as: &Path) -> Result<()> {
     if keep_as.exists() {

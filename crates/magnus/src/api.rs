@@ -1099,7 +1099,10 @@ async fn forget(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
 }
 
 async fn health(State(k): K) -> Response {
-    Json(json!({ "ok": true, "version": HARNESS_VERSION, "release": crate::update::version(), "kill_switch": k.read(|s| s.kill_switch) })).into_response()
+    // Down while the log's connection is lost: nothing can be recorded.
+    let log = k.log.up().await;
+    let body = Json(json!({ "ok": log, "log": if log { "up" } else { "down" }, "version": HARNESS_VERSION, "release": crate::update::version(), "kill_switch": k.read(|s| s.kill_switch) }));
+    if log { body.into_response() } else { (StatusCode::SERVICE_UNAVAILABLE, body).into_response() }
 }
 
 /// Model text for a task as it streams (server-sent events), before the

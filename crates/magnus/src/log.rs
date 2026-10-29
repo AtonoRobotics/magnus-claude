@@ -74,17 +74,71 @@ pub async fn migrate(admin_url: &str, kernel_url: &str) -> Result<()> {
     Ok(())
 }
 
+/// The event log. A lost connection (Postgres restarting) is opened again
+/// on the next use, with the writer's lock taken again; until then every
+/// write fails and health says so.
 pub struct Log {
-    client: Client,
+    url: String,
+    writer: bool,
+    client: tokio::sync::RwLock<Client>,
+    /// The last event this process wrote or read, to find one that was
+    /// written while its answer was lost.
+    last: std::sync::atomic::AtomicI64,
+}
+
+/// One kernel per log: a second one would break the single-writer rule.
+async fn hold(client: &Client) -> Result<()> {
+    let got: bool = client.query_one("SELECT pg_try_advisory_lock(7239001)", &[]).await?.get(0);
+    anyhow::ensure!(got, "another kernel holds this event log");
+    Ok(())
 }
 
 impl Log {
+    fn new(url: &str, writer: bool, client: Client) -> Log {
+        Log { url: url.into(), writer, client: tokio::sync::RwLock::new(client), last: 0.into() }
+    }
+
     pub async fn open(url: &str) -> Result<Log> {
         let client = connect(url).await?;
-        // One kernel per log: a second one would break the single-writer rule.
-        let got: bool = client.query_one("SELECT pg_try_advisory_lock(7239001)", &[]).await?.get(0);
-        anyhow::ensure!(got, "another kernel holds this event log");
-        Ok(Log { client })
+        hold(&client).await?;
+        Ok(Log::new(url, true, client))
+    }
+
+    /// Whether the log can be written: the connection is up, or opens again.
+    pub async fn up(&self) -> bool {
+        self.client().await.is_ok()
+    }
+
+    /// The connection, opened again if it was lost.
+    async fn client(&self) -> Result<tokio::sync::RwLockReadGuard<'_, Client>> {
+        {
+            let c = self.client.read().await;
+            if !c.is_closed() {
+                return Ok(c);
+            }
+        }
+        let mut w = self.client.write().await;
+        if w.is_closed() {
+            let c = connect(&self.url).await?;
+            if self.writer {
+                hold(&c).await?;
+                // An append whose answer was lost may be in the log but not
+                // in this process's state: start again from the log.
+                let max: i64 = c.query_one("SELECT coalesce(max(seq), 0) FROM public.events", &[]).await?.get(0);
+                if max != self.last.load(std::sync::atomic::Ordering::SeqCst) {
+                    tracing::error!("the log has events this process did not apply; restarting from the log");
+                    c.batch_execute("SELECT pg_advisory_unlock_all()").await?;
+                    crate::update::restart_in_place();
+                }
+            }
+            tracing::warn!("the event log's connection was lost and is open again");
+            *w = c;
+        }
+        Ok(w.downgrade())
+    }
+
+    fn saw(&self, seq: i64) {
+        self.last.fetch_max(seq, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Open, waiting up to `wait` for another kernel to let go of the log.
@@ -104,7 +158,7 @@ impl Log {
     /// Read the log without holding it, as a release about to be switched
     /// to does while the running one keeps writing.
     pub async fn read_only(url: &str) -> Result<Log> {
-        Ok(Log { client: connect(url).await? })
+        Ok(Log::new(url, false, connect(url).await?))
     }
 
     pub async fn append(&self, actor: &str, ev: &Ev) -> Result<Event> {
@@ -112,13 +166,15 @@ impl Log {
         let kind = body["kind"].as_str().unwrap_or_default().to_string();
         let run = ev.run().map(String::from);
         let row = self
-            .client
+            .client()
+            .await?
             .query_one(
                 "INSERT INTO public.events (kind, actor, run_id, body) VALUES ($1, $2, $3, $4) RETURNING seq, at",
                 &[&kind, &actor, &run, &body],
             )
             .await
             .context("append to the event log")?;
+        self.saw(row.get(0));
         Ok(Event { seq: row.get(0), at: row.get(1), actor: actor.into(), ev: ev.clone() })
     }
 
@@ -128,7 +184,8 @@ impl Log {
         let kinds: Vec<String> = bodies.iter().map(|b| b["kind"].as_str().unwrap_or_default().to_string()).collect();
         let runs: Vec<Option<String>> = evs.iter().map(|e| e.run().map(String::from)).collect();
         let rows = self
-            .client
+            .client()
+            .await?
             .query(
                 "INSERT INTO public.events (kind, actor, run_id, body)
                  SELECT k, $2, r, b FROM unnest($1::text[], $3::text[], $4::jsonb[]) WITH ORDINALITY AS e(k, r, b, n) ORDER BY n
@@ -139,13 +196,17 @@ impl Log {
             .context("append to the event log")?;
         let mut at: Vec<(i64, chrono::DateTime<chrono::Utc>)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
         at.sort_by_key(|(seq, _)| *seq);
+        if let Some((seq, _)) = at.last() {
+            self.saw(*seq);
+        }
         Ok(at.into_iter().zip(evs).map(|((seq, at), ev)| Event { seq, at, actor: actor.into(), ev: ev.clone() }).collect())
     }
 
     /// One delivered file's content, read straight from the log.
     pub async fn output(&self, run: &str, id: &str) -> Result<Option<(String, String, Vec<u8>)>> {
         let row = self
-            .client
+            .client()
+            .await?
             .query_opt("SELECT body FROM public.events WHERE run_id = $1 AND kind = 'output' AND body->>'id' = $2", &[&run, &id])
             .await?;
         let Some(row) = row else { return Ok(None) };
@@ -157,7 +218,7 @@ impl Log {
 
     /// One run's events in order: the developer view's full trace (V4).
     pub async fn run_events(&self, run: &str) -> Result<Vec<Event>> {
-        let rows = self.client.query("SELECT seq, at, actor, body FROM public.events WHERE run_id = $1 ORDER BY seq", &[&run]).await?;
+        let rows = self.client().await?.query("SELECT seq, at, actor, body FROM public.events WHERE run_id = $1 ORDER BY seq", &[&run]).await?;
         rows.into_iter()
             .map(|r| {
                 let body: Value = r.get(3);
@@ -169,7 +230,7 @@ impl Log {
 
     /// Every row as stored, for a backup.
     pub async fn dump(&self) -> Result<Vec<Value>> {
-        let rows = self.client.query("SELECT seq, at, kind, actor, run_id, body FROM public.events ORDER BY seq", &[]).await?;
+        let rows = self.client().await?.query("SELECT seq, at, kind, actor, run_id, body FROM public.events ORDER BY seq", &[]).await?;
         Ok(rows
             .into_iter()
             .map(|r| {
@@ -180,11 +241,12 @@ impl Log {
     }
 
     pub async fn load(&self) -> Result<Vec<Event>> {
-        let rows = self.client.query("SELECT seq, at, actor, body FROM public.events ORDER BY seq", &[]).await?;
+        let rows = self.client().await?.query("SELECT seq, at, actor, body FROM public.events ORDER BY seq", &[]).await?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let body: Value = r.get(3);
             let seq: i64 = r.get(0);
+            self.saw(seq);
             let ev: Ev = match serde_json::from_value(body.clone()) {
                 Ok(ev) => ev,
                 // Written by a later release this one was rolled back from:
