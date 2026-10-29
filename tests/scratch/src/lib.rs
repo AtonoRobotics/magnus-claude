@@ -126,18 +126,27 @@ impl Flow {
     /// Serve HTTPS as well, as a real appliance does. Returns its address and
     /// the certificate fingerprint it printed.
     pub async fn with_tls(&mut self) -> (String, String) {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        // Port 0: the appliance logs the port it bound, which no other test can hold.
         let path = self.app.dir.path().join("magnus.toml");
         let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
-        cfg["appliance"].as_table_mut().unwrap().insert("tls_listen".into(), toml::Value::String(format!("127.0.0.1:{port}")));
+        cfg["appliance"].as_table_mut().unwrap().insert("tls_listen".into(), toml::Value::String("127.0.0.1:0".into()));
         std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
         self.app.restart().await;
-        let fp = eventually("the certificate fingerprint in the log", PATIENCE, || {
+        let (addr, fp) = eventually("the HTTPS address and certificate fingerprint in the log", PATIENCE, || {
             let logs = self.app.logs();
-            async move { logs.lines().rev().find_map(|l| l.split("certificate SHA-256 ").nth(1).map(|f| f.trim().to_string())) }
+            async move {
+                let line = logs.lines().rev().find(|l| l.contains("listening on https://"))?;
+                let rest = line.split("listening on https://").nth(1)?;
+                let (addr, fp) = (rest.split(',').next()?.to_string(), rest.split("certificate SHA-256 ").nth(1)?.trim().to_string());
+                Some((addr, fp))
+            }
         })
         .await;
-        (format!("https://127.0.0.1:{port}"), fp)
+        // Later restarts keep the port.
+        let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        cfg["appliance"].as_table_mut().unwrap().insert("tls_listen".into(), toml::Value::String(addr.clone()));
+        std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+        (format!("https://{addr}"), fp)
     }
 
     /// What the person saw is what the log says.
