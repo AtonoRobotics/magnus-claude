@@ -208,6 +208,18 @@ pub enum Ev {
         #[serde(default)]
         roles: Option<Vec<String>>,
     },
+    /// The owner set a person's roles in Settings; they replace the config's
+    /// unless the identity provider names the person's roles.
+    RolesSet {
+        person: String,
+        roles: Vec<String>,
+    },
+    /// A person changed their own settings (notifications, privacy); the
+    /// keys given replace those before.
+    PreferencesSet {
+        person: String,
+        prefs: Value,
+    },
     /// A person signed in from an app. The token itself is never logged.
     SignedIn {
         person: String,

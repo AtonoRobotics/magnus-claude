@@ -429,6 +429,10 @@ pub struct State {
     /// Groups and roles from the identity provider, per person, as of their
     /// latest sign-in.
     pub provider_rights: HashMap<String, (Option<Vec<String>>, Option<Vec<String>>)>,
+    /// Roles the owner set in Settings, by person.
+    pub roles_set: HashMap<String, Vec<String>>,
+    /// Each person's own settings, by person.
+    pub preferences: HashMap<String, Value>,
     pub schedules: BTreeMap<String, Schedule>,
     /// Schedule cards from chat the person answered, by card id.
     pub cards: HashMap<String, CardState>,
@@ -581,6 +585,17 @@ impl State {
             }
             Ev::RightsFromProvider { person, groups, roles } => {
                 self.provider_rights.insert(person.clone(), (groups.clone(), roles.clone()));
+            }
+            Ev::RolesSet { person, roles } => {
+                self.roles_set.insert(person.clone(), roles.clone());
+            }
+            Ev::PreferencesSet { person, prefs } => {
+                let p = self.preferences.entry(person.clone()).or_insert_with(|| serde_json::json!({}));
+                if let (Some(p), Some(new)) = (p.as_object_mut(), prefs.as_object()) {
+                    for (k, v) in new {
+                        p.insert(k.clone(), v.clone());
+                    }
+                }
             }
             Ev::SignedIn { .. } | Ev::SignedOut { .. } => {}
             Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title } => {

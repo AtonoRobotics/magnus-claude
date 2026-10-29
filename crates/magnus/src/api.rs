@@ -55,7 +55,7 @@ fn cookie<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v)
 }
 
-fn credential(h: &HeaderMap) -> Option<&str> {
+pub(crate) fn credential(h: &HeaderMap) -> Option<&str> {
     bearer(h).or_else(|| cookie(h, SESSION_COOKIE))
 }
 
@@ -145,6 +145,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .merge(crate::connectors::router())
         .merge(crate::library::router())
         .merge(crate::update::router())
+        .merge(crate::settings::router())
         .layer(axum::middleware::from_fn(cookie_guard))
         .layer(axum::middleware::from_fn(crate::update::app_version))
         .layer(Extension(transport))
@@ -168,11 +169,12 @@ fn over_tls(k: &Kernel, t: Transport, peer: SocketAddr) -> Result<(), Response> 
 /// to a browser as an HttpOnly cookie the page cannot read.
 async fn issue(k: &Kernel, t: Transport, person: &str, app: bool) -> Response {
     let Some(p) = k.person(person) else { return err(StatusCode::FORBIDDEN, format!("{person} is not a person on this appliance.")) };
-    let (session, token) = match k.accounts.open_session(person) {
+    let client = if app { "app" } else { "browser" };
+    let (session, token) = match k.accounts.open_session(person, client) {
         Ok(s) => s,
         Err(e) => return internal(e),
     };
-    let ev = Ev::SignedIn { person: person.to_string(), session: session.id.clone(), client: if app { "app".into() } else { "browser".into() } };
+    let ev = Ev::SignedIn { person: person.to_string(), session: session.id.clone(), client: client.into() };
     if let Err(e) = k.emit(&format!("person:{person}"), ev).await {
         return internal(e);
     }

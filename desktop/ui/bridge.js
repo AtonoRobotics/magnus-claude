@@ -53,7 +53,8 @@ const appBridge = tauri && {
   async updateState() { return this.invoke("update_state"); },
   async updateLook() { return this.invoke("update_look"); },
   async updateInstall() { return this.invoke("update_install"); },
-  async whatsNew() { return this.invoke("whats_new"); },
+  // `again`: also after it was shown once (for Settings).
+  async whatsNew(again = false) { return this.invoke("whats_new", { again }); },
   onUpdateReady(fn) { tauri.event.listen("update-ready", e => fn(e.payload)); },
 };
 

@@ -99,8 +99,7 @@ function nav() {
     ${link("#/schedules", "Schedules")}
     ${link("#/library", "Library")}
     ${link("#/projects", "Projects")}
-    ${isOwner() ? link("#/models", "Models") : ""}
-    ${isOwner() ? link("#/apps", "Apps") : ""}
+    ${link("#/settings", "Settings")}
     ${isDev() ? `<div class="group">Developer</div>
       ${link("#/dev/runs", "Runs")}
       ${link("#/dev/experiments", "Experiments")}
@@ -454,8 +453,11 @@ async function pollInbox() {
     // Interrupt only for decisions a task is waiting on; the rest wait in
     // the inbox until the person looks (U3).
     const told = new Set(load("told", []));
-    const fresh = items.filter(i => i.status === "open" && i.can_respond && i.blocking && !told.has(i.id));
-    for (const i of fresh) Magnus.notify("A task needs you", i.summary);
+    const wants = i => i.blocking ? App.prefs?.notify_blocking !== false : App.prefs?.notify_batched === true;
+    // Each item is considered once, so turning a kind on later does not
+    // bring back everything already waiting.
+    const fresh = items.filter(i => i.status === "open" && i.can_respond && !told.has(i.id));
+    for (const i of fresh.filter(wants)) Magnus.notify(i.blocking ? "A task needs you" : "Something for you", i.summary);
     if (fresh.length) save("told", [...told, ...fresh.map(i => i.id)].slice(-500));
     paint($("nav.side"), nav());
   } catch (e) {
@@ -474,7 +476,7 @@ async function pollVersions() {
     const news = v.changes.filter(c => c.seq > seen);
     const told = load("version-told", 0);
     if (news.length && (v.latest_seq ?? 0) > told) {
-      Magnus.notify("The agent changed", news.map(describeChange).join("; "));
+      if (App.prefs?.notify_agent_changes !== false) Magnus.notify("The agent changed", news.map(describeChange).join("; "));
       save("version-told", v.latest_seq);
     }
   } catch { /* shown on Home */ }
@@ -565,7 +567,7 @@ function killSwitch(ks) {
     ${(ks.sealed || []).length ? `<h3>Sealed until you turn it off</h3><p class="small muted">API keys and app secrets cannot be revoked from here; if you think one leaked, revoke it in that provider's console.</p>
       <ul class="small" data-sealed>${ks.sealed.map(n => `<li class="mono" data-secret="${esc(n)}">${esc(n)}</li>`).join("")}</ul>` : ""}
     ${revoked.length ? `<h3>Revoked${ks.engaged ? "" : ": connect these again"}</h3><table class="t" data-revoked><tbody>${revoked.map(([n, r]) => `<tr data-secret="${esc(n)}"><td class="mono small">${esc(r.adapter ? `${r.adapter} sign-in` : n)}</td><td class="small">${esc(state(r))}</td></tr>`).join("")}</tbody></table>
-      ${ks.engaged ? "" : `<p class="small"><a href="#/models">Models</a>: sign in or enter keys again.</p>`}` : ""}
+      ${ks.engaged ? "" : `<p class="small"><a href="#/settings/models">Models</a>: sign in or enter keys again.</p>`}` : ""}
   </div>`;
 }
 
@@ -883,7 +885,7 @@ route(/^#\/chat\/([^/]+)$/, async (main, thread) => {
 const KIND = {
   approval: "Approval", question: "Question", review: "Review", notice: "Stopped", message: "Note from the agent",
   policy_proposal: "Policy proposal", schedule_proposal: "Recurring task proposal", tool_change: "Changed tool", tool_review: "New app's tools",
-  contract_change: "Contract change",
+  contract_change: "Contract change", deletion_request: "Deletion request",
 };
 const TIER = { read: "reads", sandbox: "workspace only", reversible_write: "can be undone", irreversible: "cannot be undone", financial: "money", prohibited: "prohibited" };
 const AUDIENCE = { private: "only you", org: "people in your organization", public: "anyone" };
@@ -1019,6 +1021,12 @@ function card(i, composed) {
     case "tool_change":
       body = `<div class="what"><div class="field"><span>Tool</span><span class="mono">${esc(d.tool)}</span></div><div class="field"><span>New description</span>${fieldValue(d.description)}</div><div class="field"><span>Inputs</span>${fieldValue(d.input_schema)}</div></div>
         ${buttons(i, [["approve", "Accept the change", "primary"], ["reject", "Keep it blocked"]])}`;
+      break;
+    case "deletion_request":
+      body = `<div class="what"><div class="field"><span>From</span><span>${esc(d.requested_by)}</span></div><div class="field"><span>What</span><span>${esc(d.what)}</span></div>
+        <div class="field"><span>Due</span><span>${esc(new Date(d.due).toLocaleDateString())}</span></div></div>
+        ${i.can_respond ? `<textarea rows="2" data-draft="ans-${esc(i.id)}" placeholder="A note for them: what was deleted, or why not" style="margin-top:10px"></textarea>` : ""}
+        ${buttons(i, [["done", "Deleted", "primary"], ["decline", "Decline"]])}`;
       break;
     case "tool_review":
       body = `<div class="what">${(d.tools || []).map(t => `<div class="field"><span class="mono">${esc(t.tool)}</span>${fieldValue(t.description)}</div>`).join("")}</div>
@@ -1238,8 +1246,7 @@ route(/^#\/task\/([^/]+)$/, async (main, id) => {
 // ---------- Models ----------
 
 const signins = {};
-route(/^#\/models$/, async main => {
-  if (!isOwner()) { paint(main, `<h1>Models</h1><p class="empty">Only the owner connects model providers.</p>`); return; }
+async function modelsSection(main) {
   let pick = null;
   const catalogs = {};
   const catalog = async a => {
@@ -1250,7 +1257,7 @@ route(/^#\/models$/, async main => {
     const [{ adapters }, cur] = await Promise.all([api("GET", "/v1/adapters"), api("GET", "/v1/model")]);
     const p = pick || cur.adapter, models = await catalog(p);
     const chosen = p === cur.adapter ? cur.model : null;
-    paint(main, `<h1>Models</h1><p class="muted">Connect providers here. Keys and sign-ins go to the appliance's vault; this app keeps none.</p>
+    paint(main, `<h2>Models</h2><p class="muted">Connect providers here. Keys and sign-ins go to the appliance's vault; this app keeps none.</p>
       <div class="card"><div class="small muted">New tasks run on</div><div class="mono" style="font-size:16px;margin:2px 0 10px">${esc(cur.adapter)} · ${esc(cur.model)}</div>
         <div class="row"><select id="madapter" aria-label="Provider">${adapters.map(a => `<option ${a.id === p ? "selected" : ""}>${esc(a.id)}</option>`).join("")}</select>
         ${models.ids ? `<select id="mname" aria-label="Model">${chosen && !models.ids.includes(chosen) ? `<option selected>${esc(chosen)}</option>` : ""}${models.ids.map(m => `<option ${m === chosen ? "selected" : ""}>${esc(m)}</option>`).join("")}</select><button class="primary" data-act="use">Use this model</button>` : ""}</div>
@@ -1310,41 +1317,45 @@ route(/^#\/models$/, async main => {
     } catch (err) { toast(err.message); b.disabled = false; }
   };
   await draw();
-});
+}
 
-// ---------- Apps ----------
+// ---------- Connectors ----------
 
 // The person's apps over MCP. The owner adds one by its address, signs in on
 // the app's own page (the code comes back to this computer), and decides
 // what each tool may do; a tool left "not offered" is never shown to the worker.
 const RISKS = [["", "Not offered"], ["read", "Reads only"], ["reversible_write", "Changes things (undoable)"], ["irreversible", "Changes things (cannot undo)"], ["financial", "Moves money"], ["prohibited", "Never"]];
 const AUDIENCES = [["private", "Only the person"], ["internal", "People in the organization"], ["public", "Anyone"]];
-route(/^#\/apps$/, async main => {
-  if (!isOwner()) { paint(main, `<h1>Apps</h1><p class="empty">Only the owner adds apps.</p>`); return; }
+// A tool whose definition changed is blocked until the owner accepts it;
+// the decision is the inbox item's, shown again on its connector.
+const changesFor = name => App.inbox.filter(i => i.status === "open" && (i.kind === "tool_change" && String(i.details?.tool).startsWith(`${name}__`)
+  || i.kind === "tool_review" && (i.details?.tools || []).some(t => String(t.tool).startsWith(`${name}__`))));
+async function connectorsSection(main) {
   const note = {};
   const draw = async () => {
     const { connectors } = await api("GET", "/v1/connectors");
-    paint(main, `<h1>Apps</h1><p class="muted">The person's apps the worker can use: email, calendar, files, chat, business systems. Sign-ins go to the appliance's vault; this computer keeps none.</p>
+    paint(main, `<h2>Connectors</h2><p class="muted">The person's apps the worker can use: email, calendar, files, chat, business systems. Sign-ins go to the appliance's vault; this computer keeps none.</p>
       ${connectors.map(c => `<div class="card" data-app="${esc(c.name)}"><div class="spread"><strong>${esc(c.name)}</strong>
           <span class="row">${c.signed_in ? `<span class="chip ok">connected</span>` : `<span class="chip warn">${esc(c.problem || "not connected")}</span>`}
           ${c.source === "config" ? `<span class="chip">set in the config file</span>` : ""}</span></div>
         <div class="small muted mono">${esc(c.url)}</div>
         <div class="small muted">What it sends reaches: ${esc((AUDIENCES.find(a => a[0] === c.audience) || [, c.audience])[1])} · what comes back: ${esc(c.label)}</div>
         <div class="row" style="margin-top:10px">${c.auth === "oauth" ? `<button ${c.signed_in ? "" : `class="primary"`} data-act="signin" data-app="${esc(c.name)}">${c.signed_in ? "Sign in again" : "Sign in"}</button>` : ""}
-          ${c.source === "app" ? `<button class="link" data-act="remove" data-app="${esc(c.name)}">Remove</button>` : ""}</div>
+          ${c.source === "app" ? `<button class="link" data-act="remove" data-app="${esc(c.name)}">Disconnect</button>` : ""}</div>
         <div data-note="${esc(c.name)}">${note[c.name] || ""}</div>
+        ${changesFor(c.name).map(i => card(i, [])).join("")}
         ${c.tools.length ? `<table class="t small" style="margin-top:10px"><thead><tr><th>Tool</th><th>What the app says it does</th><th>May</th></tr></thead><tbody>
           ${c.tools.map(t => `<tr><td class="mono">${esc(t.name)}</td><td class="muted">${esc(t.description)}</td>
             <td><select data-tool="${esc(t.name)}" data-app="${esc(c.name)}" aria-label="What ${esc(t.name)} may do" ${c.source === "app" ? "" : "disabled"}>
               ${RISKS.map(([v, l]) => `<option value="${v}" ${(t.risk || "") === v ? "selected" : ""}>${esc(l)}${v && v === t.suggested && !t.risk ? " (the app's hint)" : ""}</option>`).join("")}</select></td></tr>`).join("")}</tbody></table>` : ""}
-      </div>`).join("") || `<p class="empty">No apps yet.</p>`}
-      <div class="card"><strong>Add an app</strong>
+      </div>`).join("") || `<p class="empty">No connectors yet.</p>`}
+      <div class="card"><strong>Connect an app</strong>
         <div class="grid2" style="margin-top:8px"><label>Name<input id="aname" placeholder="calendar" autocomplete="off"></label>
           <label>Address (MCP)<input id="aurl" placeholder="https://mcp.example.com/mcp" autocomplete="off"></label>
           <label>What the worker sends there reaches<select id="aaud">${AUDIENCES.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}</select></label>
           <div><div class="small">What comes back</div><label class="row small"><input type="checkbox" id="apriv" checked> is the person's private data</label>
             <label class="row small"><input type="checkbox" id="auntr" checked> may hold text written by others</label></div></div>
-        <div class="row" style="margin-top:10px"><button class="primary" data-act="add">Add</button></div></div>`);
+        <div class="row" style="margin-top:10px"><button class="primary" data-act="add">Connect</button></div></div>`);
   };
   const say = (app, html) => { note[app] = html; const el = $(`[data-note="${CSS.escape(app)}"]`, main); if (el) el.innerHTML = html; };
   const signIn = async app => {
@@ -1370,6 +1381,8 @@ route(/^#\/apps$/, async main => {
     } catch (err) { toast(err.message); draw(); }
   };
   main.onclick = async e => {
+    const it = e.target.closest("button[data-item]");
+    if (it) { await respond(it, main); return draw(); }
     const b = e.target.closest("button[data-act]"); if (!b) return;
     const app = b.dataset.app;
     try {
@@ -1385,7 +1398,7 @@ route(/^#\/apps$/, async main => {
       if (b.dataset.act === "signin") signIn(app);
       if (b.dataset.act === "open") await Magnus.openExternal(b.dataset.url);
       if (b.dataset.act === "remove") {
-        if (!confirm(`Remove ${app}? Its sign-in is revoked and the worker can no longer use it.`)) return;
+        if (!confirm(`Disconnect ${app}? Its sign-in is revoked and the worker can no longer use it.`)) return;
         await api("DELETE", `/v1/connectors/${enc(app)}`);
         delete note[app];
         await draw();
@@ -1393,7 +1406,146 @@ route(/^#\/apps$/, async main => {
     } catch (err) { toast(err.message); b.disabled = false; }
   };
   await draw();
+  every(5000, draw);
+}
+
+// ---------- Settings ----------
+
+// Everything a person can set, in one place; developer views stay in their
+// own group. Sections that need the owner role are shown only to owners.
+const SETTINGS = [
+  ["models", "Models", modelsSection, true], ["connectors", "Connectors", connectorsSection, true], ["account", "Account", accountSection],
+  ["notifications", "Notifications", notificationsSection], ["updates", "Updates", updatesSection], ["data", "Data and privacy", dataSection],
+];
+route(/^#\/settings(?:\/([a-z]+))?$/, async (main, which) => {
+  const shown = SETTINGS.filter(x => !x[3] || isOwner());
+  const sec = shown.find(x => x[0] === which) || shown[0];
+  main.innerHTML = `<h1>Settings</h1><nav class="tabs" aria-label="Settings">${shown.map(([k, label]) =>
+    `<a href="#/settings/${k}" class="${k === sec[0] ? "on" : ""}"${k === sec[0] ? ` aria-current="page"` : ""}>${esc(label)}</a>`).join("")}</nav><section id="setting" data-section="${sec[0]}"></section>`;
+  await sec[2]($("#setting", main));
 });
+// Where these lived before Settings.
+route(/^#\/models$/, () => { location.hash = "#/settings/models"; });
+route(/^#\/apps$/, () => { location.hash = "#/settings/connectors"; });
+
+async function accountSection(el) {
+  const draw = async () => {
+    const [{ sessions }, people] = await Promise.all([api("GET", "/v1/sessions"), isOwner() ? api("GET", "/v1/people") : null]);
+    const FROM = { provider: "from the identity provider", settings: "set here", config: "from the config file" };
+    paint(el, `<h2>Account</h2>
+      <div class="card"><div class="spread"><div><strong>${esc(App.me.name)}</strong> <span class="faint">(${esc(App.me.id)})</span>
+        <div class="small muted">Signed in to ${esc(App.appliance)}${App.me.roles?.length ? ` · roles: ${esc(App.me.roles.join(", "))}` : ""}${App.me.groups?.length ? ` · groups: ${esc(App.me.groups.join(", "))}` : ""}</div></div>
+        <button data-act="sign-out">Sign out</button></div></div>
+      <h3>Devices</h3>
+      ${sessions.length ? `<table class="t" data-devices><tbody>${sessions.map(x => `<tr data-session="${esc(x.id)}"><td>${x.client === "app" ? "Magnus app" : x.client === "browser" ? "Browser" : "Device"}${x.current ? ` <span class="chip ok">this device</span>` : ""}</td>
+        <td class="small muted">signed in ${esc(when(x.created))} · until ${esc(new Date(x.expires).toLocaleDateString())}</td>
+        <td>${x.current ? "" : `<button class="link" data-act="end" data-id="${esc(x.id)}">Sign out</button>`}</td></tr>`).join("")}</tbody></table>`
+        : `<p class="empty">Signed in with an access key; no devices to list.</p>`}
+      ${people ? `<h3>People and roles</h3><table class="t" data-people><thead><tr><th>Person</th><th>Roles</th><th></th></tr></thead><tbody>
+        ${people.people.map(p => `<tr data-person="${esc(p.id)}"><td>${esc(p.name)} <span class="faint">(${esc(p.id)})</span><div class="small faint">${esc(FROM[p.roles_from])}</div></td>
+          <td>${p.roles_from === "provider" ? esc(p.roles.join(", ") || "none")
+            : `<input data-roles="${esc(p.id)}" aria-label="Roles of ${esc(p.name)}" value="${esc(p.roles.join(", "))}" placeholder="none">`}</td>
+          <td>${p.roles_from === "provider" ? "" : `<button data-act="roles" data-id="${esc(p.id)}">Save</button>`}</td></tr>`).join("")}</tbody></table>
+        <p class="small muted">Roles: owner (everything), developer (the developer views), approver:&lt;risk&gt; (approves actions of that risk). Separate several with commas.</p>` : ""}`);
+  };
+  el.onclick = async e => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    try {
+      if (b.dataset.act === "sign-out") return $("nav.side [data-act=sign-out]")?.click();
+      if (b.dataset.act === "end") { b.disabled = true; await api("DELETE", `/v1/sessions/${enc(b.dataset.id)}`); toast("That device is signed out."); }
+      if (b.dataset.act === "roles") {
+        const roles = $(`[data-roles="${CSS.escape(b.dataset.id)}"]`, el).value.split(",").map(x => x.trim()).filter(Boolean);
+        await api("PUT", `/v1/people/${enc(b.dataset.id)}/roles`, { roles });
+        toast("Roles saved.");
+        if (b.dataset.id === App.me.id) { App.me = await api("GET", "/v1/me"); paint($("nav.side"), nav()); }
+      }
+      el._html = null; await draw();
+    } catch (err) { toast(err.message); b.disabled = false; }
+  };
+  await draw();
+}
+
+// Notifications follow the person to every device: the choices live on the appliance.
+const NOTIFY = [["notify_blocking", "A task needs me now", "An approval, a question, or a review a task is waiting on."],
+  ["notify_batched", "Something can wait for me", "Results to look at and proposals: decisions no task is waiting on."],
+  ["notify_agent_changes", "The agent changes", "A new model, instructions, harness or policy."]];
+async function notificationsSection(el) {
+  const draw = async () => {
+    App.prefs = await api("GET", "/v1/preferences");
+    paint(el, `<h2>Notifications</h2><p class="muted">Magnus tells this computer when…</p>
+      <div class="card">${NOTIFY.map(([k, label, hint]) => `<label class="row toggle"><input type="checkbox" data-pref="${k}" ${App.prefs[k] ? "checked" : ""}>
+        <span><span>${esc(label)}</span><span class="small muted" style="display:block">${esc(hint)}</span></span></label>`).join("")}</div>`);
+  };
+  el.onchange = async e => {
+    const c = e.target.closest("input[data-pref]"); if (!c) return;
+    try { App.prefs = await api("PUT", "/v1/preferences", { [c.dataset.pref]: c.checked }); toast("Saved."); } catch (err) { toast(err.message); c.checked = !c.checked; }
+  };
+  await draw();
+}
+
+async function updatesSection(el) {
+  const draw = async () => {
+    const [st, notes, ver, appl] = await Promise.all([Magnus.updateState().catch(() => null), Magnus.whatsNew(true).catch(() => null),
+      api("GET", "/v1/version"), isOwner() ? api("GET", "/v1/updates").catch(() => null) : null]);
+    const para = t => esc(t || "Fixes and improvements.").split(/\n+/).map(l => `<p>${l}</p>`).join("");
+    paint(el, `<h2>Updates</h2>
+      ${st ? `<div class="card" data-app-version><div class="spread"><div><strong>This app</strong> <span class="mono">${esc(st.current)}</span></div>
+          ${st.ready ? `<button class="primary" data-act="restart-update">Restart to update</button>` : `<button data-act="look">Check now</button>`}</div>
+        <div class="small muted">${st.ready ? `Magnus ${esc(st.ready.version)} is downloaded and checked.` : st.error ? `The last look failed: ${esc(st.error)}` : st.can_update ? esc(st.can_update) : "Up to date."}</div>
+        ${st.ready ? `<h3>What's new in ${esc(st.ready.version)}</h3><div class="notes">${para(st.ready.notes)}</div>` : ""}
+        ${notes ? `<h3>What's new in ${esc(notes.version)}</h3><div class="notes">${para(notes.notes)}</div>` : ""}</div>` : ""}
+      <div class="card" data-appliance-version><div class="spread"><div><strong>The appliance</strong> <span class="mono">${esc(ver.version)}</span></div>
+          ${appl?.latest && appl.latest.version !== ver.version ? `<button class="primary" data-act="install">Install ${esc(appl.latest.version)} now</button>` : ""}</div>
+        ${appl ? `<div class="small muted">${appl.automatic ? "Updates install on their own." : "Updates install when you choose."}${appl.previous ? ` Rolls back to ${esc(appl.previous)} if one fails.` : ""}</div>
+          ${appl.latest ? `<h3>What's new in ${esc(appl.latest.version)}</h3><div class="notes">${para(appl.latest.notes)}</div>` : ""}` : ""}</div>`);
+  };
+  el.onclick = async e => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    try {
+      if (b.dataset.act === "restart-update") return restartToUpdate();
+      if (b.dataset.act === "look") { b.disabled = true; await Magnus.updateLook(); await refreshUpdate(); }
+      if (b.dataset.act === "install") { b.disabled = true; await api("POST", "/v1/updates/check", {}); toast("Installing; the appliance restarts in a moment."); }
+      el._html = null; await draw();
+    } catch (err) { toast(err.message); b.disabled = false; }
+  };
+  await draw();
+}
+
+async function dataSection(el) {
+  const draw = async () => {
+    const [prefs, { requests }, backups] = await Promise.all([api("GET", "/v1/preferences"), api("GET", "/v1/deletion-requests"), isOwner() ? api("GET", "/v1/backups").catch(() => null) : null]);
+    App.prefs = prefs;
+    const STATE = { done: ["ok", "done"], decline: ["bad", "declined"] };
+    paint(el, `<h2>Data and privacy</h2>
+      <div class="card"><label class="row toggle"><input type="checkbox" data-pref="feedback_consent" ${prefs.feedback_consent ? "checked" : ""}>
+        <span><span>Send problem reports</span><span class="small muted" style="display:block">When you report a problem, what you wrote and the task's record go to the people who build Magnus. Off: nothing leaves the appliance.</span></span></label></div>
+      <h3>Delete my data</h3>
+      <div class="card"><p class="small muted">The owner is asked, and has 30 days to act. What is deleted leaves every backup within that time.</p>
+        <label for="delwhat">What to delete</label><input id="delwhat" data-draft="delwhat" style="width:100%" placeholder="all of my data">
+        <div class="row" style="margin-top:8px"><button data-act="delete-request">Ask for deletion</button></div>
+        ${requests.length ? `<table class="t small" data-deletions style="margin-top:10px"><tbody>${requests.map(q => `<tr><td>${esc(q.what)}${isOwner() && q.person !== App.me.id ? ` <span class="faint">(${esc(q.person)})</span>` : ""}</td>
+          <td>${q.decision ? `<span class="chip ${STATE[q.decision]?.[0] || ""}">${esc(STATE[q.decision]?.[1] || q.decision)}</span>${q.note ? ` <span class="muted">${esc(q.note)}</span>` : ""}` : `<span class="chip warn">asked</span> due ${esc(new Date(q.due).toLocaleDateString())}`}</td></tr>`).join("")}</tbody></table>` : ""}</div>
+      ${backups ? `<h3>Backups</h3><div class="card"><div class="spread"><span class="small muted">${backups.files.length ? `${backups.files.length} kept for ${esc(backups.keep_days)} days` : "None yet."}${backups.latest ? ` · last ${esc(when(backups.latest.at))}${backups.latest.restored ? ", restored to check it" : `, <span style="color:var(--bad)">did not restore: ${esc(backups.latest.detail)}</span>`}` : ""}</span>
+        <button data-act="backup">Back up now</button></div></div>` : ""}`);
+  };
+  el.onchange = async e => {
+    const c = e.target.closest("input[data-pref]"); if (!c) return;
+    try { App.prefs = await api("PUT", "/v1/preferences", { [c.dataset.pref]: c.checked }); toast("Saved."); } catch (err) { toast(err.message); c.checked = !c.checked; }
+  };
+  el.onclick = async e => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    try {
+      if (b.dataset.act === "delete-request") {
+        const what = $("#delwhat", el).value.trim();
+        if (!confirm(`Ask the owner to delete ${what || "all of your data"}?`)) return;
+        b.disabled = true; await api("POST", "/v1/deletion-requests", { what }); delete drafts.delwhat; toast("Asked. The owner has 30 days to act.");
+      }
+      if (b.dataset.act === "backup") { b.disabled = true; await api("POST", "/v1/backups", {}); toast("Backed up."); }
+      el._html = null; await draw();
+    } catch (err) { toast(err.message); b.disabled = false; }
+  };
+  await draw();
+}
 
 // ---------- start ----------
 
@@ -1459,6 +1611,7 @@ async function boot() {
   Magnus.onUpdateReady(() => refreshUpdate());
   refreshUpdate(true);
   showWhatsNew();
+  App.prefs = await api("GET", "/v1/preferences").catch(() => null);
   await Promise.all([pollInbox(), pollVersions()]);
   background = [setInterval(pollInbox, 5000), setInterval(pollVersions, 30000)];
   go();

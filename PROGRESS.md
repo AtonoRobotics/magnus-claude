@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **Owner's requests in progress (2026-10-29), in this order:** 1 Connectors and Settings (branch `settings`: Connectors were never removed, only named "Apps"; now in Settings with every section); 2 chat message actions (next); 3 composed presentation U8; 4 company knowledge base on M1-M4. Installed-app tests run on Linux; the owner tests Windows in a separate session.
 - The invariant tests pass: 45 of 45, on three consecutive full runs and again after every later change.
 - **Alpha gate (2026-10-29), in order:** 1 kill switch (done, below); 2 roles and multi-user sign-in; 3 removable modules with ablation suites; 4 connectors with an injection suite; 5 signed appliance updates with rollback (with the owner's automatic-updates request: desktop updater, version handshake, "Report a problem"); 6 backup and tested restore; 7 release gating (Linux only, owner's answer 2026-10-29). Then the decision-record audit. Owner's answers (2026-10-29): updates from the owner's own static host (address and upload credentials still needed); problem reports to a private GitHub repo through an intake running on strix-alpha; Windows unsigned for alpha.
 - **strix-alpha (2026-10-29):** browsers could not reach it (HTTPS offered HTTP/2 it does not speak; fix in the `https-http1-only` PR). Its Postgres connection was cut at 12:49 UTC when the shared `magnus-claude-pg` container was restarted for the test runs; 0.2.0 does not reconnect, so it needs a manual restart until 0.2.3 is installed.
