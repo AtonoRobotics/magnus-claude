@@ -334,6 +334,24 @@ pub struct Pin {
     pub approved: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct KnowledgeEntry {
+    pub id: String,
+    pub title: String,
+    pub text: String,
+    pub readers: Vec<Vec<String>>,
+    pub integrity: String,
+    pub source: Value,
+    pub author: String,
+    pub run: Option<String>,
+    pub verification: Option<Value>,
+    pub value: Option<Value>,
+    pub endorsed: Option<Value>,
+    pub at: DateTime<Utc>,
+    /// The last event that changed it, so the index knows it is current.
+    pub version: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct MemoryEntry {
     pub id: String,
@@ -483,6 +501,8 @@ pub struct State {
     pub changed: HashMap<String, (String, Pin)>,
     pub secrets: HashSet<String>,
     pub memory: Vec<MemoryEntry>,
+    /// The company knowledge base; its searchable index is in Postgres.
+    pub knowledge: HashMap<String, KnowledgeEntry>,
     /// Files attached to each task, by task id.
     pub attachments: HashMap<String, Vec<Value>>,
     /// Every person's library, by file id.
@@ -671,6 +691,33 @@ impl State {
                 self.cards.insert(card.clone(), CardState::Declined);
             }
             Ev::MemoryForgotten { id } => self.memory.retain(|m| &m.id != id),
+            Ev::KnowledgeAdded { id, title, text, readers, integrity, source, author, run, verification, value } => {
+                self.knowledge.insert(
+                    id.clone(),
+                    KnowledgeEntry {
+                        id: id.clone(),
+                        title: title.clone(),
+                        text: text.clone(),
+                        readers: readers.clone(),
+                        integrity: integrity.clone(),
+                        source: source.clone(),
+                        author: author.clone(),
+                        run: run.clone(),
+                        verification: verification.clone(),
+                        value: value.clone(),
+                        endorsed: None,
+                        at: e.at,
+                        version: e.seq,
+                    },
+                );
+            }
+            Ev::KnowledgeEndorsed { id, by, item, note } => {
+                if let Some(k) = self.knowledge.get_mut(id) {
+                    k.integrity = "company".into();
+                    k.endorsed = Some(serde_json::json!({ "by": by, "item": item, "note": note, "at": e.at }));
+                    k.version = e.seq;
+                }
+            }
             Ev::ScheduleRemoved { id } => {
                 self.schedules.remove(id);
             }
@@ -800,7 +847,7 @@ impl State {
                     r.replies.push(Reply { step: *step, seq: e.seq, blocks: blocks.clone(), state: state.clone() });
                 }
             }
-            Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } | Ev::SpokenWritten { run, usage, .. } => {
+            Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } | Ev::SpokenWritten { run, usage, .. } | Ev::KnowledgeExtraction { run, usage, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     if let Ev::SpokenWritten { script, .. } = &e.ev {
                         r.spoken = Some(script.clone());

@@ -968,7 +968,7 @@ route(/^#\/chat\/([^/]+)$/, async (main, thread) => {
 const KIND = {
   approval: "Approval", question: "Question", review: "Review", notice: "Stopped", message: "Note from the agent",
   policy_proposal: "Policy proposal", schedule_proposal: "Recurring task proposal", tool_change: "Changed tool", tool_review: "New app's tools",
-  contract_change: "Contract change", deletion_request: "Deletion request", shared: "Shared with you",
+  contract_change: "Contract change", deletion_request: "Deletion request", shared: "Shared with you", endorsement: "Company fact?",
 };
 const TIER = { read: "reads", sandbox: "workspace only", reversible_write: "can be undone", irreversible: "cannot be undone", financial: "money", prohibited: "prohibited" };
 const AUDIENCE = { private: "only you", org: "people in your organization", public: "anyone" };
@@ -1115,6 +1115,20 @@ function card(i, composed) {
         ${i.can_respond ? `<textarea rows="2" data-draft="ans-${esc(i.id)}" placeholder="A note for them: what was deleted, or why not" style="margin-top:10px"></textarea>` : ""}
         ${buttons(i, [["done", "Deleted", "primary"], ["decline", "Decline"]])}`;
       break;
+    // An entry to make a company fact: what it says, where it came from, and
+    // what the appliance found when it checked its citations.
+    case "endorsement": {
+      const ev = d.verification?.evidence || [];
+      const how = { corroborated: "found in independent sources", system_of_record: "found in a system of record" }[d.verification?.how];
+      body = `<div class="msg magnus"><div class="pre">${esc(d.text)}</div></div>
+        <div class="what"><div class="field"><span>Now</span><span>${esc(d.integrity)}${how ? ` (${esc(how)})` : ""}</span></div>
+        <div class="field"><span>Readable by</span><span>${esc((d.readers || []).length ? d.readers.map(c => c.join(" or ")).join(", and ") : "everyone")}</span></div>
+        <div class="field"><span>Asked by</span><span>${esc(d.requested_by)}</span></div>
+        <div class="field"><span>Source</span>${ev.length ? `<ul class="small">${ev.map(c => `<li>${c.found ? "✓" : "✗ not found in"} ${esc(c.source)}: “${esc(c.quote)}”</li>`).join("")}</ul>` : fieldValue(d.source)}</div></div>
+        ${i.can_respond ? `<textarea rows="2" data-draft="ans-${esc(i.id)}" placeholder="A note: how you checked it (optional)" style="margin-top:10px"></textarea>` : ""}
+        ${buttons(i, [["endorse", "Make it a company fact", "primary"], ["decline", "Decline"]])}`;
+      break;
+    }
     case "tool_review":
       body = `<div class="what">${(d.tools || []).map(t => `<div class="field"><span class="mono">${esc(t.tool)}</span>${fieldValue(t.description)}</div>`).join("")}</div>
         ${buttons(i, [["approve", "Let the agent read these", "primary"], ["reject", "Reject"]])}`;
@@ -1169,7 +1183,7 @@ async function respond(btn, root) {
   try {
     await api("POST", `/v1/inbox/${enc(id)}`, body);
     delete drafts[`ans-${id}`]; delete drafts[`rev-${id}`]; delete drafts[`cc-${id}`];
-    toast({ approve: "Approved.", reject: decision === "reject" ? "Done." : "Done.", accept: "Accepted.", answer: "Sent.", dismiss: "Dismissed.", resume: "Continuing.", extend: "Budget doubled." }[decision] || "Done.");
+    toast({ endorse: "It is now a company fact.", approve: "Approved.", reject: decision === "reject" ? "Done." : "Done.", accept: "Accepted.", answer: "Sent.", dismiss: "Dismissed.", resume: "Continuing.", extend: "Budget doubled." }[decision] || "Done.");
     await pollInbox();
   } catch (e) { toast(e.message); btn.disabled = false; }
 }

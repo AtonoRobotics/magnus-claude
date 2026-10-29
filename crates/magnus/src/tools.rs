@@ -137,6 +137,10 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "computer_scroll", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_write", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_search", app: "memory", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // The company knowledge base. A search's result carries the taint of
+    // what it returns; filing research changes nothing outside the appliance.
+    Builtin { name: "knowledge_search", app: "knowledge", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "knowledge_add", app: "knowledge", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // A project's reference file, read when the work needs it (M2). Its
     // result carries the file's own taint; an upload is private and untrusted.
     Builtin { name: "project_read", app: "library", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -354,6 +358,29 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             name: "memory_search".into(),
             description: d("memory_search"),
             input_schema: obj(json!({ "query": { "type": "string" } }), &["query"]),
+        },
+        ToolSpec {
+            name: "knowledge_search".into(),
+            description: d("knowledge_search"),
+            input_schema: obj(json!({ "query": { "type": "string" } }), &["query"]),
+        },
+        ToolSpec {
+            name: "knowledge_add".into(),
+            description: d("knowledge_add"),
+            input_schema: obj(
+                json!({
+                    "title": { "type": "string" },
+                    "text": { "type": "string", "description": d("knowledge_add.text") },
+                    "citations": { "type": "array", "minItems": 1, "description": d("knowledge_add.citations"), "items": { "type": "object", "properties": {
+                        "source": { "type": "string" }, "quote": { "type": "string" }
+                    }, "required": ["source", "quote"] } },
+                    "value": { "type": "object", "description": d("knowledge_add.value"), "properties": {
+                        "key": { "type": "string" }, "type": { "type": "string", "enum": ["number", "boolean", "enum"] }, "options": { "type": "array", "items": { "type": "string" } }
+                    }, "required": ["key", "type"] },
+                    "propose": { "type": "boolean", "description": d("knowledge_add.propose") }
+                }),
+                &["title", "text", "citations"],
+            ),
         },
         ToolSpec {
             name: "project_read".into(),

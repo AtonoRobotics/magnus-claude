@@ -36,6 +36,8 @@ pub struct Kernel {
     pub(crate) leases: Mutex<HashMap<String, String>>,
     pub(crate) live_tools: tokio::sync::Mutex<HashMap<String, (Instant, Vec<AppTool>)>>,
     pub live_text: Arc<Live>,
+    /// The knowledge base's search index.
+    pub knowledge: crate::knowledge::Index,
     /// How long each log append took since boot, in microseconds (V6).
     pub capture: Mutex<Capture>,
 }
@@ -113,10 +115,19 @@ impl Kernel {
             leases: Mutex::new(HashMap::new()),
             live_tools: tokio::sync::Mutex::new(HashMap::new()),
             live_text,
+            knowledge: crate::knowledge::Index::new(&cfg.database.url),
             capture: Mutex::new(Capture::default()),
             cfg,
         });
         k.emit("kernel", Ev::KernelBoot { version: HARNESS_VERSION.into(), pid: std::process::id(), instructions: crate::run::instructions_version() }).await?;
+        // The search index catches up with the log (a restore, a missed
+        // write, a new embedding model) without holding up the boot.
+        let sync = k.clone();
+        tokio::spawn(async move {
+            if let Err(e) = sync.sync_knowledge().await {
+                tracing::warn!("knowledge index: {e:#}");
+            }
+        });
         // Guest processes did not survive the restart; tell runs that used a sandbox (K20).
         let restarted: Vec<(String, u32)> = k.read(|s| {
             s.runs

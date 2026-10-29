@@ -37,6 +37,8 @@ pub fn may_respond(p: &Person, i: &Item) -> bool {
         "approval" => p.is_owner() || p.has_role(&format!("approver:{}", i.details["risk"].as_str().unwrap_or_default())),
         "policy_proposal" => may_set_policy(p, i.details["layer"].as_str().unwrap_or_default()),
         "tool_change" | "tool_review" | "deletion_request" => p.is_owner(),
+        // Only someone with the role who may read the entry makes it a company fact.
+        "endorsement" => crate::knowledge::may_endorse(p) && crate::knowledge::can_read(p, &serde_json::from_value::<Vec<Vec<String>>>(i.details["readers"].clone()).unwrap_or_else(|_| vec![vec![]])),
         _ => i.person == p.id || p.is_owner(),
     }
 }
@@ -258,6 +260,19 @@ impl Kernel {
                     },
                 )
                 .await?;
+            }
+            // An entry becomes a company fact; its source stays attached, and
+            // who endorsed it, from which card, is in the log.
+            ("endorsement", "endorse") => {
+                let entry = item.details["entry"].as_str().unwrap_or_default().to_string();
+                if self.read(|s| s.knowledge.get(&entry).map(|e| e.integrity.clone())).is_none() {
+                    return Ok(Answer::Invalid("the entry no longer exists".into()));
+                }
+                self.emit(&actor, resolve(None)).await?;
+                self.endorse(&actor, &p.id, &item.id, &entry, text.clone()).await?;
+            }
+            ("endorsement", "decline") => {
+                self.emit(&actor, resolve(None)).await?;
             }
             // The owner says what became of a request to delete someone's
             // data; the note tells the person.
