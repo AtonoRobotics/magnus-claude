@@ -115,10 +115,9 @@ impl Kernel {
             let rid = run_id.to_string();
             let out = self
                 .adapters
-                .complete(adapter, model, &system, messages.clone(), tools.clone(), run.config.max_tokens, |t| {
-                    let _ = live.send((rid.clone(), t.to_string()));
-                })
+                .complete(adapter, model, &system, messages.clone(), tools.clone(), run.config.max_tokens, |t| live.send(&rid, t))
                 .await;
+            live.end(&rid);
             match out {
                 Ok(t) => {
                     let has_call = t.blocks.iter().any(|b| matches!(b, magnus_adapter_proto::Block::ToolCall { .. }));
@@ -149,14 +148,7 @@ impl Kernel {
                     // A chat turn ends with its answer: no contract, no Done
                     // check. What it did on the way went through execute().
                     if !has_call && chat {
-                        self.emit("kernel", Ev::Completed { run: run_id.into(), summary: answer, view: None, spoken: None }).await?;
-                        self.on_stop(run_id, true).await;
-                        // What the person asked for and did not happen is in the inbox too (K24).
-                        let unfinished = self.unfinished_chat_actions(&run);
-                        if !unfinished.is_empty() {
-                            self.notice(&run, format!("Not done: {}", self.title_of(&run)), json!({ "reason": "chat_action_failed", "evidence": unfinished })).await?;
-                        }
-                        self.after_end(run_id);
+                        self.end_chat_turn(&run, answer).await?;
                         return Ok(Flow::Stop);
                     }
                     if !has_call {

@@ -20,6 +20,64 @@ pub const CHAT_QUESTION: &str = "What was Q3 revenue?";
 pub const CHAT_ANSWER: &str = "Q3 revenue was 41.7M.";
 pub const TASK: &str = "Write me a one-line summary of Q3 revenue (41.7M, Q2 was 38.2M) and send me the file.";
 
+/// A scripted reply's text beside its tool calls: the scripted model writes
+/// either text or tool calls, so a call to `say` is passed on as text.
+pub fn say(text: &str) -> (&'static str, Value) {
+    (SAY, json!({ "text": text }))
+}
+
+const SAY: &str = "say";
+
+/// In a stream, the pause between a `say` text and the tool calls after it,
+/// as a model takes time to write them: longer than a chat view's 2-second
+/// refresh, so a view sees the text streaming before anything else.
+pub const SAID_PAUSE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A model response with each `say` call turned into the text it carries,
+/// as one JSON message or as its stream of events, each marked if it comes
+/// after a pause.
+fn said(body: &str, stream: bool) -> Vec<(bool, String)> {
+    let is_say = |b: &Value| b["type"] == "tool_use" && b["name"] == SAY;
+    if !stream {
+        let Ok(mut msg) = serde_json::from_str::<Value>(body) else { return vec![(false, body.to_string())] };
+        let Some(content) = msg["content"].as_array().cloned() else { return vec![(false, body.to_string())] };
+        let content: Vec<Value> = content.into_iter().map(|b| if is_say(&b) { json!({ "type": "text", "text": b["input"]["text"] }) } else { b }).collect();
+        if !content.iter().any(|b| b["type"] == "tool_use") {
+            msg["stop_reason"] = json!("end_turn");
+        }
+        msg["content"] = json!(content);
+        return vec![(false, msg.to_string())];
+    }
+    let (mut says, mut calls) = (std::collections::HashSet::new(), 0);
+    let mut out = vec![];
+    for event in body.split("\n\n").filter(|e| !e.trim().is_empty()) {
+        let (name, data) = event.split_once("\ndata: ").unwrap_or((event, ""));
+        let Ok(mut d) = serde_json::from_str::<Value>(data) else {
+            out.push((false, format!("{event}\n\n")));
+            continue;
+        };
+        let mut pause = false;
+        match d["type"].as_str() {
+            Some("content_block_start") if is_say(&d["content_block"]) => {
+                says.insert(d["index"].as_u64());
+                d["content_block"] = json!({ "type": "text", "text": "" });
+            }
+            Some("content_block_start") if d["content_block"]["type"] == "tool_use" => {
+                pause = !says.is_empty();
+                calls += 1
+            }
+            Some("content_block_delta") if says.contains(&d["index"].as_u64()) => {
+                let input: Value = serde_json::from_str(d["delta"]["partial_json"].as_str().unwrap_or("{}")).unwrap_or_default();
+                d["delta"] = json!({ "type": "text_delta", "text": input["text"] });
+            }
+            Some("message_delta") if calls == 0 && !says.is_empty() => d["delta"]["stop_reason"] = json!("end_turn"),
+            _ => {}
+        }
+        out.push((pause, format!("{name}\ndata: {d}\n\n")));
+    }
+    out
+}
+
 /// `/v1/models` answered here, since connecting a key checks it there;
 /// everything else goes to the scripted model.
 pub async fn provider(model: &FakeModel) -> String {
@@ -44,7 +102,15 @@ pub async fn provider_with(model: &FakeModel, ids: &[&str]) -> String {
         if let Some(ct) = r.headers().get("content-type").cloned() {
             resp = resp.header("content-type", ct);
         }
-        resp.body(Body::from(r.bytes().await.unwrap())).unwrap()
+        let stream = resp.headers_ref().and_then(|h| h.get("content-type")).is_some_and(|c| c.as_bytes().starts_with(b"text/event-stream"));
+        let body = String::from_utf8_lossy(&r.bytes().await.unwrap()).to_string();
+        let chunks = futures::StreamExt::then(futures::stream::iter(said(&body, stream)), |(pause, chunk)| async move {
+            if pause {
+                tokio::time::sleep(SAID_PAUSE).await;
+            }
+            Ok::<_, std::convert::Infallible>(chunk)
+        });
+        resp.body(Body::from_stream(chunks)).unwrap()
     }
     let app = Router::new()
         .route("/v1/models", get(move || async move { Json(listing) }))

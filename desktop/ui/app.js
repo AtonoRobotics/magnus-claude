@@ -792,7 +792,18 @@ async function showNewChat(main, project) {
 async function showThread(main, thread) {
   await chatLayout(main, thread);
   const projects = await projectList();
-  const ui = { editing: null, sharing: null, people: [] };
+  // An answer being written shows as it streams; `live` holds its text so far.
+  const ui = { editing: null, sharing: null, people: [], live: {} };
+  const listening = {};
+  const listen = entries => {
+    const running = new Set(entries.filter(e => e.kind === "turn" && e.status === "running").map(e => e.task_id));
+    for (const id of running) if (!listening[id]) listening[id] = Magnus.live(id, t => {
+      ui.live[id] = (ui.live[id] || "") + t;
+      const el = $(`[data-live="${CSS.escape(id)}"]`, main);
+      if (el) el.textContent = ui.live[id];
+    });
+    for (const id of Object.keys(listening)) if (!running.has(id)) { listening[id](); delete listening[id]; delete ui.live[id]; }
+  };
   let shown = [];
   const draw = async () => {
     const [{ entries }, { threads }] = await Promise.all([api("GET", `/v1/chat/${enc(thread)}`), api("GET", "/v1/chat")]);
@@ -801,6 +812,8 @@ async function showThread(main, thread) {
     const head = `<div class="spread thread-head"><span class="small">${here?.project ? `In the project <a href="#/project/${enc(here.project.id)}">${esc(here.project.name)}</a>` : ""}</span>${moveControl(thread, here?.project, projects)}</div>`;
     const body = entries.map(e => `<div class="entry ${e.kind === "message" ? "me" : "them"}" data-entry="${esc(e.id || "")}" data-kind="${esc(e.kind)}">${entry(e, ui)}${msgActions(e, ui)}</div>`).join("");
     const grew = paint($("#thread", main), head + body);
+    for (const e of entries.filter(e => e.view)) fill($(`iframe[data-shown="${CSS.escape(e.id)}"]`, main), e.view);
+    listen(entries);
     if (grew && !ui.editing && !ui.sharing) $("#thread", main).lastElementChild?.scrollIntoView({ block: "end" });
   };
   const path = (id, act) => `/v1/chat/${enc(thread)}/entries/${enc(id)}/${act}`;
@@ -827,6 +840,8 @@ async function showThread(main, thread) {
       }
       case "export": return toast(`Saved ${await Magnus.download(path(id, "export"), safeName(e))}`);
       case "save": await api("POST", path(id, "save"), {}); return toast("Saved to the library.");
+      case "listen": { b.disabled = true; try { await Magnus.speak((await api("POST", path(id, "spoken"), {})).script); } finally { b.disabled = false; } return; }
+      case "hush": return Magnus.stopSpeaking();
       case "task": { const r = await api("POST", path(id, "task"), {}); toast("Started a task."); await draw(); return r; }
       case "delete":
         if (!confirm("Delete this message? It leaves this chat and what Magnus reads next; the record keeps it.")) return;
@@ -834,7 +849,7 @@ async function showThread(main, thread) {
     }
   };
   App.redraw = draw;
-  onLeave(() => { App.redraw = null; });
+  onLeave(() => { App.redraw = null; listen([]); Magnus.stopSpeaking(); });
   $("#thread", main).onclick = async e => {
     const m = e.target.closest("[data-msg-act]");
     if (m) { try { await msgAct(m, m.closest("[data-entry]")); } catch (err) { toast(err.message); m.disabled = false; } return; }
@@ -898,11 +913,12 @@ const entryText = e => e.kind === "result" ? `${e.title} (${e.status})\n\n${e.su
 const safeName = e => `${(entryText(e).split(/\s+/).slice(0, 6).join(" ").replace(/[^\p{L}\p{N} -]/gu, " ").trim().replace(/\s+/g, "-") || "message")}.md`;
 
 // What a person can do with each entry. Edit is for their own messages,
-// Retry for Magnus's answers; the rest for every entry.
+// Retry for Magnus's answers, and Read aloud for an answer, from a script
+// written for listening; the rest for every entry.
 function msgActions(e, ui) {
   if (!e.id) return "";
   const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn";
-  const acts = [["copy", "Copy"], mine && ["edit", "Edit"], magnus && ["retry", "Retry"], ["branch", "Branch"], ["share", "Share"],
+  const acts = [["copy", "Copy"], mine && ["edit", "Edit"], magnus && ["retry", "Retry"], e.kind === "answer" && ["listen", "Read aloud"], e.kind === "answer" && ["hush", "Stop"], ["branch", "Branch"], ["share", "Share"],
     ["export", "Export"], ["save", "Save to library"], ["task", "Make a task"], ["delete", "Delete"]].filter(Boolean);
   const share = ui.sharing === e.id ? `<div class="row small share-to"><label class="sr" for="share-${esc(e.id)}">Share with</label>
     <select id="share-${esc(e.id)}" data-share-to>${ui.people.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>
@@ -916,10 +932,10 @@ function entry(e, ui = {}) {
       ? `<div class="msg me editing"><label class="sr" for="edit-${esc(e.id)}">Edit and resend</label><textarea id="edit-${esc(e.id)}" rows="3" data-draft="edit-${esc(e.id)}"></textarea>
         <div class="row small"><button class="primary" data-msg-act="edit-send">Send</button><button class="link" data-msg-act="edit-cancel">Cancel</button></div></div>`
       : `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div>${e.files?.length ? `<div class="small files">${e.files.map(fileChip).join(" ")}</div>` : ""}</div>`;
-    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div>${verdictBar(e.task_id, e.verdict)}</div>`;
+    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div>${e.view ? `<iframe class="composed" sandbox="allow-same-origin" title="What Magnus showed" data-shown="${esc(e.id)}"></iframe>` : ""}${verdictBar(e.task_id, e.verdict)}</div>`;
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
-      : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}${waitingLink(e)}</div></div>`;
+      : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}${waitingLink(e)}</div>${e.status === "running" ? `<div class="pre" data-live="${esc(e.task_id)}">${esc(ui.live?.[e.task_id] || "")}</div>` : ""}</div>`;
     case "tasks": return `<div class="card flat chatcard" data-chat-tasks="${esc(e.from_run)}"><div class="kind">${e.tasks.length === 1 ? "Started a task" : `Started ${e.tasks.length} tasks`}</div>
       <ul class="tlist">${e.tasks.map(t => `<li class="crow" data-chat-task="${esc(t.task_id)}"><a class="ttl" href="#/task/${enc(t.task_id)}" title="${esc(t.text)}">${esc(t.title)}</a><span class="small why">${t.waiting_item ? `<a href="#/inbox" data-waiting="${esc(t.waiting_item)}">${esc(WAITING[t.waiting_on] || "waiting for you")}</a>` : ""}</span>${chip(t.status)}</li>`).join("")}</ul>
       <div class="small muted">${e.tasks.length === 1 ? "It is" : "They are"} in Tasks; results post here.</div></div>`;

@@ -616,6 +616,14 @@ pub enum Ev {
         blocks: Vec<magnus_adapter_proto::Block>,
         usage: magnus_adapter_proto::Usage,
     },
+    /// An answer written for listening, by a model call with no tools, when
+    /// the person first asked to hear it.
+    SpokenWritten {
+        run: String,
+        model: String,
+        script: String,
+        usage: magnus_adapter_proto::Usage,
+    },
     /// The person had a memory forgotten; it is never read back again.
     MemoryForgotten {
         id: String,
@@ -654,6 +662,7 @@ impl Ev {
             | BudgetExtended { run, .. }
             | Memory { run, .. }
             | MemoryPass { run, .. }
+            | SpokenWritten { run, .. }
             | Output { run, .. } => Some(run),
             Item { run, .. } => run.as_deref(),
             _ => None,
