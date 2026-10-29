@@ -65,7 +65,8 @@ if (!provider) await step("sign in", async () => {
 });
 
 await step("connect Claude", async () => {
-  await page.getByRole("link", { name: "Models" }).click();
+  await page.getByRole("link", { name: "Settings" }).click();
+  await page.getByRole("navigation", { name: "Settings" }).getByRole("link", { name: "Models" }).click();
   const card = page.locator("[data-adapter=anthropic]");
   await card.getByRole("button", { name: "Connect" }).click();
   await card.getByLabel("API key").fill(apiKey);

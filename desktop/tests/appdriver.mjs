@@ -23,8 +23,8 @@ export async function open(wd, app, shots, prefix) {
   const s = p => `/session/${session}${p}`;
   const d = { call, s };
   d.run = (script, ...args) => call("POST", s("/execute/sync"), { script, args });
-  d.until = async (what, f) => {
-    const end = Date.now() + T;
+  d.until = async (what, f, ms = T) => {
+    const end = Date.now() + ms;
     let last;
     while (Date.now() < end) {
       try { const v = await f(); if (v) return v; } catch (e) { last = e; }

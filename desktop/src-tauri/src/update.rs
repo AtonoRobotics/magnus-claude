@@ -129,14 +129,18 @@ pub async fn update_install<R: Runtime>(handle: AppHandle<R>) -> Result<(), Stri
     handle.restart();
 }
 
-/// What changed in this version, once, after an update brought it.
+/// What changed in this version, after an update brought it: once for the
+/// window shown at start, and `again` whenever Settings asks.
 #[tauri::command]
-pub fn whats_new<R: Runtime>(handle: AppHandle<R>) -> Option<Value> {
+pub fn whats_new<R: Runtime>(handle: AppHandle<R>, again: Option<bool>) -> Option<Value> {
     let f = whats_new_file(&handle)?;
-    let v: Value = serde_json::from_slice(&std::fs::read(&f).ok()?).ok()?;
-    if v["version"].as_str() == Some(crate::app_version().as_str()) {
-        let _ = std::fs::remove_file(&f);
-        return Some(v);
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&f).ok()?).ok()?;
+    if v["version"].as_str() != Some(crate::app_version().as_str()) || (v["shown"] == true && again != Some(true)) {
+        return None;
     }
-    None
+    if v["shown"] != true {
+        v["shown"] = true.into();
+        let _ = std::fs::write(&f, serde_json::to_vec(&v).unwrap_or_default());
+    }
+    Some(v)
 }

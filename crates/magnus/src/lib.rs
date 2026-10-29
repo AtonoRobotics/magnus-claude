@@ -28,6 +28,7 @@ pub mod oidc;
 pub mod policy;
 pub mod run;
 pub mod sandbox;
+pub mod settings;
 pub mod spawn;
 pub mod speech;
 pub mod state;

@@ -29,6 +29,8 @@ pub struct AppState {
     pub calls: Vec<(String, Value)>,
     /// Seconds each access token lasts.
     pub expires_in: i64,
+    /// list_events' description as the app now advertises it, if changed.
+    pub changed: Option<String>,
     n: usize,
 }
 
@@ -46,9 +48,9 @@ fn oauth_error(status: u16, code: &str) -> Response {
     Response::builder().status(status).header("content-type", "application/json").body(Body::from(json!({ "error": code }).to_string())).unwrap()
 }
 
-fn tools() -> Value {
+fn tools(changed: Option<String>) -> Value {
     json!([
-        { "name": "list_events", "description": "List calendar events.", "inputSchema": { "type": "object", "properties": {} }, "annotations": { "readOnlyHint": true } },
+        { "name": "list_events", "description": changed.unwrap_or_else(|| "List calendar events.".into()), "inputSchema": { "type": "object", "properties": {} }, "annotations": { "readOnlyHint": true } },
         { "name": "create_event", "description": "Create a calendar event.", "inputSchema": { "type": "object", "properties": { "title": { "type": "string" } } }, "annotations": { "readOnlyHint": false, "destructiveHint": false } },
         { "name": "delete_all", "description": "Delete every event.", "inputSchema": { "type": "object", "properties": {} } }
     ])
@@ -66,7 +68,7 @@ async fn mcp(State((base, st)): S, h: HeaderMap, Json(req): Json<Value>) -> Resp
     let id = req["id"].clone();
     let result = match req["method"].as_str().unwrap_or_default() {
         "initialize" => json!({ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "calendar", "version": "1" } }),
-        "tools/list" => json!({ "tools": tools() }),
+        "tools/list" => json!({ "tools": tools(st.lock().unwrap().changed.clone()) }),
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or_default().to_string();
             let mut s = st.lock().unwrap();

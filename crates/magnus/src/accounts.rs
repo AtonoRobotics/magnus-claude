@@ -24,6 +24,9 @@ pub struct Session {
     pub person: String,
     pub created: DateTime<Utc>,
     pub expires: DateTime<Utc>,
+    /// What signed in: "app" or "browser".
+    #[serde(default)]
+    pub client: String,
 }
 
 pub enum SignInError {
@@ -98,8 +101,8 @@ impl Accounts {
         read_json::<BTreeMap<String, String>>(&self.dir.join("passwords.json")).map(|m| m.contains_key(person)).unwrap_or(false)
     }
 
-    /// Check a password and open a session. Returns the session and its token.
-    pub fn sign_in(&self, person: &str, password: &str) -> Result<std::result::Result<(Session, String), SignInError>> {
+    /// Check a password. The caller opens the session.
+    pub fn sign_in(&self, person: &str, password: &str) -> Result<std::result::Result<(), SignInError>> {
         let now = Utc::now();
         let window = Duration::minutes(self.cfg.lockout_minutes as i64);
         {
@@ -132,11 +135,11 @@ impl Accounts {
             return Ok(Err(SignInError::Rejected));
         }
         self.failures.lock().unwrap().remove(person);
-        self.open_session(person).map(Ok)
+        Ok(Ok(()))
     }
 
     /// Open a session for a person whose identity is already established.
-    pub fn open_session(&self, person: &str) -> Result<(Session, String)> {
+    pub fn open_session(&self, person: &str, client: &str) -> Result<(Session, String)> {
         let now = Utc::now();
         let mut raw = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut raw);
@@ -146,6 +149,7 @@ impl Accounts {
             person: person.to_string(),
             created: now,
             expires: now + Duration::days(self.cfg.session_days as i64),
+            client: client.to_string(),
         };
         let mut s = self.sessions.lock().unwrap();
         s.insert(token_hash(&token), session.clone());
@@ -157,6 +161,26 @@ impl Accounts {
     pub fn session(&self, token: &str) -> Option<Session> {
         let s = self.sessions.lock().unwrap();
         s.get(&token_hash(token)).filter(|x| x.expires > Utc::now()).cloned()
+    }
+
+    /// A person's live sessions, newest first, each with whether it is the
+    /// one `token` belongs to.
+    pub fn sessions_of(&self, person: &str, token: &str) -> Vec<(Session, bool)> {
+        let now = Utc::now();
+        let mine = token_hash(token);
+        let s = self.sessions.lock().unwrap();
+        let mut out: Vec<(Session, bool)> = s.iter().filter(|(_, x)| x.person == person && x.expires > now).map(|(h, x)| (x.clone(), *h == mine)).collect();
+        out.sort_by(|a, b| b.0.created.cmp(&a.0.created));
+        out
+    }
+
+    /// End one of a person's sessions by its id: that device is signed out.
+    pub fn end(&self, person: &str, id: &str) -> Result<Option<Session>> {
+        let mut s = self.sessions.lock().unwrap();
+        let Some(h) = s.iter().find(|(_, x)| x.person == person && x.id == id).map(|(h, _)| h.clone()) else { return Ok(None) };
+        let gone = s.remove(&h);
+        self.save(&s)?;
+        Ok(gone)
     }
 
     pub fn sign_out(&self, token: &str) -> Result<Option<Session>> {

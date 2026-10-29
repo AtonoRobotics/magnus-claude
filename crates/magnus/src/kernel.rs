@@ -187,8 +187,13 @@ impl Kernel {
     /// A person as every decision sees them: from the config, with the
     /// groups and roles the identity provider gave at their latest sign-in
     /// in place of the config's (E2).
+    /// A person's rights: the identity provider's where it names them, else
+    /// the roles the owner set in Settings, else the config's.
     pub fn person(&self, id: &str) -> Option<Person> {
         let mut p = self.cfg.person(id)?.clone();
+        if let Some(r) = self.read(|s| s.roles_set.get(id).cloned()) {
+            p.roles = r;
+        }
         if let Some((groups, roles)) = self.read(|s| s.provider_rights.get(id).cloned()) {
             if let Some(g) = groups {
                 p.groups = g;

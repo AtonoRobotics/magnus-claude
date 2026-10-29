@@ -1,7 +1,7 @@
 // Two people on one installed app, one after the other: the owner signs in
 // through the identity provider and sees the owner's controls and their task;
 // they sign out (the shell forgets the session) and a colleague signs in on
-// the same machine, with only their own rights: no Models, no kill switch,
+// the same machine, with only their own rights: no Models in Settings, no kill switch,
 // not the owner's task.
 //
 // MAGNUS_WEBDRIVER  tauri-driver's address      MAGNUS_APP  the app binary
@@ -20,8 +20,9 @@ const shows = t => d.run("return document.body.innerText.includes(arguments[0])"
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await d.step("the owner sees the owner's controls and their task", async () => {
-  await d.xpath("//nav//a[normalize-space()='Models']");
   await d.css('[data-kill-switch="off"]');
+  await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
+  await d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Models']");
   await d.click(d.xpath("//nav//a[normalize-space()='Tasks']"));
   await d.seen(title);
 });
@@ -42,7 +43,9 @@ await d.step("the colleague has only their own rights", async () => {
   const who = await d.text(d.css("nav .who"));
   if (!who.includes(`(${other})`)) throw new Error(`signed in as ${who}`);
   if (await d.run("return !!document.querySelector('[data-kill-switch]')")) throw new Error("a colleague sees the kill switch");
-  if (await d.run("return [...document.querySelectorAll('nav a')].some(a => a.innerText.trim() === 'Models')")) throw new Error("a colleague sees Models");
+  await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
+  await d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Account']");
+  if (await d.run("return [...document.querySelectorAll('nav a')].some(a => ['Models', 'Connectors'].includes(a.innerText.trim()))")) throw new Error("a colleague sees Models or Connectors");
   await d.click(d.xpath("//nav//a[normalize-space()='Tasks']"));
   await d.xpath("//h1[normalize-space()='Tasks']");
   await new Promise(r => setTimeout(r, 1500));

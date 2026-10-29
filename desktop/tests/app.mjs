@@ -20,7 +20,8 @@ const { step, css, xpath, button, click, type, text, seen, run, until } = d;
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await step("connect Claude", async () => {
-  await click(xpath("//a[normalize-space()='Models']"));
+  await click(xpath("//nav//a[normalize-space()='Settings']"));
+  await click(xpath("//nav[@aria-label='Settings']//a[normalize-space()='Models']"));
   const card = "//div[@data-adapter='anthropic']";
   await click(button("Connect", card));
   await type(css("#key-anthropic"), apiKey);

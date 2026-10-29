@@ -36,7 +36,7 @@ pub fn may_respond(p: &Person, i: &Item) -> bool {
     match i.kind.as_str() {
         "approval" => p.is_owner() || p.has_role(&format!("approver:{}", i.details["risk"].as_str().unwrap_or_default())),
         "policy_proposal" => may_set_policy(p, i.details["layer"].as_str().unwrap_or_default()),
-        "tool_change" | "tool_review" => p.is_owner(),
+        "tool_change" | "tool_review" | "deletion_request" => p.is_owner(),
         _ => i.person == p.id || p.is_owner(),
     }
 }
@@ -258,6 +258,11 @@ impl Kernel {
                     },
                 )
                 .await?;
+            }
+            // The owner says what became of a request to delete someone's
+            // data; the note tells the person.
+            ("deletion_request", "done") | ("deletion_request", "decline") => {
+                self.emit(&actor, resolve(None)).await?;
             }
             ("schedule_proposal", "reject") | ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") => {
                 self.emit(&actor, resolve(None)).await?;
