@@ -459,17 +459,17 @@ impl Kernel {
 
     /// `knowledge_search`: what the asker may read, each entry marked with
     /// its integrity. The result is untrusted unless every entry is a
-    /// company fact, and private when an entry is not readable by everyone
-    /// or is untrusted: the store is internal, and an untrusted entry is
-    /// stored injection that reaches other people's tasks, so with both
-    /// labels the Rule of Two holds every action after it for approval
-    /// (untrusted content informs and never drives an action).
+    /// company fact, and private when an entry is not readable by everyone.
+    /// Untrusted content grants no authority (invariant 4): it may inform how
+    /// a request is carried out, but never adds instructions, widens scope or
+    /// changes policy. That is enforced as everywhere else, by the labels and
+    /// the Rule of Two, never by reading the content for intent.
     pub(crate) async fn knowledge_search(&self, run_id: &str, query: &str) -> Result<(String, bool, Option<Value>)> {
         let person = self.read(|s| s.runs.get(run_id).map(|r| r.person.clone())).context("run")?;
         let Some(p) = self.person(&person) else { return Ok(("Nobody to search for.".into(), true, None)) };
         let hits = self.knowledge_for(&p, query).await?;
         let untrusted = hits.iter().any(|h| h["integrity"] != "company");
-        let private = untrusted || hits.iter().any(|h| h["readers"].as_array().is_some_and(|r| !r.is_empty()));
+        let private = hits.iter().any(|h| h["readers"].as_array().is_some_and(|r| !r.is_empty()));
         let text = if hits.is_empty() {
             "Nothing in the knowledge base matches.".to_string()
         } else {
