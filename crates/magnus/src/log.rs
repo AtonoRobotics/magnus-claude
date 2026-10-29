@@ -127,6 +127,18 @@ impl Log {
             .collect()
     }
 
+    /// Every row as stored, for a backup.
+    pub async fn dump(&self) -> Result<Vec<Value>> {
+        let rows = self.client.query("SELECT seq, at, kind, actor, run_id, body FROM public.events ORDER BY seq", &[]).await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let at: DateTime<Utc> = r.get(1);
+                serde_json::json!({ "seq": r.get::<_, i64>(0), "at": at.to_rfc3339(), "kind": r.get::<_, String>(2), "actor": r.get::<_, String>(3), "run_id": r.get::<_, Option<String>>(4), "body": r.get::<_, Value>(5) })
+            })
+            .collect())
+    }
+
     pub async fn load(&self) -> Result<Vec<Event>> {
         let rows = self.client.query("SELECT seq, at, actor, body FROM public.events ORDER BY seq", &[]).await?;
         let mut out = Vec::with_capacity(rows.len());

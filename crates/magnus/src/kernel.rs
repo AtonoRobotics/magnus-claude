@@ -20,7 +20,7 @@ pub const HARNESS_VERSION: &str = concat!("magnus-", env!("CARGO_PKG_VERSION"));
 
 pub struct Kernel {
     pub cfg: Config,
-    log: Log,
+    pub(crate) log: Log,
     state: Mutex<State>,
     write: tokio::sync::Mutex<()>,
     pub vault: Arc<Vault>,

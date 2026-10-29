@@ -9,6 +9,7 @@ pub mod accounts;
 pub mod adapters;
 pub mod api;
 pub mod apps;
+pub mod backup;
 pub mod boundary;
 pub mod browser;
 pub mod chat;

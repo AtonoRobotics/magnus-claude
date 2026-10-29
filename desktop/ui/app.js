@@ -484,8 +484,8 @@ function describeChange(c) {
 
 route(/^#\/home$/, async main => {
   const draw = async () => {
-    const [health, { tasks }, model, ks] = await Promise.all([api("GET", "/v1/health"), api("GET", "/v1/tasks"), api("GET", "/v1/model"),
-      isOwner() ? api("GET", "/v1/kill-switch") : null]);
+    const [health, { tasks }, model, ks, bk] = await Promise.all([api("GET", "/v1/health"), api("GET", "/v1/tasks"), api("GET", "/v1/model"),
+      isOwner() ? api("GET", "/v1/kill-switch") : null, isOwner() ? api("GET", "/v1/backups").catch(() => null) : null]);
     const v = App.versions;
     const seen = load("version", 0);
     const news = v ? v.changes.filter(c => c.seq > seen) : [];
@@ -511,11 +511,18 @@ route(/^#\/home$/, async main => {
       ${active.length ? `<table class="t"><tbody>${active.map(row).join("")}</tbody></table>` : `<p class="empty">Nothing is running. <a href="#/new">Start a task</a>.</p>`}
       <h2>Recent</h2>
       ${recent.length ? `<table class="t"><tbody>${recent.map(row).join("")}</tbody></table>` : `<p class="empty">No finished tasks yet.</p>`}
-      ${ks ? killSwitch(ks) : ""}`);
+      ${ks ? killSwitch(ks) : ""}
+      ${bk ? backups(bk) : ""}`);
   };
   main.onclick = e => {
     const r = e.target.closest("[data-href]"); if (r) location.hash = r.dataset.href;
     if (e.target.closest("[data-act=seen-versions]")) { save("version", App.versions?.latest_seq ?? 0); main._html = null; draw(); }
+    const bb = e.target.closest("[data-act=back-up]");
+    if (bb) {
+      bb.disabled = true;
+      api("POST", "/v1/backups", {}).then(r => { toast(r.restored ? "Backed up, and the backup restores." : `Backed up, but it does not restore: ${r.detail}`); draw(); })
+        .catch(err => { toast(err.message); bb.disabled = false; });
+    }
     const kill = e.target.closest("[data-kill]");
     if (kill) {
       const on = kill.dataset.kill === "on";
@@ -527,6 +534,16 @@ route(/^#\/home$/, async main => {
   await draw();
   every(4000, draw);
 });
+
+// Backups of the log and the vault (K10): the latest, whether it restores,
+// and where they are kept.
+function backups(b) {
+  const l = b.latest;
+  return `<div class="card" data-backups style="margin-top:16px"><div class="spread"><h2 style="margin:0">Backups</h2><button data-act="back-up">Back up now</button></div>
+    <p class="small">${l ? `Latest ${esc(when(l.at))}: ${l.restored ? `<span class="chip ok">restores</span>` : `<span class="chip bad">does not restore</span> ${esc(l.detail)}`}` : "None yet."}
+      Every ${esc(String(b.every_hours))} hours, kept ${esc(String(b.keep_days))} days, in <span class="mono">${esc(b.dir)}</span>.</p>
+    ${b.on_appliance_disk ? `<p class="small" style="color:var(--warn)">They are on the appliance's own disk, so a lost disk loses them too: set <span class="mono">[backup] dir</span> to another disk, and keep a copy of the backup key off the appliance.</p>` : ""}</div>`;
+}
 
 // The owner's kill switch (B11): one control that refuses every action,
 // suspends every task and revokes the vault's sign-ins and keys; after it,

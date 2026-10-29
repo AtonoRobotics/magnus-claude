@@ -128,6 +128,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/secrets", get(secret_names))
         .route("/v1/secrets/{name}", put(put_secret))
         .route("/v1/kill-switch", post(kill_switch).get(kill_switch_state))
+        .route("/v1/backups", get(backups).post(back_up))
         .route("/v1/adapters", get(adapters))
         .route("/v1/model", get(get_model).put(put_model))
         .route("/v1/models", get(models))
@@ -826,6 +827,29 @@ async fn put_secret(State(k): K, h: HeaderMap, Path(name): Path<String>, Json(b)
 
 /// The kill switch and the secrets it took out (owner only): what to sign
 /// in to or enter again, and whether each provider revoked it.
+/// The backups on disk and whether the latest one restored (K10).
+async fn backups(State(k): K, h: HeaderMap) -> Response {
+    if let Err(r) = owner(&k, &h) {
+        return r;
+    }
+    let dir = k.cfg.backup_dir();
+    let files: Vec<Value> = crate::backup::list(&dir).into_iter().map(|(f, b)| json!({ "file": f, "bytes": b })).collect();
+    let last = k.read(|s| s.last_backup.clone()).map(|(file, ok, detail, at)| json!({ "file": file, "restored": ok, "detail": detail, "at": at }));
+    let c = &k.cfg.backup;
+    Json(json!({ "dir": dir, "every_hours": c.every_hours, "keep_days": c.keep_days, "on_appliance_disk": c.dir.is_none(), "latest": last, "files": files })).into_response()
+}
+
+async fn back_up(State(k): K, h: HeaderMap) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match k.back_up(&format!("person:{}", p.id)).await {
+        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
 async fn kill_switch_state(State(k): K, h: HeaderMap) -> Response {
     if let Err(r) = owner(&k, &h) {
         return r;

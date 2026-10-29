@@ -389,6 +389,8 @@ pub struct State {
     pub approvals: Vec<Approval>,
     pub policies: BTreeMap<String, String>,
     pub kill_switch: bool,
+    /// The latest backup's restore check: file, whether it restored, detail, when.
+    pub last_backup: Option<(String, bool, String, DateTime<Utc>)>,
     /// Apps the owner added from the app (config-file apps are not here).
     pub connectors: BTreeMap<String, crate::config::Connector>,
     /// Secrets the kill switch emptied from the vault, latest engagement
@@ -491,6 +493,10 @@ impl State {
                 self.version_changes.push((e.seq, e.at, format!("policy:{layer}"), format!("v{n}")));
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
+            Ev::BackupMade { .. } => {}
+            Ev::BackupChecked { file, ok, detail } => {
+                self.last_backup = Some((file.clone(), *ok, detail.clone(), e.at));
+            }
             Ev::ConnectorAdded { connector } => {
                 self.connectors.insert(connector.name.clone(), connector.clone());
             }

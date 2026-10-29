@@ -15,6 +15,8 @@ pub struct Config {
     pub budget: Budget,
     #[serde(default)]
     pub verifier: Verifier,
+    #[serde(default)]
+    pub backup: Backup,
     /// Removable modules, on or off for every model, and per model.
     #[serde(default)]
     pub modules: Modules,
@@ -191,6 +193,51 @@ pub struct Budget {
 impl Default for Budget {
     fn default() -> Self {
         Budget { max_model_calls: 300, max_actions: 500, max_usd: 50.0 }
+    }
+}
+
+/// Backups of the event log and the vault (K10).
+#[derive(Deserialize, Clone, Debug)]
+pub struct Backup {
+    /// Where backups are written; `<state_dir>/backups` unless set. Set it
+    /// to another disk: a backup on the appliance's own disk is lost with it.
+    #[serde(default)]
+    pub dir: Option<std::path::PathBuf>,
+    /// The key backups are encrypted with; `<state_dir>/backup.key` unless
+    /// set, made on the first backup. Keep a copy off the appliance.
+    #[serde(default)]
+    pub key_file: Option<std::path::PathBuf>,
+    /// Hours between scheduled backups; 0 turns the schedule off.
+    #[serde(default = "every_hours")]
+    pub every_hours: u32,
+    /// Days a backup is kept: the record keeps key-store backups no longer
+    /// than the legal deletion deadline, and the GDPR gives a month to act
+    /// on an erasure request (Art. 12(3)), so a deleted secret leaves every
+    /// backup within it.
+    #[serde(default = "keep_days")]
+    pub keep_days: u32,
+}
+
+/// Daily: with a month kept, a month of daily restore points.
+fn every_hours() -> u32 {
+    24
+}
+fn keep_days() -> u32 {
+    30
+}
+
+impl Default for Backup {
+    fn default() -> Self {
+        Backup { dir: None, key_file: None, every_hours: every_hours(), keep_days: keep_days() }
+    }
+}
+
+impl Config {
+    pub fn backup_dir(&self) -> std::path::PathBuf {
+        self.backup.dir.clone().unwrap_or_else(|| self.appliance.state_dir.join("backups"))
+    }
+    pub fn backup_key_file(&self) -> std::path::PathBuf {
+        self.backup.key_file.clone().unwrap_or_else(|| self.appliance.state_dir.join("backup.key"))
     }
 }
 

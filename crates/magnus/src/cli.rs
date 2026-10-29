@@ -25,8 +25,9 @@ pub fn main() {
             Some("serve") => serve(&args).await,
             Some("conformance") => conformance(&args).await,
             Some("password") => password(&args),
+            Some("restore") => restore(&args).await,
             _ => {
-                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus conformance --config <file> --adapter <id> [--model <id>]");
+                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>");
                 std::process::exit(2);
             }
         }
@@ -40,6 +41,16 @@ pub fn main() {
 fn config(args: &[String]) -> Result<Config> {
     let path = PathBuf::from(arg(args, "--config").context("--config is required")?);
     Config::load(&path).with_context(|| format!("load {}", path.display()))
+}
+
+/// Put a backup back into an empty event log and state directory (K10).
+async fn restore(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    let admin = arg(args, "--admin-url").context("--admin-url is required")?;
+    let from = PathBuf::from(arg(args, "--from").context("--from is required")?);
+    let (n, last) = crate::backup::restore(&cfg, &admin, &from).await?;
+    println!("restored {n} events through {last} and the vault from {}", from.display());
+    Ok(())
 }
 
 async fn migrate(args: &[String]) -> Result<()> {
@@ -61,6 +72,7 @@ async fn serve(args: &[String]) -> Result<()> {
         None => None,
     };
     let k = crate::kernel::Kernel::boot(cfg).await?;
+    crate::backup::schedule(k.clone());
     tokio::spawn(k.clone().sweep());
     let plain = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("listen on {listen}"))?;
     tracing::info!("magnus listening on http://{listen}");

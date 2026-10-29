@@ -128,6 +128,19 @@ pub enum Ev {
         blocks: Vec<magnus_adapter_proto::Block>,
         usage: magnus_adapter_proto::Usage,
     },
+    /// A backup of the log and the vault was written (K10).
+    BackupMade {
+        file: String,
+        through_seq: i64,
+        events: usize,
+        bytes: usize,
+    },
+    /// The backup was restored in memory: whether it would restore.
+    BackupChecked {
+        file: String,
+        ok: bool,
+        detail: String,
+    },
     /// The owner added one of the person's apps (an MCP server).
     ConnectorAdded {
         connector: crate::config::Connector,

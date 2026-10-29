@@ -152,6 +152,14 @@ impl Vault {
         Ok(out)
     }
 
+    /// The vault's key and its encrypted contents as stored, for a backup.
+    pub fn raw(&self) -> Result<(Vec<u8>, String)> {
+        let _g = self.lock.lock().unwrap();
+        let key = std::fs::read(self.dir.join("key"))?;
+        let secrets = std::fs::read_to_string(self.path()).unwrap_or_else(|_| "{}".into());
+        Ok((key, secrets))
+    }
+
     /// Remove a secret (a connector the owner removed).
     pub fn remove(&self, name: &str) -> Result<Option<Secret>> {
         let _g = self.lock.lock().unwrap();
