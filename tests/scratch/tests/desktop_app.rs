@@ -5,6 +5,10 @@
 //!   inbox, see the outcome with its evidence, download the delivered file.
 //! - `desktop/tests/app-library.mjs`: download a file from the library.
 //!
+//! The Windows app runs on another machine: `the_windows_app_passes_against_this_appliance`
+//! serves the appliance on the LAN, and `desktop/tests/remote.mjs` runs the
+//! same scripts there (`.github/workflows/desktop.yml`).
+//!
 //! Needs the built app (`cargo tauri build` in desktop/src-tauri, or
 //! MAGNUS_DESKTOP_APP), `tauri-driver`, `WebKitWebDriver`
 //! (MAGNUS_WEBKIT_DRIVER) and `xvfb-run`. Run with `--ignored`.
@@ -88,7 +92,6 @@ impl Driver {
             .env("MAGNUS_FINGERPRINT", fingerprint)
             .env("MAGNUS_PERSON", PERSON)
             .env("MAGNUS_PROVIDER", IDP_LABEL)
-            .env("MAGNUS_DOWNLOADS", self.downloads())
             .envs(envs.iter().copied())
             .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
             .output()
@@ -142,4 +145,56 @@ async fn the_installed_app_downloads_a_file_from_the_library() {
     let (ok, log) = d.script("app-library.mjs", &url, &fingerprint, &[("MAGNUS_FILE", name), ("MAGNUS_FILE_TEXT", &content)]).await;
     assert!(ok, "the library download failed:\n{log}");
     assert_eq!(std::fs::read_to_string(Path::new(&d.downloads()).join(name)).unwrap(), content);
+}
+
+/// The installed Windows app, on another machine, against an appliance here.
+/// The appliance listens on MAGNUS_LAN_HOST at the first of MAGNUS_LAN_PORTS,
+/// the identity provider at the second, and the third says how to reach them
+/// (`GET /run`) and takes each script's result (`POST /result`), as
+/// `desktop/tests/remote.mjs` sends it. Waits for every script in
+/// `remote.mjs`'s list; the CI job's time limit bounds the wait.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the Windows app running desktop/tests/remote.mjs against this machine"]
+async fn the_windows_app_passes_against_this_appliance() {
+    use axum::{extract::State, routing::{get, post}, Json, Router};
+    use std::sync::{Arc, Mutex};
+    let host = std::env::var("MAGNUS_LAN_HOST").expect("MAGNUS_LAN_HOST: this machine's address on the LAN");
+    let ports: Vec<String> = std::env::var("MAGNUS_LAN_PORTS").expect("MAGNUS_LAN_PORTS: appliance,provider,coordinator").split(',').map(|p| p.trim().to_string()).collect();
+    assert_eq!(ports.len(), 3, "MAGNUS_LAN_PORTS needs three ports: appliance,provider,coordinator");
+
+    let mut f = Flow::start().await;
+    let idp = FakeIdp::start_on(PERSON, &format!("{host}:{}", ports[1])).await;
+    idp.configure(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls_on(&format!("{host}:{}", ports[0])).await;
+    let (name, content) = (format!("kitchen-notes-{}.txt", canary("n")), format!("Tiles from the corner shop. {}\n", canary("library")));
+    use base64::Engine;
+    let (st, v) = f.app.api(PERSON).post("/v1/files", json!({ "name": name, "media_type": "text/plain", "data_b64": base64::engine::general_purpose::STANDARD.encode(&content) })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let key = canary("anthropic-key");
+    let run = json!({
+        "MAGNUS_URL": url, "MAGNUS_FINGERPRINT": fingerprint, "MAGNUS_PERSON": PERSON, "MAGNUS_PROVIDER": IDP_LABEL,
+        "MAGNUS_API_KEY": key, "MAGNUS_TASK": TASK, "MAGNUS_FILE": name, "MAGNUS_FILE_TEXT": content,
+    });
+
+    type Results = Arc<Mutex<Vec<serde_json::Value>>>;
+    let results: Results = Default::default();
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let router = Router::new()
+        .route("/run", get(move || { let run = run.clone(); async move { Json(run) } }))
+        .route("/result", post(|State((r, tx)): State<(Results, tokio::sync::mpsc::UnboundedSender<()>)>, Json(v): Json<serde_json::Value>| async move {
+            let last = v["last"].as_bool().unwrap_or(false);
+            r.lock().unwrap().push(v);
+            if last { let _ = tx.send(()); }
+            "ok"
+        }))
+        .with_state((results.clone(), done_tx));
+    let l = tokio::net::TcpListener::bind(format!("{host}:{}", ports[2])).await.unwrap();
+    tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
+    eprintln!("waiting for the Windows app at http://{host}:{}", ports[2]);
+    done_rx.recv().await.unwrap();
+
+    let results = results.lock().unwrap().clone();
+    let failed: Vec<String> = results.iter().filter(|r| r["ok"] != true).map(|r| format!("{}:\n{}", r["script"], r["log"].as_str().unwrap_or_default())).collect();
+    assert!(!results.is_empty() && failed.is_empty(), "the Windows app failed:\n{}\n{}", failed.join("\n"), f.report().await);
+    f.check_outcome(&key).await;
 }

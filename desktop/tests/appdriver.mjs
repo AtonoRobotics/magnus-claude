@@ -54,6 +54,18 @@ export async function open(wd, app, shots, prefix) {
   return d;
 }
 
+// Do `act` (a click that downloads), then wait for the app's next toast and
+// return the path of the file it saved, or fail with what it said instead.
+// Toasts already showing are from earlier steps and are passed over.
+export async function savedPath(d, act) {
+  await d.run("document.querySelectorAll('.toast').forEach(t => t.dataset.seen = '1')");
+  await act();
+  const said = await d.until("the app to say what happened", () => d.run("const t = [...document.querySelectorAll('.toast:not([data-seen])')]; return t.length ? JSON.stringify(t.map(e => e.innerText)) : null"));
+  const saved = JSON.parse(said).find(t => t.startsWith("Saved "));
+  if (!saved) throw new Error(`the app did not save the file; it said ${said}`);
+  return saved.slice("Saved ".length).trim();
+}
+
 // Connect to the appliance over HTTPS, pinning the certificate it printed,
 // and sign in through the identity provider; the test is the person's
 // browser and approves the code the app shows.

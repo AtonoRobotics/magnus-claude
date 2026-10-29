@@ -7,14 +7,13 @@
 // MAGNUS_WEBDRIVER  tauri-driver's address      MAGNUS_APP  the app binary
 // MAGNUS_URL        the appliance (https)       MAGNUS_FINGERPRINT  what it printed
 // MAGNUS_PROVIDER   the identity provider's name on the sign-in button
-// MAGNUS_PERSON  MAGNUS_API_KEY  MAGNUS_TASK  MAGNUS_DOWNLOADS
+// MAGNUS_PERSON  MAGNUS_API_KEY  MAGNUS_TASK
 // MAGNUS_SHOTS      optional: where to keep screenshots
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { env, open, pinAndSignIn } from "./appdriver.mjs";
+import { readFileSync } from "node:fs";
+import { env, open, pinAndSignIn, savedPath } from "./appdriver.mjs";
 
-const [wd, app, url, fingerprint, provider, person, apiKey, task, downloads] =
-  ["MAGNUS_WEBDRIVER", "MAGNUS_APP", "MAGNUS_URL", "MAGNUS_FINGERPRINT", "MAGNUS_PROVIDER", "MAGNUS_PERSON", "MAGNUS_API_KEY", "MAGNUS_TASK", "MAGNUS_DOWNLOADS"].map(env);
+const [wd, app, url, fingerprint, provider, person, apiKey, task] =
+  ["MAGNUS_WEBDRIVER", "MAGNUS_APP", "MAGNUS_URL", "MAGNUS_FINGERPRINT", "MAGNUS_PROVIDER", "MAGNUS_PERSON", "MAGNUS_API_KEY", "MAGNUS_TASK"].map(env);
 const d = await open(wd, app, process.env.MAGNUS_SHOTS, "app");
 const { step, css, xpath, button, click, type, text, seen, run, until } = d;
 
@@ -63,10 +62,7 @@ await step("see the outcome with its evidence", async () => {
 });
 
 await step("download the delivered file", async () => {
-  await click(css("button[data-act=download]"));
-  await seen("Saved ");
-  const files = await until("the file in Downloads", () => { try { const f = readdirSync(downloads); return f.length ? f : null; } catch { return null; } });
-  const body = readFileSync(join(downloads, files[0]), "utf8");
+  const body = readFileSync(await savedPath(d, () => click(css("button[data-act=download]"))), "utf8");
   if (!body.includes("41.7M")) throw new Error(`the downloaded file holds ${JSON.stringify(body)}`);
 });
 
