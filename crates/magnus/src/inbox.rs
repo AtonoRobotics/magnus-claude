@@ -119,7 +119,13 @@ impl Kernel {
                 }
                 let rule = item.details["rule"].as_str().unwrap_or_default();
                 let unknown = item.details["reason"] == "unknown_outcome";
-                if scope != "once" && (rule.starts_with("kernel:") || unknown) {
+                // Web lookups after reading private, untrusted data may be
+                // allowed for the whole task (B5); other taint asks only once.
+                let lookups = rule == crate::boundary::WEB_LOOKUPS;
+                if lookups && !["once", "task"].contains(&scope.as_str()) {
+                    return Ok(Answer::Invalid("web lookups are allowed once or for this task".into()));
+                }
+                if scope != "once" && !lookups && (rule.starts_with("kernel:") || unknown) {
                     return Ok(Answer::Invalid("this action can only be approved once: it is asked because of what the task has read, or because its outcome is unknown".into()));
                 }
                 // A standing approval is autonomy; only the owner grants it (invariant 6).

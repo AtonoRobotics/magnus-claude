@@ -41,16 +41,99 @@ const Compose = (() => {
     return frame(c, `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(c.title || "line chart")}">${ticks}${xl}${paths}</svg>${legend}${c.unit ? `<p class="cap">Values in ${esc(c.unit)}</p>` : ""}`);
   }
 
-  function part(c, images) {
+  // A delivered file shown in full, drawn from the same components: Markdown
+  // as headings, paragraphs, lists and tables; CSV as a table; other text as
+  // text. `limit` is the appliance's ({chars, rows}); the rest is in the file.
+  const inline = s => s
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g, (_, t, u) => t === u ? u : `${t} (${u})`)
+    .replace(/<(https?:[^>\s]+)>/g, "$1")
+    .replace(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a, b) => a ?? b)
+    .replace(/`([^`]+)`/g, "$1");
+
+  function table(columns, rows, limit) {
+    const t = { type: "table", columns: columns.map(c => c || " "), rows: rows.slice(0, limit.rows).map(r => columns.map((_, k) => r[k] ?? "")) };
+    if (rows.length > limit.rows) t.caption = `The first ${limit.rows} of ${rows.length} rows; the rest are in the file.`;
+    return t;
+  }
+
+  function fromMarkdown(md, limit) {
+    const out = [], lines = md.replace(/\r\n?/g, "\n").split("\n");
+    let para = [], list = null;
+    const endPara = () => { if (para.length) out.push({ type: "text", text: inline(para.join("\n")) }); para = []; };
+    const endList = () => { if (list) out.push(list); list = null; };
+    const cells = l => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => inline(c.trim()));
+    const rule = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      let m;
+      if (/^\s*```/.test(l)) {
+        endPara(); endList();
+        const body = [];
+        while (++i < lines.length && !/^\s*```/.test(lines[i])) body.push(lines[i]);
+        if (body.join("").trim()) out.push({ type: "text", text: body.join("\n") });
+      } else if (!l.trim()) { endPara(); endList(); }
+      else if ((m = l.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/))) { endPara(); endList(); out.push({ type: "heading", text: inline(m[2]) || " ", level: m[1].length }); }
+      else if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(l)) { endPara(); endList(); }
+      else if (l.includes("|") && rule.test(lines[i + 1] || "")) {
+        endPara(); endList();
+        const columns = cells(l), rows = [];
+        for (i += 1; i + 1 < lines.length && lines[i + 1].includes("|") && lines[i + 1].trim(); i++) rows.push(cells(lines[i + 1]));
+        out.push(table(columns, rows, limit));
+      } else if ((m = l.match(/^\s*([-*+]|\d+[.)])\s+(.*)$/))) {
+        endPara();
+        const ordered = /\d/.test(m[1]);
+        if (list && list.ordered !== ordered) endList();
+        (list ||= { type: "list", items: [], ordered }).items.push(inline(m[2]));
+      } else if (list && /^\s{2,}\S/.test(l)) list.items[list.items.length - 1] += " " + inline(l.trim());
+      else { endList(); para.push((l.match(/^\s*>\s?(.*)$/) || [, l])[1].trim()); }
+    }
+    endPara(); endList();
+    return out;
+  }
+
+  function fromCsv(text, limit) {
+    const rows = [];
+    let row = [], cell = "", quoted = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (quoted) {
+        if (c !== '"') cell += c;
+        else if (text[i + 1] === '"') { cell += '"'; i++; }
+        else quoted = false;
+      } else if (c === '"') quoted = true;
+      else if (c === ",") { row.push(cell); cell = ""; }
+      else if (c === "\n" || c === "\r") { if (c === "\r" && text[i + 1] === "\n") i++; row.push(cell); rows.push(row); row = []; cell = ""; }
+      else cell += c;
+    }
+    if (cell || row.length) { row.push(cell); rows.push(row); }
+    const [columns, ...body] = rows.filter(r => r.some(x => x.trim()));
+    return columns ? [table(columns, body, limit)] : [];
+  }
+
+  const TEXT = /^(text\/|application\/(json|xml|csv|x-ndjson|yaml))/;
+  function fileParts(name, f, limit) {
+    if (f?.image) return [{ type: "image", file: name }];
+    if (typeof f?.text !== "string") return [{ type: "text", text: `${name} cannot be shown here; download it from Files.` }];
+    const cut = f.text.length > limit.chars, text = cut ? f.text.slice(0, limit.chars) : f.text;
+    const md = /\.(md|markdown)$/i.test(name) || f.media_type === "text/markdown";
+    const csv = /\.csv$/i.test(name) || /csv/.test(f.media_type);
+    const parts = md ? fromMarkdown(text, limit) : csv ? fromCsv(text, limit) : text.trim() ? [{ type: "text", text }] : [];
+    if (cut) parts.push({ type: "text", text: "The file goes on; the rest is in the file.", muted: true });
+    return parts;
+  }
+
+  function part(c, files, limit) {
     switch (c.type) {
-      case "heading": return `<h2>${esc(c.text)}</h2>`;
-      case "text": return `<p>${esc(c.text)}</p>`;
-      case "list": return frame(c, `<ul>${c.items.map(i => `<li>${esc(i)}</li>`).join("")}</ul>`);
+      case "heading": return c.level > 2 ? `<h4>${esc(c.text)}</h4>` : `<h2>${esc(c.text)}</h2>`;
+      case "text": return `<p${c.muted ? ` class="cap"` : ""}>${esc(c.text)}</p>`;
+      case "list": return frame(c, c.ordered ? `<ol>${c.items.map(i => `<li>${esc(i)}</li>`).join("")}</ol>` : `<ul>${c.items.map(i => `<li>${esc(i)}</li>`).join("")}</ul>`);
       case "table": return frame(c, `<div class="tw"><table><thead><tr>${c.columns.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${c.rows.map(r => `<tr>${r.map(v => `<td class="${typeof v === "number" ? "num" : ""}">${fmt(v)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
       case "stat": return `<div class="stat"><div class="sv">${fmt(c.value)}${c.unit ? `<span class="su"> ${esc(c.unit)}</span>` : ""}</div><div class="sl">${esc(c.label)}</div>${c.caption ? `<p class="cap">${esc(c.caption)}</p>` : ""}</div>`;
       case "bar_chart": return bar(c);
       case "line_chart": return line(c);
-      case "image": return images[c.file] ? frame(c, `<img src="${images[c.file]}" alt="${esc(c.caption || c.file)}">`) : frame(c, `<p class="cap">${esc(c.file)} (not an image this app can show)</p>`);
+      case "image": return files[c.file]?.image ? frame(c, `<img src="${files[c.file].image}" alt="${esc(c.caption || c.file)}">`) : frame(c, `<p class="cap">${esc(c.file)} (not an image this app can show)</p>`);
+      case "file": return `<section class="file" data-file="${esc(c.file)}"><p class="fname">${esc(c.file)}</p>${fileParts(c.file, files[c.file], limit).map(x => part(x, files, limit)).join("\n")}</section>`;
       default: return "";
     }
   }
@@ -62,10 +145,15 @@ const Compose = (() => {
     body { padding: 4px 2px 8px; }
     h2 { font-size: 18px; margin: 18px 0 6px; letter-spacing: -0.01em; }
     h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
-    p { margin: 6px 0 10px; max-width: 70ch; }
+    p { margin: 6px 0 10px; max-width: 70ch; white-space: pre-line; }
+    h4 { font-size: 15px; margin: 14px 0 4px; }
+    ul, ol { max-width: 70ch; }
+    li { margin: 3px 0; }
+    .file { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 4px; }
+    .fname { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
     figure { margin: 14px 0; }
     .cap { color: var(--muted); font-size: 13px; }
-    ul { margin: 6px 0; padding-left: 20px; }
+    ul, ol { margin: 6px 0; padding-left: 20px; }
     .tw { overflow-x: auto; }
     table { border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 6px 12px 6px 0; border-bottom: 1px solid var(--line); }
@@ -87,14 +175,15 @@ const Compose = (() => {
     img { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; }
   `;
 
-  /// A whole document for the frame's srcdoc. `images` maps a delivered
-  /// file's name to a data: URL the app fetched itself.
-  function documentFor(view, images, fontCss) {
-    const body = (view || []).map(c => part(c, images || {})).join("\n");
+  /// A whole document for the frame's srcdoc. `files` maps a delivered
+  /// file's name to what the app fetched itself: {image: a data: URL} or
+  /// {text, media_type}. `limit` is how much of a file to show.
+  function documentFor(view, files, fontCss, limit) {
+    const body = (view || []).map(c => part(c, files || {}, limit || { chars: 160000, rows: 200 })).join("\n");
     return `<!doctype html><html><head><meta charset="utf-8">
       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data: ${location.origin}">
       <style>${fontCss || ""}${CSS}</style></head><body>${body}</body></html>`;
   }
 
-  return { documentFor };
+  return { documentFor, TEXT };
 })();

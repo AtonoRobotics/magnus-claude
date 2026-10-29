@@ -69,7 +69,7 @@ fn replies(page: String) -> Vec<Reply> {
         tool("deliver_file", json!({ "path": "summary.txt" })),
         tool("task_complete", json!({
             "summary": "Wrote the Q3 revenue summary and delivered summary.txt.",
-            "view": [{ "type": "stat", "label": "Q3 revenue", "value": "41.7M" }, { "type": "bar_chart", "title": "Revenue by quarter", "labels": ["Q2", "Q3"], "values": [38.2, 41.7], "unit": "M" }],
+            "deliverable": [{ "type": "file", "file": "summary.txt" }, { "type": "stat", "label": "Q3 revenue", "value": "41.7M" }, { "type": "bar_chart", "title": "Revenue by quarter", "labels": ["Q2", "Q3"], "values": [38.2, 41.7], "unit": "M" }],
             "spoken": "Revenue in the third quarter was forty one point seven million, up from thirty eight point two."
         })),
     ]

@@ -93,6 +93,8 @@ function nav() {
     ${link("#/new", "New task")}
     ${link("#/tasks", "Tasks")}
     ${link("#/schedules", "Schedules")}
+    ${link("#/library", "Library")}
+    ${link("#/projects", "Projects")}
     ${isOwner() ? link("#/models", "Models") : ""}
     ${isDev() ? `<div class="group">Developer</div>
       ${link("#/dev/runs", "Runs")}
@@ -116,9 +118,159 @@ function shell() {
     }
   });
   paint($("nav.side"), nav());
+  // A library file downloads from wherever it is listed; a move control
+  // moves its item into a project or out, wherever it is shown.
+  document.addEventListener("click", async e => {
+    const b = e.target.closest("[data-file-download]");
+    if (!b) return;
+    e.preventDefault();
+    try { toast(`Saved ${await Magnus.download(`/v1/files/${enc(b.dataset.fileDownload)}`, b.dataset.name)}`); } catch (err) { toast(err.message); }
+  });
+  document.addEventListener("change", async e => {
+    const sel = e.target.closest("select[data-move]");
+    if (!sel) return;
+    try {
+      await api("POST", "/v1/moves", { item: sel.dataset.move, project: sel.value || null });
+      toast(sel.value ? `Moved to ${sel.selectedOptions[0].textContent}.` : "Taken out of the project.");
+      await App.redraw?.();
+    } catch (err) { toast(err.message); }
+  });
 }
 
 function route(re, view) { App.routes.push([re, view]); }
+
+// ---------- Files and projects ----------
+
+const kb = n => `${Math.max(1, Math.round(n / 1024))} KB`;
+function fileChip(f) {
+  return `<span class="fchip"><button class="link" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}">${esc(f.name)}</button> <span class="small faint">${esc(kb(f.size))}</span></span>`;
+}
+function readFile(file) {
+  return new Promise((ok, no) => {
+    const r = new FileReader();
+    r.onload = () => ok({ name: file.name, media_type: file.type || "application/octet-stream", data_b64: String(r.result).slice(String(r.result).indexOf(",") + 1) });
+    r.onerror = () => no(new Error(`Could not read ${file.name}`));
+    r.readAsDataURL(file);
+  });
+}
+// Upload chosen files to the library (into a project, or in a thread).
+async function upload(list, where = {}) {
+  const out = [];
+  for (const file of list) out.push(await api("POST", "/v1/files", { ...(await readFile(file)), ...where }));
+  return out;
+}
+async function projectList() {
+  return (await api("GET", "/v1/projects").catch(() => ({ projects: [] }))).projects;
+}
+function projectOptions(projects, current, none = "No project") {
+  return `<option value="">${esc(none)}</option>${projects.map(p => `<option value="${esc(p.id)}"${p.id === current ? " selected" : ""}>${esc(p.name)}</option>`).join("")}`;
+}
+// A control that moves an item into one of the person's projects, or out.
+function moveControl(item, current, projects) {
+  return `<label class="small move"><span class="muted">Project</span> <select data-move="${esc(item)}" aria-label="Project">${projectOptions(projects, current?.id)}</select></label>`;
+}
+// A file input behind a button; `onFiles` gets the chosen files.
+function attachButton(label = "Add files") {
+  return `<label class="button attach">${esc(label)}<input type="file" multiple hidden data-attach></label>`;
+}
+
+route(/^#\/library$/, async main => {
+  let q = "", project = "";
+  const projects = await projectList();
+  paint(main, `<h1>Library</h1><p class="muted">Every file you uploaded and every file Magnus delivered to you.</p>
+    <div class="row lib-bar"><label class="sr" for="lq">Search files</label><input id="lq" type="search" placeholder="Search by name, task, project or text" autocomplete="off">
+    <label class="sr" for="lp">Project</label><select id="lp" aria-label="Filter by project"><option value="">All files</option><option value="none">In no project</option>${projects.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>
+    ${attachButton("Upload")}</div><div id="files"></div>`);
+  const draw = async () => {
+    const qs = new URLSearchParams();
+    if (q) qs.set("q", q);
+    if (project) qs.set("project", project);
+    const { files } = await api("GET", `/v1/files${qs.size ? `?${qs}` : ""}`);
+    const from = f => f.origin.kind === "task" ? `<a href="#/task/${enc(f.origin.task_id)}">${esc(f.origin.title)}</a>`
+      : f.origin.kind === "chat" ? `<a href="#/chat/${enc(f.origin.thread)}">Chat: ${esc(f.origin.title || "conversation")}</a>` : `<span class="faint">Uploaded to the library</span>`;
+    paint($("#files", main), files.length ? `<table class="t files"><thead><tr><th>File</th><th>From</th><th>Project</th><th>Added</th></tr></thead><tbody>${files.map(f => `<tr data-lib-file="${esc(f.id)}">
+      <td>${fileChip(f)}<div class="small faint">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"}</div></td><td class="small">${from(f)}</td>
+      <td>${moveControl(f.id, f.project, projects)}</td><td class="small faint n">${esc(when(f.at))}</td></tr>`).join("")}</tbody></table>`
+      : `<p class="empty">${q || project ? "No file matches." : "No files yet. Upload one, or ask Magnus for a document."}</p>`);
+  };
+  let t;
+  $("#lq", main).oninput = e => { clearTimeout(t); t = setTimeout(() => { q = e.target.value.trim(); draw(); }, 200); };
+  $("#lp", main).onchange = e => { project = e.target.value; draw(); };
+  $("[data-attach]", main).onchange = async e => {
+    try { const up = await upload(e.target.files, project && project !== "none" ? { project } : {}); toast(`Uploaded ${up.map(f => f.name).join(", ")}.`); }
+    catch (err) { toast(err.message); }
+    e.target.value = "";
+    draw();
+  };
+  App.redraw = draw;
+  onLeave(() => { App.redraw = null; });
+  await draw();
+  every(5000, draw);
+});
+
+route(/^#\/projects$/, async main => {
+  const draw = async () => {
+    const projects = await projectList();
+    paint(main, `<h1>Projects</h1><p class="muted">A project groups chats, tasks, schedules and files. Its instructions and files apply to everything in it.</p>
+      ${projects.length ? `<ul class="plist">${projects.map(p => `<li><a href="#/project/${enc(p.id)}"><strong>${esc(p.name)}</strong><span class="small muted">${p.counts.tasks} tasks · ${p.counts.files} files · ${p.counts.schedules} schedules</span></a></li>`).join("")}</ul>` : `<p class="empty">No projects yet.</p>`}
+      <form id="np" class="card flat"><h3>New project</h3><label>Name <input id="pn" required></label>
+      <label>Instructions for everything in it <span class="faint small">(optional)</span><textarea id="pi" rows="3" data-draft="new-project" placeholder="For example: Prices in euros. Keep every document to one page."></textarea></label>
+      <div class="row"><button class="primary">Create</button></div></form>`);
+    $("#np", main).onsubmit = async e => {
+      e.preventDefault();
+      try {
+        const r = await api("POST", "/v1/projects", { name: $("#pn", main).value, instructions: $("#pi", main).value });
+        $("#pi", main).value = "";
+        delete drafts["new-project"];
+        location.hash = `#/project/${enc(r.id)}`;
+      } catch (err) { toast(err.message); }
+    };
+  };
+  await draw();
+});
+
+route(/^#\/project\/([^/]+)$/, async (main, id) => {
+  const projects = await projectList();
+  const draw = async () => {
+    const p = await api("GET", `/v1/projects/${enc(id)}`);
+    paint(main, `<p class="small"><a href="#/projects">Projects</a></p><h1>${esc(p.name)}</h1>
+      <section class="card flat"><h3>Instructions</h3><p class="small muted">Applied to every task and chat in this project. Only you change them; Magnus reads them.</p>
+        <textarea id="pin" rows="4" data-draft="pin-${esc(id)}">${esc(p.instructions || "")}</textarea><div class="row"><button data-act="save-ins">Save instructions</button></div></section>
+      <section><div class="spread"><h3>Files</h3>${attachButton("Upload to this project")}</div>
+        ${p.files.length ? `<ul class="flist">${p.files.map(f => `<li data-project-file="${esc(f.id)}">${fileChip(f)} <span class="small faint">${f.source === "delivered" ? "delivered" : "uploaded"} ${esc(when(f.at))}</span> ${moveControl(f.id, f.project, projects)}</li>`).join("")}</ul>` : `<p class="empty">No files. Tasks here read the project's files when they need them.</p>`}</section>
+      <section><h3>Start here</h3><form id="pt"><label class="sr" for="ptt">Task</label><textarea id="ptt" rows="3" data-draft="ptask-${esc(id)}" placeholder="Say what you want done in this project."></textarea>
+        <div class="row" style="margin-top:8px">${await modelPicker()}<button class="primary">Start task</button><a class="button" href="#/chat/new/${enc(id)}">New chat in this project</a></div></form></section>
+      <section><h3>Conversations</h3>${p.threads.length ? `<ul class="tlist">${p.threads.map(t => `<li class="trow"><a href="#/chat/${enc(t.thread)}"><span class="ttl">${esc(t.title)}</span><span class="small faint when">${esc(when(t.updated_at))}</span></a></li>`).join("")}</ul>` : `<p class="empty">No conversations.</p>`}</section>
+      <section><h3>Tasks</h3>${p.tasks.length ? `<ul class="tlist">${p.tasks.map(taskRow).join("")}</ul>` : `<p class="empty">No tasks.</p>`}</section>
+      <section><h3>Schedules</h3>${p.schedules.length ? `<ul class="tlist">${p.schedules.map(x => `<li class="trow"><a href="#/schedules"><span class="ttl">${esc(x.title)}</span><span class="small faint when">Next ${esc(until(x.next))}</span></a></li>`).join("")}</ul>` : `<p class="empty">No schedules.</p>`}</section>`);
+  };
+  main.onclick = async e => {
+    if (!e.target.closest("[data-act=save-ins]")) return;
+    try { await api("PUT", `/v1/projects/${enc(id)}`, { instructions: $("#pin", main).value }); delete drafts[`pin-${id}`]; toast("Instructions saved. New tasks here use them."); }
+    catch (err) { toast(err.message); }
+  };
+  main.onchange = async e => {
+    if (!e.target.matches("[data-attach]")) return;
+    try { const up = await upload(e.target.files, { project: id }); toast(`Uploaded ${up.map(f => f.name).join(", ")}.`); } catch (err) { toast(err.message); }
+    draw();
+  };
+  main.onsubmit = async e => {
+    if (e.target.id !== "pt") return;
+    e.preventDefault();
+    const text = $("#ptt", main).value.trim();
+    if (!text) return;
+    try {
+      const r = await api("POST", "/v1/tasks", { text, project: id, model: chosenModel($("#pt", main)) });
+      $("#ptt", main).value = "";
+      delete drafts[`ptask-${id}`];
+      location.hash = `#/task/${enc(r.task_id)}`;
+    } catch (err) { toast(err.message); }
+  };
+  App.redraw = draw;
+  onLeave(() => { App.redraw = null; });
+  await draw();
+  every(5000, draw);
+});
 
 async function go() {
   App.timers.forEach(clearInterval); App.timers = [];
@@ -127,6 +279,8 @@ async function go() {
   paint($("nav.side"), nav());
   const main = $("#main");
   main._html = null;
+  // Each view sets its own handlers on main; none outlives its view.
+  main.onclick = main.onchange = main.onsubmit = main.oninput = null;
   for (const [re, view] of App.routes) {
     const m = h.match(re);
     if (m) {
@@ -397,12 +551,12 @@ route(/^#\/tasks$/, async main => {
 // except those waiting on the person.
 route(/^#\/schedules$/, async main => {
   const draw = async () => {
-    const { schedules } = await api("GET", "/v1/schedules");
+    const [{ schedules }, projects] = await Promise.all([api("GET", "/v1/schedules"), projectList()]);
     schedules.sort((a, b) => (a.next || "").localeCompare(b.next || ""));
     paint(main, `<h1>Schedules</h1>${schedules.length ? schedules.map(sc => {
       const waiting = sc.runs.filter(r => r.needs_you), last = sc.last;
       return `<div class="card sched" data-schedule="${esc(sc.id)}">
-        <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))}</span></div>
+        <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))} ${moveControl(sc.id, sc.project, projects)}</span></div>
         <div class="small muted">Next run ${esc(until(sc.next))} · ${last ? `Last result: ${chip(last.status)} <a href="#/task/${enc(last.task_id)}">${esc(firstLine(last.summary) || last.title)}</a> <span class="faint">${esc(when(last.ended_at))}</span>` : "No results yet"}</div>
         ${waiting.length ? `<ul class="tlist">${waiting.map(taskRow).join("")}</ul>` : ""}
         ${sc.runs.length ? `<details data-key="sched:${esc(sc.id)}"><summary class="small muted">${sc.runs.length} run${sc.runs.length === 1 ? "" : "s"}</summary><ul class="tlist">${sc.runs.map(taskRow).join("")}</ul></details>` : ""}
@@ -416,17 +570,27 @@ route(/^#\/schedules$/, async main => {
 // ---------- New task ----------
 
 route(/^#\/new$/, async main => {
+  const projects = await projectList();
+  let files = [];
   paint(main, `<h1>New task</h1><p class="muted">Say what you want done, the way you would to a colleague.</p>
     <form id="f"><label for="text" class="sr">Task</label><textarea id="text" rows="6" data-draft="new-task" placeholder="For example: Make a one-page summary of last month's sales from the attached sheet." required></textarea>
-    <div class="row" style="margin-top:12px">${await modelPicker()}<button class="primary" id="go">Start</button></div></form>`);
+    <div class="row" style="margin-top:8px">${attachButton("Attach files")}<span id="att" class="small"></span></div>
+    <div class="row" style="margin-top:12px">${projects.length ? `<label class="small">Project <select id="proj" aria-label="Project">${projectOptions(projects, null)}</select></label>` : ""}${await modelPicker()}<button class="primary" id="go">Start</button></div></form>`);
   $("#text").focus();
+  $("[data-attach]", main).onchange = async e => {
+    try { files.push(...await upload(e.target.files)); } catch (err) { toast(err.message); }
+    e.target.value = "";
+    $("#att", main).innerHTML = files.map(fileChip).join(" ");
+  };
   $("#f").onsubmit = async e => {
     e.preventDefault();
     const text = $("#text").value.trim();
     if (!text) return;
     $("#go").disabled = true;
     try {
-      const r = await api("POST", "/v1/tasks", { text, model: chosenModel($("#f")) });
+      const body = { text, model: chosenModel($("#f")), files: files.map(f => f.id) };
+      if ($("#proj", main)?.value) body.project = $("#proj", main).value;
+      const r = await api("POST", "/v1/tasks", body);
       delete drafts["new-task"];
       location.hash = `#/task/${enc(r.task_id)}`;
     } catch (err) { toast(err.message); $("#go").disabled = false; }
@@ -464,10 +628,19 @@ function chosenModel(root) {
 // opening Chat returns to the latest. Approvals and questions stay in the
 // inbox; the thread links to them.
 function composer(placeholder, picker) {
-  return `<form id="say" class="say"><label for="msg" class="sr">Message</label><textarea id="msg" rows="2" data-draft="chat-${esc(location.hash)}" placeholder="${esc(placeholder)}" required></textarea>
-    <div class="say-side">${picker}<button class="primary" id="send">Send</button></div></form>`;
+  return `<form id="say" class="say"><div class="say-main"><label for="msg" class="sr">Message</label><textarea id="msg" rows="2" data-draft="chat-${esc(location.hash)}" placeholder="${esc(placeholder)}" required></textarea>
+    <div class="row small" id="pending"></div></div>
+    <div class="say-side">${picker}${attachButton("Attach")}<button class="primary" id="send">Send</button></div></form>`;
 }
-function wireComposer(thread) {
+// Files added to the next message: uploaded at once, sent with it.
+function wireComposer(thread, project) {
+  let files = [];
+  const shown = () => { $("#pending").innerHTML = files.map(fileChip).join(" "); };
+  $("#say [data-attach]").onchange = async e => {
+    try { files.push(...await upload(e.target.files, thread ? { thread } : project ? { project } : {})); } catch (err) { toast(err.message); }
+    e.target.value = "";
+    shown();
+  };
   const box = $("#msg");
   box.focus();
   box.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#say").requestSubmit(); } };
@@ -477,11 +650,14 @@ function wireComposer(thread) {
     if (!text) return;
     $("#send").disabled = true;
     try {
-      const body = { text, model: chosenModel($("#say")) };
+      const body = { text, model: chosenModel($("#say")), files: files.map(f => f.id) };
       if (thread) body.thread = thread;
+      else if (project) body.project = project;
       const r = await api("POST", "/v1/chat", body);
       delete drafts[`chat-${location.hash}`];
       box.value = "";
+      files = [];
+      shown();
       if (!thread) location.hash = `#/chat/${enc(r.thread)}`;
       else await App.redraw?.();
     } catch (err) { toast(err.message); }
@@ -490,7 +666,7 @@ function wireComposer(thread) {
 }
 
 // The person's conversations beside the open one, with a button for a new one.
-async function chatLayout(main, thread) {
+async function chatLayout(main, thread, project) {
   paint(main, `<div class="chat">
     <aside class="convos" aria-label="Conversations"><button class="primary" data-act="new-chat">New conversation</button><div id="convos"></div></aside>
     <section class="conv"><h1 class="sr">Chat</h1><div id="thread" class="thread" aria-live="polite"></div><div id="composer"></div></section></div>`);
@@ -501,21 +677,25 @@ async function chatLayout(main, thread) {
   };
   $("[data-act=new-chat]", main).onclick = () => { location.hash = "#/chat/new"; };
   paint($("#composer", main), composer(thread ? "Reply" : "Ask a question, or say what you want done. For example: Every Monday, summarise my open invoices.", await modelPicker()));
-  wireComposer(thread);
+  wireComposer(thread, project);
   every(5000, list);
   return list();
 }
 
-async function showNewChat(main) {
-  await chatLayout(main, null);
-  paint($("#thread", main), `<p class="muted">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm.</p>`);
+async function showNewChat(main, project) {
+  await chatLayout(main, null, project);
+  const p = project && (await projectList()).find(x => x.id === project);
+  paint($("#thread", main), `${p ? `<p class="small">In the project <a href="#/project/${enc(p.id)}">${esc(p.name)}</a></p>` : ""}<p class="muted">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm.</p>`);
 }
 
 async function showThread(main, thread) {
   await chatLayout(main, thread);
+  const projects = await projectList();
   const draw = async () => {
-    const { entries } = await api("GET", `/v1/chat/${enc(thread)}`);
-    if (paint($("#thread", main), entries.map(entry).join(""))) $("#thread", main).lastElementChild?.scrollIntoView({ block: "end" });
+    const [{ entries }, { threads }] = await Promise.all([api("GET", `/v1/chat/${enc(thread)}`), api("GET", "/v1/chat")]);
+    const here = threads.find(t => t.thread === thread);
+    const head = `<div class="spread thread-head"><span class="small">${here?.project ? `In the project <a href="#/project/${enc(here.project.id)}">${esc(here.project.name)}</a>` : ""}</span>${moveControl(thread, here?.project, projects)}</div>`;
+    if (paint($("#thread", main), head + entries.map(entry).join(""))) $("#thread", main).lastElementChild?.scrollIntoView({ block: "end" });
   };
   App.redraw = draw;
   onLeave(() => { App.redraw = null; });
@@ -547,7 +727,8 @@ route(/^#\/chat$/, async main => {
   return showChat(main, "#/chat/new", showNewChat);
 });
 
-route(/^#\/chat\/new$/, showNewChat);
+route(/^#\/chat\/new$/, m => showNewChat(m));
+route(/^#\/chat\/new\/([^/]+)$/, (m, project) => showNewChat(m, project));
 
 function rule(e) {
   const m = e.every_minutes;
@@ -566,7 +747,7 @@ function waitingLink(e) {
 }
 function entry(e) {
   switch (e.kind) {
-    case "message": return `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div></div>`;
+    case "message": return `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div>${e.files?.length ? `<div class="small files">${e.files.map(fileChip).join(" ")}</div>` : ""}</div>`;
     case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div></div>`;
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
@@ -575,7 +756,7 @@ function entry(e) {
       <ul class="tlist">${e.tasks.map(t => `<li class="crow" data-chat-task="${esc(t.task_id)}"><a class="ttl" href="#/task/${enc(t.task_id)}" title="${esc(t.text)}">${esc(t.title)}</a><span class="small why">${t.waiting_item ? `<a href="#/inbox" data-waiting="${esc(t.waiting_item)}">${esc(WAITING[t.waiting_on] || "waiting for you")}</a>` : ""}</span>${chip(t.status)}</li>`).join("")}</ul>
       <div class="small muted">${e.tasks.length === 1 ? "It is" : "They are"} in Tasks; results post here.</div></div>`;
     case "result": return `<details class="result" data-key="result:${esc(e.task_id)}" data-result="${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
-      <div class="pre">${esc(e.summary || "")}</div><a class="small" href="#/task/${enc(e.task_id)}">Open the task</a></details>`;
+      <div class="pre">${esc(e.summary || "")}</div>${e.files?.length ? `<div class="small files">${e.files.map(fileChip).join(" ")}</div>` : ""}<a class="small" href="#/task/${enc(e.task_id)}">Open the task</a></details>`;
     case "schedule_card": {
       const b = e.budget || {};
       const decided = e.state === "confirmed" ? `<p class="small"><span class="chip ok">Scheduled</span></p>` : e.state === "declined" ? `<p class="small"><span class="chip">Declined</span></p>` : "";
@@ -673,7 +854,9 @@ function card(i, composed) {
   switch (i.kind) {
     case "approval": {
       const onceOnly = String(d.rule || "").startsWith("kernel:") || d.reason === "unknown_outcome";
-      const list = [["approve:once", "Approve once", "primary"]];
+      // Web lookups after reading private data: one answer for the whole
+      // task, or the whole conversation.
+      const list = d.web_lookups ? [["approve:task", `Allow web lookups for this ${d.web_lookups}`, "primary"], ["approve:once", "Allow this lookup only"]] : [["approve:once", "Approve once", "primary"]];
       if (!onceOnly) {
         list.push(["approve:task", "Approve for this task"]);
         list.push(["approve:window", "Approve for an hour"]);
@@ -753,23 +936,28 @@ const fontCss = () => {
   const u = f => new URL(`fonts/${f}`, location.href).href;
   return `@font-face{font-family:Inter;font-weight:100 900;src:url(${u("inter-latin-wght-normal.woff2")}) format("woff2")}`;
 };
-async function images(view, taskId) {
+// A task's delivered files, the latest of each name.
+const latestOutputs = t => Object.values(Object.fromEntries((t?.outputs || []).map(o => [o.name, o])));
+const decodeText = u => new TextDecoder().decode(Uint8Array.from(atob(u.slice(u.indexOf(",") + 1)), c => c.charCodeAt(0)));
+// The delivered files a composition shows, fetched by the app itself:
+// images as data: URLs, text files decoded for drawing.
+async function fileData(view, t) {
   const out = {};
-  const files = (view || []).filter(c => c.type === "image").map(c => c.file);
-  if (!files.length || !taskId) return out;
-  const t = await api("GET", `/v1/tasks/${enc(taskId)}`);
-  for (const f of files) {
-    const o = (t.outputs || []).find(x => x.name === f);
-    if (o && /^image\/(png|jpeg|gif|webp)$/.test(o.media_type)) {
-      try { out[f] = await Magnus.dataUrl(`/v1/tasks/${enc(taskId)}/outputs/${enc(o.id)}`, o.media_type); } catch { /* shown as missing */ }
-    }
+  const names = new Set((view || []).filter(c => c.type === "image" || c.type === "file").map(c => c.file));
+  for (const o of latestOutputs(t).filter(o => names.has(o.name))) {
+    const path = `/v1/tasks/${enc(t.task_id)}/outputs/${enc(o.id)}`;
+    try {
+      if (/^image\/(png|jpeg|gif|webp)$/.test(o.media_type)) out[o.name] = { image: await Magnus.dataUrl(path, o.media_type) };
+      else if (Compose.TEXT.test(o.media_type)) out[o.name] = { text: decodeText(await Magnus.dataUrl(path, o.media_type)), media_type: o.media_type };
+    } catch { /* shown as missing */ }
   }
   return out;
 }
-async function fill(frame, view, taskId) {
+async function fill(frame, view, taskId, task) {
   if (!frame || frame._drawn) return;
   frame._drawn = true;
-  frame.srcdoc = Compose.documentFor(view, await images(view, taskId), fontCss());
+  const t = task || (view?.some(c => c.type === "image" || c.type === "file") ? await api("GET", `/v1/tasks/${enc(taskId)}`) : null);
+  frame.srcdoc = Compose.documentFor(view, await fileData(view, t), fontCss(), t?.preview);
   frame.onload = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* sized by CSS */ } };
 }
 
@@ -884,31 +1072,50 @@ function trace(tl) {
   return (steps || `<p class="empty">No steps yet.</p>`) + (notices ? `<h3>Kernel notices</h3>${notices}` : "");
 }
 
+// What the outcome page draws first: the deliverable the agent composed
+// (the summary when it gave none), then each delivered file it does not
+// show, in full.
+function deliverable(t) {
+  const view = t.outcome_view ? [...t.outcome_view] : t.summary && t.status !== "running" ? [{ type: "text", text: t.summary }] : [];
+  const shown = new Set(view.filter(c => c.type === "file" || c.type === "image").map(c => c.file));
+  for (const o of latestOutputs(t)) if (!shown.has(o.name)) view.push({ type: "file", file: o.name });
+  return view;
+}
+
 route(/^#\/task\/([^/]+)$/, async (main, id) => {
   let layer = "outcome", liveText = "", stopLive = null;
+  const projects = await projectList();
   const draw = async () => {
     const [t, tl] = await Promise.all([api("GET", `/v1/tasks/${enc(id)}`), api("GET", `/v1/tasks/${enc(id)}/timeline`)]);
     const running = t.status === "running";
     if (running && !stopLive) stopLive = Magnus.live(id, txt => { liveText += txt; const el = $("#live", main); if (el) el.textContent = liveText; });
     if (!running && stopLive) { stopLive(); stopLive = null; liveText = ""; }
     const open = App.inbox.filter(i => i.task_id === id && i.status === "open");
-    const outcome = `${doneLine(t)}${t.summary && t.status !== "running" ? `<p style="font-size:16px">${esc(t.summary)}</p>` : ""}
-      ${t.outcome_view ? `<iframe class="composed" sandbox="allow-same-origin" title="The outcome" id="view"></iframe>` : ""}
+    // The deliverable leads, drawn in full; every delivered file it does
+    // not show itself follows it inline. Then the summary, the evidence, the
+    // cost, and the trace.
+    const view = deliverable(t);
+    const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="view"></iframe>` : ""}
       ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
       ${t.outputs?.length ? `<h3>Files</h3>${t.outputs.map(o => `<div class="row"><button class="link" data-act="download" data-out="${esc(o.id)}" data-name="${esc(o.name)}">${esc(o.name)}</button><span class="small faint">${esc(o.media_type)} · ${Math.max(1, Math.round(o.size / 1024))} KB</span></div>`).join("")}` : ""}
-      <h3>Evidence</h3>${criteria(t)}`;
-    const html = `<p class="small"><a href="#/tasks">Tasks</a>${t.thread ? ` · <a href="#/chat/${enc(t.thread)}">From a chat</a>` : ""}</p>
+      ${t.outcome_view && t.summary ? `<h3>Summary</h3><p data-summary>${esc(t.summary)}</p>` : ""}
+      <h3>Evidence</h3>${doneLine(t)}${criteria(t)}
+      <h3>Cost</h3><p class="small" data-cost>${esc(t.model?.adapter)} · ${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} model calls · ${t.usage?.actions ?? 0} actions · $${(t.usage?.cost_usd ?? 0).toFixed(2)}</p>
+      <details class="trace" data-key="trace:${esc(id)}"><summary><h3 style="display:inline">Full trace</h3></summary>${trace(tl)}</details>`;
+    const html = `<div class="spread"><p class="small"><a href="#/tasks">Tasks</a>${t.thread ? ` · <a href="#/chat/${enc(t.thread)}">From a chat</a>` : ""}${t.project ? ` · In the project <a href="#/project/${enc(t.project.id)}">${esc(t.project.name)}</a>` : ""}</p>${moveControl(t.task_id, t.project, projects)}</div>
+      ${t.files?.length ? `<p class="small"><span class="muted">Your files:</span> ${t.files.map(fileChip).join(" ")}</p>` : ""}
       <div class="spread"><h1 style="max-width:44ch">${esc(t.text)}</h1><div class="row">${chip(t.status)}</div></div>
       <p class="muted">${esc(WAITING[t.waiting_on] || "")}${t.waiting_on && glance(t) ? " · " : ""}${esc(glance(t))}</p>
       ${open.length ? `<div class="banner">${open.length === 1 ? "A decision for this task is" : `${open.length} decisions for this task are`} in your <a href="#/inbox">inbox</a>.</div>` : ""}
       ${running ? `<div class="live" id="live" aria-live="polite">${esc(liveText) || `<span class="faint">Working…</span>`}</div>` : ""}
-      <div class="layers" role="tablist">${[["outcome", "Outcome"], ["plan", "Contract and plan"], ["trace", "Full trace"]].map(([k, l]) => `<button role="tab" aria-selected="${layer === k}" class="${layer === k ? "on" : ""}" data-layer="${k}">${l}</button>`).join("")}</div>
-      <section>${layer === "outcome" ? outcome : layer === "plan" ? `<h3>Task</h3><p>${esc(t.text)}</p><h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}` : trace(tl)}</section>
-      <hr><p class="small faint">${esc(t.model?.adapter)} · ${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} model calls · ${t.usage?.actions ?? 0} actions · $${(t.usage?.cost_usd ?? 0).toFixed(2)}</p>
+      <div class="layers" role="tablist">${[["outcome", "Outcome"], ["plan", "Contract and plan"]].map(([k, l]) => `<button role="tab" aria-selected="${layer === k}" class="${layer === k ? "on" : ""}" data-layer="${k}">${l}</button>`).join("")}</div>
+      <section>${layer === "outcome" ? outcome : `<h3>Task</h3><p>${esc(t.text)}</p><h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}`}</section>
       <div class="row">${!["completed", "failed", "cancelled"].includes(t.status) ? `<button data-act="cancel">Cancel task</button>` : ""}${t.status === "suspended" && !t.waiting_item ? `<button data-act="resume">Resume</button>` : ""}</div>`;
-    if (paint(main, html) && t.outcome_view) fill($("#view", main), t.outcome_view, id);
+    if (paint(main, html) && layer === "outcome" && view.length) fill($("#view", main), view, id, t);
     main._task = t;
   };
+  App.redraw = draw;
+  onLeave(() => { App.redraw = null; });
   main.onclick = async e => {
     const l = e.target.closest("[data-layer]");
     if (l) { layer = l.dataset.layer; return draw(); }

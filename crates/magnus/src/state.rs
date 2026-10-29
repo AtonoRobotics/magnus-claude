@@ -173,6 +173,43 @@ pub struct Task {
     pub title: Option<String>,
     /// The schedule that started it, if any.
     pub schedule: Option<String>,
+    /// Library files the person gave it.
+    pub files: Vec<String>,
+    /// The project it started in, as it stood then.
+    pub project: Option<crate::events::ProjectContext>,
+}
+
+/// A file in a person's library: one they uploaded, or one a task delivered.
+#[derive(Clone, Debug)]
+pub struct LibFile {
+    pub id: String,
+    pub person: String,
+    pub name: String,
+    pub media_type: String,
+    pub size: usize,
+    pub at: DateTime<Utc>,
+    /// An upload's content, kept for the runs given it (inputs, images,
+    /// PDFs). A delivered file's is read from the log when needed.
+    pub data_b64: Option<String>,
+    /// The run that delivered it.
+    pub run: Option<String>,
+    /// The chat thread it was uploaded in.
+    pub thread: Option<String>,
+    /// Its content's taint: an upload is private and untrusted; a delivered
+    /// file has the taint its run had when it delivered it.
+    pub label: Label,
+    /// A text file's content in lower case, for search, up to the length a
+    /// page shows of it.
+    pub text: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct Project {
+    pub id: String,
+    pub person: String,
+    pub name: String,
+    pub instructions: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 impl Task {
@@ -318,6 +355,11 @@ pub struct State {
     pub memory: Vec<MemoryEntry>,
     /// Files attached to each task, by task id.
     pub attachments: HashMap<String, Vec<Value>>,
+    /// Every person's library, by file id.
+    pub files: BTreeMap<String, LibFile>,
+    pub projects: BTreeMap<String, Project>,
+    /// Items the person moved into a project (Some) or out of one (None).
+    pub moved: HashMap<String, Option<String>>,
     /// Latest conformance result per adapter id: (version, model, passed, report).
     pub conformance: HashMap<String, (String, String, bool, Value)>,
     pub playbook: BTreeMap<String, PlaybookItem>,
@@ -330,7 +372,45 @@ pub struct State {
     pub last_seq: i64,
 }
 
+/// A text file's content in lower case for library search, up to as much as
+/// a page shows of a file; other files are found by name.
+fn search_text(media_type: &str, data_b64: &str) -> String {
+    use base64::Engine;
+    let textual = media_type.starts_with("text/") || ["application/json", "application/xml", "application/csv"].contains(&media_type);
+    let Some(bytes) = textual.then(|| base64::engine::general_purpose::STANDARD.decode(data_b64).ok()).flatten() else { return String::new() };
+    String::from_utf8_lossy(&bytes).chars().take(crate::compose::PREVIEW_CHARS).collect::<String>().to_lowercase()
+}
+
 impl State {
+    /// The project an item is in: where the person moved it, else where it
+    /// began. A task begins in the project it started in; a thread in its
+    /// first message's; a delivered file in its task's; a file uploaded in
+    /// chat in its thread's.
+    pub fn project_of(&self, item: &str) -> Option<String> {
+        if let Some(p) = self.moved.get(item) {
+            return p.clone().filter(|p| self.projects.contains_key(p));
+        }
+        if let Some(t) = self.tasks.get(item) {
+            return t.project.as_ref().map(|p| p.id.clone());
+        }
+        if let Some(f) = self.files.get(item) {
+            if let Some(task) = f.run.as_ref().and_then(|r| self.runs.get(r)).map(|r| r.task.clone()) {
+                return self.project_of(&task);
+            }
+            return f.thread.as_ref().and_then(|t| self.project_of(t));
+        }
+        self.tasks
+            .values()
+            .filter(|t| t.chat.as_ref().is_some_and(|c| c.thread == item && c.turn))
+            .min_by_key(|t| t.created_at)
+            .and_then(|t| t.project.as_ref().map(|p| p.id.clone()))
+    }
+
+    /// A person's file, or a delivered file of a task they may see.
+    pub fn file_for(&self, person: &str, owner: bool, id: &str) -> Option<&LibFile> {
+        self.files.get(id).filter(|f| f.person == person || (owner && f.run.is_some()))
+    }
+
     pub fn apply(&mut self, e: &Event) {
         self.last_seq = e.seq;
         if let Some(r) = e.ev.run().and_then(|id| self.runs.get_mut(id)) {
@@ -409,17 +489,29 @@ impl State {
                     (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: false }),
                 );
             }
-            Ev::TaskCreated { task, run, person, text, config, attachments, experiment, chat, label, title } => {
+            Ev::TaskCreated { task, run, person, text, config, attachments, experiment, chat, label, title, files, project } => {
                 // Playbook items the run starts with carry the taint of the
                 // runs that wrote them (I2, M1), and a task from chat that of
                 // the turn that started it.
                 let pb = self.playbook_at(person, config.playbook).into_iter().fold(label.unwrap_or_default(), |l, i| l.join(i.label));
+                let uploads = !attachments.is_empty() || !files.is_empty();
                 if !attachments.is_empty() {
                     self.attachments.insert(task.clone(), attachments.clone());
                 }
                 self.tasks.insert(
                     task.clone(),
-                    Task { task_id: task.clone(), run_id: run.clone(), person: person.clone(), text: text.clone(), created_at: e.at, chat: chat.clone(), title: title.clone(), schedule: None },
+                    Task {
+                        task_id: task.clone(),
+                        run_id: run.clone(),
+                        person: person.clone(),
+                        text: text.clone(),
+                        created_at: e.at,
+                        chat: chat.clone(),
+                        title: title.clone(),
+                        schedule: None,
+                        files: files.clone(),
+                        project: project.clone(),
+                    },
                 );
                 self.runs.insert(
                     run.clone(),
@@ -440,10 +532,11 @@ impl State {
                         contract_taint: (false, false),
                         contract_approved_by: None,
                         verified: BTreeMap::new(),
-                        // Attached files are content from elsewhere: data, not instructions.
-                        untrusted: !attachments.is_empty() || pb.untrusted,
-                        private: pb.private,
-                        private_from: Default::default(),
+                        // Uploaded files are the person's private data, and
+                        // content from elsewhere: data, not instructions.
+                        untrusted: uploads || pb.untrusted,
+                        private: uploads || pb.private,
+                        private_from: if uploads { ["library".to_string()].into() } else { Default::default() },
                         model_calls: 0,
                         actions: 0,
                         usd: 0.0,
@@ -717,7 +810,44 @@ impl State {
             Ev::Output { id, run, name, media_type, data_b64 } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.outputs.push((id.clone(), name.clone(), media_type.clone(), data_b64.len() * 3 / 4));
+                    let f = LibFile {
+                        id: id.clone(),
+                        person: r.person.clone(),
+                        name: name.clone(),
+                        media_type: media_type.clone(),
+                        size: data_b64.len() * 3 / 4,
+                        at: e.at,
+                        data_b64: None,
+                        run: Some(run.clone()),
+                        thread: None,
+                        label: Label { untrusted: r.untrusted, private: r.private },
+                        text: search_text(media_type, data_b64),
+                    };
+                    self.files.insert(id.clone(), f);
                 }
+            }
+            Ev::FileUploaded { id, person, name, media_type, data_b64, thread } => {
+                let f = LibFile {
+                    id: id.clone(),
+                    person: person.clone(),
+                    name: name.clone(),
+                    media_type: media_type.clone(),
+                    size: data_b64.len() * 3 / 4,
+                    at: e.at,
+                    data_b64: Some(data_b64.clone()),
+                    run: None,
+                    thread: thread.clone(),
+                    label: Label { untrusted: true, private: true },
+                    text: search_text(media_type, data_b64),
+                };
+                self.files.insert(id.clone(), f);
+            }
+            Ev::ProjectSet { id, person, name, instructions } => {
+                let created_at = self.projects.get(id).map_or(e.at, |p| p.created_at);
+                self.projects.insert(id.clone(), Project { id: id.clone(), person: person.clone(), name: name.clone(), instructions: instructions.clone(), created_at });
+            }
+            Ev::Moved { item, project } => {
+                self.moved.insert(item.clone(), project.clone());
             }
             Ev::AdapterVerified { adapter_id, version, model, passed, report, .. } => {
                 self.conformance.insert(adapter_id.clone(), (version.clone(), model.clone(), *passed, report.clone()));

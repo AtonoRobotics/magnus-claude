@@ -4,11 +4,15 @@
 
 use serde_json::Value;
 
-pub const KINDS: &[&str] = &["heading", "text", "list", "table", "stat", "bar_chart", "line_chart", "image"];
+pub const KINDS: &[&str] = &["heading", "text", "list", "table", "stat", "bar_chart", "line_chart", "image", "file"];
 
 const MAX_COMPONENTS: usize = 40;
 const MAX_TEXT: usize = 4000;
-const MAX_ROWS: usize = 200;
+pub const MAX_ROWS: usize = 200;
+/// A delivered file shown in full on the page holds at most as much text as
+/// a composition may, and a table from it at most as many rows; the rest is
+/// in the file.
+pub const PREVIEW_CHARS: usize = MAX_COMPONENTS * MAX_TEXT;
 const MAX_COLUMNS: usize = 12;
 const MAX_POINTS: usize = 60;
 const MAX_ITEMS: usize = 100;
@@ -90,7 +94,9 @@ pub fn validate(view: &Value, files: &[String]) -> Result<(), String> {
                     numbers(&s["values"], &format!("{at}.series[{i}].values"), n)?;
                 }
             }
-            "image" => {
+            // An image is drawn; a file is shown in full, drawn from the
+            // same components by the app.
+            "image" | "file" => {
                 let f = c["file"].as_str().ok_or(format!("{at}.file must name a delivered file"))?;
                 if !files.iter().any(|x| x == f) {
                     return Err(format!("{at}.file {f:?} is not a file you delivered; deliver it with deliver_file first"));

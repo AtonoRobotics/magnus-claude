@@ -246,12 +246,12 @@ async fn an_approval_blocks_and_the_outcome_carries_its_view() {
                 { "id": "u2", "goal": "report", "done_when": "summary sent" }
             ] })),
             2 => tool("memory_write", json!({ "fact": "Q3 revenue is 41.7M", "topic": "finance" })),
-            3 => tool("task_complete", json!({ "summary": "Remembered.", "view": [{ "type": "nonsense" }] })),
+            3 => tool("task_complete", json!({ "summary": "Remembered.", "deliverable": [{ "type": "nonsense" }] })),
             4 => {
                 assert!(last.iter().any(|r| r.is_error && r.text.contains("unknown type")), "a bad view was not refused: {:?}", last.iter().map(|r| &r.text).collect::<Vec<_>>());
                 tool("task_complete", json!({
                     "summary": "Remembered the Q3 figure.",
-                    "view": [
+                    "deliverable": [
                         { "type": "stat", "label": "Q3 revenue", "value": "41.7M" },
                         { "type": "bar_chart", "labels": ["Q2", "Q3"], "values": [38.2, 41.7], "unit": "M" }
                     ],

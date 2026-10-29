@@ -137,6 +137,9 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "computer_scroll", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_write", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_search", app: "memory", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // A project's reference file, read when the work needs it (M2). Its
+    // result carries the file's own taint; an upload is private and untrusted.
+    Builtin { name: "project_read", app: "library", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "playbook_update", app: "playbook", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // Chat only: start a task for the person, or show them a schedule to
     // confirm. Neither leaves the appliance; the task carries the turn's taint.
@@ -248,10 +251,10 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             description: d("task_complete"),
             input_schema: obj(
                 json!({
-                    "summary": { "type": "string" },
+                    "summary": { "type": "string", "description": d("task_complete.summary") },
                     // Every component field is declared: a model that keeps to
                     // the schema cannot otherwise fill one in.
-                    "view": { "type": "array", "minItems": 1, "description": d("task_complete.view"), "items": { "type": "object", "properties": {
+                    "deliverable": { "type": "array", "minItems": 1, "description": d("task_complete.deliverable"), "items": { "type": "object", "properties": {
                         "type": { "type": "string", "enum": crate::compose::KINDS },
                         "text": { "type": "string", "description": "heading, text" },
                         "items": { "type": "array", "items": { "type": "string" }, "description": "list" },
@@ -263,13 +266,13 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
                         "labels": { "type": "array", "items": { "type": "string" }, "description": "bar_chart, line_chart" },
                         "values": { "type": "array", "items": { "type": "number" }, "description": "bar_chart: one per label" },
                         "series": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "values": { "type": "array", "items": { "type": "number" } } }, "required": ["name", "values"] }, "description": "line_chart: 1 to 6, one value per label each" },
-                        "file": { "type": "string", "description": "image: the name of a file you delivered" },
+                        "file": { "type": "string", "description": "image, file: the name of a file you delivered" },
                         "title": { "type": "string" },
                         "caption": { "type": "string" }
                     }, "required": ["type"] } },
                     "spoken": { "type": "string", "description": d("task_complete.spoken") }
                 }),
-                &["summary"],
+                &["deliverable", "summary"],
             ),
         },
         ToolSpec {
@@ -325,6 +328,11 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             name: "memory_search".into(),
             description: d("memory_search"),
             input_schema: obj(json!({ "query": { "type": "string" } }), &["query"]),
+        },
+        ToolSpec {
+            name: "project_read".into(),
+            description: d("project_read"),
+            input_schema: obj(json!({ "name": { "type": "string", "description": "the file's name, as the project lists it" } }), &["name"]),
         },
         ToolSpec {
             name: "playbook_update".into(),

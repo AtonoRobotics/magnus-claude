@@ -68,6 +68,10 @@ pub struct NewRun {
     pub model: Option<(String, String)>,
     /// A short title the model wrote when starting it.
     pub title: Option<String>,
+    /// Library files the person gave it.
+    pub files: Vec<String>,
+    /// The project it starts in.
+    pub project: Option<String>,
 }
 
 impl Kernel {
@@ -169,7 +173,9 @@ impl Kernel {
     pub fn wake(self: &Arc<Self>, run: &str) {
         let files = self.read(|s| {
             let task = s.runs.get(run).map(|r| r.task.clone()).unwrap_or_default();
-            s.attachments.get(&task).cloned().unwrap_or_default()
+            let mut v = s.attachments.get(&task).cloned().unwrap_or_default();
+            v.extend(s.tasks.get(&task).into_iter().flat_map(|t| &t.files).filter_map(|id| s.files.get(id)).map(|f| serde_json::json!({ "name": f.name, "data_b64": f.data_b64 })));
+            v
         });
         if !files.is_empty() {
             use base64::Engine;
@@ -275,9 +281,31 @@ impl Kernel {
             harness: HARNESS_VERSION.into(),
             playbook: self.read(|s| s.playbook_version),
         };
+        // The project's instructions and reference files as they stand now.
+        let project = o.project.as_ref().and_then(|id| {
+            self.read(|s| {
+                let p = s.projects.get(id).filter(|p| p.person == person)?;
+                let mut files: Vec<&crate::state::LibFile> = s.files.values().filter(|f| f.person == person && s.project_of(&f.id).as_deref() == Some(id)).collect();
+                files.sort_by_key(|f| f.at);
+                Some(crate::events::ProjectContext { id: p.id.clone(), name: p.name.clone(), instructions: p.instructions.clone(), files: files.into_iter().map(|f| f.id.clone()).collect() })
+            })
+        });
         self.emit(
             actor,
-            Ev::TaskCreated { task: task.clone(), run: run.clone(), person: person.into(), text, attachments, config, experiment: o.experiment, chat: o.chat, label: o.label, title: o.title },
+            Ev::TaskCreated {
+                task: task.clone(),
+                run: run.clone(),
+                person: person.into(),
+                text,
+                attachments,
+                config,
+                experiment: o.experiment,
+                chat: o.chat,
+                label: o.label,
+                title: o.title,
+                files: o.files,
+                project,
+            },
         )
         .await?;
         self.wake(&run);
@@ -294,7 +322,13 @@ impl Kernel {
             for sc in due_schedules {
                 // A scheduled task acts for the person who set it up (K54),
                 // within the schedule's budget.
-                let o = NewRun { budget: sc.budget.clone(), label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label), ..Default::default() };
+                // Its runs start in the project the schedule is in now.
+                let o = NewRun {
+                    budget: sc.budget.clone(),
+                    label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label),
+                    project: self.read(|s| s.project_of(&sc.id)),
+                    ..Default::default()
+                };
                 match self.create_run(&format!("schedule:{}", sc.id), &sc.person, sc.text.clone(), vec![], o).await {
                     Ok((task, _)) => {
                         let _ = self.emit("kernel", Ev::ScheduleFired { id: sc.id.clone(), task }).await;

@@ -38,9 +38,12 @@ The upstream files are mounted over the image's copies. The originals were extra
 | `stack/docker-compose.yml`: `ulimits.nofile=65536` on gitlab, rocketchat, mongodb | Docker 29/containerd 2 sets the container default soft `nofile` to 1024. With that limit, mongod aborted with "Too many open files" about 5 minutes after start. GitLab's first boot also failed (`runsv not running` during `gitlab-ctl reconfigure`), and upstream's `restart: always` would have hidden both. With the higher limit, both have stayed up. |
 | `stack/plane/Makefile`: `download-setup` is a no-op | Upstream's `start-plane` re-downloads `install.sh` from GitHub and runs it as root with the Docker socket mounted. We fetched it separately, read it, and confirmed it is byte-identical to the baked `/plane/setup.sh`. We run the baked copy instead of fetching code at runtime. |
 | `stack/plane/plane-app/docker-compose.yaml`: minio image changed to `tac-local/minio:RELEASE.2025-09-07T16-13-09Z` | `minio/minio:RELEASE.2024-11-07T00-52-20Z` no longer exists on Docker Hub ("repository does not exist"), and quay.io returns 401. The replacement is a local retag of the official MinIO image already on this host (`minio/minio:latest`, release 2025-09-07). Plane only uses basic S3 calls. |
+| `stack/Makefile` (the api-server's `/workspace/Makefile`): `start-all` and `reset-gitlab` wait on a new `gitlab-ready` target | The image's seeded GitLab access tokens (`root-token`, used by task setup and graders) expired on 2025-11-18, and a reset restores them expired; `gitlab-ready` extends them once the database is up. It also starts GitLab once more if its first boot exits (`runsv not running`). |
 | `busybox:latest` is a local retag of `busybox:1.37.0` | Plane's `restore.sh` runs plain `busybox`. The retag avoids an unpinned pull. |
 
 The restore data (Plane tarballs, RocketChat dump) is still the upstream data. The only code that runs is code we read: `api-server.py`, `utils.py`, both Makefiles, `setup.sh`, `restore.sh`, and the compose files.
+
+`stack/up.sh` starts (or restarts) the stack with all of these mounted, keeps Plane's runtime state in `$TAC_HOME/stack` (default `~/.magnus-tac/stack`), and waits up to 30 minutes for the four health checks. On 2026-10-29 owncloud, gitlab and plane came up healthy; rocketchat's health check returned 500.
 
 ### 1.3 Commands (exactly what ran on 2026-10-27)
 

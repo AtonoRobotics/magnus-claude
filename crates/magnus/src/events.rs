@@ -21,6 +21,20 @@ pub struct ChatOrigin {
     pub conversation: Vec<Value>,
 }
 
+/// The project a task started in, as it stood then: the person's
+/// instructions for everything in it and its reference files. Fixed at the
+/// start, so the task's context only grows (C1, K5).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ProjectContext {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// Library file ids, read on demand with `project_read` (M2).
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
 /// A run's pinned configuration (K9), recorded at its start.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RunConfig {
@@ -162,6 +176,41 @@ pub enum Ev {
         /// A short title the model wrote when it started the task.
         #[serde(default)]
         title: Option<String>,
+        /// Library files the person gave this task or message (uploads).
+        #[serde(default)]
+        files: Vec<String>,
+        /// The project it started in.
+        #[serde(default)]
+        project: Option<ProjectContext>,
+    },
+    /// A file the person added: to the library, a project, or a chat
+    /// message. Its content is private data, never instructions.
+    FileUploaded {
+        id: String,
+        person: String,
+        name: String,
+        media_type: String,
+        data_b64: String,
+        /// Where it was added, when that was a chat thread.
+        #[serde(default)]
+        thread: Option<String>,
+    },
+    /// A project was made or changed by its person: its name and the
+    /// instructions that apply to everything in it. Only the person writes
+    /// these (I1); no tool does.
+    ProjectSet {
+        id: String,
+        person: String,
+        name: String,
+        #[serde(default)]
+        instructions: Option<String>,
+    },
+    /// The person moved a task, chat thread, schedule or file into a
+    /// project, or out of one (`project` None).
+    Moved {
+        item: String,
+        #[serde(default)]
+        project: Option<String>,
     },
     ModelCall {
         run: String,

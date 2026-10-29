@@ -403,7 +403,7 @@ async fn add_trial(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Json(b):
         return err(StatusCode::CONFLICT, "this trial already exists");
     }
     if b["via"] == "chat" {
-        return match k.chat_say(&p.id, text, b["thread"].as_str().map(String::from), model, Some(tag)).await {
+        return match k.chat_say(&p.id, text, b["thread"].as_str().map(String::from), model, Some(tag), vec![], None).await {
             Ok(Some((thread, task))) => (StatusCode::CREATED, Json(json!({ "thread": thread, "task_id": task }))).into_response(),
             Ok(None) => err(StatusCode::NOT_FOUND, "no such thread"),
             Err(e) => internal(e),

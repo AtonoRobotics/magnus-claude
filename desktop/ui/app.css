@@ -212,3 +212,23 @@ table.req { table-layout: fixed; }
 table.req th:nth-child(1) { width: 22%; }
 table.req th:nth-child(2) { width: 40%; }
 table.req th:nth-child(3), table.req th:nth-child(4), table.req th:nth-child(5) { width: 9%; }
+
+/* Files and projects. A label or link styled as a button opens a file
+   picker or goes somewhere; it looks like the buttons beside it. */
+.button { display: inline-block; font-size: 14px; font-weight: 550; border-radius: 7px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--fg); padding: 7px 14px; cursor: pointer; margin: 0; text-decoration: none; }
+.button:hover { border-color: var(--fg); }
+.button:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.fchip { display: inline-block; margin: 2px 10px 2px 0; }
+.files { margin-top: 6px; }
+.lib-bar { gap: 10px; align-items: center; margin: 12px 0 16px; flex-wrap: wrap; }
+.lib-bar input[type=search] { flex: 1; min-width: 220px; }
+table.files td { vertical-align: top; }
+label.move { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
+label.move select { padding: 3px 6px; font-size: 13px; }
+.plist, .flist { list-style: none; padding: 0; margin: 8px 0; }
+.plist li a { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; background: var(--surface); text-decoration: none; color: var(--fg); }
+.flist li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.say-main { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.thread-head { margin-bottom: 4px; }
+details.trace { margin-top: 18px; }
+details.trace > summary { cursor: pointer; }

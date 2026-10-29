@@ -30,8 +30,9 @@ pub enum CardRefusal {
 }
 
 impl Kernel {
-    /// The person writes in a thread of theirs, or starts one, with the
-    /// model they chose for this message (the appliance's when none).
+    /// The person writes in a thread of theirs, or starts one (in a project
+    /// of theirs, if they chose one), with the model they chose for this
+    /// message (the appliance's when none) and any files they added to it.
     pub async fn chat_say(
         self: &Arc<Self>,
         person: &str,
@@ -39,14 +40,26 @@ impl Kernel {
         thread: Option<String>,
         model: Option<(String, String)>,
         experiment: Option<crate::events::ExperimentTag>,
+        files: Vec<String>,
+        project: Option<String>,
     ) -> Result<Option<(String, String)>> {
-        let thread = match thread {
+        let (thread, project) = match thread {
             Some(t) if self.thread(person, &t).is_empty() => return Ok(None),
-            Some(t) => t,
-            None => new_id("thread"),
+            Some(t) => {
+                let p = self.read(|s| s.project_of(&t));
+                (t, p)
+            }
+            None => (new_id("thread"), project),
         };
         let conversation = self.conversation(person, &thread);
-        let o = NewRun { chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation }), model, experiment, ..Default::default() };
+        let o = NewRun {
+            chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation }),
+            model,
+            experiment,
+            files,
+            project,
+            ..Default::default()
+        };
         let (task, _) = self.create_run(&format!("person:{person}"), person, text, vec![], o).await?;
         Ok(Some((thread, task)))
     }
@@ -66,7 +79,12 @@ impl Kernel {
         });
         let mut v: Vec<_> = by.into_iter().collect();
         v.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
-        v.into_iter().map(|(id, (started, updated, first))| json!({ "thread": id, "title": first.chars().take(80).collect::<String>(), "started_at": started, "updated_at": updated })).collect()
+        v.into_iter()
+            .map(|(id, (started, updated, first))| {
+                let project = self.read(|s| s.project_of(&id).and_then(|p| s.projects.get(&p)).map(|p| json!({ "id": p.id, "name": p.name })));
+                json!({ "thread": id, "title": first.chars().take(80).collect::<String>(), "started_at": started, "updated_at": updated, "project": project })
+            })
+            .collect()
     }
 
     /// A thread's turns and tasks, in the order they were created.
@@ -98,7 +116,8 @@ impl Kernel {
             let turn = t.is_chat_turn();
             let status = crate::api::status_str(r.status);
             if turn {
-                out.push((t.created_at, 0, json!({ "kind": "message", "text": t.text, "at": t.created_at, "task_id": t.task_id })));
+                let files: Vec<Value> = self.read(|s| t.files.iter().filter_map(|id| s.files.get(id)).map(|f| json!({ "id": f.id, "name": f.name, "media_type": f.media_type, "size": f.size })).collect());
+                out.push((t.created_at, 0, json!({ "kind": "message", "text": t.text, "at": t.created_at, "task_id": t.task_id, "files": files })));
                 let mut cards: Vec<_> = r.results.values().filter_map(|res| res.data.as_ref().filter(|d| d["card"].is_string()).map(|d| (res.seq, d.clone()))).collect();
                 cards.sort_by_key(|(seq, _)| *seq);
                 for (seq, d) in cards {
@@ -135,7 +154,8 @@ impl Kernel {
                 e.1.push(json!({ "task_id": t.task_id, "title": title, "text": t.text, "status": status, "waiting_on": r.reason, "waiting_item": r.waiting_item }));
                 if let Some(end) = r.ended_at {
                     let after = t.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| answered.get(f)).map_or(end, |a| end.max(*a));
-                    out.push((after, i64::MAX, json!({ "kind": "result", "task_id": t.task_id, "title": title, "text": t.text, "status": status, "summary": r.summary, "at": end })));
+                    let files: Vec<Value> = r.outputs.iter().map(|(id, name, mt, size)| json!({ "id": id, "name": name, "media_type": mt, "size": size })).collect();
+                    out.push((after, i64::MAX, json!({ "kind": "result", "task_id": t.task_id, "title": title, "text": t.text, "status": status, "summary": r.summary, "at": end, "files": files })));
                 }
             }
         }
@@ -191,6 +211,9 @@ impl Kernel {
                 ids: Some((task_id.clone(), run_id)),
                 model: Some((run.config.adapter.clone(), run.config.model.clone())),
                 title: Some(title.clone()),
+                // The files of the message that started it, and the thread's project.
+                files: task.files.clone(),
+                project: self.read(|s| s.project_of(&chat.thread)),
                 ..Default::default()
             };
             self.create_run(&format!("chat:{}", a.run), &run.person, text.clone(), vec![], o).await?;
@@ -283,6 +306,10 @@ impl Kernel {
                     },
                 )
                 .await?;
+                // A schedule confirmed in a project's conversation is in that project.
+                if let Some(project) = self.read(|s| s.project_of(&task.chat.as_ref().map(|c| c.thread.clone()).unwrap_or_default())) {
+                    self.emit(&actor, Ev::Moved { item: id.clone(), project: Some(project) }).await?;
+                }
                 Ok(Ok(json!({ "schedule": id })))
             }
             "decline" => {

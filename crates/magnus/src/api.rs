@@ -59,7 +59,7 @@ fn credential(h: &HeaderMap) -> Option<&str> {
     bearer(h).or_else(|| cookie(h, SESSION_COOKIE))
 }
 
-fn who(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
+pub(crate) fn who(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
     let token = credential(h).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "sign in"))?;
     if let Some(p) = k.cfg.person_by_token(token) {
         return Ok(p.clone());
@@ -140,6 +140,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/schedules", get(schedules).post(add_schedule))
         .route("/v1/schedules/{id}", axum::routing::delete(remove_schedule))
         .merge(crate::dev::router())
+        .merge(crate::library::router())
         .layer(axum::middleware::from_fn(cookie_guard))
         .layer(Extension(transport))
         .with_state(k)
@@ -376,9 +377,10 @@ fn needs(s: &crate::state::State, p: &Person, run: &Run) -> bool {
 
 /// A task in a list: what it is, where it stands, whether it needs this
 /// person, and the request it came from (a chat message or a schedule).
-fn task_row(k: &Kernel, s: &crate::state::State, p: &Person, t: &crate::state::Task, r: &Run) -> Value {
+pub(crate) fn task_row(k: &Kernel, s: &crate::state::State, p: &Person, t: &crate::state::Task, r: &Run) -> Value {
     let mut v = task_json(k, t, r, false);
     v["needs_you"] = json!(needs(s, p, r));
+    v["project"] = crate::library::project_ref(s, &t.task_id);
     v["waiting_item"] = json!(r.waiting_item);
     v["ended_at"] = json!(r.ended_at);
     v["group"] = if let Some(sc) = t.schedule.as_ref().and_then(|id| s.schedules.get(id)) {
@@ -443,6 +445,10 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Va
         v["plan"] = run.plan.clone().unwrap_or(Value::Null);
         v["plan_version"] = json!(run.plan_version);
         v["outcome_view"] = run.outcome_view.clone().unwrap_or(Value::Null);
+        // Only here, never in a list's rows: those are built under the state lock.
+        v["files"] = json!(k.read(|s| task.files.iter().filter_map(|id| s.files.get(id)).map(|f| crate::library::file_json(s, f)).collect::<Vec<_>>()));
+        v["project"] = k.read(|s| crate::library::project_ref(s, &task.task_id));
+        v["preview"] = json!({ "chars": crate::compose::PREVIEW_CHARS, "rows": crate::compose::MAX_ROWS });
         v["spoken"] = json!(run.spoken);
         v["ended_at"] = json!(run.ended_at);
         v["waiting_item"] = json!(run.waiting_item);
@@ -466,22 +472,29 @@ async fn submit(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
     if text.is_empty() {
         return err(StatusCode::BAD_REQUEST, "the task has no text");
     }
-    let attachments = b["attachments"].as_array().cloned().unwrap_or_default();
-    for a in &attachments {
-        let size = a["data_b64"].as_str().map(|d| d.len() * 3 / 4).unwrap_or(0);
-        if a["name"].as_str().is_none() || a["media_type"].as_str().is_none() || size == 0 {
-            return err(StatusCode::BAD_REQUEST, "each attachment needs name, media_type and data_b64");
-        }
-        if size > 25 * 1024 * 1024 {
-            return err(StatusCode::PAYLOAD_TOO_LARGE, "attachments are limited to 25 MB each");
-        }
-    }
+    let mut files = match crate::library::given_files(&k, &p, &b) {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    let project = match crate::library::chosen_project(&k, &p, &b) {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
     let model = match chosen_model(&k, &b).await {
         Ok(m) => m,
         Err(r) => return r,
     };
-    let o = crate::kernel::NewRun { model, ..Default::default() };
-    match k.create_run(&format!("person:{}", p.id), &p.id, text, attachments, o).await {
+    // Files sent with the task are uploads like any other: they go to the
+    // person's library, linked to this task.
+    for a in b["attachments"].as_array().into_iter().flatten() {
+        match crate::library::add_file(&k, &p, a, None).await {
+            Ok(Ok(id)) => files.push(id),
+            Ok(Err(r)) => return r,
+            Err(e) => return internal(e),
+        }
+    }
+    let o = crate::kernel::NewRun { model, files, project, ..Default::default() };
+    match k.create_run(&format!("person:{}", p.id), &p.id, text, vec![], o).await {
         Ok((task, run)) => (StatusCode::CREATED, Json(json!({ "task_id": task, "run_id": run }))).into_response(),
         Err(e) => internal(e),
     }
@@ -535,7 +548,15 @@ async fn chat_post(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response 
         Ok(m) => m,
         Err(r) => return r,
     };
-    match k.chat_say(&p.id, text, b["thread"].as_str().map(String::from), model, None).await {
+    let files = match crate::library::given_files(&k, &p, &b) {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    let project = match crate::library::chosen_project(&k, &p, &b) {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
+    match k.chat_say(&p.id, text, b["thread"].as_str().map(String::from), model, None, files, project).await {
         Ok(Some((thread, task))) => (StatusCode::CREATED, Json(json!({ "thread": thread, "task_id": task }))).into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "no such thread"),
         Err(e) => internal(e),
@@ -1068,6 +1089,7 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
                     "id": x.id, "person": x.person, "text": x.text, "title": x.title.clone().unwrap_or_else(|| x.text.clone()),
                     "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due(), "last_fired": x.last_fired,
                     "last": last, "runs": rows,
+                    "project": s.project_of(&x.id).and_then(|id| s.projects.get(&id)).map(|p| json!({ "id": p.id, "name": p.name })),
                 })
             })
             .collect()
@@ -1099,11 +1121,21 @@ async fn add_schedule(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respon
         Ok(r) => r,
         Err(m) => return err(StatusCode::BAD_REQUEST, m),
     };
+    let project = match crate::library::chosen_project(&k, &p, &b) {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
     let id = new_id("sched");
-    match k.emit(&format!("person:{}", p.id), Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at, budget: None, card: None, label: None, title: None }).await {
-        Ok(_) => (StatusCode::CREATED, Json(json!({ "id": id }))).into_response(),
-        Err(e) => internal(e),
+    let actor = format!("person:{}", p.id);
+    if let Err(e) = k.emit(&actor, Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at, budget: None, card: None, label: None, title: None }).await {
+        return internal(e);
     }
+    if project.is_some() {
+        if let Err(e) = k.emit(&actor, Ev::Moved { item: id.clone(), project }).await {
+            return internal(e);
+        }
+    }
+    (StatusCode::CREATED, Json(json!({ "id": id }))).into_response()
 }
 
 async fn remove_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {

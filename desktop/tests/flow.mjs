@@ -127,6 +127,14 @@ await step("see the outcome with its evidence", async () => {
   await page.locator(".evidence.pass pre").first().waitFor({ timeout: T });
   const frame = page.frameLocator("iframe.composed");
   await frame.locator("body").getByText(/\S/).first().waitFor({ timeout: T });
+  // The deliverable leads, with the delivered file shown in full, before the
+  // summary, the evidence, the cost and the trace.
+  await frame.getByText("Q3 revenue: 41.7M, up from 38.2M in Q2.").waitFor({ timeout: T });
+  const order = await page.evaluate(() => ["iframe.composed", "[data-summary]", "[data-done-line]", "[data-cost]", "details.trace"].map(q => {
+    const el = document.querySelector(q);
+    return el ? el.getBoundingClientRect().top + window.scrollY : null;
+  }));
+  if (order.some(y => y === null) || order.some((y, i) => i && y <= order[i - 1])) throw new Error(`the outcome page is out of order (deliverable, summary, evidence, cost, trace): ${order}`);
   // The composed outcome cannot run scripts.
   const sandbox = await page.locator("iframe.composed").getAttribute("sandbox");
   if (sandbox === null || /allow-scripts/.test(sandbox)) throw new Error(`the outcome frame may run scripts: ${sandbox}`);
@@ -139,7 +147,8 @@ await step("see the outcome with its evidence", async () => {
   await page.locator("ol .chip", { hasText: "appliance-verified" }).first().waitFor({ timeout: T });
   const states = await page.locator("[data-unit-status]").evaluateAll(els => els.map(e => e.dataset.unitStatus));
   if (states.some(s => s === "active" || s === "pending")) throw new Error(`a finished task shows plan units as ${states.join(", ")}`);
-  await page.getByRole("tab", { name: "Full trace" }).click();
+  await page.getByRole("tab", { name: "Outcome" }).click();
+  await page.locator("details.trace > summary").click();
   await page.locator(".call").first().waitFor({ timeout: T });
 });
 
