@@ -26,6 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { clean: false }
+      # The browser sidecar's packages (some suites drive a browser).
+      - name: Browser sidecar
+        run: npm ci --prefix browser
       - name: Programs the tests launch
         run: cargo build --workspace --bins
       - name: Invariants and scratch suites
