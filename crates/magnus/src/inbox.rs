@@ -262,6 +262,11 @@ impl Kernel {
             ("schedule_proposal", "reject") | ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") => {
                 self.emit(&actor, resolve(None)).await?;
             }
+            // A run stopped by its budget stops again at once on the same
+            // budget: it continues only with more.
+            ("notice", "resume") if item.details["reason"] == "budget" => {
+                return Ok(Answer::Invalid("the run used its budget; continue it with a bigger one (extend)".into()));
+            }
             // Only the kernel's own notices (which name a reason) can continue a
             // run; a message the agent wrote cannot.
             ("notice", "extend") | ("notice", "resume") if item.details["reason"].is_string() && (decision != "extend" || item.details["reason"] == "budget") => {

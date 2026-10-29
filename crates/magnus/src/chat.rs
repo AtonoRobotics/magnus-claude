@@ -247,26 +247,16 @@ impl Kernel {
         (format!("A card for this schedule ({card}) is in the thread. Nothing is scheduled until the person confirms it."), false, Some(data))
     }
 
-    /// A schedule's budget per run: the appliance's, tightened where the
-    /// model asked, never loosened.
+    /// A schedule's budget per run: the appliance's, with its spending
+    /// tightened where the model asked, never loosened. Model calls and
+    /// actions stay the appliance's whatever the model sends.
     fn card_budget(&self, b: &Value) -> std::result::Result<crate::config::Budget, String> {
         let mut out = self.cfg.budget.clone();
-        if b.is_null() {
-            return Ok(out);
-        }
         if let Some(v) = b["max_usd"].as_f64() {
             if v <= 0.0 || v > out.max_usd {
                 return Err(format!("max_usd must be above 0 and at most the appliance's {}", out.max_usd));
             }
             out.max_usd = v;
-        }
-        for (k, slot) in [("max_model_calls", &mut out.max_model_calls), ("max_actions", &mut out.max_actions)] {
-            if let Some(v) = b[k].as_u64() {
-                if v == 0 || v > *slot as u64 {
-                    return Err(format!("{k} must be above 0 and at most the appliance's {slot}"));
-                }
-                *slot = v as u32;
-            }
         }
         Ok(out)
     }

@@ -1,6 +1,7 @@
 // A schedule from chat, in the installed app: the person asks in Chat,
-// confirms the card, and watches the Schedules view as runs arrive. The test
-// restarts the appliance under the open app after the first run.
+// confirms the card, and watches the Schedules view as runs arrive, then
+// deletes the schedule there. The test restarts the appliance under the open
+// app after the first run.
 //
 // MAGNUS_WEBDRIVER  tauri-driver's address      MAGNUS_APP  the app binary
 // MAGNUS_URL        the appliance (https)       MAGNUS_FINGERPRINT  what it printed
@@ -38,6 +39,15 @@ await d.step(`the Schedules view shows ${runs} completed runs`, async () => {
     await new Promise(r => setTimeout(r, 2000));
   }
   throw new Error(`the view shows: ${seen}`);
+});
+
+// Deleting asks first; the runs it made stay in Tasks.
+await d.step("delete the schedule from the view", async () => {
+  await d.click(d.xpath("//div[@data-schedule]//button[normalize-space()='Delete']"));
+  const asked = await d.until("the confirmation", () => d.call("GET", d.s("/alert/text")));
+  if (!asked.includes("starts no more runs")) throw new Error(`the confirmation says: ${asked}`);
+  await d.call("POST", d.s("/alert/accept"), {});
+  await d.seen("No schedules yet.");
 });
 
 await d.close();

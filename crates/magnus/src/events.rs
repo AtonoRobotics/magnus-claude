@@ -308,6 +308,9 @@ pub enum Ev {
         /// The project it started in.
         #[serde(default)]
         project: Option<ProjectContext>,
+        /// The schedule it is one firing of.
+        #[serde(default)]
+        schedule: Option<String>,
     },
     /// A file the person added: to the library, a project, or a chat
     /// message. Its content is private data, never instructions.

@@ -79,6 +79,7 @@ impl Kernel {
         });
         let project = task.as_ref().and_then(|t| t.project.clone());
         let chat = task.as_ref().and_then(|t| t.chat.clone());
+        let scheduled = task.as_ref().is_some_and(|t| t.schedule.is_some());
         let mut first = vec![];
         // A chat turn sees the thread so far, as recorded when the person
         // wrote; a task from chat, the conversation that started it.
@@ -89,6 +90,10 @@ impl Kernel {
             _ => {}
         }
         first.push(Block::Text { text: task.map(|t| t.text).unwrap_or_default() });
+        // The schedule's text says how often; this run is one of those times.
+        if scheduled {
+            first.push(Block::Text { text: "This is one run of a schedule the person already set up; the schedule starts the next run on its own. Do the work once, now.".into() });
+        }
         // The project's instructions are the person's own words, for
         // everything in it; its files are data, read when needed (M2).
         if let Some(p) = &project {
@@ -191,6 +196,10 @@ impl Kernel {
         if chat {
             specs.retain(|t| tools::builtin(&t.name).is_some_and(|b| b.risk == Risk::Read || b.name == "memory_write"));
             specs.extend(tools::chat_specs());
+        }
+        // A scheduled run is already one firing of a schedule.
+        if self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.schedule.is_some())) {
+            specs.retain(|t| t.name != "propose_schedule");
         }
         // project_read only where there are reference files to read.
         if !self.read(|s| s.tasks.get(&run.task).and_then(|t| t.project.as_ref()).is_some_and(|p| !p.files.is_empty())) {
@@ -463,6 +472,11 @@ impl Kernel {
                     (false, _) => self.result(rid, call_id, "Unknown layer: use org, group/<id> or user/<id>. A retry with the same layer will not help.", true).await?,
                     (_, Err(e)) => self.result(rid, call_id, format!("The policy does not parse: {e}. A retry with the same text will not help."), true).await?,
                 }
+            }
+            // Offered only outside a schedule; a model that calls it anyway
+            // is told why.
+            "propose_schedule" if self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.schedule.is_some())) => {
+                self.result(rid, call_id, "This run is already one firing of the person's schedule; nothing more to schedule. Do the work once, now.", true).await?
             }
             "propose_schedule" => match crate::api::rule_for(input) {
                 Ok((every, daily)) => {

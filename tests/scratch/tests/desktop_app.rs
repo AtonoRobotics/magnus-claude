@@ -211,15 +211,24 @@ async fn a_schedule_asked_for_in_chat_runs_in_the_installed_app_across_a_restart
     let s = script(|c| async move {
         if c.body["system"].to_string().contains("in a chat") {
             return match c.turn() {
-                0 => tool("create_schedule", json!({ "title": "Tell me the time", "text": "Tell me the time.", "every_minutes": 5, "daily_at": "", "scope": "Reads the clock; sends nothing.", "budget": { "max_usd": 0.1 } })),
+                0 => tool("create_schedule", json!({ "title": "Tell me the time", "text": "Every 5 minutes, tell me the current time.", "every_minutes": 5, "daily_at": "",
+                    "scope": "Reads the clock; sends nothing.", "budget": { "max_usd": 0.1, "max_model_calls": 3, "max_actions": 3 } })),
                 _ => Reply::Text("Confirm the card and I'll tell you the time every 5 minutes.".into()),
             };
         }
-        match c.turn() {
-            0 => tool("task_contract", json!({ "goal": "tell the time", "assumptions": [], "irreversible_actions": [],
-                "criteria": [{ "id": "c1", "description": "the time is told", "check": { "tool": "sandbox_exec", "input": { "command": "date" }, "expect": [{ "pointer": "/exit_code", "equals": 0 }] } }] })),
-            _ => complete("It is time."),
+        if c.body["system"].to_string().contains("You keep the person's long-term memory") {
+            return Reply::Text(String::new());
         }
+        // As the live model did: it proposes the recurrence its text names
+        // when it may, and leaves optional fields "".
+        if c.turn() == 0 && c.offered_tools().iter().any(|t| t == "propose_schedule") {
+            return tool("propose_schedule", json!({ "text": "Every 5 minutes, tell me the current time.", "every_minutes": 5 }));
+        }
+        if !c.messages().iter().any(|m| m.to_string().contains("task_contract")) {
+            return tool("task_contract", json!({ "goal": "tell the time", "assumptions": [], "irreversible_actions": [],
+                "criteria": [{ "id": "c1", "description": "the time is told", "check": { "tool": "sandbox_exec", "input": { "command": "date" }, "expect": [{ "pointer": "/exit_code", "equals": 0 }] } }] }));
+        }
+        tool("task_complete", json!({ "summary": "It is time.", "deliverable": [{ "type": "stat", "label": "Time", "value": "12:00", "title": "", "unit": "", "caption": "" }] }))
     });
     let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
     let idp = FakeIdp::start(PERSON).await;
@@ -251,8 +260,11 @@ async fn a_schedule_asked_for_in_chat_runs_in_the_installed_app_across_a_restart
     let ((ok, log), restarted) = tokio::join!(watch, restart);
     let (_, s) = alice.get("/v1/schedules").await;
     assert!(ok && restarted, "the schedule did not run as the app shows it (restarted: {restarted}):\n{log}\nschedules: {s}\n{}", f.report().await);
-    let runs = s["schedules"][0]["runs"].as_array().unwrap();
-    assert!(runs.len() >= 3 && runs.iter().all(|r| r["status"] == "completed"), "{s}");
+    assert!(s["schedules"].as_array().unwrap().is_empty(), "the schedule deleted in the app is still there: {s}");
+    let (_, t) = alice.get("/v1/tasks").await;
+    let runs: Vec<&serde_json::Value> = t["tasks"].as_array().unwrap().iter().filter(|t| t["text"].as_str().is_some_and(|x| x.contains("tell me the current time"))).collect();
+    assert!(runs.len() >= 3 && runs.iter().all(|r| r["status"] == "completed"), "{t}");
+    assert!(!alice.inbox().await.iter().any(|i| i["kind"] == "schedule_proposal"), "a firing proposed the schedule again");
     assert_eq!(f.app.starts(), starts + 1, "the appliance did not restart between runs");
 }
 

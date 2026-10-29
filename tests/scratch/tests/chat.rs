@@ -314,6 +314,67 @@ async fn a_schedule_from_chat_needs_its_creators_confirmation() {
     assert_eq!(wait_entry(&alice, &thread, |e| e["kind"] == "schedule_card").await["state"], "confirmed");
 }
 
+/// A schedule made in chat, in the shapes the live model sent: `every_minutes`
+/// 0 beside the time, a guessed count of model calls and actions, schedule
+/// text that says how often, and a deliverable with its optional fields "".
+/// Each firing is one run that does the work and completes: it is told it is
+/// one run of the schedule, is not offered `propose_schedule`, and has the
+/// appliance's model calls and actions. Live, every run proposed the schedule
+/// again and then stopped on its budget.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_schedule_from_chat_fires_runs_that_complete() {
+    let at = (chrono::Local::now() + chrono::Duration::minutes(1)).format("%H:%M").to_string();
+    let ask = format!("Every day at {at}, tell me the current time.");
+    let text = ask.clone();
+    let m = FakeModel::start(script(move |c| {
+        let text = text.clone();
+        async move {
+            if is_chat(&c) {
+                return match c.turn() {
+                    0 => tool("create_schedule", json!({ "title": "Tell me the time", "text": text, "every_minutes": 0, "daily_at": at_of(&text),
+                        "scope": "Reads the clock; sends nothing.", "budget": { "max_usd": 0.5, "max_model_calls": 3, "max_actions": 3 } })),
+                    _ => say("Confirm the card."),
+                };
+            }
+            if c.body["system"].to_string().contains("You keep the person's long-term memory") {
+                return say("");
+            }
+            // As the live model did: a recurrence in the text, and a tool to propose one.
+            if c.turn() == 0 && c.offered_tools().iter().any(|t| t == "propose_schedule") {
+                return tool("propose_schedule", json!({ "text": text, "every_minutes": 5 }));
+            }
+            if !c.messages().iter().any(|m| m.to_string().contains("task_contract")) {
+                return simple_contract();
+            }
+            tool("task_complete", json!({ "summary": "It is 12:00.", "deliverable": [{ "type": "stat", "label": "Time", "value": "12:00", "title": "", "unit": "", "caption": "" }] }))
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (thread, turn) = chat(&alice, &ask, None).await;
+    alice.wait_settled(&turn).await;
+    let card = wait_entry(&alice, &thread, |e| e["kind"] == "schedule_card").await;
+    assert!(card["budget"]["max_model_calls"].as_u64() > Some(3), "the model's guess at model calls limits each run: {card}");
+    let (st, v) = alice.post(&format!("/v1/chat/cards/{}", card["card"].as_str().unwrap()), json!({ "decision": "confirm" })).await;
+    assert!(st.is_success(), "{v}");
+    let s = eventually("the schedule fires and its run ends", Duration::from_secs(150), || async {
+        let (_, v) = alice.get("/v1/schedules").await;
+        v["schedules"][0]["last"]["ended_at"].is_string().then(|| v["schedules"][0].clone())
+    })
+    .await;
+    assert_eq!(s["last"]["status"], "completed", "{s}\n{}", app.logs());
+    let run = m.requests().into_iter().find(|c| !is_chat(c) && c.offered_tools().iter().any(|t| t == "task_complete")).unwrap();
+    assert!(run.messages()[0].to_string().contains("one run of a schedule"), "the run was not told it is one firing: {}", run.messages()[0]);
+    assert!(!alice.inbox().await.iter().any(|i| i["kind"] == "schedule_proposal"), "a firing proposed the schedule again");
+    assert_eq!(alice.send(reqwest::Method::DELETE, &format!("/v1/schedules/{}", s["id"].as_str().unwrap()), None).await.0.as_u16(), 204);
+    assert!(alice.get("/v1/schedules").await.1["schedules"].as_array().unwrap().is_empty(), "the deleted schedule is still listed");
+}
+
+fn at_of(text: &str) -> String {
+    text.split_whitespace().nth(3).unwrap_or_default().trim_end_matches(',').to_string()
+}
+
 /// Restart while a chat-created task is running: it resumes and posts its
 /// result to the thread.
 #[tokio::test(flavor = "multi_thread")]

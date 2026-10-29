@@ -188,8 +188,10 @@ pub fn check_fields(name: &str) -> Option<&'static [&'static str]> {
 pub fn chat_specs() -> Vec<ToolSpec> {
     let desc: Value = serde_json::from_str(include_str!("../instructions/tools.json")).expect("tools.json");
     let d = |n: &str| desc[n].as_str().unwrap_or_default().to_string();
+    // Only the money: a count of model calls or actions is no limit a person
+    // sets, and a model that guessed one stopped every run part way.
     let budget = json!({ "type": "object", "description": d("create_schedule.budget"), "properties": {
-        "max_usd": { "type": "number" }, "max_model_calls": { "type": "integer" }, "max_actions": { "type": "integer" }
+        "max_usd": { "type": "number" }
     } });
     vec![
         ToolSpec { name: "create_task".into(), description: d("create_task"), input_schema: obj(json!({ "title": { "type": "string" }, "text": { "type": "string" } }), &["title", "text"]) },

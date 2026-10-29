@@ -72,6 +72,8 @@ pub struct NewRun {
     pub files: Vec<String>,
     /// The project it starts in.
     pub project: Option<String>,
+    /// The schedule it is one firing of.
+    pub schedule: Option<String>,
     /// Removable modules switched on or off for this run alone, over the
     /// model's settings (an ablation trial).
     pub modules: std::collections::BTreeMap<String, bool>,
@@ -359,6 +361,7 @@ impl Kernel {
                 title: o.title,
                 files: o.files,
                 project,
+                schedule: o.schedule,
             },
         )
         .await?;
@@ -381,6 +384,7 @@ impl Kernel {
                     budget: sc.budget.clone(),
                     label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label),
                     project: self.read(|s| s.project_of(&sc.id)),
+                    schedule: Some(sc.id.clone()),
                     ..Default::default()
                 };
                 match self.create_run(&format!("schedule:{}", sc.id), &sc.person, sc.text.clone(), vec![], o).await {

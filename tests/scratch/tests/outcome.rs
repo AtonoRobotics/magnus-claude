@@ -94,3 +94,24 @@ async fn a_completion_with_an_empty_deliverable_is_refused() {
     }
     assert_eq!(t["outcome_view"][0]["text"], "Closed ticket 42 with the note \"fixed in 1.2\".", "{t}");
 }
+
+/// Bug (owner, 2026-10-29): a model that fills every field of a component
+/// sends "" for the optional ones (and the other types' fields too); every
+/// live completion shaped so was refused ("component 0.title is empty"), and
+/// each scheduled run stopped at its budget retrying. An empty optional field
+/// is not given.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_component_with_every_field_filled_and_empty_optional_ones_is_accepted() {
+    let contract = tool("task_contract", json!({ "goal": "tell the time", "assumptions": [], "irreversible_actions": [],
+        "criteria": [{ "id": "c1", "description": "the work is done", "check": { "tool": "sandbox_exec", "input": { "command": "true" }, "expect": [{ "pointer": "/exit_code", "equals": 0 }] } }] }));
+    // As the live model sent it (seq 6514 on strix-alpha), less the values.
+    let filled = json!({ "type": "text", "text": "It is 13:54 UTC.", "title": "", "unit": "", "caption": "", "label": "", "file": "not-applicable", "rows": [], "columns": [], "items": [], "labels": [], "values": [], "series": [] });
+    let mut m = FakeModel::start(steps(vec![contract, tool("task_complete", json!({ "summary": "It is 13:54 UTC.", "deliverable": [filled], "spoken": "It is six minutes to two." }))])).await;
+    m.url = provider(&m).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api(PERSON);
+    let id = alice.submit("Tell me the time.").await;
+    let t = alice.wait_status(&id, &["completed", "failed", "suspended"]).await;
+    assert_eq!(t["status"], "completed", "{t}");
+    assert_eq!(t["outcome_view"][0]["text"], "It is 13:54 UTC.", "{t}");
+}

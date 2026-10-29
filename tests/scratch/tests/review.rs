@@ -185,3 +185,27 @@ async fn agent_messages_cannot_continue_runs() {
     let st = alice.respond(msg["id"].as_str().unwrap(), json!({ "decision": "extend" })).await;
     assert_eq!(st, 400);
 }
+
+/// A run its budget stopped stops again at once on the same budget: the
+/// person pressed Continue seven times on one live. It continues only with a
+/// bigger budget.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_out_of_budget_continues_only_with_more() {
+    let model = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("x", "x"),
+            1 | 2 => tool("notify", json!({ "message": "working" })),
+            _ => complete("done"),
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default().max_model_calls(2), &model).await;
+    let alice = app.api("alice");
+    let id = alice.submit("x").await;
+    let stop = alice.wait_item(&id, "notice").await;
+    assert_eq!(stop["details"]["reason"], "budget", "{stop}");
+    let item = stop["id"].as_str().unwrap();
+    assert_eq!(alice.respond(item, json!({ "decision": "resume" })).await, 400, "continued on the budget that stopped it");
+    assert!(alice.respond(item, json!({ "decision": "extend" })).await.is_success());
+    assert_eq!(alice.wait_settled(&id).await["waiting_on"], "review");
+}

@@ -644,7 +644,7 @@ impl State {
                     (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: false }),
                 );
             }
-            Ev::TaskCreated { task, run, person, text, config, attachments, experiment, chat, label, title, files, project } => {
+            Ev::TaskCreated { task, run, person, text, config, attachments, experiment, chat, label, title, files, project, schedule } => {
                 // Playbook items the run starts with carry the taint of the
                 // runs that wrote them (I2, M1), and a task from chat that of
                 // the turn that started it.
@@ -663,7 +663,7 @@ impl State {
                         created_at: e.at,
                         chat: chat.clone(),
                         title: title.clone(),
-                        schedule: None,
+                        schedule: schedule.clone(),
                         files: files.clone(),
                         project: project.clone(),
                         verdict: None,

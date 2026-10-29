@@ -104,8 +104,10 @@ pub fn validate(view: &Value, files: &[String]) -> Result<(), String> {
             }
             other => return Err(format!("{at} has unknown type {other:?}; use one of {}", KINDS.join(", "))),
         }
+        // A model that must fill every field sends "" for the optional one it
+        // does not mean, as it does for a schedule's daily_at.
         for t in ["title", "unit", "caption"] {
-            if !c[t].is_null() {
+            if !c[t].is_null() && c[t].as_str().is_none_or(|s| !s.trim().is_empty()) {
                 text(&c[t], &format!("{at}.{t}"))?;
             }
         }

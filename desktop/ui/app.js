@@ -654,13 +654,20 @@ route(/^#\/schedules$/, async main => {
     paint(main, `<h1>Schedules</h1>${schedules.length ? schedules.map(sc => {
       const waiting = sc.runs.filter(r => r.needs_you), last = sc.last;
       return `<div class="card sched" data-schedule="${esc(sc.id)}">
-        <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))} ${moveControl(sc.id, sc.project, projects)}</span></div>
+        <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))} ${moveControl(sc.id, sc.project, projects)} <button class="link" data-act="delete" data-id="${esc(sc.id)}">Delete</button></span></div>
         <div class="small muted" data-last>Next run ${esc(until(sc.next))} · ${sc.last_failed ? `Last firing <span class="chip bad">could not start</span> ${esc(sc.last_failed.error)} <span class="faint">${esc(when(sc.last_failed.at))}</span>`
           : last ? `Last result: ${chip(last.status)} <a href="#/task/${enc(last.task_id)}">${esc(firstLine(last.summary) || last.title)}</a> <span class="faint">${esc(when(last.ended_at || last.created_at))}</span>` : "No results yet"}</div>
         ${waiting.length ? `<ul class="tlist">${waiting.map(taskRow).join("")}</ul>` : ""}
         ${sc.runs.length ? `<details data-key="sched:${esc(sc.id)}"><summary class="small muted">${sc.runs.length} run${sc.runs.length === 1 ? "" : "s"}</summary><ul class="tlist">${sc.runs.map(taskRow).join("")}</ul></details>` : ""}
       </div>`;
     }).join("") : `<p class="empty">No schedules yet. Ask in Chat for something done every day or every week.</p>`}`);
+  };
+  // Deleting stops future runs; the runs it already made stay in Tasks.
+  main.onclick = async e => {
+    const b = e.target.closest("[data-act=delete]");
+    if (!b || !confirm("Delete this schedule? It starts no more runs; the runs it made stay in Tasks.")) return;
+    b.disabled = true;
+    try { await api("DELETE", `/v1/schedules/${enc(b.dataset.id)}`); await draw(); } catch (err) { toast(err.message); b.disabled = false; }
   };
   await draw();
   every(5000, draw);
@@ -996,8 +1003,9 @@ function card(i, composed) {
     case "notice": {
       const ev = d.evidence;
       const list = [];
-      if (typeof d.reason === "string") list.push(["resume", "Continue", "primary"]);
-      if (d.reason === "budget") list.push(["extend", "Double the budget and continue"]);
+      // A run out of budget would stop again at once: it continues only with more.
+      if (d.reason === "budget") list.push(["extend", "Double the budget and continue", "primary"]);
+      else if (typeof d.reason === "string") list.push(["resume", "Continue", "primary"]);
       list.push(["dismiss", "Dismiss"]);
       body = `<p class="small"><span class="muted">Why it stopped:</span> ${esc(d.reason)}</p>
         ${ev ? `<div class="evidence fail"><div class="small muted">Evidence</div>${fieldValue(ev)}</div>` : ""}${buttons(i, list)}`;
