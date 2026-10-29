@@ -18,7 +18,8 @@ const tauri = window.__TAURI__;
 
 const appBridge = tauri && {
   kind: "app",
-  invoke: (cmd, args) => tauri.core.invoke(cmd, args || {}),
+  // A shell command fails with a plain string; the page shows `e.message`.
+  invoke: (cmd, args) => tauri.core.invoke(cmd, args || {}).catch(e => { throw e instanceof Error ? e : new Error(String(e)); }),
   async restore() { return this.invoke("restore"); },
   async connect(url) { return this.invoke("connect", { url }); },
   async trust(url, fingerprint) { return this.invoke("trust", { url, fingerprint }); },

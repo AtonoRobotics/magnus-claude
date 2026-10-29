@@ -9,75 +9,16 @@
 // MAGNUS_PROVIDER   the identity provider's name on the sign-in button
 // MAGNUS_PERSON  MAGNUS_API_KEY  MAGNUS_TASK  MAGNUS_DOWNLOADS
 // MAGNUS_SHOTS      optional: where to keep screenshots
-import { writeFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { env, open, pinAndSignIn } from "./appdriver.mjs";
 
-const env = k => { const v = process.env[k]; if (!v) { console.error(`${k} is not set`); process.exit(2); } return v; };
 const [wd, app, url, fingerprint, provider, person, apiKey, task, downloads] =
   ["MAGNUS_WEBDRIVER", "MAGNUS_APP", "MAGNUS_URL", "MAGNUS_FINGERPRINT", "MAGNUS_PROVIDER", "MAGNUS_PERSON", "MAGNUS_API_KEY", "MAGNUS_TASK", "MAGNUS_DOWNLOADS"].map(env);
-const shots = process.env.MAGNUS_SHOTS;
-if (shots) mkdirSync(shots, { recursive: true });
-const E = "element-6066-11e4-a52e-4f735466cecf";
-const T = 60_000;
+const d = await open(wd, app, process.env.MAGNUS_SHOTS, "app");
+const { step, css, xpath, button, click, type, text, seen, run, until } = d;
 
-async function call(method, path, body) {
-  const r = await fetch(`${wd}${path}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const j = await r.json();
-  if (!r.ok || (j.value && j.value.error)) throw new Error(`${method} ${path}: ${JSON.stringify(j.value)}`);
-  return j.value;
-}
-
-const session = (await call("POST", "/session", { capabilities: { alwaysMatch: { "tauri:options": { application: app } } } })).sessionId;
-const s = p => `/session/${session}${p}`;
-const run = (script, ...args) => call("POST", s("/execute/sync"), { script, args });
-const until = async (what, f) => {
-  const end = Date.now() + T;
-  let last;
-  while (Date.now() < end) {
-    try { const v = await f(); if (v) return v; } catch (e) { last = e; }
-    await new Promise(r => setTimeout(r, 250));
-  }
-  throw new Error(`timed out waiting for ${what}${last ? `: ${last.message}` : ""}`);
-};
-const find = (using, value) => until(value, async () => {
-  const els = await call("POST", s("/elements"), { using, value });
-  return els.length ? els[0][E] : null;
-});
-const css = v => find("css selector", v);
-const xpath = v => find("xpath", v);
-const button = (label, within = "") => xpath(`${within}//button[normalize-space()='${label}']`);
-const click = async el => call("POST", s(`/element/${await el}/click`), {});
-const type = async (el, text) => call("POST", s(`/element/${await el}/value`), { text });
-const text = async el => call("GET", s(`/element/${await el}/text`));
-const seen = t => until(`"${t}"`, () => run("return document.body.innerText.includes(arguments[0])", t));
-let n = 0;
-const shot = async name => { if (shots) writeFileSync(join(shots, `${String(++n).padStart(2, "0")}-${name}.png`), Buffer.from(await call("GET", s("/screenshot")), "base64")); };
-const step = async (name, f) => {
-  try { await f(); await shot(name); console.log(`ok   ${name}`); }
-  catch (e) { await shot(`FAILED-${name}`).catch(() => {}); console.error(`FAIL ${name}: ${e.message}`); await call("DELETE", s("")).catch(() => {}); process.exit(1); }
-};
-
-await step("pin the appliance's certificate", async () => {
-  await type(css("#addr"), url);
-  await click(button("Continue"));
-  const shown = (await text(css("#fp"))).trim();
-  if (shown !== fingerprint) throw new Error(`the app shows ${shown}, the appliance printed ${fingerprint}`);
-  await click(button("They match"));
-});
-
-await step(`sign in with ${provider}`, async () => {
-  await click(button(`Sign in with ${provider}`));
-  // The app opens the provider's page in the person's browser; here the
-  // test is that browser, and approves the code the app shows.
-  const code = (await text(css("#code"))).trim();
-  const link = await call("GET", s(`/element/${await css("#open")}/attribute/data-url`));
-  if (!link.includes(code)) throw new Error(`the provider's page ${link} is not for code ${code}`);
-  const approved = await (await fetch(link)).text();
-  if (!approved.includes(`Signed in as ${person}`)) throw new Error(`the provider did not approve: ${approved}`);
-  await xpath("//h1[normalize-space()='Home']");
-  const page = await run("return JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie");
-  if (page.includes("mgs_")) throw new Error("the session token reached the page");
-});
+await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await step("connect Claude", async () => {
   await click(xpath("//a[normalize-space()='Models']"));
@@ -129,5 +70,5 @@ await step("download the delivered file", async () => {
   if (!body.includes("41.7M")) throw new Error(`the downloaded file holds ${JSON.stringify(body)}`);
 });
 
-await call("DELETE", s(""));
+await d.close();
 console.log("app flow passed");
