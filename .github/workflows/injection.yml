@@ -1,0 +1,48 @@
+# The injection suite (X16), AgentDojo-style: on every change to the
+# boundary (what execute() decides with, and the loop that calls it), the
+# attacks in tests/scratch/tests/injection.rs run against the kernel with a
+# model that obeys every instruction it reads. It fails if any gets past.
+# Same build box as the desktop checks (desktop/README.md, "Release checks").
+name: injection
+
+on:
+  push:
+    branches: [master]
+    paths: &boundary
+      - crates/magnus/src/boundary.rs
+      - crates/magnus/src/policy.rs
+      - crates/magnus/src/tools.rs
+      - crates/magnus/src/apps.rs
+      - crates/magnus/src/connectors.rs
+      - crates/magnus/src/web.rs
+      - crates/magnus/src/browser.rs
+      - crates/magnus/src/vault.rs
+      - crates/magnus/src/state.rs
+      - crates/magnus/src/events.rs
+      - crates/magnus/src/run/**
+      - tests/scratch/tests/injection.rs
+      - .github/workflows/injection.yml
+  pull_request:
+    paths: *boundary
+  workflow_dispatch:
+
+concurrency:
+  group: injection-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  MAGNUS_GUEST_KERNEL: ${{ vars.MAGNUS_SANDBOX_OUT }}/vmlinux
+  MAGNUS_GUEST_ROOTFS: ${{ vars.MAGNUS_SANDBOX_OUT }}/rootfs.ext4
+
+jobs:
+  injection:
+    runs-on: [self-hosted, linux, magnus-linux]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with: { clean: false }
+      - name: Programs the suite launches
+        run: cargo build --workspace --bins
+      - name: Injection suite
+        run: cargo test -p magnus-scratch --test injection -- --nocapture
