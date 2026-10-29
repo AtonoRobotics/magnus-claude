@@ -1116,8 +1116,11 @@ async fn live(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
         Err(r) => return r,
     };
     let Some((_, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
-    let mut rx = k.live_text.subscribe();
+    let (so_far, mut rx) = k.live_text.subscribe(&run.id);
     let stream = async_stream(move |tx| async move {
+        if !so_far.is_empty() && tx.send(format!("data: {}\n\n", json!({ "text": so_far }))).await.is_err() {
+            return;
+        }
         loop {
             match rx.recv().await {
                 Ok((r, text)) if r == run.id => {

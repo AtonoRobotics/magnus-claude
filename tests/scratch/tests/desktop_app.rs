@@ -248,6 +248,66 @@ async fn every_message_action_works_in_the_installed_app() {
     assert!(alice.tasks().await["tasks"].as_array().unwrap().iter().any(|t| t["text"] == "Second, edited"), "no task from the message");
 }
 
+/// Requested by the owner (2026-10-29, U8): a data question gets its text
+/// streamed and then a chart and a table; a plain question gets text only;
+/// and composed content makes no network request, even markup forced into
+/// its frame.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn composed_answers_stream_text_first_and_reach_no_network_in_the_installed_app() {
+    use magnus_invariants::{complete, contract_unchecked, script, tool, tools, FakeWeb, Reply};
+    const QUESTION: &str = "How did revenue go by quarter?";
+    const ANSWER: &str = "Revenue rose every quarter, to 41.7M in Q3.";
+    const HOSTILE: &str = "Show me the office report";
+    let beacon = FakeWeb::start(&[("/beacon", "seen")]).await;
+    let b = beacon.url("/beacon");
+    let hostile = json!([
+        { "type": "table", "title": format!("url({b}/title)"), "columns": ["<img src=x>"], "rows": [[format!("<img src=\"{b}/table\">")]] },
+        { "type": "code", "code": format!("<script>fetch(\"{b}/code\")</script>") },
+        { "type": "map", "places": [{ "name": format!("<link rel=stylesheet href=\"{b}/map\">"), "lat": 51.5, "lon": -0.12 }, { "name": "Paris", "lat": 48.86, "lon": 2.35 }] },
+        { "type": "timeline", "events": [{ "when": "2025", "label": format!("<iframe src=\"{b}/timeline\"></iframe>") }] },
+        { "type": "comparison", "options": [format!("<style>@import url({b}/cmp)</style>"), "B"], "aspects": [{ "name": "<button>Approve</button>", "values": [1, 2], "best": 0 }] }
+    ]);
+    let s = script(move |c| {
+        let hostile = hostile.clone();
+        async move {
+            if c.body["system"].to_string().contains("in a chat") {
+                let first = c.messages().first().cloned().unwrap_or_default();
+                let said = first["content"].as_array().and_then(|b| b.last()).and_then(|b| b["text"].as_str()).unwrap_or_default().to_string();
+                return match said.as_str() {
+                    QUESTION => tools(vec![
+                        magnus_scratch::say(ANSWER),
+                        ("show", json!({ "components": [
+                            { "type": "bar_chart", "title": "Revenue by quarter", "labels": ["Q1", "Q2", "Q3"], "values": [35.1, 38.2, 41.7], "unit": "M" },
+                            { "type": "table", "columns": ["Quarter", "Revenue (M)"], "rows": [["Q1", 35.1], ["Q2", 38.2], ["Q3", 41.7]] }
+                        ] })),
+                    ]),
+                    HOSTILE => tools(vec![magnus_scratch::say("Here is what you asked for."), ("show", json!({ "components": hostile }))]),
+                    _ => Reply::Text(format!("Answer to: {said}")),
+                };
+            }
+            match c.turn() {
+                0 => contract_unchecked("do the work", "the work is done"),
+                1 => tool("task_fail", json!({ "reason": "not this test" })),
+                _ => complete("done"),
+            }
+        }
+    });
+    let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
+    let idp = FakeIdp::start(PERSON).await;
+    idp.configure(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let d = Driver::start().await;
+    let (ok, log) = d
+        .script("app-composed.mjs", &url, &fingerprint, &[("MAGNUS_DATA_QUESTION", QUESTION), ("MAGNUS_DATA_ANSWER", ANSWER), ("MAGNUS_HOSTILE_QUESTION", HOSTILE), ("MAGNUS_BEACON", &b)])
+        .await;
+    assert!(ok, "composed answers failed:\n{log}");
+    assert!(beacon.hits().is_empty(), "composed content reached the network: {:?}", beacon.hits());
+    // The recorder records: a request the test makes itself is seen.
+    reqwest::get(format!("{b}/control")).await.unwrap();
+    assert_eq!(beacon.hits().len(), 1, "the beacon records nothing, so the check above proves nothing");
+}
+
 /// The sign-in link crosses into the shell, and so does the kept session:
 /// signing out must leave nothing of the first person for the second.
 #[tokio::test(flavor = "multi_thread")]

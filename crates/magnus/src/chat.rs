@@ -162,7 +162,7 @@ impl Kernel {
                     Status::Completed => out.push((
                         r.ended_at.unwrap_or(t.created_at),
                         i64::MAX,
-                        json!({ "id": format!("a:{}", t.task_id), "kind": "answer", "text": r.summary, "at": r.ended_at, "task_id": t.task_id, "model": { "adapter": r.config.adapter, "model": r.config.model }, "verdict": t.verdict }),
+                        json!({ "id": format!("a:{}", t.task_id), "kind": "answer", "text": r.summary, "view": r.outcome_view, "spoken": r.spoken, "at": r.ended_at, "task_id": t.task_id, "model": { "adapter": r.config.adapter, "model": r.config.model }, "verdict": t.verdict }),
                     )),
                     _ => out.push((
                         r.ended_at.unwrap_or(t.created_at),
@@ -222,6 +222,8 @@ impl Kernel {
                 let text = |k: &str| e[k].as_str().unwrap_or_default().to_string();
                 let (role, said) = match e["kind"].as_str()? {
                     "message" => ("person", text("text")),
+                    // What the answer showed below its text is part of what it said.
+                    "answer" if e["view"].is_array() => ("you", format!("{}\n[Shown below the answer: {}]", text("text"), e["view"])),
                     "answer" => ("you", text("text")),
                     "tasks" => ("you", format!("Started tasks: {}", e["tasks"].as_array().into_iter().flatten().map(|t| format!("{} ({})", t["title"].as_str().unwrap_or_default(), t["text"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("; "))),
                     "result" => ("task result", format!("{} ({}): {}", text("title"), text("status"), text("summary"))),

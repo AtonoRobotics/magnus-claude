@@ -4,7 +4,12 @@
 
 use serde_json::Value;
 
-pub const KINDS: &[&str] = &["heading", "text", "list", "table", "stat", "bar_chart", "line_chart", "image", "file"];
+pub const KINDS: &[&str] = &["heading", "text", "list", "table", "stat", "bar_chart", "line_chart", "map", "timeline", "comparison", "code", "image", "file"];
+
+/// What a chat answer may show beside its text: only components that carry
+/// what prose cannot. Headings, paragraphs and lists belong in the answer
+/// itself, and a chat turn delivers no files to show.
+pub const SHOWN: &[&str] = &["table", "stat", "bar_chart", "line_chart", "map", "timeline", "comparison", "code"];
 
 const MAX_COMPONENTS: usize = 40;
 pub const MAX_TEXT: usize = 4000;
@@ -16,6 +21,8 @@ pub const PREVIEW_CHARS: usize = MAX_COMPONENTS * MAX_TEXT;
 const MAX_COLUMNS: usize = 12;
 const MAX_POINTS: usize = 60;
 const MAX_ITEMS: usize = 100;
+/// A comparison sets 2 to this many options side by side.
+const MAX_OPTIONS: usize = 6;
 pub const MAX_SPOKEN: usize = 6000;
 
 fn text(v: &Value, what: &str) -> Result<(), String> {
@@ -38,6 +45,23 @@ fn strings(v: &Value, what: &str, max: usize) -> Result<usize, String> {
         text(x, &format!("{what}[{i}]"))?;
     }
     Ok(a.len())
+}
+
+/// A number within a range, for a coordinate.
+fn number_in(v: &Value, what: &str, lo: f64, hi: f64) -> Result<(), String> {
+    match v.as_f64() {
+        Some(x) if (lo..=hi).contains(&x) => Ok(()),
+        _ => Err(format!("{what} must be a number from {lo} to {hi}")),
+    }
+}
+
+/// A list of 1 to `max` objects.
+fn objects<'a>(v: &'a Value, what: &str, max: usize) -> Result<&'a Vec<Value>, String> {
+    let a = v.as_array().filter(|a| !a.is_empty() && a.len() <= max).ok_or(format!("{what} needs 1 to {max} entries"))?;
+    if a.iter().any(|x| !x.is_object()) {
+        return Err(format!("each of {what} must be an object"));
+    }
+    Ok(a)
 }
 
 fn numbers(v: &Value, what: &str, len: usize) -> Result<(), String> {
@@ -94,6 +118,38 @@ pub fn validate(view: &Value, files: &[String]) -> Result<(), String> {
                     numbers(&s["values"], &format!("{at}.series[{i}].values"), n)?;
                 }
             }
+            // Places on a plain projection: the frame has no network, so no
+            // map tiles.
+            "map" => {
+                for (i, p) in objects(&c["places"], &format!("{at}.places"), MAX_ITEMS)?.iter().enumerate() {
+                    text(&p["name"], &format!("{at}.places[{i}].name"))?;
+                    number_in(&p["lat"], &format!("{at}.places[{i}].lat"), -90.0, 90.0)?;
+                    number_in(&p["lon"], &format!("{at}.places[{i}].lon"), -180.0, 180.0)?;
+                }
+            }
+            "timeline" => {
+                for (i, e) in objects(&c["events"], &format!("{at}.events"), MAX_ITEMS)?.iter().enumerate() {
+                    text(&e["when"], &format!("{at}.events[{i}].when"))?;
+                    text(&e["label"], &format!("{at}.events[{i}].label"))?;
+                }
+            }
+            "comparison" => {
+                let n = strings(&c["options"], &format!("{at}.options"), MAX_OPTIONS)?;
+                if n < 2 {
+                    return Err(format!("{at}.options needs 2 to {MAX_OPTIONS} entries"));
+                }
+                for (i, a) in objects(&c["aspects"], &format!("{at}.aspects"), MAX_ROWS)?.iter().enumerate() {
+                    text(&a["name"], &format!("{at}.aspects[{i}].name"))?;
+                    let vals = a["values"].as_array().filter(|v| v.len() == n && v.iter().all(|x| x.is_string() || x.is_number()));
+                    if vals.is_none() {
+                        return Err(format!("{at}.aspects[{i}].values must hold {n} strings or numbers, one per option"));
+                    }
+                    if !a["best"].is_null() && !a["best"].as_u64().is_some_and(|b| (b as usize) < n) {
+                        return Err(format!("{at}.aspects[{i}].best must be the index of an option, 0 to {}", n - 1));
+                    }
+                }
+            }
+            "code" => text(&c["code"], &format!("{at}.code"))?,
             // An image is drawn; a file is shown in full, drawn from the
             // same components by the app.
             "image" | "file" => {
@@ -104,11 +160,57 @@ pub fn validate(view: &Value, files: &[String]) -> Result<(), String> {
             }
             other => return Err(format!("{at} has unknown type {other:?}; use one of {}", KINDS.join(", "))),
         }
-        for t in ["title", "unit", "caption"] {
+        for t in ["title", "unit", "caption", "language"] {
             if !c[t].is_null() {
                 text(&c[t], &format!("{at}.{t}"))?;
             }
         }
     }
     Ok(())
+}
+
+/// Check what a chat answer shows beside its text: the same components, but
+/// only those that carry what the text cannot.
+pub fn validate_shown(view: &Value) -> Result<(), String> {
+    for (n, c) in view.as_array().into_iter().flatten().enumerate() {
+        let kind = c["type"].as_str().unwrap_or_default();
+        if KINDS.contains(&kind) && !SHOWN.contains(&kind) {
+            return Err(format!("component {n} is a {kind}: say that in your answer; show only {}", SHOWN.join(", ")));
+        }
+    }
+    validate(view, &[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn why(c: Value) -> String {
+        validate(&json!([c]), &[]).err().unwrap_or_default()
+    }
+
+    #[test]
+    fn the_new_components_are_checked() {
+        assert_eq!(why(json!({ "type": "map", "places": [{ "name": "A", "lat": 1, "lon": 2 }] })), "");
+        assert!(why(json!({ "type": "map", "places": [{ "name": "A", "lat": 1, "lon": 181 }] })).contains("lon must be a number from -180 to 180"));
+        assert!(why(json!({ "type": "map", "places": [] })).contains("places needs 1 to"));
+        assert_eq!(why(json!({ "type": "timeline", "events": [{ "when": "2024", "label": "x" }] })), "");
+        assert!(why(json!({ "type": "timeline", "events": [{ "when": "2024" }] })).contains("label must be a string"));
+        let cmp = |options: Value, values: Value, best: Value| json!({ "type": "comparison", "options": options, "aspects": [{ "name": "Price", "values": values, "best": best }] });
+        assert_eq!(why(cmp(json!(["a", "b"]), json!([1, "two"]), json!(1))), "");
+        assert!(why(cmp(json!(["a"]), json!([1]), Value::Null)).contains("options needs 2 to 6"));
+        assert!(why(cmp(json!(["a", "b"]), json!([1]), Value::Null)).contains("must hold 2 strings or numbers"));
+        assert!(why(cmp(json!(["a", "b"]), json!([1, 2]), json!(2))).contains("best must be the index of an option"));
+        assert_eq!(why(json!({ "type": "code", "code": "fn main() {}", "language": "rust" })), "");
+        assert!(why(json!({ "type": "code", "code": "" })).contains("code is empty"));
+    }
+
+    #[test]
+    fn chat_shows_only_what_text_cannot_carry() {
+        assert!(validate_shown(&json!([{ "type": "list", "items": ["a"] }])).unwrap_err().contains("say that in your answer"));
+        assert!(validate_shown(&json!([{ "type": "image", "file": "x.png" }])).unwrap_err().contains("show only"));
+        assert!(validate_shown(&json!([{ "type": "stat", "label": "Revenue", "value": 41.7 }])).is_ok());
+        assert!(validate_shown(&json!([{ "type": "script", "text": "<script>" }])).unwrap_err().contains("unknown type"));
+    }
 }

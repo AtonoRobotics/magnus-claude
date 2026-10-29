@@ -36,6 +36,20 @@ pub struct Reply {
 }
 
 impl Reply {
+    /// The reply's text, its blocks joined.
+    pub fn text(&self) -> String {
+        self.blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
+
     pub fn calls(&self) -> Vec<(String, String, Value)> {
         self.blocks
             .iter()
@@ -180,6 +194,17 @@ impl Run {
             .flat_map(|r| r.calls())
             .filter_map(|(id, name, _)| self.results.get(&id).map(|x| serde_json::json!({ "tool": name, "text": x.text, "is_error": x.is_error, "status": x.status, "seq": x.seq })))
             .collect()
+    }
+
+    /// What a chat turn showed below its answer: the components of its
+    /// last `show` the kernel accepted.
+    pub fn shown(&self) -> Option<Value> {
+        self.replies
+            .iter()
+            .flat_map(|r| r.calls())
+            .filter(|(id, name, _)| name == "show" && self.results.get(id).is_some_and(|x| !x.is_error))
+            .map(|(_, _, input)| input["components"].clone())
+            .last()
     }
 
     pub fn pending_calls(&self) -> Vec<(usize, String, String, Value)> {
@@ -775,8 +800,11 @@ impl State {
                     r.replies.push(Reply { step: *step, seq: e.seq, blocks: blocks.clone(), state: state.clone() });
                 }
             }
-            Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } => {
+            Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } | Ev::SpokenWritten { run, usage, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
+                    if let Ev::SpokenWritten { script, .. } = &e.ev {
+                        r.spoken = Some(script.clone());
+                    }
                     r.model_calls += 1;
                     r.usd += usage.cost_usd;
                     r.tokens.input += usage.input_tokens;

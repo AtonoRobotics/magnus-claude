@@ -376,6 +376,9 @@ impl Kernel {
 
     pub(crate) async fn record_call(self: &Arc<Self>, run: &Run, call_id: &str, step_id: &str, name: &str, input: &Value) -> Result<Flow> {
         let rid = run.id.as_str();
+        if name == "show" {
+            return self.show(run, call_id, input).await;
+        }
         // A chat turn has no contract, plan or Done: it ends with its answer.
         if self.is_chat_turn(run) {
             self.result(rid, call_id, format!("{name} is not available in chat. Reply with your answer as text, or start a task with create_task."), true).await?;
@@ -590,6 +593,47 @@ impl Kernel {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// A chat turn shows components below its answer (U8). Their shape is
+    /// checked like a deliverable's; a reply of answer text and `show` calls
+    /// only is the turn's last, so the text streams first and the components
+    /// are drawn after it.
+    async fn show(self: &Arc<Self>, run: &Run, call_id: &str, input: &Value) -> Result<Flow> {
+        let rid = run.id.as_str();
+        if !self.is_chat_turn(run) {
+            self.result(rid, call_id, "show is for chat. A task's outcome is the deliverable of task_complete.", true).await?;
+            return Ok(Flow::Continue);
+        }
+        if let Err(why) = crate::compose::validate_shown(&input["components"]) {
+            self.result(rid, call_id, format!("Nothing was shown: {why}. Fix it; a retry with the same components will not help."), true).await?;
+            return Ok(Flow::Continue);
+        }
+        self.result(rid, call_id, "Shown below your answer.", false).await?;
+        let Some(run) = self.read(|s| s.runs.get(rid).cloned()) else { return Ok(Flow::Stop) };
+        let Some(last) = run.replies.last() else { return Ok(Flow::Continue) };
+        let answer = last.text();
+        if run.pending_calls().is_empty() && !answer.is_empty() && last.calls().iter().all(|(_, n, _)| n == "show") {
+            self.end_chat_turn(&run, answer).await?;
+            return Ok(Flow::Stop);
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// A chat turn ends with its answer and what it showed: no contract, no
+    /// Done check. What it did on the way went through execute().
+    pub(crate) async fn end_chat_turn(self: &Arc<Self>, run: &Run, answer: String) -> Result<()> {
+        let rid = run.id.as_str();
+        let run = self.read(|s| s.runs.get(rid).cloned()).unwrap_or_else(|| run.clone());
+        self.emit("kernel", Ev::Completed { run: rid.into(), summary: answer, view: run.shown(), spoken: None }).await?;
+        self.on_stop(rid, true).await;
+        // What the person asked for and did not happen is in the inbox too (K24).
+        let unfinished = self.unfinished_chat_actions(&run);
+        if !unfinished.is_empty() {
+            self.notice(&run, format!("Not done: {}", self.title_of(&run)), json!({ "reason": "chat_action_failed", "evidence": unfinished })).await?;
+        }
+        self.after_end(rid);
         Ok(())
     }
 

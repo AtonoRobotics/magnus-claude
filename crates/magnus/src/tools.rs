@@ -105,7 +105,7 @@ impl Audience {
 }
 
 /// Run records the loop writes to the log itself, outside execute() (K21).
-pub const RECORDS: &[&str] = &["task_contract", "task_plan", "task_complete", "task_fail", "ask_principal", "propose_policy", "propose_schedule", "wait_until", "notify"];
+pub const RECORDS: &[&str] = &["show", "task_contract", "task_plan", "task_complete", "task_fail", "ask_principal", "propose_policy", "propose_schedule", "wait_until", "notify"];
 
 /// Built-in actions that pass the boundary like app tools.
 pub struct Builtin {
@@ -183,6 +183,34 @@ pub fn check_fields(name: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+/// One component of a composition, of the given kinds. Every field is
+/// declared: a model that keeps to the schema cannot otherwise fill one in.
+fn component(kinds: &[&str]) -> Value {
+    let cell = json!({ "type": ["string", "number"] });
+    json!({ "type": "object", "properties": {
+        "type": { "type": "string", "enum": kinds },
+        "text": { "type": "string", "description": "heading, text" },
+        "items": { "type": "array", "items": { "type": "string" }, "description": "list" },
+        "columns": { "type": "array", "items": { "type": "string" }, "description": "table" },
+        "rows": { "type": "array", "items": { "type": "array", "items": cell }, "description": "table: one list of cells per row, as many as columns" },
+        "label": { "type": "string", "description": "stat" },
+        "value": { "type": ["string", "number"], "description": "stat" },
+        "unit": { "type": "string", "description": "stat, bar_chart" },
+        "labels": { "type": "array", "items": { "type": "string" }, "description": "bar_chart, line_chart" },
+        "values": { "type": "array", "items": { "type": "number" }, "description": "bar_chart: one per label" },
+        "series": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "values": { "type": "array", "items": { "type": "number" } } }, "required": ["name", "values"] }, "description": "line_chart: 1 to 6, one value per label each" },
+        "places": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "lat": { "type": "number" }, "lon": { "type": "number" }, "note": { "type": "string" } }, "required": ["name", "lat", "lon"] }, "description": "map" },
+        "events": { "type": "array", "items": { "type": "object", "properties": { "when": { "type": "string" }, "label": { "type": "string" }, "note": { "type": "string" } }, "required": ["when", "label"] }, "description": "timeline, in order" },
+        "options": { "type": "array", "items": { "type": "string" }, "description": "comparison: the 2 to 6 things compared" },
+        "aspects": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "values": { "type": "array", "items": cell }, "best": { "type": "integer" } }, "required": ["name", "values"] }, "description": "comparison: one value per option each; best is the index of the option that wins on it" },
+        "code": { "type": "string", "description": "code" },
+        "language": { "type": "string", "description": "code" },
+        "file": { "type": "string", "description": "image, file: the name of a file you delivered" },
+        "title": { "type": "string" },
+        "caption": { "type": "string" }
+    }, "required": ["type"] })
+}
+
 /// The tools a chat turn may call besides reads: start a task, or propose a
 /// schedule the person confirms in the thread.
 pub fn chat_specs() -> Vec<ToolSpec> {
@@ -192,6 +220,11 @@ pub fn chat_specs() -> Vec<ToolSpec> {
         "max_usd": { "type": "number" }, "max_model_calls": { "type": "integer" }, "max_actions": { "type": "integer" }
     } });
     vec![
+        ToolSpec {
+            name: "show".into(),
+            description: d("show"),
+            input_schema: obj(json!({ "components": { "type": "array", "minItems": 1, "items": component(crate::compose::SHOWN) } }), &["components"]),
+        },
         ToolSpec { name: "create_task".into(), description: d("create_task"), input_schema: obj(json!({ "title": { "type": "string" }, "text": { "type": "string" } }), &["title", "text"]) },
         ToolSpec {
             name: "create_schedule".into(),
@@ -262,22 +295,7 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
                     "summary": { "type": "string", "description": d("task_complete.summary") },
                     // Every component field is declared: a model that keeps to
                     // the schema cannot otherwise fill one in.
-                    "deliverable": { "type": "array", "minItems": 1, "description": d("task_complete.deliverable"), "items": { "type": "object", "properties": {
-                        "type": { "type": "string", "enum": crate::compose::KINDS },
-                        "text": { "type": "string", "description": "heading, text" },
-                        "items": { "type": "array", "items": { "type": "string" }, "description": "list" },
-                        "columns": { "type": "array", "items": { "type": "string" }, "description": "table" },
-                        "rows": { "type": "array", "items": { "type": "array", "items": { "type": ["string", "number"] } }, "description": "table: one list of cells per row, as many as columns" },
-                        "label": { "type": "string", "description": "stat" },
-                        "value": { "type": ["string", "number"], "description": "stat" },
-                        "unit": { "type": "string", "description": "stat, bar_chart" },
-                        "labels": { "type": "array", "items": { "type": "string" }, "description": "bar_chart, line_chart" },
-                        "values": { "type": "array", "items": { "type": "number" }, "description": "bar_chart: one per label" },
-                        "series": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "values": { "type": "array", "items": { "type": "number" } } }, "required": ["name", "values"] }, "description": "line_chart: 1 to 6, one value per label each" },
-                        "file": { "type": "string", "description": "image, file: the name of a file you delivered" },
-                        "title": { "type": "string" },
-                        "caption": { "type": "string" }
-                    }, "required": ["type"] } },
+                    "deliverable": { "type": "array", "minItems": 1, "description": d("task_complete.deliverable"), "items": component(crate::compose::KINDS) },
                     "spoken": { "type": "string", "description": d("task_complete.spoken") }
                 }),
                 &["deliverable", "summary"],

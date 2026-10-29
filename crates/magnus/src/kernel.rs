@@ -35,7 +35,7 @@ pub struct Kernel {
     drivers: Mutex<HashSet<String>>,
     pub(crate) leases: Mutex<HashMap<String, String>>,
     pub(crate) live_tools: tokio::sync::Mutex<HashMap<String, (Instant, Vec<AppTool>)>>,
-    pub live_text: tokio::sync::broadcast::Sender<(String, String)>,
+    pub live_text: Arc<Live>,
     /// How long each log append took since boot, in microseconds (V6).
     pub capture: Mutex<Capture>,
 }
@@ -96,7 +96,7 @@ impl Kernel {
         let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
         let oidc = cfg.sign_in.oidc.clone().map(crate::oidc::Provider::new).transpose()?;
         let adapters = Adapters::new(&cfg.appliance.state_dir, vault.clone(), &cfg.adapters);
-        let (live_text, _) = tokio::sync::broadcast::channel(1024);
+        let live_text = Arc::new(Live { tx: tokio::sync::broadcast::channel(1024).0, so_far: Mutex::new(HashMap::new()) });
         let k = Arc::new(Kernel {
             web: Web::new(&cfg.web),
             sandboxes: Sandboxes::new(cfg.sandbox.clone(), &cfg.appliance.state_dir),
@@ -503,4 +503,32 @@ impl Kernel {
 fn notice_event(task: Option<String>, run: Option<String>, person: String, summary: String, details: serde_json::Value) -> (String, Ev) {
     let id = new_id("item");
     (id.clone(), Ev::Item { id, item_kind: "notice".into(), task, run, person, summary, details })
+}
+
+/// Model text as it streams, before the reply is appended to the log (K6),
+/// and each run's reply so far, so a view that opens mid-reply starts with
+/// what was already said.
+pub struct Live {
+    tx: tokio::sync::broadcast::Sender<(String, String)>,
+    so_far: Mutex<HashMap<String, String>>,
+}
+
+impl Live {
+    pub fn send(&self, run: &str, text: &str) {
+        let mut so_far = self.so_far.lock().unwrap();
+        so_far.entry(run.to_string()).or_default().push_str(text);
+        let _ = self.tx.send((run.to_string(), text.to_string()));
+    }
+
+    /// The run's reply is complete (or failed): nothing more streams for it.
+    pub fn end(&self, run: &str) {
+        self.so_far.lock().unwrap().remove(run);
+    }
+
+    /// The run's reply so far and what streams after it, with nothing lost
+    /// or repeated between the two.
+    pub fn subscribe(&self, run: &str) -> (String, tokio::sync::broadcast::Receiver<(String, String)>) {
+        let so_far = self.so_far.lock().unwrap();
+        (so_far.get(run).cloned().unwrap_or_default(), self.tx.subscribe())
+    }
 }
