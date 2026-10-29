@@ -547,12 +547,12 @@ impl Kernel {
                     && ap.reason.as_deref() == Some(WEB_LOOKUPS)
                     && (ap.task == run.task || thread(&ap.task).is_some_and(|t| Some(t) == thread(&run.task)))
             });
-            if allowed.is_some() {
-                return allowed.cloned();
+            if let Some(ap) = allowed {
+                return vec![ap.clone()];
             }
             s.approvals
                 .iter()
-                .find(|ap| {
+                .filter(|ap| {
                     ap.person == run.person
                         && ap.tool == a.tool
                         && ap.reason.as_deref() != Some("unknown_outcome")
@@ -566,7 +566,15 @@ impl Kernel {
                         }
                 })
                 .cloned()
+                .collect::<Vec<_>>()
         });
+        // A lasting approval holds only while its approver may still give it:
+        // one whose approver role was taken away no longer covers anything.
+        let still_may = |ap: &crate::state::Approval| {
+            !matches!(ap.scope.as_str(), "standing" | "window")
+                || ap.by.strip_prefix("person:").and_then(|id| self.person(id)).is_some_and(|p| p.is_owner() || p.has_role(&format!("approver:{}", f.risk.as_str())))
+        };
+        let found = found.into_iter().find(|ap| still_may(ap));
         if let Some(ap) = found {
             self.decision(a, "allow", "approval", &format!("approved by {} ({})", ap.by, ap.scope), rule).await?;
             if ap.scope == "once" {

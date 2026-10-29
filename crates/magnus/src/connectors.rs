@@ -33,6 +33,10 @@ struct Pending {
     verifier: String,
     redirect_uri: String,
     client: Client,
+    /// The authorization server this sign-in went to, and whether it says
+    /// so in its answer (RFC 9207): an answer from another one is refused.
+    issuer: String,
+    iss_required: bool,
     at: Instant,
 }
 
@@ -56,6 +60,10 @@ struct Tokens {
     /// Unix seconds.
     #[serde(default)]
     expires_at: Option<i64>,
+    /// Seconds an access token lasts, as last said: kept for a refresh
+    /// answer that does not say (expires_in is only recommended).
+    #[serde(default)]
+    lifetime: Option<i64>,
     client: Client,
 }
 
@@ -147,22 +155,38 @@ pub async fn asks_sign_in(url: &str) -> Result<Option<Option<String>>> {
     Ok(Some(meta))
 }
 
+fn same_url(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
 /// The app's authorization server metadata: from its protected-resource
-/// metadata (RFC 9728), then the server's own (RFC 8414, else OpenID).
-async fn discover(app_url: &str, resource_metadata: Option<String>) -> Result<(Value, Vec<String>)> {
+/// metadata (RFC 9728), then the server's own (RFC 8414, else OpenID). The
+/// metadata must be for this app and that server (RFC 9728 §3.3, RFC 8414
+/// §3.3): metadata for another resource or another issuer is refused, so
+/// a sign-in never goes where the app's metadata was not about.
+async fn discover(app_url: &str, resource_metadata: Option<String>) -> Result<(Value, Vec<String>, String)> {
     let c = http();
     let prm_urls = match resource_metadata {
         Some(u) => vec![u],
         None => well_known(app_url, "oauth-protected-resource")?,
     };
     let prm = first_json(&c, &prm_urls).await.ok_or_else(|| anyhow!("the app does not say where to sign in (no protected-resource metadata)"))?;
+    if let Some(r) = prm["resource"].as_str() {
+        if !same_url(r, app_url) {
+            bail!("the app's sign-in metadata is for {r}, not {app_url}");
+        }
+    }
     let issuer = prm["authorization_servers"][0].as_str().ok_or_else(|| anyhow!("the app names no authorization server"))?.to_string();
     let scopes: Vec<String> = prm["scopes_supported"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
     let mut urls = well_known(&issuer, "oauth-authorization-server")?;
     urls.extend(well_known(&issuer, "openid-configuration")?);
     urls.push(format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/')));
     let asm = first_json(&c, &urls).await.ok_or_else(|| anyhow!("{issuer} publishes no authorization server metadata"))?;
-    Ok((asm, scopes))
+    match asm["issuer"].as_str() {
+        Some(i) if same_url(i, &issuer) => {}
+        other => bail!("the authorization server metadata found for {issuer} names issuer {}", other.unwrap_or("none")),
+    }
+    Ok((asm, scopes, issuer))
 }
 
 impl Kernel {
@@ -214,7 +238,10 @@ impl Kernel {
             if let Some(r) = v["refresh_token"].as_str() {
                 t.refresh_token = Some(r.into());
             }
-            t.expires_at = v["expires_in"].as_i64().map(|s| now + s);
+            // A token that had a lifetime keeps one: without it, it would
+            // never be refreshed again and sign the person out at expiry.
+            t.lifetime = v["expires_in"].as_i64().or(t.lifetime).or(Some(3600));
+            t.expires_at = t.lifetime.map(|s| now + s);
             self.vault.put(name, &serde_json::to_string(&t)?)?;
         }
         Ok(Some(Secret::new(t.access_token)))
@@ -225,7 +252,7 @@ impl Kernel {
     pub async fn connector_sign_in(&self, c: &Connector, redirect_uri: &str) -> Result<(String, String)> {
         loopback(redirect_uri)?;
         let meta = asks_sign_in(&c.url).await?.unwrap_or(None);
-        let (asm, scopes) = discover(&c.url, meta).await?;
+        let (asm, scopes, issuer) = discover(&c.url, meta).await?;
         let s = |k: &str| asm[k].as_str().map(String::from);
         let (Some(authorize), Some(token)) = (s("authorization_endpoint"), s("token_endpoint")) else { bail!("the app's authorization server names no authorization or token endpoint") };
         if asm["code_challenge_methods_supported"].as_array().is_some_and(|m| !m.iter().any(|x| x == "S256")) {
@@ -269,13 +296,22 @@ impl Kernel {
         let client = Client { token_endpoint: token, revocation_endpoint: s("revocation_endpoint"), client_id, client_secret, resource: c.url.clone() };
         let mut p = pending().lock().unwrap();
         p.retain(|_, x| x.at.elapsed() < PENDING_FOR);
-        p.insert(state.clone(), Pending { app: c.name.clone(), verifier, redirect_uri: redirect_uri.into(), client, at: Instant::now() });
+        let iss_required = asm["authorization_response_iss_parameter_supported"] == true;
+        p.insert(state.clone(), Pending { app: c.name.clone(), verifier, redirect_uri: redirect_uri.into(), client, issuer, iss_required, at: Instant::now() });
         Ok((u.to_string(), state))
     }
 
     /// Finish a sign-in with the code the browser brought back.
-    pub async fn connector_sign_in_complete(&self, app: &str, state: &str, code: &str) -> Result<()> {
+    pub async fn connector_sign_in_complete(&self, app: &str, state: &str, code: &str, iss: Option<&str>) -> Result<()> {
         let p = pending().lock().unwrap().remove(state).filter(|p| p.app == app && p.at.elapsed() < PENDING_FOR).ok_or_else(|| anyhow!("this sign-in expired or is unknown; start again"))?;
+        // The answer must come from the server the sign-in went to (RFC
+        // 9207): otherwise the code and verifier would go to this one's token
+        // endpoint for another server's code (a mix-up).
+        match iss {
+            Some(i) if !same_url(i, &p.issuer) => bail!("the sign-in was answered by {i}, not {}; start again", p.issuer),
+            None if p.iss_required => bail!("{} says it names itself in its answer, and this answer names no one; start again", p.issuer),
+            _ => {}
+        }
         let c = &p.client;
         let mut form = vec![
             ("grant_type", "authorization_code".to_string()),
@@ -298,6 +334,7 @@ impl Kernel {
             access_token: access.into(),
             refresh_token: v["refresh_token"].as_str().map(String::from),
             expires_at: v["expires_in"].as_i64().map(|s| chrono::Utc::now().timestamp() + s),
+            lifetime: v["expires_in"].as_i64(),
             client: p.client,
         };
         self.vault.put(&credential_name(app), &serde_json::to_string(&t)?)?;
@@ -426,7 +463,9 @@ async fn add(AxState(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
     if crate::tools::Audience::parse(&audience).is_none() {
         return err(StatusCode::BAD_REQUEST, "audience is private, internal or public: who can see what the worker sends there");
     }
-    if crate::tools::Label::parse(&label).is_none() {
+    // Named, never assumed: an empty label would read as "principal", and
+    // the app's results would taint nothing.
+    if label.is_empty() || crate::tools::Label::parse(&label).is_none() {
         return err(StatusCode::BAD_REQUEST, "label is what the app returns: principal, private, untrusted, or private+untrusted");
     }
     if !url.starts_with("https://") && !(url.starts_with("http://") && k.cfg.web.allow_private_networks) {
@@ -436,11 +475,20 @@ async fn add(AxState(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
         Ok(a) => a.is_some(),
         Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("{e:#}")),
     };
+    // A credential only where there is one: the app's sign-in, or a key the
+    // owner gives. An app that asks for neither is called without one.
+    let token = s("token");
+    if !oauth && !token.is_empty() {
+        if let Err(e) = k.vault.put(&credential_name(&name), &token) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}"));
+        }
+    }
+    let credential = (oauth || !token.is_empty()).then(|| credential_name(&name));
     let c = Connector {
         name: name.clone(),
         transport: "mcp_http".into(),
         url,
-        credential: Some(credential_name(&name)),
+        credential,
         audience,
         label,
         access_groups: b["access_groups"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(String::from)).collect(),
@@ -517,7 +565,7 @@ async fn sign_in(AxState(k): K, h: HeaderMap, Path(name): Path<String>, Json(b):
 async fn sign_in_complete(AxState(k): K, h: HeaderMap, Path(name): Path<String>, Json(b): Json<Value>) -> Response {
     owner!(k, h);
     let (Some(state), Some(code)) = (b["state"].as_str(), b["code"].as_str()) else { return err(StatusCode::BAD_REQUEST, "state and code are required") };
-    match k.connector_sign_in_complete(&name, state, code).await {
+    match k.connector_sign_in_complete(&name, state, code, b["iss"].as_str()).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, &format!("{e:#}")),
     }

@@ -1469,7 +1469,7 @@ async function connectorsSection(main) {
     try {
       const got = await Magnus.loopbackWait();
       if (got.state !== r.state) throw new Error("the sign-in came back for a different request; start again");
-      await api("POST", `/v1/connectors/${enc(app)}/sign-in/complete`, { state: got.state, code: got.code });
+      await api("POST", `/v1/connectors/${enc(app)}/sign-in/complete`, { state: got.state, code: got.code, iss: got.iss });
       say(app, `<p class="small" style="color:var(--ok)">Connected.</p>`);
       await draw();
     } catch (e) { say(app, `<p class="small" style="color:var(--bad)">${esc(e.message)}</p>`); }

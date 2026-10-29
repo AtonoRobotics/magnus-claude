@@ -410,7 +410,7 @@ async fn loopback_wait(app: State<'_, App>) -> Res<Value> {
             }
             let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
             let (title, result) = match (q.get("code"), q.get("state"), q.get("error")) {
-                (Some(code), Some(state), _) => ("Signed in. You can close this page and return to Magnus.", Ok(json!({ "code": code, "state": state }))),
+                (Some(code), Some(state), _) => ("Signed in. You can close this page and return to Magnus.", Ok(json!({ "code": code, "state": state, "iss": q.get("iss") }))),
                 (_, _, Some(e)) => ("The sign-in did not finish. Return to Magnus.", Err(format!("the app's sign-in page said: {}", q.get("error_description").unwrap_or(e)))),
                 _ => ("The sign-in did not finish. Return to Magnus.", Err("the app's sign-in page sent no code".to_string())),
             };

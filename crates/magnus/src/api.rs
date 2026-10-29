@@ -877,25 +877,25 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
     };
     let engaged = b["engaged"].as_bool().unwrap_or(true);
     let actor = format!("person:{}", p.id);
-    if let Err(e) = k.emit(&actor, Ev::KillSwitch { engaged }).await {
-        return internal(e);
-    }
+    // One at a time: a release racing an engage could unseal before the
+    // engage sealed, or seal after the release.
+    static SWITCHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = SWITCHING.lock().await;
     if !engaged {
+        if let Err(e) = k.emit(&actor, Ev::KillSwitch { engaged }).await {
+            return internal(e);
+        }
         // Released: the vault takes secrets again, but holds none; nothing
         // resumes by itself (K53).
         k.vault.unseal();
         return Json(json!({ "engaged": false })).into_response();
     }
-    // One control (B11): the policy is deny-all from the event above; every
-    // run is suspended; the vault is sealed, and each OAuth sign-in is taken
-    // out and revoked at its provider. API keys and app secrets stay sealed:
-    // only their provider's console can revoke them.
-    let active: Vec<String> = k.read(|s| s.runs.values().filter(|r| r.status == Status::Running).map(|r| r.id.clone()).collect());
-    for run in active {
-        if let Err(e) = k.suspend(&run, "kill_switch", None).await {
-            return internal(e);
-        }
-    }
+    // One control (B11). The vault is sealed first, and each OAuth sign-in
+    // taken out of it and revoked at its provider, whatever happens to the
+    // records after: the switch must work when the log cannot be written.
+    // API keys and app secrets stay sealed: only their provider's console
+    // can revoke them.
+    k.vault.seal();
     let names = match k.vault.names() {
         Ok(n) => n,
         Err(e) => return internal(e),
@@ -914,10 +914,6 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
         Ok(t) => t,
         Err(e) => return internal(e),
     };
-    let kept: Vec<String> = names.iter().filter(|n| !take.contains(n)).cloned().collect();
-    if let Err(e) = k.emit(&actor, Ev::VaultSealed { revoking: take.clone(), kept: kept.clone() }).await {
-        return internal(e);
-    }
     let kk = k.clone();
     tokio::spawn(async move {
         for (name, secret) in taken {
@@ -932,6 +928,25 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
             }
         }
     });
+    // Then the records: the policy is deny-all from this event on, and every
+    // run is suspended.
+    let kept: Vec<String> = names.iter().filter(|n| !take.contains(n)).cloned().collect();
+    let recorded = async {
+        k.emit(&actor, Ev::KillSwitch { engaged }).await?;
+        let active: Vec<String> = k.read(|s| s.runs.values().filter(|r| r.status == Status::Running).map(|r| r.id.clone()).collect());
+        for run in active {
+            k.suspend(&run, "kill_switch", None).await?;
+        }
+        k.emit(&actor, Ev::VaultSealed { revoking: take.clone(), kept: kept.clone() }).await?;
+        anyhow::Ok(())
+    };
+    if let Err(e) = recorded.await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("The vault is sealed and the sign-ins are being revoked, but recording the kill switch failed: {e:#}. Engage it again once the appliance can write."), "sealed": true })),
+        )
+            .into_response();
+    }
     Json(json!({ "engaged": true, "revoking": take, "sealed": kept })).into_response()
 }
 

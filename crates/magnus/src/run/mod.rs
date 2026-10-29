@@ -279,8 +279,13 @@ impl Kernel {
                 }
             }
         }
-        let secret = self.connector_secret(c).await.ok().flatten()?;
-        match self.mcp.list_tools(&c.url, Some(secret.expose())).await {
+        // An app that takes a credential lists nothing without it; one that
+        // takes none is listed as it is.
+        let secret = self.connector_secret(c).await.ok().flatten();
+        if c.credential.is_some() && secret.is_none() {
+            return None;
+        }
+        match self.mcp.list_tools(&c.url, secret.as_ref().map(|s| s.expose())).await {
             Ok(t) => {
                 self.live_tools.lock().await.insert(c.name.clone(), (Instant::now(), t.clone()));
                 Some(t)
