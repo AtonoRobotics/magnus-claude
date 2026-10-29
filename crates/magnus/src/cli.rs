@@ -26,8 +26,13 @@ pub fn main() {
             Some("conformance") => conformance(&args).await,
             Some("password") => password(&args),
             Some("restore") => restore(&args).await,
+            Some("check") => check(&args).await,
+            Some("version") => {
+                println!("{}", crate::update::version());
+                Ok(())
+            }
             _ => {
-                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>");
+                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>\n       magnus check --config <file>   (reads the log and the vault, as a new release must)\n       magnus version");
                 std::process::exit(2);
             }
         }
@@ -53,6 +58,13 @@ async fn restore(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// A new release proves it can read this appliance before it is switched to.
+async fn check(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    println!("{}", crate::update::check(&cfg).await?);
+    Ok(())
+}
+
 async fn migrate(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let admin = arg(args, "--admin-url").context("--admin-url is required")?;
@@ -60,9 +72,21 @@ async fn migrate(args: &[String]) -> Result<()> {
 }
 
 async fn serve(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    crate::update::on_start(&cfg)?;
+    let r = run(cfg.clone()).await;
+    // A release just switched to that cannot serve goes back to the one before.
+    if let Err(e) = &r {
+        if let Some(p) = crate::update::pending(&cfg) {
+            crate::update::roll_back_now(&cfg, &p, &format!("{e:#}"))?;
+        }
+    }
+    r
+}
+
+async fn run(cfg: Config) -> Result<()> {
     use crate::api::{router, Transport};
     use std::net::SocketAddr;
-    let cfg = config(args)?;
     let listen = cfg.appliance.listen.clone();
     let tls = match &cfg.appliance.tls_listen {
         Some(addr) => {
@@ -72,16 +96,23 @@ async fn serve(args: &[String]) -> Result<()> {
         None => None,
     };
     let k = crate::kernel::Kernel::boot(cfg).await?;
-    crate::backup::schedule(k.clone());
-    tokio::spawn(k.clone().sweep());
     let plain = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("listen on {listen}"))?;
-    tracing::info!("magnus listening on http://{listen}");
+    let tls = match tls {
+        Some((addr, server, fingerprint)) => Some((crate::tls::Listener::bind(&addr, server).await?, addr, fingerprint)),
+        None => None,
+    };
+    // Serving: an update that brought this release here is done.
+    k.after_start().await?;
+    crate::backup::schedule(k.clone());
+    crate::update::schedule(k.clone());
+    tokio::spawn(k.clone().sweep());
+    tracing::info!("magnus {} listening on http://{listen}", crate::update::version());
     let plain = axum::serve(plain, router(k.clone(), Transport::Plain).into_make_service_with_connect_info::<SocketAddr>());
     match tls {
-        Some((addr, server, fingerprint)) => {
+        Some((l, addr, fingerprint)) => {
             use axum::serve::ListenerExt;
             // tap_io gives the TLS listener axum's connect-info for its peer address.
-            let l = crate::tls::Listener::bind(&addr, server).await?.tap_io(|_| {});
+            let l = l.tap_io(|_| {});
             tracing::info!("magnus listening on https://{addr}, certificate SHA-256 {fingerprint}");
             let secure = axum::serve(l, router(k, Transport::Tls).into_make_service_with_connect_info::<SocketAddr>());
             tokio::try_join!(async { plain.await }, async { secure.await })?;

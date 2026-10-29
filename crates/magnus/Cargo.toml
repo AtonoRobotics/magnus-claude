@@ -43,6 +43,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+semver = "1"
+tar = "0.4"
+flate2 = "1"
+minisign-verify = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

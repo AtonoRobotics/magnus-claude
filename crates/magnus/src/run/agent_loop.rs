@@ -40,6 +40,11 @@ impl Kernel {
             self.suspend(run_id, "kill_switch", None).await?;
             return Ok(Flow::Stop);
         }
+        // An update is switching releases: wait for the new one.
+        if self.read(|s| s.updating.is_some()) {
+            self.suspend(run_id, "update", None).await?;
+            return Ok(Flow::Stop);
+        }
 
         // Finish the tool calls of the latest reply, in order.
         if let Some((index, call_id, name, input)) = run.pending_calls().into_iter().next() {

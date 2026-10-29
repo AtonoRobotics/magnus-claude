@@ -87,6 +87,26 @@ impl Log {
         Ok(Log { client })
     }
 
+    /// Open, waiting up to `wait` for another kernel to let go of the log.
+    pub async fn open_waiting(url: &str, wait: std::time::Duration) -> Result<Log> {
+        let start = std::time::Instant::now();
+        loop {
+            match Log::open(url).await {
+                Err(e) if start.elapsed() < wait => {
+                    tracing::info!("waiting for the log: {e:#}");
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                r => return r,
+            }
+        }
+    }
+
+    /// Read the log without holding it, as a release about to be switched
+    /// to does while the running one keeps writing.
+    pub async fn read_only(url: &str) -> Result<Log> {
+        Ok(Log { client: connect(url).await? })
+    }
+
     pub async fn append(&self, actor: &str, ev: &Ev) -> Result<Event> {
         let body = serde_json::to_value(ev)?;
         let kind = body["kind"].as_str().unwrap_or_default().to_string();
@@ -144,8 +164,18 @@ impl Log {
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             let body: Value = r.get(3);
-            let ev: Ev = serde_json::from_value(body).with_context(|| format!("event {} does not parse", r.get::<_, i64>(0)))?;
-            out.push(Event { seq: r.get(0), at: r.get(1), actor: r.get(2), ev });
+            let seq: i64 = r.get(0);
+            let ev: Ev = match serde_json::from_value(body.clone()) {
+                Ok(ev) => ev,
+                // Written by a later release this one was rolled back from:
+                // a kind of event it does not know, so nothing it acts on.
+                Err(e) if e.to_string().starts_with("unknown variant") => {
+                    tracing::warn!("event {seq} is a kind this release does not know ({}); skipped", body["kind"]);
+                    continue;
+                }
+                Err(e) => return Err(anyhow::Error::from(e).context(format!("event {seq} does not parse"))),
+            };
+            out.push(Event { seq, at: r.get(1), actor: r.get(2), ev });
         }
         Ok(out)
     }

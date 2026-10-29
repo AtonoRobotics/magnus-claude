@@ -17,6 +17,11 @@ pub struct Config {
     pub verifier: Verifier,
     #[serde(default)]
     pub backup: Backup,
+    #[serde(default)]
+    pub updates: Updates,
+    /// The file this was read from: a new release is checked against it.
+    #[serde(skip)]
+    pub path: PathBuf,
     /// Removable modules, on or off for every model, and per model.
     #[serde(default)]
     pub modules: Modules,
@@ -232,7 +237,48 @@ impl Default for Backup {
     }
 }
 
+/// Signed updates of the appliance and of the desktop app (gate item 5).
+#[derive(Deserialize, Clone, Debug)]
+pub struct Updates {
+    /// Where release packages arrive (`appliance/` and `desktop/`, each with
+    /// its `latest.json`); `<state_dir>/updates` unless set. The appliance
+    /// installs its own from here and serves the desktop app's to the apps.
+    #[serde(default)]
+    pub dir: Option<std::path::PathBuf>,
+    /// The release key (minisign, as `tauri signer` writes it); packages
+    /// signed by anything else are refused. The project's key unless set.
+    #[serde(default = "release_key")]
+    pub public_key: String,
+    /// Install a newer appliance release as soon as it is found.
+    #[serde(default = "yes")]
+    pub automatic: bool,
+    /// Minutes between looks for a new release; 0 looks only when asked.
+    #[serde(default = "check_minutes")]
+    pub check_minutes: u32,
+}
+
+fn release_key() -> String {
+    include_str!("../../../release/update.pub").trim().to_string()
+}
+fn yes() -> bool {
+    true
+}
+/// Hourly: a look reads one local file, and a release reaches the
+/// appliance within the hour it is published.
+fn check_minutes() -> u32 {
+    60
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Updates { dir: None, public_key: release_key(), automatic: true, check_minutes: check_minutes() }
+    }
+}
+
 impl Config {
+    pub fn updates_dir(&self) -> std::path::PathBuf {
+        self.updates.dir.clone().unwrap_or_else(|| self.appliance.state_dir.join("updates"))
+    }
     pub fn backup_dir(&self) -> std::path::PathBuf {
         self.backup.dir.clone().unwrap_or_else(|| self.appliance.state_dir.join("backups"))
     }
@@ -417,7 +463,8 @@ pub struct ToolClass {
 impl Config {
     pub fn load(path: &std::path::Path) -> anyhow::Result<Config> {
         let text = std::fs::read_to_string(path)?;
-        let cfg: Config = toml::from_str(&text)?;
+        let mut cfg: Config = toml::from_str(&text)?;
+        cfg.path = path.canonicalize()?;
         for c in &cfg.connectors {
             anyhow::ensure!(
                 !c.name.contains("__") && c.name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),

@@ -144,7 +144,9 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .merge(crate::dev::router())
         .merge(crate::connectors::router())
         .merge(crate::library::router())
+        .merge(crate::update::router())
         .layer(axum::middleware::from_fn(cookie_guard))
+        .layer(axum::middleware::from_fn(crate::update::app_version))
         .layer(Extension(transport))
         .with_state(k)
 }
@@ -1097,7 +1099,7 @@ async fn forget(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
 }
 
 async fn health(State(k): K) -> Response {
-    Json(json!({ "ok": true, "version": HARNESS_VERSION, "kill_switch": k.read(|s| s.kill_switch) })).into_response()
+    Json(json!({ "ok": true, "version": HARNESS_VERSION, "release": crate::update::version(), "kill_switch": k.read(|s| s.kill_switch) })).into_response()
 }
 
 /// Model text for a task as it streams (server-sent events), before the

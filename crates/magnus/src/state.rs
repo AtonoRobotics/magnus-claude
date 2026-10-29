@@ -381,6 +381,16 @@ impl Schedule {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Update {
+    /// "updated", "rolled_back" or "failed".
+    pub what: String,
+    pub from: String,
+    pub to: String,
+    pub detail: String,
+    pub at: DateTime<Utc>,
+}
+
 #[derive(Default)]
 pub struct State {
     pub tasks: BTreeMap<String, Task>,
@@ -391,6 +401,11 @@ pub struct State {
     pub kill_switch: bool,
     /// The latest backup's restore check: file, whether it restored, detail, when.
     pub last_backup: Option<(String, bool, String, DateTime<Utc>)>,
+    /// An appliance update in progress: from, to, and whether it is a rollback.
+    pub updating: Option<(String, String, bool)>,
+    pub last_update: Option<Update>,
+    /// Releases rolled back from: not installed again by themselves.
+    pub skipped_releases: std::collections::BTreeSet<String>,
     /// Apps the owner added from the app (config-file apps are not here).
     pub connectors: BTreeMap<String, crate::config::Connector>,
     /// Secrets the kill switch emptied from the vault, latest engagement
@@ -494,6 +509,20 @@ impl State {
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
             Ev::BackupMade { .. } => {}
+            Ev::UpdateStarted { from, to, rollback } => self.updating = Some((from.clone(), to.clone(), *rollback)),
+            Ev::UpdateFinished { from, to } => {
+                self.updating = None;
+                self.last_update = Some(Update { what: "updated".into(), from: from.clone(), to: to.clone(), detail: String::new(), at: e.at });
+            }
+            Ev::UpdateRolledBack { from, to, reason } => {
+                self.updating = None;
+                self.skipped_releases.insert(from.clone());
+                self.last_update = Some(Update { what: "rolled_back".into(), from: from.clone(), to: to.clone(), detail: reason.clone(), at: e.at });
+            }
+            Ev::UpdateFailed { to, reason } => {
+                self.updating = None;
+                self.last_update = Some(Update { what: "failed".into(), from: String::new(), to: to.clone(), detail: reason.clone(), at: e.at });
+            }
             Ev::BackupChecked { file, ok, detail } => {
                 self.last_backup = Some((file.clone(), *ok, detail.clone(), e.at));
             }

@@ -80,7 +80,11 @@ pub struct NewRun {
 impl Kernel {
     pub async fn boot(cfg: Config) -> Result<Arc<Kernel>> {
         std::fs::create_dir_all(&cfg.appliance.state_dir)?;
-        let log = Log::open(&cfg.database.url).await?;
+        // Just switched releases: the one before may still be letting go of the log.
+        let log = match crate::update::switching(&cfg) {
+            true => Log::open_waiting(&cfg.database.url, Duration::from_secs(15)).await?,
+            false => Log::open(&cfg.database.url).await?,
+        };
         let mut state = State::default();
         for e in log.load().await? {
             state.apply(&e);
@@ -218,6 +222,10 @@ impl Kernel {
                 tracing::error!("run {run}: {e:#}");
             }
         });
+    }
+
+    pub fn any_driving(&self) -> bool {
+        !self.drivers.lock().unwrap().is_empty()
     }
 
     pub fn driving(&self, run: &str) -> bool {

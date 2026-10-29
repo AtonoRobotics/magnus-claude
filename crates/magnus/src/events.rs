@@ -141,6 +141,30 @@ pub enum Ev {
         ok: bool,
         detail: String,
     },
+    /// An appliance update began (or a rollback, to the release before):
+    /// running tasks are suspended ("update") until a version is running again.
+    UpdateStarted {
+        from: String,
+        to: String,
+        rollback: bool,
+    },
+    /// The new release started and took over the log.
+    UpdateFinished {
+        from: String,
+        to: String,
+    },
+    /// The appliance went back from `from` to `to`, which it runs now;
+    /// `from` is not installed again by itself.
+    UpdateRolledBack {
+        from: String,
+        to: String,
+        reason: String,
+    },
+    /// A release was found and not installed: the appliance stays as it is.
+    UpdateFailed {
+        to: String,
+        reason: String,
+    },
     /// The owner added one of the person's apps (an MCP server).
     ConnectorAdded {
         connector: crate::config::Connector,

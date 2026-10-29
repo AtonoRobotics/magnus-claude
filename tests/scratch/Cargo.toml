@@ -19,3 +19,8 @@ base64 = "0.22"
 sha2 = "0.10"
 futures = "0.3"
 url = "2"
+
+[dev-dependencies]
+flate2 = "1"
+minisign = "0.7"
+tar = "0.4"
