@@ -13,6 +13,7 @@ pub mod backup;
 pub mod boundary;
 pub mod browser;
 pub mod chat;
+pub mod chat_actions;
 pub mod cli;
 pub mod compose;
 pub mod config;

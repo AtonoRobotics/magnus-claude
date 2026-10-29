@@ -792,15 +792,52 @@ async function showNewChat(main, project) {
 async function showThread(main, thread) {
   await chatLayout(main, thread);
   const projects = await projectList();
+  const ui = { editing: null, sharing: null, people: [] };
+  let shown = [];
   const draw = async () => {
     const [{ entries }, { threads }] = await Promise.all([api("GET", `/v1/chat/${enc(thread)}`), api("GET", "/v1/chat")]);
+    shown = entries;
     const here = threads.find(t => t.thread === thread);
     const head = `<div class="spread thread-head"><span class="small">${here?.project ? `In the project <a href="#/project/${enc(here.project.id)}">${esc(here.project.name)}</a>` : ""}</span>${moveControl(thread, here?.project, projects)}</div>`;
-    if (paint($("#thread", main), head + entries.map(entry).join(""))) $("#thread", main).lastElementChild?.scrollIntoView({ block: "end" });
+    const body = entries.map(e => `<div class="entry ${e.kind === "message" ? "me" : "them"}" data-entry="${esc(e.id || "")}" data-kind="${esc(e.kind)}">${entry(e, ui)}${msgActions(e, ui)}</div>`).join("");
+    const grew = paint($("#thread", main), head + body);
+    if (grew && !ui.editing && !ui.sharing) $("#thread", main).lastElementChild?.scrollIntoView({ block: "end" });
+  };
+  const path = (id, act) => `/v1/chat/${enc(thread)}/entries/${enc(id)}/${act}`;
+  const msgAct = async (b, el) => {
+    const id = el.dataset.entry, e = shown.find(x => x.id === id), act = b.dataset.msgAct;
+    if (!e) return;
+    switch (act) {
+      case "copy": await copyText(entryText(e)); return toast("Copied.");
+      case "edit": drafts[`edit-${id}`] = e.text; ui.editing = id; return draw();
+      case "edit-cancel": ui.editing = null; return draw();
+      case "edit-send": {
+        const text = $(`#edit-${CSS.escape(id)}`, main).value.trim();
+        if (!text) return toast("Write the message first.");
+        b.disabled = true; await api("POST", path(id, "resend"), { text }); ui.editing = null; delete drafts[`edit-${id}`]; return draw();
+      }
+      case "retry": b.disabled = true; await api("POST", path(id, "resend"), {}); return draw();
+      case "branch": { const r = await api("POST", path(id, "branch"), {}); toast("Branched into a new chat."); location.hash = `#/chat/${enc(r.thread)}`; return; }
+      case "share": ui.people = (await api("GET", "/v1/directory")).people; if (!ui.people.length) return toast("Nobody else is on this appliance."); ui.sharing = id; return draw();
+      case "share-cancel": ui.sharing = null; return draw();
+      case "share-send": {
+        const to = $("[data-share-to]", el).value;
+        b.disabled = true; await api("POST", path(id, "share"), { person: to }); ui.sharing = null;
+        toast(`Shared with ${ui.people.find(p => p.id === to)?.name || to}.`); return draw();
+      }
+      case "export": return toast(`Saved ${await Magnus.download(path(id, "export"), safeName(e))}`);
+      case "save": await api("POST", path(id, "save"), {}); return toast("Saved to the library.");
+      case "task": { const r = await api("POST", path(id, "task"), {}); toast("Started a task."); await draw(); return r; }
+      case "delete":
+        if (!confirm("Delete this message? It leaves this chat and what Magnus reads next; the record keeps it.")) return;
+        await api("POST", path(id, "delete"), {}); return draw();
+    }
   };
   App.redraw = draw;
   onLeave(() => { App.redraw = null; });
   $("#thread", main).onclick = async e => {
+    const m = e.target.closest("[data-msg-act]");
+    if (m) { try { await msgAct(m, m.closest("[data-entry]")); } catch (err) { toast(err.message); m.disabled = false; } return; }
     const b = e.target.closest("[data-decide]");
     if (!b) return;
     const card = b.closest("[data-card]").dataset.card;
@@ -846,9 +883,39 @@ function waitingLink(e) {
   if (!e.waiting_item) return "";
   return ` · <a href="#/inbox" data-waiting="${esc(e.waiting_item)}">${esc(WAITING[e.waiting_on] || "waiting for you")}: open the inbox</a>`;
 }
-function entry(e) {
+// The clipboard where the page may use it; the old way where it may not.
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); return; } catch { /* fall back */ }
+  const a = document.createElement("textarea");
+  a.value = t; a.style.position = "fixed"; a.style.opacity = "0"; document.body.append(a); a.select();
+  const ok = document.execCommand("copy"); a.remove();
+  if (!ok) throw new Error("This app may not use the clipboard.");
+}
+
+// What a message says, as text to copy.
+const entryText = e => e.kind === "result" ? `${e.title} (${e.status})\n\n${e.summary || ""}`
+  : e.kind === "tasks" ? e.tasks.map(t => `- ${t.title}: ${t.text}`).join("\n") : e.text || "";
+const safeName = e => `${(entryText(e).split(/\s+/).slice(0, 6).join(" ").replace(/[^\p{L}\p{N} -]/gu, " ").trim().replace(/\s+/g, "-") || "message")}.md`;
+
+// What a person can do with each entry. Edit is for their own messages,
+// Retry for Magnus's answers; the rest for every entry.
+function msgActions(e, ui) {
+  if (!e.id) return "";
+  const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn";
+  const acts = [["copy", "Copy"], mine && ["edit", "Edit"], magnus && ["retry", "Retry"], ["branch", "Branch"], ["share", "Share"],
+    ["export", "Export"], ["save", "Save to library"], ["task", "Make a task"], ["delete", "Delete"]].filter(Boolean);
+  const share = ui.sharing === e.id ? `<div class="row small share-to"><label class="sr" for="share-${esc(e.id)}">Share with</label>
+    <select id="share-${esc(e.id)}" data-share-to>${ui.people.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>
+    <button class="primary" data-msg-act="share-send">Share</button><button class="link" data-msg-act="share-cancel">Cancel</button></div>` : "";
+  return `<div class="msg-actions small" role="toolbar" aria-label="Actions">${acts.map(([a, l]) => `<button class="link" data-msg-act="${a}">${l}</button>`).join("")}</div>${share}`;
+}
+
+function entry(e, ui = {}) {
   switch (e.kind) {
-    case "message": return `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div>${e.files?.length ? `<div class="small files">${e.files.map(fileChip).join(" ")}</div>` : ""}</div>`;
+    case "message": return ui.editing === e.id
+      ? `<div class="msg me editing"><label class="sr" for="edit-${esc(e.id)}">Edit and resend</label><textarea id="edit-${esc(e.id)}" rows="3" data-draft="edit-${esc(e.id)}"></textarea>
+        <div class="row small"><button class="primary" data-msg-act="edit-send">Send</button><button class="link" data-msg-act="edit-cancel">Cancel</button></div></div>`
+      : `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div>${e.files?.length ? `<div class="small files">${e.files.map(fileChip).join(" ")}</div>` : ""}</div>`;
     case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div>${verdictBar(e.task_id, e.verdict)}</div>`;
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
@@ -885,7 +952,7 @@ route(/^#\/chat\/([^/]+)$/, async (main, thread) => {
 const KIND = {
   approval: "Approval", question: "Question", review: "Review", notice: "Stopped", message: "Note from the agent",
   policy_proposal: "Policy proposal", schedule_proposal: "Recurring task proposal", tool_change: "Changed tool", tool_review: "New app's tools",
-  contract_change: "Contract change", deletion_request: "Deletion request",
+  contract_change: "Contract change", deletion_request: "Deletion request", shared: "Shared with you",
 };
 const TIER = { read: "reads", sandbox: "workspace only", reversible_write: "can be undone", irreversible: "cannot be undone", financial: "money", prohibited: "prohibited" };
 const AUDIENCE = { private: "only you", org: "people in your organization", public: "anyone" };
@@ -1021,6 +1088,10 @@ function card(i, composed) {
     case "tool_change":
       body = `<div class="what"><div class="field"><span>Tool</span><span class="mono">${esc(d.tool)}</span></div><div class="field"><span>New description</span>${fieldValue(d.description)}</div><div class="field"><span>Inputs</span>${fieldValue(d.input_schema)}</div></div>
         ${buttons(i, [["approve", "Accept the change", "primary"], ["reject", "Keep it blocked"]])}`;
+      break;
+    case "shared":
+      body = `<div class="msg magnus"><div class="small faint">${esc(d.speaker)} · ${esc(when(d.at))}</div><div class="pre">${esc(d.text)}</div></div>${taintNote(d.taint)}
+        ${buttons(i, [["dismiss", "Dismiss"]])}`;
       break;
     case "deletion_request":
       body = `<div class="what"><div class="field"><span>From</span><span>${esc(d.requested_by)}</span></div><div class="field"><span>What</span><span>${esc(d.what)}</span></div>
