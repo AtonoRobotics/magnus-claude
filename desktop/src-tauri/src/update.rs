@@ -130,17 +130,21 @@ pub async fn update_install<R: Runtime>(handle: AppHandle<R>) -> Result<(), Stri
 }
 
 /// What changed in this version, after an update brought it: once for the
-/// window shown at start, and `again` whenever Settings asks.
+/// window shown at start, and `again` whenever Settings asks. Once shown, the
+/// note moves from `whats-new.json` to `whats-new-shown.json`, where only
+/// Settings reads it.
 #[tauri::command]
 pub fn whats_new<R: Runtime>(handle: AppHandle<R>, again: Option<bool>) -> Option<Value> {
-    let f = whats_new_file(&handle)?;
-    let mut v: Value = serde_json::from_slice(&std::fs::read(&f).ok()?).ok()?;
-    if v["version"].as_str() != Some(crate::app_version().as_str()) || (v["shown"] == true && again != Some(true)) {
-        return None;
+    let pending = whats_new_file(&handle)?;
+    let shown = pending.with_file_name("whats-new-shown.json");
+    let read = |f: &std::path::Path| {
+        let v: Value = serde_json::from_slice(&std::fs::read(f).ok()?).ok()?;
+        (v["version"].as_str() == Some(crate::app_version().as_str())).then_some(v)
+    };
+    if again == Some(true) {
+        return read(&pending).or_else(|| read(&shown));
     }
-    if v["shown"] != true {
-        v["shown"] = true.into();
-        let _ = std::fs::write(&f, serde_json::to_vec(&v).unwrap_or_default());
-    }
+    let v = read(&pending)?;
+    let _ = std::fs::rename(&pending, &shown);
     Some(v)
 }
