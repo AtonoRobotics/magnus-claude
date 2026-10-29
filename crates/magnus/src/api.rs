@@ -62,11 +62,11 @@ fn credential(h: &HeaderMap) -> Option<&str> {
 pub(crate) fn who(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
     let token = credential(h).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "sign in"))?;
     if let Some(p) = k.cfg.person_by_token(token) {
-        return Ok(p.clone());
+        return k.person(&p.id).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "sign in again"));
     }
     k.accounts
         .session(token)
-        .and_then(|s| k.cfg.person(&s.person).cloned())
+        .and_then(|s| k.person(&s.person))
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "sign in again"))
 }
 
@@ -163,7 +163,7 @@ fn over_tls(k: &Kernel, t: Transport, peer: SocketAddr) -> Result<(), Response> 
 /// Open a session for a person and hand it over: to the app as a token,
 /// to a browser as an HttpOnly cookie the page cannot read.
 async fn issue(k: &Kernel, t: Transport, person: &str, app: bool) -> Response {
-    let Some(p) = k.cfg.person(person).cloned() else { return err(StatusCode::FORBIDDEN, format!("{person} is not a person on this appliance.")) };
+    let Some(p) = k.person(person) else { return err(StatusCode::FORBIDDEN, format!("{person} is not a person on this appliance.")) };
     let (session, token) = match k.accounts.open_session(person) {
         Ok(s) => s,
         Err(e) => return internal(e),
@@ -253,10 +253,18 @@ async fn device_poll(State(k): K, Extension(t): Extension<Transport>, ConnectInf
     let Some(o) = &k.oidc else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
     match o.poll(&flow).await {
         Ok(crate::oidc::Polled::Pending) => (StatusCode::ACCEPTED, Json(json!({ "pending": true }))).into_response(),
-        Ok(crate::oidc::Polled::Done { person, app }) => {
+        Ok(crate::oidc::Polled::Done { person, app, rights }) => {
             if k.cfg.person(&person).is_none() {
                 tracing::warn!("oidc: {person} signed in at {} but is not a person on this appliance", o.label());
                 return err(StatusCode::FORBIDDEN, format!("You signed in as {person}, who is not a person on this appliance. Ask the owner to add you."));
+            }
+            // What the provider says the person may do now counts from here
+            // on, for every decision about them (E2).
+            if rights.groups.is_some() || rights.roles.is_some() {
+                let ev = Ev::RightsFromProvider { person: person.clone(), groups: rights.groups, roles: rights.roles };
+                if let Err(e) = k.emit(&format!("person:{person}"), ev).await {
+                    return internal(e);
+                }
             }
             issue(&k, t, &person, app).await
         }

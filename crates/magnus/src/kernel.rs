@@ -164,12 +164,24 @@ impl Kernel {
         f(&self.state.lock().unwrap())
     }
 
-    pub fn person(&self, id: &str) -> Option<&Person> {
-        self.cfg.person(id)
+    /// A person as every decision sees them: from the config, with the
+    /// groups and roles the identity provider gave at their latest sign-in
+    /// in place of the config's (E2).
+    pub fn person(&self, id: &str) -> Option<Person> {
+        let mut p = self.cfg.person(id)?.clone();
+        if let Some((groups, roles)) = self.read(|s| s.provider_rights.get(id).cloned()) {
+            if let Some(g) = groups {
+                p.groups = g;
+            }
+            if let Some(r) = roles {
+                p.roles = r;
+            }
+        }
+        Some(p)
     }
 
-    pub fn owners(&self) -> Vec<&Person> {
-        self.cfg.people.iter().filter(|p| p.is_owner()).collect()
+    pub fn owners(&self) -> Vec<Person> {
+        self.cfg.people.iter().filter_map(|p| self.person(&p.id)).filter(|p| p.is_owner()).collect()
     }
 
     /// Start driving a run if nothing is.

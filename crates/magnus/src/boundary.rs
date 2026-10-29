@@ -218,7 +218,7 @@ impl Kernel {
         let Some(run) = self.read(|s| s.runs.get(&a.run).cloned()) else {
             return Err(anyhow!("unknown run {}", a.run));
         };
-        let person = self.person(&run.person).cloned().ok_or_else(|| anyhow!("unknown person {}", run.person))?;
+        let person = self.person(&run.person).ok_or_else(|| anyhow!("unknown person {}", run.person))?;
         // The kill switch holds before anything touches a credential (B11).
         if self.read(|s| s.kill_switch) {
             self.decision(a, "deny", "identify", "kill switch engaged", None).await?;

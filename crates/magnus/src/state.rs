@@ -371,6 +371,9 @@ pub struct State {
     pub revoked: BTreeMap<String, Revoked>,
     /// Secrets the kill switch kept, sealed: only their provider can revoke them.
     pub sealed: Vec<String>,
+    /// Groups and roles from the identity provider, per person, as of their
+    /// latest sign-in.
+    pub provider_rights: HashMap<String, (Option<Vec<String>>, Option<Vec<String>>)>,
     pub schedules: BTreeMap<String, Schedule>,
     /// Schedule cards from chat the person answered, by card id.
     pub cards: HashMap<String, CardState>,
@@ -472,6 +475,9 @@ impl State {
             }
             Ev::SecretRevoked { name, adapter, at_provider, detail } => {
                 self.revoked.insert(name.clone(), Revoked { adapter: Some(adapter.clone()), at_provider: Some(*at_provider), detail: Some(detail.clone()) });
+            }
+            Ev::RightsFromProvider { person, groups, roles } => {
+                self.provider_rights.insert(person.clone(), (groups.clone(), roles.clone()));
             }
             Ev::SignedIn { .. } | Ev::SignedOut { .. } => {}
             Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title } => {

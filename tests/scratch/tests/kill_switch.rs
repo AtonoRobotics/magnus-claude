@@ -9,7 +9,7 @@ use axum::{extract::State, routing::{get, post}, Form, Json, Router};
 use magnus_invariants::appliance::{bin, workspace_root};
 use magnus_invariants::*;
 use magnus_scratch::*;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

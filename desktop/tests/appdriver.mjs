@@ -77,13 +77,20 @@ export async function pinAndSignIn(d, { url, fingerprint, provider, person }) {
     if (shown !== fingerprint) throw new Error(`the app shows ${shown}, the appliance printed ${fingerprint}`);
     await d.click(d.button("They match"));
   });
-  await d.step(`sign in with ${provider}`, async () => {
+  await signIn(d, { provider, person });
+}
+
+// Sign in through the identity provider on an app already pinned to its
+// appliance; the test is the person's browser and approves the code the app
+// shows, as `person`.
+export async function signIn(d, { provider, person, as }) {
+  await d.step(`sign in with ${provider} as ${as || person}`, async () => {
     await d.click(d.button(`Sign in with ${provider}`));
     const code = (await d.text(d.css("#code"))).trim();
     const link = await d.attr(d.css("#open"), "data-url");
     if (!link.includes(code)) throw new Error(`the provider's page ${link} is not for code ${code}`);
-    const approved = await (await fetch(link)).text();
-    if (!approved.includes(`Signed in as ${person}`)) throw new Error(`the provider did not approve: ${approved}`);
+    const approved = await (await fetch(as ? `${link}&as=${encodeURIComponent(as)}` : link)).text();
+    if (!approved.includes(`Signed in as ${as || person}`)) throw new Error(`the provider did not approve: ${approved}`);
     await d.xpath("//h1[normalize-space()='Home']");
     const page = await d.run("return JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie");
     if (page.includes("mgs_")) throw new Error("the session token reached the page");

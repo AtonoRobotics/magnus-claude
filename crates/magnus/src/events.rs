@@ -101,6 +101,15 @@ pub enum Ev {
         at_provider: bool,
         detail: String,
     },
+    /// The groups and roles the identity provider gave a person at sign-in
+    /// (where the owner named those claims); they replace the config's.
+    RightsFromProvider {
+        person: String,
+        #[serde(default)]
+        groups: Option<Vec<String>>,
+        #[serde(default)]
+        roles: Option<Vec<String>>,
+    },
     /// A person signed in from an app. The token itself is never logged.
     SignedIn {
         person: String,

@@ -184,7 +184,7 @@ impl Kernel {
         if !self.read(|s| s.tasks.get(&run.task).and_then(|t| t.project.as_ref()).is_some_and(|p| !p.files.is_empty())) {
             specs.retain(|t| t.name != "project_read");
         }
-        let Some(person) = self.person(&run.person).cloned() else { return specs };
+        let Some(person) = self.person(&run.person) else { return specs };
         for c in self.cfg.connectors.clone() {
             let live = self.live_app_tools(&c).await;
             let mut fresh = vec![];

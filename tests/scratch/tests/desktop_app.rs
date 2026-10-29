@@ -4,6 +4,8 @@
 //! - `desktop/tests/app.mjs`: connect Claude, type a task, approve in the
 //!   inbox, see the outcome with its evidence, download the delivered file.
 //! - `desktop/tests/app-library.mjs`: download a file from the library.
+//! - `desktop/tests/app-people.mjs`: two people sign in on one app, one after
+//!   the other, each with their own rights.
 //!
 //! Needs the built app (`cargo tauri build` in desktop/src-tauri, or
 //! MAGNUS_DESKTOP_APP), `tauri-driver`, `WebKitWebDriver`
@@ -143,3 +145,15 @@ async fn the_installed_app_downloads_a_file_from_the_library() {
     assert_eq!(std::fs::read_to_string(Path::new(&d.downloads()).join(name)).unwrap(), content);
 }
 
+/// The sign-in link crosses into the shell, and so does the kept session:
+/// signing out must leave nothing of the first person for the second.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn two_people_sign_in_on_one_installed_app_each_with_their_own_rights() {
+    let (f, _idp, url, fingerprint) = appliance().await;
+    let title = format!("Plan the offsite budget {}", canary("people"));
+    f.app.api(PERSON).submit(&title).await;
+    let d = Driver::start().await;
+    let (ok, log) = d.script("app-people.mjs", &url, &fingerprint, &[("MAGNUS_OTHER", "carol"), ("MAGNUS_TASK_TITLE", &title)]).await;
+    assert!(ok, "two people on one app failed:\n{log}");
+}

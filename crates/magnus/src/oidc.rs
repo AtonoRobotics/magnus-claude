@@ -47,9 +47,25 @@ pub enum Polled {
     Pending,
     /// Approved: the person claim from the ID token, and whether the
     /// sign-in began in the app.
-    Done { person: String, app: bool },
+    Done { person: String, app: bool, rights: Rights },
     /// Over: declined, expired or refused, with a message for the person.
     Failed(String),
+}
+
+/// Groups and roles the provider gave in the ID token, where the owner
+/// named their claims; None where not.
+#[derive(Debug, Default, Clone)]
+pub struct Rights {
+    pub groups: Option<Vec<String>>,
+    pub roles: Option<Vec<String>>,
+}
+
+/// A list of names at a JSON pointer. Keycloak writes groups as paths
+/// (`/finance`); the leading slash is not part of the name.
+fn names_at(c: &Value, pointer: &Option<String>) -> Option<Vec<String>> {
+    let p = pointer.as_deref()?;
+    let v = c.pointer(p).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    Some(v.iter().filter_map(|x| x.as_str()).map(|s| s.trim_start_matches('/').to_string()).filter(|s| !s.is_empty()).collect())
 }
 
 pub struct Provider {
@@ -193,8 +209,11 @@ impl Provider {
         if status.is_success() {
             p.remove(flow);
             let id_token = b["id_token"].as_str().ok_or_else(|| anyhow!("{} sent no ID token (is \"openid\" in the scope?)", self.label()))?;
-            return match claims(id_token).and_then(|c| person(&c, &d.issuer, &self.cfg.client_id, &self.cfg.person_claim, now)) {
-                Ok(person) => Ok(Polled::Done { person, app }),
+            return match claims(id_token).and_then(|c| person(&c, &d.issuer, &self.cfg.client_id, &self.cfg.person_claim, now).map(|p| (p, c))) {
+                Ok((person, c)) => {
+                    let rights = Rights { groups: names_at(&c, &self.cfg.groups_claim), roles: names_at(&c, &self.cfg.roles_claim) };
+                    Ok(Polled::Done { person, app, rights })
+                }
                 Err(e) => {
                     tracing::warn!("oidc: refused an ID token: {e:#}");
                     Ok(Polled::Failed(format!("{} answered, but not with a sign-in for this appliance.", self.label())))

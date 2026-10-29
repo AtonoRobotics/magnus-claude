@@ -1,0 +1,52 @@
+// Two people on one installed app, one after the other: the owner signs in
+// through the identity provider and sees the owner's controls and their task;
+// they sign out (the shell forgets the session) and a colleague signs in on
+// the same machine, with only their own rights: no Models, no kill switch,
+// not the owner's task.
+//
+// MAGNUS_WEBDRIVER  tauri-driver's address      MAGNUS_APP  the app binary
+// MAGNUS_URL        the appliance (https)       MAGNUS_FINGERPRINT  what it printed
+// MAGNUS_PROVIDER   the identity provider's name on the sign-in button
+// MAGNUS_PERSON     the owner                   MAGNUS_OTHER  the colleague
+// MAGNUS_TASK_TITLE the owner's task, by title
+// MAGNUS_SHOTS      optional: where to keep screenshots
+import { env, open, pinAndSignIn, signIn } from "./appdriver.mjs";
+
+const [wd, app, url, fingerprint, provider, person, other, title] =
+  ["MAGNUS_WEBDRIVER", "MAGNUS_APP", "MAGNUS_URL", "MAGNUS_FINGERPRINT", "MAGNUS_PROVIDER", "MAGNUS_PERSON", "MAGNUS_OTHER", "MAGNUS_TASK_TITLE"].map(env);
+const d = await open(wd, app, process.env.MAGNUS_SHOTS, "people");
+const shows = t => d.run("return document.body.innerText.includes(arguments[0])", t);
+
+await pinAndSignIn(d, { url, fingerprint, provider, person });
+
+await d.step("the owner sees the owner's controls and their task", async () => {
+  await d.xpath("//nav//a[normalize-space()='Models']");
+  await d.css('[data-kill-switch="off"]');
+  await d.click(d.xpath("//nav//a[normalize-space()='Tasks']"));
+  await d.seen(title);
+});
+
+await d.step("sign out; the next person keeps the pinned appliance", async () => {
+  await d.click(d.button("Sign out"));
+  const kept = await d.run("return document.querySelector('#addr')?.value");
+  if (kept !== url) throw new Error(`the address after signing out is ${kept}`);
+  await d.click(d.button("Continue"));
+  await d.button(`Sign in with ${provider}`);
+  if (await d.run("return !!document.querySelector('#fp')")) throw new Error("the pinned certificate was asked for again");
+});
+
+await signIn(d, { provider, person, as: other });
+
+await d.step("the colleague has only their own rights", async () => {
+  const who = await d.text(d.css("nav .who"));
+  if (!who.includes(`(${other})`)) throw new Error(`signed in as ${who}`);
+  if (await d.run("return !!document.querySelector('[data-kill-switch]')")) throw new Error("a colleague sees the kill switch");
+  if (await d.run("return [...document.querySelectorAll('nav a')].some(a => a.innerText.trim() === 'Models')")) throw new Error("a colleague sees Models");
+  await d.click(d.xpath("//nav//a[normalize-space()='Tasks']"));
+  await d.xpath("//h1[normalize-space()='Tasks']");
+  await new Promise(r => setTimeout(r, 1500));
+  if (await shows(title)) throw new Error("a colleague sees the owner's task");
+});
+
+await d.close();
+console.log("people passed");

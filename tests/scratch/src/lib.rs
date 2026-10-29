@@ -177,6 +177,8 @@ struct IdpState {
     /// Who approves, and the audience the ID token names.
     username: String,
     audience: String,
+    /// More claims for the ID token (groups, roles).
+    extra: Value,
 }
 
 /// An OpenID Connect provider with the device-code grant, as Keycloak
@@ -213,6 +215,10 @@ impl FakeIdp {
             let uc = q.get("user_code").cloned().unwrap_or_default();
             let verdict = if q.contains_key("deny") { "denied" } else { "approved" };
             let mut s = st.lock().unwrap();
+            // `as`: the person signs in on this page as someone else.
+            if let Some(other) = q.get("as") {
+                s.username = other.clone();
+            }
             let who = s.username.clone();
             let found = s.codes.values_mut().find(|(c, _)| *c == uc).map(|e| e.1 = verdict.into()).is_some();
             let msg = if found { format!("<p>Signed in as {who}. You can close this page.</p>") } else { "<p>Unknown code.</p>".into() };
@@ -230,7 +236,10 @@ impl FakeIdp {
                 _ => {
                     use base64_url as b64;
                     let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 300;
-                    let claims = json!({ "iss": iss, "aud": s.audience, "azp": s.audience, "exp": exp, "sub": format!("sub-{}", s.username), "preferred_username": s.username });
+                    let mut claims = json!({ "iss": iss, "aud": s.audience, "azp": s.audience, "exp": exp, "sub": format!("sub-{}", s.username), "preferred_username": s.username });
+                    if let (Some(c), Some(x)) = (claims.as_object_mut(), s.extra.as_object()) {
+                        c.extend(x.clone());
+                    }
                     let id_token = format!("{}.{}.unsigned", b64::encode(&json!({ "alg": "RS256", "typ": "JWT" }).to_string()), b64::encode(&claims.to_string()));
                     Json(json!({ "access_token": "at-not-kept", "refresh_token": "rt-not-kept", "id_token": id_token, "token_type": "Bearer", "expires_in": 300 })).into_response()
                 }
@@ -257,6 +266,37 @@ impl FakeIdp {
         self.state.lock().unwrap().username = who.into();
     }
 
+    /// Put these claims in ID tokens from now on (groups, roles).
+    pub fn set_claims(&self, extra: Value) {
+        self.state.lock().unwrap().extra = extra;
+    }
+
+    /// Sign in as an app does: start, approve on the provider's page, poll
+    /// until done. Returns the session token.
+    pub async fn sign_in(&self, app: &Appliance) -> String {
+        let http = reqwest::Client::new();
+        let s: Value = http.post(format!("{}/v1/sign-in/device", app.base)).json(&json!({ "client": "app" })).send().await.unwrap().json().await.unwrap();
+        self.visit(s["user_code"].as_str().unwrap(), false).await;
+        let flow = s["flow"].as_str().unwrap();
+        let end = std::time::Instant::now() + magnus_invariants::PATIENCE;
+        loop {
+            let r = http.post(format!("{}/v1/sign-in/device/{flow}", app.base)).send().await.unwrap();
+            let st = r.status().as_u16();
+            let v: Value = r.json().await.unwrap_or(Value::Null);
+            if st == 200 {
+                return v["token"].as_str().expect("an app sign-in returns a token").to_string();
+            }
+            assert!(st == 202 && std::time::Instant::now() < end, "sign-in failed: {st} {v}");
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
+
+    /// Point the appliance at this provider, with more `[sign_in.oidc]`
+    /// settings, and restart it.
+    pub async fn configure_with(&self, app: &mut Appliance, more: &[(&str, &str)]) {
+        self.configure_inner(app, more).await
+    }
+
     /// Mint ID tokens for another client from now on.
     pub fn set_audience(&self, aud: &str) {
         self.state.lock().unwrap().audience = aud.into();
@@ -264,6 +304,10 @@ impl FakeIdp {
 
     /// Point the appliance at this provider and restart it.
     pub async fn configure(&self, app: &mut Appliance) {
+        self.configure_inner(app, &[]).await
+    }
+
+    async fn configure_inner(&self, app: &mut Appliance, more: &[(&str, &str)]) {
         let path = app.dir.path().join("magnus.toml");
         let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let sign_in = cfg.entry("sign_in").or_insert(toml::Value::Table(Default::default())).as_table_mut().unwrap();
@@ -271,6 +315,9 @@ impl FakeIdp {
         oidc.insert("issuer".into(), toml::Value::String(self.issuer.clone()));
         oidc.insert("client_id".into(), toml::Value::String(IDP_CLIENT.into()));
         oidc.insert("label".into(), toml::Value::String(IDP_LABEL.into()));
+        for (k, v) in more {
+            oidc.insert(k.to_string(), toml::Value::String(v.to_string()));
+        }
         sign_in.insert("oidc".into(), toml::Value::Table(oidc));
         std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
         app.restart().await;

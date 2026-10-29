@@ -111,6 +111,14 @@ pub struct Oidc {
     /// credential, so this bounds what strangers can make the appliance hold.
     #[serde(default = "max_pending")]
     pub max_pending: usize,
+    /// Where the ID token carries the person's groups (a JSON pointer, for
+    /// Keycloak `/groups`). When set, the provider's groups replace the
+    /// config's at each sign-in (E2).
+    #[serde(default)]
+    pub groups_claim: Option<String>,
+    /// Where it carries their roles (Keycloak realm roles: `/realm_access/roles`).
+    #[serde(default)]
+    pub roles_claim: Option<String>,
 }
 
 fn person_claim() -> String {
