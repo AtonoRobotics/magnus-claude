@@ -28,6 +28,7 @@ await d.step("the owner sees the owner's controls and their task", async () => {
 
 await d.step("sign out; the next person keeps the pinned appliance", async () => {
   await d.click(d.button("Sign out"));
+  await d.css("#addr");
   const kept = await d.run("return document.querySelector('#addr')?.value");
   if (kept !== url) throw new Error(`the address after signing out is ${kept}`);
   await d.click(d.button("Continue"));
