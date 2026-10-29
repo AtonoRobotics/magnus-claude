@@ -4,6 +4,9 @@
 
 use axum::{body::Body, extract::State, http::HeaderMap, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
 use magnus_invariants::appliance::bin;
+
+mod oauth_app;
+pub use oauth_app::FakeOAuthApp;
 use magnus_invariants::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;

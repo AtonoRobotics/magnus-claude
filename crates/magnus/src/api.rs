@@ -89,7 +89,7 @@ async fn cookie_guard(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-fn owner(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
+pub(crate) fn owner(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
     let p = who(k, h)?;
     if !p.is_owner() {
         return Err(err(StatusCode::FORBIDDEN, "this needs the owner role"));
@@ -141,6 +141,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/schedules", get(schedules).post(add_schedule))
         .route("/v1/schedules/{id}", axum::routing::delete(remove_schedule))
         .merge(crate::dev::router())
+        .merge(crate::connectors::router())
         .merge(crate::library::router())
         .layer(axum::middleware::from_fn(cookie_guard))
         .layer(Extension(transport))
@@ -864,9 +865,12 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
         Err(e) => return internal(e),
     };
     let mut revoking = vec![];
+    let signed_in: Vec<(String, String)> = k.connectors().into_iter().filter(|c| c.auth.as_deref() == Some(crate::connectors::OAUTH)).filter_map(|c| Some((c.credential?, c.name))).collect();
     for n in &names {
         if let Some(adapter) = k.adapters.oauth_owner_of(n).await {
             revoking.push((n.clone(), adapter));
+        } else if let Some((_, app)) = signed_in.iter().find(|(cred, _)| cred == n) {
+            revoking.push((n.clone(), format!("connector:{app}")));
         }
     }
     let take: Vec<String> = revoking.iter().map(|(n, _)| n.clone()).collect();
@@ -882,7 +886,11 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
     tokio::spawn(async move {
         for (name, secret) in taken {
             let adapter = revoking.iter().find(|(n, _)| *n == name).map(|(_, a)| a.clone()).unwrap_or_default();
-            let (at_provider, detail) = kk.adapters.revoke(&adapter, secret.expose().to_string()).await;
+            let (at_provider, detail) = if adapter.starts_with("connector:") {
+                crate::connectors::revoke(secret.expose()).await
+            } else {
+                kk.adapters.revoke(&adapter, secret.expose().to_string()).await
+            };
             if let Err(e) = kk.emit("kernel", Ev::SecretRevoked { name, adapter, at_provider, detail }).await {
                 tracing::error!("could not record a revocation: {e:#}");
             }

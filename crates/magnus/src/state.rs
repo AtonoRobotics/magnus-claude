@@ -389,6 +389,8 @@ pub struct State {
     pub approvals: Vec<Approval>,
     pub policies: BTreeMap<String, String>,
     pub kill_switch: bool,
+    /// Apps the owner added from the app (config-file apps are not here).
+    pub connectors: BTreeMap<String, crate::config::Connector>,
     /// Secrets the kill switch emptied from the vault, latest engagement
     /// only: what the owner signs in to or enters again.
     pub revoked: BTreeMap<String, Revoked>,
@@ -489,6 +491,24 @@ impl State {
                 self.version_changes.push((e.seq, e.at, format!("policy:{layer}"), format!("v{n}")));
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
+            Ev::ConnectorAdded { connector } => {
+                self.connectors.insert(connector.name.clone(), connector.clone());
+            }
+            Ev::ConnectorRemoved { name } => {
+                self.connectors.remove(name);
+            }
+            Ev::ToolClassified { connector, tool, risk } => {
+                if let Some(c) = self.connectors.get_mut(connector) {
+                    match risk {
+                        Some(r) => {
+                            c.tools.insert(tool.clone(), crate::config::ToolClass { risk: r.clone(), label: None });
+                        }
+                        None => {
+                            c.tools.remove(tool);
+                        }
+                    }
+                }
+            }
             Ev::ContextReset { run, from, to, note, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.cuts.push(Cut { from: *from, to: *to, note: note.clone() });

@@ -9,11 +9,17 @@ use std::time::Duration;
 
 const PROTOCOL: &str = "2025-06-18";
 
+/// What an app says when it wants a sign-in (HTTP 401 at initialize).
+pub const UNAUTHORIZED: &str = "the app asks for a sign-in (HTTP 401)";
+
 #[derive(Clone, Debug)]
 pub struct AppTool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// The app's hints (readOnlyHint, destructiveHint, ...): a suggestion
+    /// for the owner's classification, never trusted, never pinned.
+    pub annotations: Value,
 }
 
 #[derive(Debug)]
@@ -126,6 +132,9 @@ impl Mcp {
             req = req.bearer_auth(b);
         }
         let resp = req.send().await.map_err(|e| CallError::NotSent(format!("could not connect: {e}")))?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(CallError::NotSent(UNAUTHORIZED.into()));
+        }
         if !resp.status().is_success() {
             return Err(CallError::NotSent(format!("app refused initialize: HTTP {}", resp.status())));
         }
@@ -166,6 +175,7 @@ impl Mcp {
                 name: Self::clean(&t.name, bearer),
                 description: Self::clean(&t.description, bearer),
                 input_schema: Self::clean_value(t.input_schema, bearer),
+                annotations: t.annotations,
             })
             .collect())
     }
@@ -182,6 +192,7 @@ impl Mcp {
                 name: t["name"].as_str().unwrap_or_default().into(),
                 description: t["description"].as_str().unwrap_or_default().into(),
                 input_schema: t.get("inputSchema").cloned().unwrap_or(json!({ "type": "object" })),
+                annotations: t.get("annotations").cloned().unwrap_or(Value::Null),
             })
             .collect())
     }

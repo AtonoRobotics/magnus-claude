@@ -128,6 +128,19 @@ pub enum Ev {
         blocks: Vec<magnus_adapter_proto::Block>,
         usage: magnus_adapter_proto::Usage,
     },
+    /// The owner added one of the person's apps (an MCP server).
+    ConnectorAdded {
+        connector: crate::config::Connector,
+    },
+    ConnectorRemoved {
+        name: String,
+    },
+    /// The owner classified one of an app's tools (None: not offered).
+    ToolClassified {
+        connector: String,
+        tool: String,
+        risk: Option<String>,
+    },
     /// The escalation module moved a lost run to a stronger model.
     Escalated {
         run: String,

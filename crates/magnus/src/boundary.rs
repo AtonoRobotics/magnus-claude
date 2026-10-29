@@ -87,7 +87,7 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
         });
     }
     let (app, remote) = tool.split_once("__")?;
-    let c = k.cfg.connectors.iter().find(|c| c.name == app)?;
+    let c = k.connector(app)?;
     let class = c.tools.get(remote)?;
     Some(Facts {
         name: tool.into(),
@@ -95,7 +95,7 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
         risk: Risk::parse(&class.risk)?,
         label: class.label.as_deref().and_then(Label::parse).or_else(|| Label::parse(&c.label))?,
         audience: Audience::parse(&c.audience)?,
-        connector: Some(c.clone()),
+        connector: Some(c),
         remote: remote.into(),
     })
 }
@@ -313,10 +313,10 @@ impl Kernel {
         if self.read(|s| s.kill_switch) {
             return self.deny(a, "credentials", "the kill switch is engaged", false, None).await;
         }
-        let secret = match f.connector.as_ref().and_then(|c| c.credential.clone()) {
-            Some(name) => match self.vault.get(&name)? {
+        let secret = match f.connector.as_ref().filter(|c| c.credential.is_some()) {
+            Some(c) => match self.connector_secret(c).await? {
                 Some(s) => Some(s),
-                None => return self.deny(a, "credentials", &format!("no credential is stored for {}", f.app), false, None).await,
+                None => return self.deny(a, "credentials", &format!("no credential is stored for {} (or its sign-in expired: the owner signs in again)", f.app), false, None).await,
             },
             None => None,
         };
@@ -393,7 +393,7 @@ impl Kernel {
     }
 
     async fn check_pin(&self, c: &Connector, f: &Facts) -> std::result::Result<(), String> {
-        let secret = c.credential.as_ref().and_then(|n| self.vault.get(n).ok().flatten());
+        let secret = self.connector_secret(c).await.ok().flatten();
         let live = self
             .mcp
             .list_tools(&c.url, secret.as_ref().map(|s| s.expose()))

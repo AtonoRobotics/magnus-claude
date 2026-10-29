@@ -151,6 +151,14 @@ pub fn builtin(name: &str) -> Option<&'static Builtin> {
     BUILTINS.iter().find(|b| b.name == name)
 }
 
+/// The appliance's own apps; no added app may take one of their names.
+pub fn builtin_apps() -> Vec<&'static str> {
+    let mut a: Vec<&str> = BUILTINS.iter().map(|b| b.app).collect();
+    a.sort();
+    a.dedup();
+    a
+}
+
 fn obj(props: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": props, "required": required })
 }

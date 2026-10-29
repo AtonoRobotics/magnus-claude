@@ -324,7 +324,7 @@ pub struct Person {
     pub roles: Vec<String>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, serde::Serialize, Clone, Debug)]
 pub struct Connector {
     pub name: String,
     #[serde(default = "mcp_http")]
@@ -340,6 +340,14 @@ pub struct Connector {
     pub idempotency: String,
     #[serde(default)]
     pub tools: BTreeMap<String, ToolClass>,
+    /// `oauth`: the person signs in to the app (MCP authorization); the
+    /// credential holds the tokens. Otherwise the credential is a bearer token.
+    #[serde(default)]
+    pub auth: Option<String>,
+    /// A client registered with the app by hand, for an app that does not
+    /// register clients itself.
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 fn mcp_http() -> String {
@@ -351,7 +359,7 @@ fn header() -> String {
     "none".into()
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, serde::Serialize, Clone, Debug)]
 pub struct ToolClass {
     pub risk: String,
     /// Overrides the app's inbound label for this tool's results.

@@ -196,7 +196,7 @@ impl Kernel {
             specs.retain(|t| t.name != "project_read");
         }
         let Some(person) = self.person(&run.person) else { return specs };
-        for c in self.cfg.connectors.clone() {
+        for c in self.connectors() {
             let live = self.live_app_tools(&c).await;
             let mut fresh = vec![];
             for (remote, class) in &c.tools {
@@ -269,8 +269,7 @@ impl Kernel {
                 }
             }
         }
-        let secret = c.credential.as_ref().and_then(|n| self.vault.get(n).ok().flatten());
-        let secret = secret?;
+        let secret = self.connector_secret(c).await.ok().flatten()?;
         match self.mcp.list_tools(&c.url, Some(secret.expose())).await {
             Ok(t) => {
                 self.live_tools.lock().await.insert(c.name.clone(), (Instant::now(), t.clone()));

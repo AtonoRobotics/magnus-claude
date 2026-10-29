@@ -29,6 +29,10 @@ pub struct Vault {
 pub struct Secret(String);
 
 impl Secret {
+    pub(crate) fn new(s: String) -> Secret {
+        Secret(s)
+    }
+
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -146,6 +150,16 @@ impl Vault {
         }
         write_private(&self.path(), &serde_json::to_vec(&all)?)?;
         Ok(out)
+    }
+
+    /// Remove a secret (a connector the owner removed).
+    pub fn remove(&self, name: &str) -> Result<Option<Secret>> {
+        let _g = self.lock.lock().unwrap();
+        let mut all = self.read_all()?;
+        let old = self.get_locked(name)?;
+        all.remove(name);
+        write_private(&self.path(), &serde_json::to_vec(&all)?)?;
+        Ok(old)
     }
 
     /// Seal without emptying: a restart while the kill switch is engaged.
