@@ -37,11 +37,19 @@ jobs:
       - uses: actions/checkout@v7
         with: { clean: false }
       # The updater packages (AppImage, setup.exe) are signed with the release
-      # key, which is on the build box only, bound to the version.
+      # key, which is on the build box only, bound to the version. A pull
+      # request's build is signed with a key made for the run instead: what
+      # it builds is untested, and nothing it signs could install anywhere.
       - name: Installers
         working-directory: desktop/src-tauri
         run: |
-          export TAURI_SIGNING_PRIVATE_KEY="$HOME/.magnus-release/update.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            k="$RUNNER_TEMP/pr-installers" && rm -rf "$k" && mkdir -p "$k"
+            cargo tauri signer generate --ci -p "" -f -w "$k/run.key" >/dev/null
+            export TAURI_SIGNING_PRIVATE_KEY="$k/run.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          else
+            export TAURI_SIGNING_PRIVATE_KEY="$HOME/.magnus-release/update.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          fi
           cargo tauri build --bundles deb,appimage
           cargo tauri build --runner cargo --target x86_64-pc-windows-gnu --bundles nsis
       - name: Collect this version's installers

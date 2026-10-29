@@ -208,13 +208,16 @@ async fn sign_in_method(State(k): K) -> Response {
 
 /// Password sign-in: the only way without an identity provider, and the
 /// backup with one.
-async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Json(b): Json<Value>) -> Response {
     if let Err(r) = over_tls(&k, t, peer) {
         return r;
     }
     let person = b["person"].as_str().unwrap_or_default().trim().to_lowercase();
     let password = b["password"].as_str().unwrap_or_default();
     let app = b["client"].as_str() == Some("app");
+    if let Some(r) = app.then(|| crate::update::unversioned_app(&h)).flatten() {
+        return r;
+    }
     if k.cfg.person(&person).is_none() {
         // Same answer and the same work as a wrong password.
         let _ = k.accounts.sign_in(&person, password);
@@ -234,8 +237,11 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
 
 /// Start a sign-in through the identity provider: the person approves the
 /// code on the provider's page, then polls `/v1/sign-in/device/{flow}`.
-async fn device_start(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+async fn device_start(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Json(b): Json<Value>) -> Response {
     if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    if let Some(r) = (b["client"].as_str() == Some("app")).then(|| crate::update::unversioned_app(&h)).flatten() {
         return r;
     }
     let Some(o) = &k.oidc else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };

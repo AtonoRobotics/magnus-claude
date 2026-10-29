@@ -129,6 +129,9 @@ fn backing_up() -> &'static tokio::sync::Mutex<()> {
 fn prune(dir: &Path, keep_days: u32) -> Result<Vec<String>> {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(keep_days as i64);
     let mut removed = vec![];
+    if !dir.exists() {
+        return Ok(removed);
+    }
     for e in std::fs::read_dir(dir)? {
         let name = e?.file_name().to_string_lossy().to_string();
         let Some(t) = made_at(&name) else { continue };

@@ -51,6 +51,7 @@ fn with_token(app: &Appliance, token: &str) -> Api {
 async fn sign_in(app: &Appliance, person: &str, pw: &str) -> (reqwest::StatusCode, Value) {
     let r = reqwest::Client::new()
         .post(format!("{}/v1/sign-in", app.base))
+        .header("x-magnus-app", "0.5.0")
         .json(&json!({ "person": person, "password": pw, "client": "app" }))
         .send()
         .await
@@ -126,7 +127,7 @@ async fn a_browser_session_needs_the_client_header_to_change_anything() {
 }
 
 async fn device_start(app: &Appliance) -> Value {
-    let r = reqwest::Client::new().post(format!("{}/v1/sign-in/device", app.base)).json(&json!({ "client": "app" })).send().await.unwrap();
+    let r = reqwest::Client::new().post(format!("{}/v1/sign-in/device", app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "client": "app" })).send().await.unwrap();
     assert_eq!(r.status(), 200);
     r.json().await.unwrap()
 }

@@ -256,7 +256,11 @@ async fn a_signed_release_installs_while_a_task_runs_and_goes_back_one_step() {
     let broken = root.join("broken.sh");
     let broken_cfg = root.join("broken.toml");
     let mut bc = cfg.clone();
-    bc["appliance"].as_table_mut().unwrap().insert("listen".into(), "127.0.0.1:1".into());
+    // A port this test holds, so the listen fails for root too (port 1 does
+    // not refuse root).
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let taken = held.local_addr().unwrap().to_string();
+    bc["appliance"].as_table_mut().unwrap().insert("listen".into(), taken.clone().into());
     std::fs::write(&broken_cfg, toml::to_string(&bc).unwrap()).unwrap();
     std::fs::write(
         &broken,
@@ -268,12 +272,27 @@ async fn a_signed_release_installs_while_a_task_runs_and_goes_back_one_step() {
     alice.post("/v1/updates/check", json!({})).await;
     let v = wait_for(&alice, &err_log, "the broken release is gone back from", |v| v["last"]["what"] == "rolled_back" && v["last"]["from"] == "0.1.2").await;
     assert_eq!(v["version"], "0.1.0", "{v}");
-    assert!(v["last"]["detail"].as_str().unwrap().contains("listen on 127.0.0.1:1"), "{v}");
+    assert!(v["last"]["detail"].as_str().unwrap().contains(&format!("listen on {taken}")), "{v}");
     assert_eq!(v["skipped"], json!(["0.1.1", "0.1.2"]), "{v}");
     assert_eq!(a.release(&err_log).await, "0.1.0");
     assert_eq!(a.child.id(), pid);
     let t = alice.submit("Read my inbox again.").await;
     assert_eq!(alice.wait_settled(&t).await["waiting_on"], "review");
+
+    // The release kept now is the broken one. The owner goes back to it
+    // anyway: it reads the appliance but cannot serve, so the appliance
+    // comes back to the release that was running, instead of staying down.
+    let count = |kind: &'static str| {
+        let db = &db;
+        async move { db.query_one("SELECT count(*) FROM public.events WHERE kind = $1", &[&kind]).await.unwrap().get::<_, i64>(0) }
+    };
+    let back_before = count("update_rolled_back").await;
+    let (st, v) = alice.post("/v1/updates/rollback", json!({})).await;
+    assert_eq!((st.as_u16(), v["to"].clone()), (202, json!("0.1.2")), "{v}");
+    eventually("the appliance is back on 0.1.0", PATIENCE, || async { (count("update_rolled_back").await > back_before).then_some(()) }).await;
+    assert_eq!(a.release(&err_log).await, "0.1.0");
+    assert_eq!(a.child.id(), pid, "the appliance stopped");
     drop(a);
+    drop(held);
     let _: PathBuf = inst;
 }

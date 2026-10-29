@@ -349,7 +349,7 @@ impl FakeIdp {
     /// until done. Returns the session token.
     pub async fn sign_in(&self, app: &Appliance) -> String {
         let http = reqwest::Client::new();
-        let s: Value = http.post(format!("{}/v1/sign-in/device", app.base)).json(&json!({ "client": "app" })).send().await.unwrap().json().await.unwrap();
+        let s: Value = http.post(format!("{}/v1/sign-in/device", app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "client": "app" })).send().await.unwrap().json().await.unwrap();
         self.visit(s["user_code"].as_str().unwrap(), false).await;
         let flow = s["flow"].as_str().unwrap();
         let end = std::time::Instant::now() + magnus_invariants::PATIENCE;

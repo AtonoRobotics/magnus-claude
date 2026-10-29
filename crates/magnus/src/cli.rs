@@ -74,7 +74,13 @@ async fn migrate(args: &[String]) -> Result<()> {
 async fn serve(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     crate::update::on_start(&cfg)?;
-    let r = run(cfg.clone()).await;
+    // A panic while starting is a failed start too, not a process that is
+    // gone with the switch unrecorded.
+    use futures::FutureExt;
+    let r = match std::panic::AssertUnwindSafe(run(cfg.clone())).catch_unwind().await {
+        Ok(r) => r,
+        Err(p) => Err(anyhow::anyhow!("panicked: {}", p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())),
+    };
     // A release just switched to that cannot serve goes back to the one before.
     if let Err(e) = &r {
         if let Some(p) = crate::update::pending(&cfg) {
