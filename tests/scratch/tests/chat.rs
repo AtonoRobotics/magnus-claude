@@ -178,7 +178,7 @@ async fn a_chat_turn_may_only_read() {
                 ("sandbox_exec", json!({ "command": "echo hi" })),
                 ("memory_write", json!({ "fact": "x" })),
                 ("task_contract", json!({ "goal": "g", "criteria": [{ "id": "c", "description": "d" }] })),
-                ("task_complete", json!({ "summary": "done" })),
+                ("task_complete", json!({ "summary": "done", "deliverable": [{ "type": "text", "text": "done" }] })),
             ]),
             _ => say("I can't do that here."),
         },
@@ -218,7 +218,7 @@ async fn a_task_from_chat_starts_carries_the_conversation_and_posts_its_result()
             (_, 0) => say("Noted."),
             _ => say("Started: I'll post the comparison here."),
         },
-        vec![simple_contract(), tool("task_complete", json!({ "summary": "Offer B is cheapest at 1.10/h." }))],
+        vec![simple_contract(), tool("task_complete", json!({ "summary": "Offer B is cheapest at 1.10/h.", "deliverable": [{ "type": "text", "text": "Offer B is cheapest at 1.10/h." }] }))],
     ))
     .await;
     let app = Appliance::start(Spec::default(), &m).await;
@@ -334,7 +334,7 @@ async fn a_chat_task_running_at_a_restart_resumes() {
                     tokio::time::sleep(Duration::from_secs(3600)).await;
                     unreachable!()
                 }
-                1 => tool("task_complete", json!({ "summary": "Report written." })),
+                1 => tool("task_complete", json!({ "summary": "Report written.", "deliverable": [{ "type": "text", "text": "Report written." }] })),
                 _ => tool("task_fail", json!({ "reason": "script exhausted" })),
             }
         }
@@ -372,7 +372,7 @@ async fn a_chat_task_waiting_for_approval_at_a_restart_resumes() {
         vec![
             simple_contract(),
             tool("mail__send", json!({ "to": "bob@corp.example", "subject": "Agenda", "body": "1. Budget" })),
-            tool("task_complete", json!({ "summary": "Sent Bob the agenda." })),
+            tool("task_complete", json!({ "summary": "Sent Bob the agenda.", "deliverable": [{ "type": "text", "text": "Sent Bob the agenda." }] })),
         ],
     ))
     .await;
@@ -403,7 +403,7 @@ async fn a_schedule_from_chat_fires_after_a_restart() {
     let card_at = at.clone();
     let m = FakeModel::start(model(
         move |_, turn| if turn == 0 { tool("create_schedule", json!({ "text": "Check the status page.", "daily_at": card_at, "scope": "Reads one web page." })) } else { say("Confirm the card.") },
-        vec![simple_contract(), tool("task_complete", json!({ "summary": "All systems normal." }))],
+        vec![simple_contract(), tool("task_complete", json!({ "summary": "All systems normal.", "deliverable": [{ "type": "text", "text": "All systems normal." }] }))],
     ))
     .await;
     let mut app = Appliance::start(Spec::default(), &m).await;
@@ -467,7 +467,7 @@ async fn a_person_chooses_the_model_for_a_task_and_a_chat_message() {
             ("Look into it properly.", 0) => tool("create_task", json!({ "title": "Research it", "text": "Research it." })),
             _ => say("Done."),
         },
-        vec![simple_contract(), tool("task_complete", json!({ "summary": "done" }))],
+        vec![simple_contract(), tool("task_complete", json!({ "summary": "done", "deliverable": [{ "type": "text", "text": "done" }] }))],
     ))
     .await;
     m.url = magnus_scratch::provider_with(&m, &["claude-test", "claude-other"]).await;
@@ -534,7 +534,7 @@ async fn a_request_set_compares_models_in_chat_and_takes_the_persons_judgment() 
             (_, 0) => say("Eight."),
             _ => say("Started."),
         },
-        vec![simple_contract(), tool("mail__send", json!({ "to": "bob@corp.example", "subject": "Agenda", "body": "1. Budget" })), tool("task_complete", json!({ "summary": "Sent." }))],
+        vec![simple_contract(), tool("mail__send", json!({ "to": "bob@corp.example", "subject": "Agenda", "body": "1. Budget" })), tool("task_complete", json!({ "summary": "Sent.", "deliverable": [{ "type": "text", "text": "Sent." }] }))],
     ))
     .await;
     m.url = magnus_scratch::provider_with(&m, &["claude-test", "claude-other"]).await;

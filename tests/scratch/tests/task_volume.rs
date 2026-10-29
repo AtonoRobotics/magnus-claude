@@ -36,7 +36,7 @@ fn task_reply(kind: &str, turn: usize, page: &str) -> Reply {
         ("fail", _) => tool("task_fail", json!({ "reason": "The source is gone." })),
         ("wait", _) => tool("wait_until", json!({ "at": "2099-01-01T00:00:00Z", "reason": "the filing window opens" })),
         (_, 0) => contract,
-        _ => tool("task_complete", json!({ "summary": "Finished.\nThe details are in the task." })),
+        _ => tool("task_complete", json!({ "summary": "Finished.\nThe details are in the task.", "deliverable": [{ "type": "text", "text": "Finished.\nThe details are in the task." }] })),
     }
 }
 

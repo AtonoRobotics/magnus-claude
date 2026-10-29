@@ -61,3 +61,32 @@ async fn the_outcome_page_leads_with_the_full_deliverable() {
     let log = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "the outcome check failed:\n{log}");
 }
+
+/// A completion must carry a deliverable: one that is missing, an empty list,
+/// or only blank text is refused, and the task goes on.
+/// Its shape is checked, not its content.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completion_with_an_empty_deliverable_is_refused() {
+    let contract = tool("task_contract", json!({ "goal": "close the ticket", "assumptions": [], "irreversible_actions": [],
+        "criteria": [{ "id": "c1", "description": "the work is done", "check": { "tool": "sandbox_exec", "input": { "command": "true" }, "expect": [{ "pointer": "/exit_code", "equals": 0 }] } }] }));
+    let mut m = FakeModel::start(steps(vec![
+        contract,
+        tool("task_complete", json!({ "summary": "Closed the ticket." })),
+        tool("task_complete", json!({ "summary": "Closed the ticket.", "deliverable": [] })),
+        tool("task_complete", json!({ "summary": "Closed the ticket.", "deliverable": [{ "type": "text", "text": "  " }] })),
+        tool("task_complete", json!({ "summary": "Closed the ticket.", "deliverable": [{ "type": "text", "text": "Closed ticket 42 with the note \"fixed in 1.2\"." }] })),
+    ]))
+    .await;
+    m.url = provider(&m).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api(PERSON);
+    let id = alice.submit("Close ticket 42.").await;
+    let t = alice.wait_status(&id, &["completed", "failed"]).await;
+    assert_eq!(t["status"], "completed", "{t}");
+    let reqs = m.requests();
+    for turn in [2, 3, 4] {
+        let r = reqs.iter().find(|c| c.turn() == turn).unwrap().last_results();
+        assert!(r.iter().any(|r| r.is_error && r.text.contains("The deliverable was not accepted")), "turn {turn}: {r:?}");
+    }
+    assert_eq!(t["outcome_view"][0]["text"], "Closed ticket 42 with the note \"fixed in 1.2\".", "{t}");
+}

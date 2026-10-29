@@ -51,9 +51,9 @@ fn numbers(v: &Value, what: &str, len: usize) -> Result<(), String> {
 /// Check a composition against the fixed components. `files` are the names of
 /// files the run delivered; an image must show one of them.
 pub fn validate(view: &Value, files: &[String]) -> Result<(), String> {
-    let parts = view.as_array().ok_or("view must be a list of components")?;
+    let parts = view.as_array().ok_or("the deliverable must be a list of components")?;
     if parts.is_empty() || parts.len() > MAX_COMPONENTS {
-        return Err(format!("view needs 1 to {MAX_COMPONENTS} components"));
+        return Err(format!("the deliverable needs 1 to {MAX_COMPONENTS} components"));
     }
     for (n, c) in parts.iter().enumerate() {
         let at = format!("component {n}");

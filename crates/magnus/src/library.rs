@@ -30,6 +30,7 @@ pub fn router() -> Router<Arc<Kernel>> {
         // Base64 makes a file a third larger; the rest is the request's fields.
         .route("/v1/files", get(list).post(upload).layer(DefaultBodyLimit::max(MAX_FILE / 3 * 4 + 64 * 1024)))
         .route("/v1/files/{id}", get(download))
+        .route("/v1/files/{id}/info", get(info))
         .route("/v1/projects", get(projects).post(new_project))
         .route("/v1/projects/{id}", get(project).put(set_project))
         .route("/v1/moves", post(move_item))
@@ -182,6 +183,21 @@ pub(crate) fn chosen_project(k: &Kernel, p: &Person, b: &Value) -> Result<Option
         Ok(Some(id.into()))
     } else {
         Err(err(StatusCode::NOT_FOUND, "no such project"))
+    }
+}
+
+/// One file's entry, as the library lists it, for its own page.
+async fn info(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match k.read(|s| s.files.get(&id).filter(|f| f.person == p.id).map(|f| file_json(s, f))) {
+        Some(mut v) => {
+            v["preview"] = json!({ "chars": crate::compose::PREVIEW_CHARS, "rows": crate::compose::MAX_ROWS });
+            Json(v).into_response()
+        }
+        None => err(StatusCode::NOT_FOUND, "no such file"),
     }
 }
 

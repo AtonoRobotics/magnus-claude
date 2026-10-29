@@ -142,9 +142,13 @@ function route(re, view) { App.routes.push([re, view]); }
 // ---------- Files and projects ----------
 
 const kb = n => `${Math.max(1, Math.round(n / 1024))} KB`;
+// A file wherever it is listed: its name opens it, Download saves it.
 function fileChip(f) {
-  return `<span class="fchip"><button class="link" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}">${esc(f.name)}</button> <span class="small faint">${esc(kb(f.size))}</span></span>`;
+  return `<span class="fchip"><a href="#/file/${enc(f.id)}">${esc(f.name)}</a> <span class="small faint">${esc(kb(f.size))}</span> <button class="link small" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}" aria-label="Download ${esc(f.name)}">Download</button></span>`;
 }
+// Where a library file came from, as a link.
+const fileFrom = f => f.origin.kind === "task" ? `<a href="#/task/${enc(f.origin.task_id)}">${esc(f.origin.title)}</a>`
+  : f.origin.kind === "chat" ? `<a href="#/chat/${enc(f.origin.thread)}">Chat: ${esc(f.origin.title || "conversation")}</a>` : `<span class="faint">Uploaded to the library</span>`;
 function readFile(file) {
   return new Promise((ok, no) => {
     const r = new FileReader();
@@ -186,10 +190,8 @@ route(/^#\/library$/, async main => {
     if (q) qs.set("q", q);
     if (project) qs.set("project", project);
     const { files } = await api("GET", `/v1/files${qs.size ? `?${qs}` : ""}`);
-    const from = f => f.origin.kind === "task" ? `<a href="#/task/${enc(f.origin.task_id)}">${esc(f.origin.title)}</a>`
-      : f.origin.kind === "chat" ? `<a href="#/chat/${enc(f.origin.thread)}">Chat: ${esc(f.origin.title || "conversation")}</a>` : `<span class="faint">Uploaded to the library</span>`;
     paint($("#files", main), files.length ? `<table class="t files"><thead><tr><th>File</th><th>From</th><th>Project</th><th>Added</th></tr></thead><tbody>${files.map(f => `<tr data-lib-file="${esc(f.id)}">
-      <td>${fileChip(f)}<div class="small faint">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"}</div></td><td class="small">${from(f)}</td>
+      <td>${fileChip(f)}<div class="small faint">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"}</div></td><td class="small">${fileFrom(f)}</td>
       <td>${moveControl(f.id, f.project, projects)}</td><td class="small faint n">${esc(when(f.at))}</td></tr>`).join("")}</tbody></table>`
       : `<p class="empty">${q || project ? "No file matches." : "No files yet. Upload one, or ask Magnus for a document."}</p>`);
   };
@@ -206,6 +208,27 @@ route(/^#\/library$/, async main => {
   onLeave(() => { App.redraw = null; });
   await draw();
   every(5000, draw);
+});
+
+// One file: shown in full, drawn the way the outcome page draws it, with
+// where it came from and a way to save it.
+route(/^#\/file\/([^/]+)$/, async (main, id) => {
+  const [f, projects] = await Promise.all([api("GET", `/v1/files/${enc(id)}/info`), projectList()]);
+  const path = `/v1/files/${enc(id)}`;
+  paint(main, `<p class="small"><a href="#/library">Library</a></p><h1>${esc(f.name)}</h1>
+    <p class="small muted">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"} · ${fileFrom(f)} · ${esc(kb(f.size))} · ${esc(when(f.at))}</p>
+    <div class="row"><button class="primary" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}">Download</button> ${moveControl(f.id, f.project, projects)}</div>
+    <iframe class="composed" sandbox="allow-same-origin" title="${esc(f.name)}"></iframe>`);
+  const files = {};
+  try {
+    if (/^image\/(png|jpeg|gif|webp)$/.test(f.media_type)) files[f.name] = { image: await Magnus.dataUrl(path, f.media_type) };
+    else if (Compose.TEXT.test(f.media_type)) files[f.name] = { text: decodeText(await Magnus.dataUrl(path, f.media_type)), media_type: f.media_type };
+  } catch (e) { toast(e.message); }
+  const frame = $("iframe.composed", main);
+  frame.srcdoc = Compose.documentFor([{ type: "file", file: f.name }], files, fontCss(), f.preview);
+  frame.onload = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* sized by CSS */ } };
+  App.redraw = () => go();
+  onLeave(() => { App.redraw = null; });
 });
 
 route(/^#\/projects$/, async main => {

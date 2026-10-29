@@ -224,17 +224,20 @@ async fn api(app: State<'_, App>, method: String, path: String, body: Option<Val
     Ok(json!({ "status": status, "body": body }))
 }
 
-fn output_path(path: &str) -> Res<()> {
+/// Bytes come only from a file: a task's delivered output or a library file.
+fn file_path(path: &str) -> Res<()> {
     allowed(path)?;
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    if !(parts.len() == 5 && parts[1] == "tasks" && parts[3] == "outputs") {
-        return Err("not a delivered file".into());
+    let output = parts.len() == 5 && parts[1] == "tasks" && parts[3] == "outputs";
+    let library = parts.len() == 3 && parts[1] == "files" && !parts[2].is_empty();
+    if !(output || library) {
+        return Err("not a file".into());
     }
     Ok(())
 }
 
 async fn bytes(app: &App, path: &str) -> Res<Vec<u8>> {
-    output_path(path)?;
+    file_path(path)?;
     let (url, c, token) = app.session()?;
     let r = c.get(format!("{url}{path}")).bearer_auth(&token).send().await.map_err(|e| pin::describe(&e))?;
     if !r.status().is_success() {
@@ -359,8 +362,11 @@ mod tests {
             assert!(allowed(bad).is_err(), "{bad} was allowed");
         }
         assert!(allowed("/v1/inbox").is_ok());
-        assert!(output_path("/v1/tasks/t1/outputs/o1").is_ok());
-        assert!(output_path("/v1/tasks/t1").is_err());
+        assert!(file_path("/v1/tasks/t1/outputs/o1").is_ok());
+        assert!(file_path("/v1/files/file_1").is_ok());
+        assert!(file_path("/v1/tasks/t1").is_err());
+        assert!(file_path("/v1/files").is_err());
+        assert!(file_path("/v1/files/file_1/info").is_err());
     }
 
     #[test]

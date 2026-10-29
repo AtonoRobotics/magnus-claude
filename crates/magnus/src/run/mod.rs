@@ -582,10 +582,12 @@ impl Kernel {
     /// The model reports completion; the world decides (A4, K25, K26, K37).
     async fn complete(self: &Arc<Self>, run: &Run, call_id: &str, step_id: &str, input: &Value) -> Result<Flow> {
         let rid = run.id.as_str();
-        let view = input.get("deliverable").filter(|v| !v.is_null()).cloned();
+        // The deliverable's shape is checked, never its content: a missing or
+        // empty one is refused like a plan without units.
+        let view = input.get("deliverable").cloned().unwrap_or(Value::Null);
         let spoken = input["spoken"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
         let files: Vec<String> = run.outputs.iter().map(|(_, n, ..)| n.clone()).collect();
-        if let Some(why) = view.as_ref().and_then(|v| crate::compose::validate(v, &files).err()) {
+        if let Err(why) = crate::compose::validate(&view, &files) {
             self.result(rid, call_id, format!("The deliverable was not accepted: {why}. Fix it; a retry with the same deliverable will not help."), true).await?;
             return Ok(Flow::Continue);
         }
@@ -708,7 +710,7 @@ impl Kernel {
             return Ok(Flow::Stop);
         }
         self.result(rid, call_id, "Verified and completed.", false).await?;
-        self.emit("kernel", Ev::Completed { run: rid.into(), summary, view, spoken }).await?;
+        self.emit("kernel", Ev::Completed { run: rid.into(), summary, view: Some(view), spoken }).await?;
         self.on_stop(rid, true).await;
         Ok(Flow::Stop)
     }

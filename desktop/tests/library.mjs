@@ -1,7 +1,7 @@
 // The library and projects, as a person uses them in the app: make a
 // project with instructions, upload a file into it, start a task there,
 // see its output in full on the outcome page and in the library under the
-// project, search the library, download a file, and start a chat in the
+// project, search the library, download a file, open files, and start a chat in the
 // project with a file attached.
 //
 // MAGNUS_URL, MAGNUS_PERSON, MAGNUS_PASSWORD  where and who
@@ -90,8 +90,27 @@ await step("search the library by content and download a file", async () => {
   await page.getByLabel("Search files").fill("nothing-matches-this");
   await page.getByText("No file matches.").waitFor({ timeout: T });
   await page.getByLabel("Search files").fill("");
-  const [download] = await Promise.all([page.waitForEvent("download", { timeout: T }), page.locator("[data-lib-file]", { hasText: "report.md" }).getByRole("button", { name: "report.md" }).click()]);
+  const [download] = await Promise.all([page.waitForEvent("download", { timeout: T }), page.locator("[data-lib-file]", { hasText: "report.md" }).getByRole("button", { name: "Download report.md" }).click()]);
   if (download.suggestedFilename() !== "report.md") throw new Error(`downloaded ${download.suggestedFilename()}`);
+});
+
+await step("open files from the library", async () => {
+  // A delivered report opens on its own page, drawn in full, with where it
+  // came from and a way to save it.
+  await page.locator("[data-lib-file]", { hasText: "report.md" }).getByRole("link", { name: "report.md" }).click();
+  await page.getByRole("heading", { name: "report.md" }).waitFor({ timeout: T });
+  const frame = page.frameLocator("iframe.composed");
+  await frame.getByText("Total: 42 EUR").waitFor({ timeout: T });
+  await frame.getByRole("cell", { name: "widget", exact: true }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: "Total the prices" }).waitFor({ timeout: T });
+  const [download] = await Promise.all([page.waitForEvent("download", { timeout: T }), page.getByRole("button", { name: "Download", exact: true }).click()]);
+  if (download.suggestedFilename() !== "report.md") throw new Error(`downloaded ${download.suggestedFilename()}`);
+  // An uploaded CSV opens as a table.
+  await page.getByRole("link", { name: "Library", exact: true }).first().click();
+  await page.locator("[data-lib-file]", { hasText: "prices.csv" }).getByRole("link", { name: "prices.csv" }).click();
+  await page.getByRole("heading", { name: "prices.csv" }).waitFor({ timeout: T });
+  await page.frameLocator("iframe.composed").getByRole("cell", { name: "bolt", exact: true }).waitFor({ timeout: T });
+  await page.getByText("Uploaded by you").waitFor({ timeout: T });
 });
 
 await step("the task is listed in Tasks", async () => {
@@ -110,7 +129,7 @@ await step("chat in the project with a file attached", async () => {
   await page.getByLabel("Message").fill("Keep these notes for later.");
   await page.getByRole("button", { name: "Send" }).click();
   await page.waitForURL(/#\/chat\/thread_/, { timeout: T });
-  await page.locator(".msg.me").getByRole("button", { name: "notes.txt" }).waitFor({ timeout: T });
+  await page.locator(".msg.me").getByRole("link", { name: "notes.txt" }).waitFor({ timeout: T });
   await page.locator("[data-answer]", { hasText: "Noted." }).waitFor({ timeout: T });
   await page.locator(".thread-head").getByRole("link", { name: "Kitchen remodel" }).waitFor({ timeout: T });
 });

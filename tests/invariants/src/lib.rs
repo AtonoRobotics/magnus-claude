@@ -83,8 +83,10 @@ pub fn contract_unchecked(goal: &str, criterion: &str) -> Reply {
     )
 }
 
+/// The example tasks' results are actions, so the deliverable is the record
+/// of what was done: the summary, as one text component.
 pub fn complete(summary: &str) -> Reply {
-    model::tool("task_complete", json!({ "summary": summary }))
+    model::tool("task_complete", json!({ "summary": summary, "deliverable": [{ "type": "text", "text": summary }] }))
 }
 
 pub fn fail(reason: &str) -> Reply {
