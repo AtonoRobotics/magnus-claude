@@ -881,7 +881,9 @@ impl Kernel {
                     let hay = format!("{} {}", m.fact, m.topic.clone().unwrap_or_default()).to_lowercase();
                     (terms.iter().filter(|t| hay.contains(t.as_str())).count(), m.clone())
                 })
-                .filter(|(n, _)| *n > 0)
+                // No words to match ("what do you remember?" searched with
+                // nothing): everything kept, newest first.
+                .filter(|(n, _)| *n > 0 || terms.is_empty())
                 .collect();
             hits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.at.cmp(&a.1.at)));
             hits.into_iter().take(20).map(|(_, m)| m).collect()
