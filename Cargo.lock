@@ -1475,7 +1475,7 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
 name = "magnus"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "magnus-adapter-anthropic"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "futures",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "magnus-adapter-openai"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1542,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "magnus-adapter-proto"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "serde",
@@ -1552,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "magnus-guest"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "base64 0.22.1",
  "libc",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "magnus-invariants"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "magnus-scratch"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
