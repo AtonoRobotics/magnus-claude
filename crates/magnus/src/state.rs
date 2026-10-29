@@ -36,6 +36,20 @@ pub struct Reply {
 }
 
 impl Reply {
+    /// The reply's text, its blocks joined.
+    pub fn text(&self) -> String {
+        self.blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
+
     pub fn calls(&self) -> Vec<(String, String, Value)> {
         self.blocks
             .iter()
@@ -182,6 +196,17 @@ impl Run {
             .collect()
     }
 
+    /// What a chat turn showed below its answer: the components of its
+    /// last `show` the kernel accepted.
+    pub fn shown(&self) -> Option<Value> {
+        self.replies
+            .iter()
+            .flat_map(|r| r.calls())
+            .filter(|(id, name, _)| name == "show" && self.results.get(id).is_some_and(|x| !x.is_error))
+            .map(|(_, _, input)| input["components"].clone())
+            .last()
+    }
+
     pub fn pending_calls(&self) -> Vec<(usize, String, String, Value)> {
         let Some(r) = self.replies.last() else { return vec![] };
         r.calls()
@@ -309,6 +334,24 @@ pub struct Pin {
     pub approved: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct KnowledgeEntry {
+    pub id: String,
+    pub title: String,
+    pub text: String,
+    pub readers: Vec<Vec<String>>,
+    pub integrity: String,
+    pub source: Value,
+    pub author: String,
+    pub run: Option<String>,
+    pub verification: Option<Value>,
+    pub value: Option<Value>,
+    pub endorsed: Option<Value>,
+    pub at: DateTime<Utc>,
+    /// The last event that changed it, so the index knows it is current.
+    pub version: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct MemoryEntry {
     pub id: String,
@@ -363,6 +406,18 @@ pub struct Schedule {
     pub title: Option<String>,
     /// Firings that could not start a task: when, and why.
     pub failures: Vec<(DateTime<Utc>, String)>,
+}
+
+/// A thread branched from another at one of its entries.
+#[derive(Clone, Debug)]
+pub struct Branch {
+    pub person: String,
+    pub from: String,
+    pub upto: String,
+    /// The entries up to `upto`, as they were shown then.
+    pub entries: Vec<Value>,
+    pub title: String,
+    pub at: DateTime<Utc>,
 }
 
 /// What became of a schedule proposed in chat.
@@ -433,6 +488,10 @@ pub struct State {
     pub roles_set: HashMap<String, Vec<String>>,
     /// Each person's own settings, by person.
     pub preferences: HashMap<String, Value>,
+    /// Entries people deleted from their threads, by thread.
+    pub hidden: HashMap<String, std::collections::HashSet<String>>,
+    /// Threads branched from another, by thread.
+    pub branches: HashMap<String, Branch>,
     pub schedules: BTreeMap<String, Schedule>,
     /// Schedule cards from chat the person answered, by card id.
     pub cards: HashMap<String, CardState>,
@@ -442,6 +501,8 @@ pub struct State {
     pub changed: HashMap<String, (String, Pin)>,
     pub secrets: HashSet<String>,
     pub memory: Vec<MemoryEntry>,
+    /// The company knowledge base; its searchable index is in Postgres.
+    pub knowledge: HashMap<String, KnowledgeEntry>,
     /// Files attached to each task, by task id.
     pub attachments: HashMap<String, Vec<Value>>,
     /// Every person's library, by file id.
@@ -597,6 +658,12 @@ impl State {
                     }
                 }
             }
+            Ev::ChatHidden { thread, entries, .. } => {
+                self.hidden.entry(thread.clone()).or_default().extend(entries.iter().cloned());
+            }
+            Ev::ThreadBranched { person, thread, from, upto, entries, title } => {
+                self.branches.insert(thread.clone(), Branch { person: person.clone(), from: from.clone(), upto: upto.clone(), entries: entries.clone(), title: title.clone(), at: e.at });
+            }
             Ev::SignedIn { .. } | Ev::SignedOut { .. } => {}
             Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title } => {
                 self.schedules.insert(
@@ -624,6 +691,33 @@ impl State {
                 self.cards.insert(card.clone(), CardState::Declined);
             }
             Ev::MemoryForgotten { id } => self.memory.retain(|m| &m.id != id),
+            Ev::KnowledgeAdded { id, title, text, readers, integrity, source, author, run, verification, value } => {
+                self.knowledge.insert(
+                    id.clone(),
+                    KnowledgeEntry {
+                        id: id.clone(),
+                        title: title.clone(),
+                        text: text.clone(),
+                        readers: readers.clone(),
+                        integrity: integrity.clone(),
+                        source: source.clone(),
+                        author: author.clone(),
+                        run: run.clone(),
+                        verification: verification.clone(),
+                        value: value.clone(),
+                        endorsed: None,
+                        at: e.at,
+                        version: e.seq,
+                    },
+                );
+            }
+            Ev::KnowledgeEndorsed { id, by, item, note } => {
+                if let Some(k) = self.knowledge.get_mut(id) {
+                    k.integrity = "company".into();
+                    k.endorsed = Some(serde_json::json!({ "by": by, "item": item, "note": note, "at": e.at }));
+                    k.version = e.seq;
+                }
+            }
             Ev::ScheduleRemoved { id } => {
                 self.schedules.remove(id);
             }
@@ -753,8 +847,11 @@ impl State {
                     r.replies.push(Reply { step: *step, seq: e.seq, blocks: blocks.clone(), state: state.clone() });
                 }
             }
-            Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } => {
+            Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } | Ev::SpokenWritten { run, usage, .. } | Ev::KnowledgeExtraction { run, usage, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
+                    if let Ev::SpokenWritten { script, .. } = &e.ev {
+                        r.spoken = Some(script.clone());
+                    }
                     r.model_calls += 1;
                     r.usd += usage.cost_usd;
                     r.tokens.input += usage.input_tokens;

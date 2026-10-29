@@ -444,6 +444,7 @@ async fn add(AxState(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
         audience,
         label,
         access_groups: b["access_groups"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(String::from)).collect(),
+        system_of_record: b["system_of_record"].as_bool().unwrap_or(false),
         idempotency: "none".into(),
         tools: Default::default(),
         auth: oauth.then(|| OAUTH.to_string()),

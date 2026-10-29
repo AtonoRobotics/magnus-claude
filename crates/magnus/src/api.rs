@@ -146,6 +146,8 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .merge(crate::library::router())
         .merge(crate::update::router())
         .merge(crate::settings::router())
+        .merge(crate::knowledge::router())
+        .merge(crate::chat_actions::router())
         .layer(axum::middleware::from_fn(cookie_guard))
         .layer(axum::middleware::from_fn(crate::update::app_version))
         .layer(Extension(transport))
@@ -1115,8 +1117,11 @@ async fn live(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
         Err(r) => return r,
     };
     let Some((_, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
-    let mut rx = k.live_text.subscribe();
+    let (so_far, mut rx) = k.live_text.subscribe(&run.id);
     let stream = async_stream(move |tx| async move {
+        if !so_far.is_empty() && tx.send(format!("data: {}\n\n", json!({ "text": so_far }))).await.is_err() {
+            return;
+        }
         loop {
             match rx.recv().await {
                 Ok((r, text)) if r == run.id => {

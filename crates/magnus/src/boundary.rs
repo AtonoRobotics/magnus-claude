@@ -351,7 +351,11 @@ impl Kernel {
         }
         let out = self.call(a, &f, secret.as_ref().map(|s| s.expose()), &key).await;
         // memory_search returns content with the taint it was written under (M1).
-        let (label, sources) = if a.tool == "memory_search" {
+        let (label, sources) = if a.tool == "knowledge_search" {
+            // What the search returned decides; a result that says nothing is untrusted and private.
+            let d = out.as_ref().ok().and_then(|(_, _, d)| d.clone()).unwrap_or_default();
+            (Label { untrusted: d["untrusted"] != false, private: d["private"] != false }, vec![f.app.clone()])
+        } else if a.tool == "memory_search" {
             self.memory_taint(&a.run, &a.input["query"].as_str().unwrap_or_default().to_string())
         } else if a.tool == "project_read" {
             // A reference file carries its own taint (M1, M2).
@@ -795,6 +799,8 @@ impl Kernel {
                     Ok((format!("remembered ({id})"), false, None))
                 }
                 "memory_search" => Ok((self.memory_search(&a.run, &s("query")), false, None)),
+                "knowledge_search" => Ok(self.knowledge_search(&a.run, &s("query")).await?),
+                "knowledge_add" => Ok(self.knowledge_add(&a.run, &a.input).await?),
                 "project_read" => {
                     let name = s("name");
                     let Some(f) = self.project_file(&a.run, &name) else {

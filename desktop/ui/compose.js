@@ -41,6 +41,37 @@ const Compose = (() => {
     return frame(c, `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(c.title || "line chart")}">${ticks}${xl}${paths}</svg>${legend}${c.unit ? `<p class="cap">Values in ${esc(c.unit)}</p>` : ""}`);
   }
 
+  // Places by latitude and longitude on a plain projection. The frame has no
+  // network, so there are no map tiles beneath them.
+  function map(c) {
+    const ps = c.places.map(p => ({ ...p, lat: Number(p.lat), lon: Number(p.lon) }));
+    const lats = ps.map(p => p.lat), lons = ps.map(p => p.lon);
+    const mid = (Math.min(...lats) + Math.max(...lats)) / 2, k = Math.max(Math.cos(mid * Math.PI / 180), 0.2);
+    const pad = d => Math.max(d * 0.15, 0.5);
+    const [x0, x1] = [Math.min(...lons), Math.max(...lons)], [y0, y1] = [Math.min(...lats), Math.max(...lats)];
+    const [lo0, lo1, la0, la1] = [x0 - pad(x1 - x0), x1 + pad(x1 - x0), y0 - pad(y1 - y0), y1 + pad(y1 - y0)];
+    const w = 560, sx = w / ((lo1 - lo0) * k), h = Math.min(Math.max((la1 - la0) * sx, 160), 420), sy = h / (la1 - la0);
+    const x = lon => (lon - lo0) * k * sx, y = lat => (la1 - lat) * sy;
+    const dots = ps.map(p => `<circle cx="${x(p.lon)}" cy="${y(p.lat)}" r="5" class="pt"/><text x="${x(p.lon) + 8}" y="${y(p.lat) + 4}" class="lbl">${esc(p.name)}</text>`).join("");
+    const corner = (lat, lon) => `${Math.abs(lat).toFixed(1)}°${lat < 0 ? "S" : "N"} ${Math.abs(lon).toFixed(1)}°${lon < 0 ? "W" : "E"}`;
+    const notes = ps.filter(p => p.note).map(p => `<li><b>${esc(p.name)}</b>: ${esc(p.note)}</li>`).join("");
+    return frame(c, `<svg viewBox="-2 -2 ${w + 4} ${h + 22}" role="img" aria-label="${esc(c.title || "map")}: ${esc(ps.map(p => p.name).join(", "))}">
+      <rect x="0" y="0" width="${w}" height="${h}" class="area"/>${dots}
+      <text x="0" y="${h + 16}" class="val">${corner(la0, lo0)}</text><text x="${w}" y="${h + 16}" text-anchor="end" class="val">${corner(la1, lo1)}</text></svg>${notes ? `<ul>${notes}</ul>` : ""}`);
+  }
+
+  function timeline(c) {
+    return frame(c, `<ol class="tl">${c.events.map(e => `<li><span class="when">${esc(e.when)}</span><span class="what">${esc(e.label)}${e.note ? `<span class="cap"> ${esc(e.note)}</span>` : ""}</span></li>`).join("")}</ol>`);
+  }
+
+  // Options side by side, one row per aspect; the option that wins an aspect
+  // is marked.
+  function comparison(c) {
+    const head = `<tr><th></th>${c.options.map(o => `<th>${esc(o)}</th>`).join("")}</tr>`;
+    const rows = c.aspects.map(a => `<tr><th scope="row">${esc(a.name)}</th>${a.values.map((v, i) => `<td class="${typeof v === "number" ? "num" : ""}${a.best === i ? " best" : ""}">${fmt(v)}${a.best === i ? ` <span class="sr">(best)</span>` : ""}</td>`).join("")}</tr>`).join("");
+    return frame(c, `<div class="tw"><table class="cmp"><thead>${head}</thead><tbody>${rows}</tbody></table></div>`);
+  }
+
   // A delivered file shown in full, drawn from the same components: Markdown
   // as headings, paragraphs, lists and tables; CSV as a table; other text as
   // text. `limit` is the appliance's ({chars, rows}); the rest is in the file.
@@ -132,6 +163,10 @@ const Compose = (() => {
       case "stat": return `<div class="stat"><div class="sv">${fmt(c.value)}${c.unit ? `<span class="su"> ${esc(c.unit)}</span>` : ""}</div><div class="sl">${esc(c.label)}</div>${c.caption ? `<p class="cap">${esc(c.caption)}</p>` : ""}</div>`;
       case "bar_chart": return bar(c);
       case "line_chart": return line(c);
+      case "map": return map(c);
+      case "timeline": return timeline(c);
+      case "comparison": return comparison(c);
+      case "code": return frame(c, `<pre class="code"${c.language ? ` data-language="${esc(c.language)}"` : ""}><code>${esc(c.code)}</code></pre>`);
       case "image": return files[c.file]?.image ? frame(c, `<img src="${files[c.file].image}" alt="${esc(c.caption || c.file)}">`) : frame(c, `<p class="cap">${esc(c.file)} (not an image this app can show)</p>`);
       case "file": return `<section class="file" data-file="${esc(c.file)}"><p class="fname">${esc(c.file)}</p>${fileParts(c.file, files[c.file], limit).map(x => part(x, files, limit)).join("\n")}</section>`;
       default: return "";
@@ -173,6 +208,16 @@ const Compose = (() => {
     .legend { font-size: 13px; color: var(--muted); }
     .key { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 6px 0 10px; }
     img { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; }
+    .area { fill: none; stroke: var(--line); }
+    .pt { fill: var(--bar); }
+    .tl { list-style: none; padding: 0; border-left: 2px solid var(--line); margin-left: 4px; }
+    .tl li { display: flex; gap: 14px; padding: 4px 0 4px 14px; position: relative; }
+    .tl li::before { content: ""; position: absolute; left: -6px; top: 11px; width: 10px; height: 10px; border-radius: 50%; background: var(--bar); }
+    .when { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 9ch; }
+    .cmp th[scope=row] { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--fg); font-weight: 500; }
+    .cmp td.best { font-weight: 650; color: var(--bar); }
+    .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    pre.code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: color-mix(in srgb, var(--line) 35%, transparent); padding: 10px 12px; border-radius: 4px; overflow-x: auto; white-space: pre; }
   `;
 
   /// A whole document for the frame's srcdoc. `files` maps a delivered

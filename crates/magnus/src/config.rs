@@ -35,6 +35,8 @@ pub struct Config {
     #[serde(default)]
     pub speech: Option<Speech>,
     #[serde(default)]
+    pub knowledge: Knowledge,
+    #[serde(default)]
     pub people: Vec<Person>,
     #[serde(default)]
     pub connectors: Vec<Connector>,
@@ -447,6 +449,30 @@ pub struct Connector {
     /// register clients itself.
     #[serde(default)]
     pub client_id: Option<String>,
+    /// The company's record of what it holds (an ERP, a CRM): a knowledge
+    /// entry whose quote is found in its answer is verified.
+    #[serde(default)]
+    pub system_of_record: bool,
+}
+
+/// The company knowledge base. Without an embedding server it is searched
+/// by its words (Postgres full-text search).
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct Knowledge {
+    #[serde(default)]
+    pub embeddings: Option<Embeddings>,
+}
+
+/// An embedding server with the OpenAI-compatible `/embeddings` call (a
+/// local one such as Ollama, llama.cpp or TEI keeps the text on site).
+#[derive(Deserialize, Clone, Debug)]
+pub struct Embeddings {
+    /// The API's base address, e.g. `http://127.0.0.1:11434/v1`.
+    pub url: String,
+    pub model: String,
+    /// The vault secret holding its API key, if it needs one.
+    #[serde(default)]
+    pub credential: Option<String>,
 }
 
 fn mcp_http() -> String {

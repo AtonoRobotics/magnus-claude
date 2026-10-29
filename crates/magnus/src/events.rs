@@ -220,6 +220,23 @@ pub enum Ev {
         person: String,
         prefs: Value,
     },
+    /// A person deleted entries from a thread: views leave them out; the
+    /// log keeps them.
+    ChatHidden {
+        person: String,
+        thread: String,
+        entries: Vec<String>,
+    },
+    /// A person branched a thread at an entry: a new thread starts with the
+    /// conversation up to there, as it was then.
+    ThreadBranched {
+        person: String,
+        thread: String,
+        from: String,
+        upto: String,
+        entries: Vec<Value>,
+        title: String,
+    },
     /// A person signed in from an app. The token itself is never logged.
     SignedIn {
         person: String,
@@ -599,6 +616,48 @@ pub enum Ev {
         blocks: Vec<magnus_adapter_proto::Block>,
         usage: magnus_adapter_proto::Usage,
     },
+    /// An entry joins the company knowledge base (M1-M4). `readers` are
+    /// clauses that must all be met, each by any one of its principals
+    /// (`person:<id>`, `group:<id>`); none means everyone. `integrity` is
+    /// `company`, `verified` or `untrusted`; `source` keeps where it came
+    /// from (citations, file, app, or the entry a value was extracted from).
+    KnowledgeAdded {
+        id: String,
+        title: String,
+        text: String,
+        readers: Vec<Vec<String>>,
+        integrity: String,
+        source: Value,
+        author: String,
+        run: Option<String>,
+        /// How the kernel checked its citations, with the evidence.
+        verification: Option<Value>,
+        /// A typed value (number, boolean or one of named options).
+        value: Option<Value>,
+    },
+    /// A person with the role made an entry a company fact, from an inbox
+    /// card; its source stays attached.
+    KnowledgeEndorsed {
+        id: String,
+        by: String,
+        item: Option<String>,
+        note: Option<String>,
+    },
+    /// One model call with no tools that read an entry's sources for a typed value.
+    KnowledgeExtraction {
+        run: String,
+        model: String,
+        reply: String,
+        usage: magnus_adapter_proto::Usage,
+    },
+    /// An answer written for listening, by a model call with no tools, when
+    /// the person first asked to hear it.
+    SpokenWritten {
+        run: String,
+        model: String,
+        script: String,
+        usage: magnus_adapter_proto::Usage,
+    },
     /// The person had a memory forgotten; it is never read back again.
     MemoryForgotten {
         id: String,
@@ -637,6 +696,8 @@ impl Ev {
             | BudgetExtended { run, .. }
             | Memory { run, .. }
             | MemoryPass { run, .. }
+            | SpokenWritten { run, .. }
+            | KnowledgeExtraction { run, .. }
             | Output { run, .. } => Some(run),
             Item { run, .. } => run.as_deref(),
             _ => None,

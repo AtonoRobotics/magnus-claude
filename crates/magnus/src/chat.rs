@@ -44,7 +44,7 @@ impl Kernel {
         project: Option<String>,
     ) -> Result<Option<(String, String)>> {
         let (thread, project) = match thread {
-            Some(t) if self.thread(person, &t).is_empty() => return Ok(None),
+            Some(t) if self.thread(person, &t).is_empty() && !self.read(|s| s.branches.get(&t).is_some_and(|b| b.person == person)) => return Ok(None),
             Some(t) => {
                 let p = self.read(|s| s.project_of(&t));
                 (t, p)
@@ -52,8 +52,12 @@ impl Kernel {
             None => (new_id("thread"), project),
         };
         let conversation = self.conversation(person, &thread);
+        // What the turn reads in the conversation carries the taint of the
+        // runs that wrote it, as their tasks would (I2).
+        let label = self.thread_label(person, &thread, None);
         let o = NewRun {
             chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation }),
+            label: (label != Label::PRINCIPAL).then_some(label),
             model,
             experiment,
             files,
@@ -75,6 +79,13 @@ impl Kernel {
                     (e.0, e.2) = (t.created_at, t.text.clone());
                 }
                 e.1 = e.1.max(t.created_at);
+            }
+        });
+        // A branch is a thread from the moment it is made, before its first turn.
+        self.read(|s| {
+            for (id, b) in s.branches.iter().filter(|(_, b)| b.person == person) {
+                let e = by.entry(id.clone()).or_insert((b.at, b.at, b.title.clone()));
+                (e.0, e.2) = (b.at, b.title.clone());
             }
         });
         let mut v: Vec<_> = by.into_iter().collect();
@@ -101,12 +112,22 @@ impl Kernel {
     }
 
     /// The thread as the person sees it, from the log.
+    /// Each entry has an `id`, which the message actions name; entries the
+    /// person deleted are left out (the log keeps them).
     pub fn thread_entries(&self, person: &str, thread: &str) -> Option<Vec<Value>> {
         let runs = self.thread(person, thread);
-        if runs.is_empty() {
+        let branch = self.read(|s| s.branches.get(thread).filter(|b| b.person == person).cloned());
+        if runs.is_empty() && branch.is_none() {
             return None;
         }
         let mut out: Vec<(DateTime<Utc>, i64, Value)> = vec![];
+        // A branch starts with the conversation it was made from, as it was then.
+        for (n, e) in branch.iter().flat_map(|b| b.entries.iter()).enumerate() {
+            let mut e = e.clone();
+            e["copied"] = json!(true);
+            let at = e["at"].as_str().and_then(|a| a.parse::<DateTime<Utc>>().ok()).unwrap_or(branch.as_ref().unwrap().at);
+            out.push((at, n as i64 - i64::MAX / 2, e));
+        }
         // The tasks one message started, as one card in the order they began.
         let mut started: std::collections::BTreeMap<String, (DateTime<Utc>, Vec<Value>)> = Default::default();
         // A task's result follows the reply of the message that started it,
@@ -117,7 +138,7 @@ impl Kernel {
             let status = crate::api::status_str(r.status);
             if turn {
                 let files: Vec<Value> = self.read(|s| t.files.iter().filter_map(|id| s.files.get(id)).map(|f| json!({ "id": f.id, "name": f.name, "media_type": f.media_type, "size": f.size })).collect());
-                out.push((t.created_at, 0, json!({ "kind": "message", "text": t.text, "at": t.created_at, "task_id": t.task_id, "files": files })));
+                out.push((t.created_at, 0, json!({ "id": format!("m:{}", t.task_id), "kind": "message", "text": t.text, "at": t.created_at, "task_id": t.task_id, "files": files })));
                 let mut cards: Vec<_> = r.results.values().filter_map(|res| res.data.as_ref().filter(|d| d["card"].is_string()).map(|d| (res.seq, d.clone()))).collect();
                 cards.sort_by_key(|(seq, _)| *seq);
                 for (seq, d) in cards {
@@ -128,6 +149,8 @@ impl Kernel {
                         None => ("open", None),
                     };
                     let mut e = d.clone();
+                    e["id"] = json!(format!("c:{card}"));
+                    e["task_id"] = json!(t.task_id);
                     e["kind"] = json!("schedule_card");
                     e["state"] = json!(state);
                     e["schedule"] = json!(schedule);
@@ -139,12 +162,12 @@ impl Kernel {
                     Status::Completed => out.push((
                         r.ended_at.unwrap_or(t.created_at),
                         i64::MAX,
-                        json!({ "kind": "answer", "text": r.summary, "at": r.ended_at, "task_id": t.task_id, "model": { "adapter": r.config.adapter, "model": r.config.model }, "verdict": t.verdict }),
+                        json!({ "id": format!("a:{}", t.task_id), "kind": "answer", "text": r.summary, "view": r.outcome_view, "spoken": r.spoken, "at": r.ended_at, "task_id": t.task_id, "model": { "adapter": r.config.adapter, "model": r.config.model }, "verdict": t.verdict }),
                     )),
                     _ => out.push((
                         r.ended_at.unwrap_or(t.created_at),
                         i64::MAX,
-                        json!({ "kind": "turn", "status": status, "waiting_on": r.reason, "waiting_item": r.waiting_item, "text": r.summary, "task_id": t.task_id, "at": r.ended_at }),
+                        json!({ "id": format!("a:{}", t.task_id), "kind": "turn", "status": status, "waiting_on": r.reason, "waiting_item": r.waiting_item, "text": r.summary, "task_id": t.task_id, "at": r.ended_at }),
                     )),
                 }
             } else {
@@ -155,26 +178,52 @@ impl Kernel {
                 if let Some(end) = r.ended_at {
                     let after = t.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| answered.get(f)).map_or(end, |a| end.max(*a));
                     let files: Vec<Value> = r.outputs.iter().map(|(id, name, mt, size)| json!({ "id": id, "name": name, "media_type": mt, "size": size })).collect();
-                    out.push((after, i64::MAX, json!({ "kind": "result", "task_id": t.task_id, "title": title, "text": t.text, "status": status, "summary": r.summary, "at": end, "files": files, "verdict": t.verdict })));
+                    out.push((after, i64::MAX, json!({ "id": format!("r:{}", t.task_id), "kind": "result", "task_id": t.task_id, "title": title, "text": t.text, "status": status, "summary": r.summary, "at": end, "files": files, "verdict": t.verdict })));
                 }
             }
         }
         for (from, (at, tasks)) in started {
-            out.push((at, 1, json!({ "kind": "tasks", "from_run": from, "tasks": tasks, "at": at })));
+            out.push((at, 1, json!({ "id": format!("t:{from}"), "kind": "tasks", "from_run": from, "tasks": tasks, "at": at })));
         }
         out.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-        Some(out.into_iter().map(|(.., v)| v).collect())
+        let hidden = self.read(|s| s.hidden.get(thread).cloned().unwrap_or_default());
+        Some(out.into_iter().map(|(.., v)| v).filter(|v| !v["id"].as_str().is_some_and(|id| hidden.contains(id))).collect())
+    }
+
+    /// The taint of what the thread shows, up to and including entry `upto`
+    /// (all of it when none): that of the runs that wrote each entry. The
+    /// person's own messages carry none.
+    pub fn thread_label(&self, person: &str, thread: &str, upto: Option<&str>) -> Label {
+        let entries = self.thread_entries(person, thread).unwrap_or_default();
+        let end = upto.and_then(|u| entries.iter().position(|e| e["id"] == u)).map_or(entries.len(), |i| i + 1);
+        let mut tasks: Vec<String> = vec![];
+        for e in &entries[..end] {
+            match e["kind"].as_str() {
+                Some("message") | None => {}
+                Some("tasks") => tasks.extend(e["tasks"].as_array().into_iter().flatten().filter_map(|t| t["task_id"].as_str().map(String::from))),
+                _ => tasks.extend(e["task_id"].as_str().map(String::from)),
+            }
+        }
+        self.read(|s| {
+            tasks.iter().filter_map(|t| s.tasks.get(t).and_then(|t| s.runs.get(&t.run_id))).fold(Label::PRINCIPAL, |l, r| l.join(Label { untrusted: r.untrusted, private: r.private }))
+        })
     }
 
     /// The thread as the model reads it in the next turn: who said what.
-    fn conversation(&self, person: &str, thread: &str) -> Vec<Value> {
-        self.thread_entries(person, thread)
-            .unwrap_or_default()
+    pub(crate) fn conversation(&self, person: &str, thread: &str) -> Vec<Value> {
+        Self::transcript_of(self.thread_entries(person, thread).unwrap_or_default())
+    }
+
+    /// Entries as the model reads them: who said what.
+    pub(crate) fn transcript_of(entries: Vec<Value>) -> Vec<Value> {
+        entries
             .into_iter()
             .filter_map(|e| {
                 let text = |k: &str| e[k].as_str().unwrap_or_default().to_string();
                 let (role, said) = match e["kind"].as_str()? {
                     "message" => ("person", text("text")),
+                    // What the answer showed below its text is part of what it said.
+                    "answer" if e["view"].is_array() => ("you", format!("{}\n[Shown below the answer: {}]", text("text"), e["view"])),
                     "answer" => ("you", text("text")),
                     "tasks" => ("you", format!("Started tasks: {}", e["tasks"].as_array().into_iter().flatten().map(|t| format!("{} ({})", t["title"].as_str().unwrap_or_default(), t["text"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("; "))),
                     "result" => ("task result", format!("{} ({}): {}", text("title"), text("status"), text("summary"))),

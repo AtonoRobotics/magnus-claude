@@ -90,6 +90,32 @@ impl Driver {
         self.home.path().join("Downloads")
     }
 
+    /// The X display xvfb-run gave the driver and the app it launches, and
+    /// the authority file that opens it.
+    fn display(&self) -> (String, String) {
+        let root = self._driver.id().expect("the driver is running");
+        let parent = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|s| s.rsplit(')').next()?.split_whitespace().nth(1)?.parse::<u32>().ok());
+        let under = |mut pid: u32| loop {
+            if pid == root {
+                return true;
+            }
+            match parent(pid) {
+                Some(p) if p > 1 => pid = p,
+                _ => return false,
+            }
+        };
+        std::fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
+            .filter(|pid| *pid != root && under(*pid))
+            .find_map(|pid| {
+                let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+                let var = |k: &[u8]| env.split(|b| *b == 0).find_map(|v| v.strip_prefix(k).map(|d| String::from_utf8_lossy(d).into_owned()));
+                Some((var(b"DISPLAY=")?, var(b"XAUTHORITY=").unwrap_or_default()))
+            })
+            .expect("no display under the driver")
+    }
+
     /// Run an installed-app script against the appliance at `url`; returns
     /// whether it passed and what it printed.
     async fn script(&self, name: &str, url: &str, fingerprint: &str, envs: &[(&str, &str)]) -> (bool, String) {
@@ -181,6 +207,105 @@ async fn settings_holds_every_section_and_each_works_in_the_installed_app() {
     assert_eq!(v["requests"][0]["what"], "my chats", "{v}");
     let (_, b) = alice.get("/v1/backups").await;
     assert!(b["latest"]["restored"] == true, "{b}");
+}
+
+/// Every message action in the installed app, each checked again on the
+/// appliance: copy, delete, edit and resend, retry, save to the library,
+/// export as a file, make a task, share with a colleague, branch.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn every_message_action_works_in_the_installed_app() {
+    use magnus_invariants::{complete, contract_unchecked, script, FakeWeb, Reply};
+    let s = script(|c| async move {
+        if c.body["system"].to_string().contains("in a chat") {
+            let first = c.messages().first().cloned().unwrap_or_default();
+            let said = first["content"].as_array().and_then(|b| b.last()).and_then(|b| b["text"].as_str()).unwrap_or_default().to_string();
+            return Reply::Text(format!("Answer to: {said}"));
+        }
+        match c.turn() {
+            0 => contract_unchecked("do the work", "the work is done"),
+            _ => complete("done"),
+        }
+    });
+    let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
+    let idp = FakeIdp::start(PERSON).await;
+    idp.configure(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let d = Driver::start().await;
+    let (display, xauth) = d.display();
+    let (ok, log) = d.script("app-chat-actions.mjs", &url, &fingerprint, &[("MAGNUS_OTHER_NAME", "carol"), ("MAGNUS_DISPLAY", &display), ("MAGNUS_XAUTHORITY", &xauth)]).await;
+    assert!(ok, "a message action failed:\n{log}");
+
+    let alice = f.app.api(PERSON);
+    let (_, threads) = alice.get("/v1/chat").await;
+    assert_eq!(threads["threads"].as_array().unwrap().len(), 2, "no branch: {threads}");
+    let shared = f.app.api("carol").inbox().await.into_iter().find(|i| i["kind"] == "shared").expect("nothing reached carol");
+    assert_eq!(shared["details"]["text"], "Answer to: Second, edited");
+    let (_, files) = alice.get("/v1/files").await;
+    assert!(files["files"].as_array().unwrap().iter().any(|f| f["media_type"] == "text/markdown" && f["origin"]["kind"] == "chat"), "{files}");
+    let exported = std::fs::read_dir(d.downloads()).unwrap().filter_map(|e| e.ok()).find(|e| e.file_name().to_string_lossy().ends_with(".md")).expect("no exported file");
+    assert!(std::fs::read_to_string(exported.path()).unwrap().contains("Answer to: Second, edited"));
+    assert!(alice.tasks().await["tasks"].as_array().unwrap().iter().any(|t| t["text"] == "Second, edited"), "no task from the message");
+}
+
+/// Requested by the owner (2026-10-29, U8): a data question gets its text
+/// streamed and then a chart and a table; a plain question gets text only;
+/// and composed content makes no network request, even markup forced into
+/// its frame.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn composed_answers_stream_text_first_and_reach_no_network_in_the_installed_app() {
+    use magnus_invariants::{complete, contract_unchecked, script, tool, tools, FakeWeb, Reply};
+    const QUESTION: &str = "How did revenue go by quarter?";
+    const ANSWER: &str = "Revenue rose every quarter, to 41.7M in Q3.";
+    const HOSTILE: &str = "Show me the office report";
+    let beacon = FakeWeb::start(&[("/beacon", "seen")]).await;
+    let b = beacon.url("/beacon");
+    let hostile = json!([
+        { "type": "table", "title": format!("url({b}/title)"), "columns": ["<img src=x>"], "rows": [[format!("<img src=\"{b}/table\">")]] },
+        { "type": "code", "code": format!("<script>fetch(\"{b}/code\")</script>") },
+        { "type": "map", "places": [{ "name": format!("<link rel=stylesheet href=\"{b}/map\">"), "lat": 51.5, "lon": -0.12 }, { "name": "Paris", "lat": 48.86, "lon": 2.35 }] },
+        { "type": "timeline", "events": [{ "when": "2025", "label": format!("<iframe src=\"{b}/timeline\"></iframe>") }] },
+        { "type": "comparison", "options": [format!("<style>@import url({b}/cmp)</style>"), "B"], "aspects": [{ "name": "<button>Approve</button>", "values": [1, 2], "best": 0 }] }
+    ]);
+    let s = script(move |c| {
+        let hostile = hostile.clone();
+        async move {
+            if c.body["system"].to_string().contains("in a chat") {
+                let first = c.messages().first().cloned().unwrap_or_default();
+                let said = first["content"].as_array().and_then(|b| b.last()).and_then(|b| b["text"].as_str()).unwrap_or_default().to_string();
+                return match said.as_str() {
+                    QUESTION => tools(vec![
+                        magnus_scratch::say(ANSWER),
+                        ("show", json!({ "components": [
+                            { "type": "bar_chart", "title": "Revenue by quarter", "labels": ["Q1", "Q2", "Q3"], "values": [35.1, 38.2, 41.7], "unit": "M" },
+                            { "type": "table", "columns": ["Quarter", "Revenue (M)"], "rows": [["Q1", 35.1], ["Q2", 38.2], ["Q3", 41.7]] }
+                        ] })),
+                    ]),
+                    HOSTILE => tools(vec![magnus_scratch::say("Here is what you asked for."), ("show", json!({ "components": hostile }))]),
+                    _ => Reply::Text(format!("Answer to: {said}")),
+                };
+            }
+            match c.turn() {
+                0 => contract_unchecked("do the work", "the work is done"),
+                1 => tool("task_fail", json!({ "reason": "not this test" })),
+                _ => complete("done"),
+            }
+        }
+    });
+    let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
+    let idp = FakeIdp::start(PERSON).await;
+    idp.configure(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let d = Driver::start().await;
+    let (ok, log) = d
+        .script("app-composed.mjs", &url, &fingerprint, &[("MAGNUS_DATA_QUESTION", QUESTION), ("MAGNUS_DATA_ANSWER", ANSWER), ("MAGNUS_HOSTILE_QUESTION", HOSTILE), ("MAGNUS_BEACON", &b)])
+        .await;
+    assert!(ok, "composed answers failed:\n{log}");
+    assert!(beacon.hits().is_empty(), "composed content reached the network: {:?}", beacon.hits());
+    // The recorder records: a request the test makes itself is seen.
+    reqwest::get(format!("{b}/control")).await.unwrap();
+    assert_eq!(beacon.hits().len(), 1, "the beacon records nothing, so the check above proves nothing");
 }
 
 /// The sign-in link crosses into the shell, and so does the kept session:
