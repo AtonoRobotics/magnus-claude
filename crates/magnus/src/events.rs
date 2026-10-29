@@ -87,6 +87,20 @@ pub enum Ev {
     KillSwitch {
         engaged: bool,
     },
+    /// The kill switch sealed the vault (B11): OAuth sign-ins taken out to be
+    /// revoked at their providers, and the secrets kept sealed (API keys and
+    /// app secrets, which only their provider's console can revoke). Names only.
+    VaultSealed {
+        revoking: Vec<String>,
+        kept: Vec<String>,
+    },
+    /// What the provider said when asked to revoke one sign-in.
+    SecretRevoked {
+        name: String,
+        adapter: String,
+        at_provider: bool,
+        detail: String,
+    },
     /// A person signed in from an app. The token itself is never logged.
     SignedIn {
         person: String,

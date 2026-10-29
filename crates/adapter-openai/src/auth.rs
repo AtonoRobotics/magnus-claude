@@ -239,3 +239,57 @@ pub async fn complete(http: &reqwest::Client, settings: &Value, flow: &Value, in
         k => sink.error(ErrorClass::InvalidRequest, format!("unknown sign-in flow {k}")).await,
     }
 }
+
+/// The provider's revocation endpoint (RFC 7009): `revoke_url` in settings,
+/// else the one its discovery document publishes, at the issuer (`issuer`,
+/// else the token endpoint's origin).
+async fn revocation_endpoint(http: &reqwest::Client, a: &Value) -> Result<String, String> {
+    if let Some(u) = a["revoke_url"].as_str() {
+        return Ok(u.to_string());
+    }
+    let issuer = match a["issuer"].as_str() {
+        Some(i) => i.trim_end_matches('/').to_string(),
+        None => {
+            let t = reqwest::Url::parse(a["token_url"].as_str().ok_or("no token_url in settings")?).map_err(|e| format!("token_url: {e}"))?;
+            t.origin().ascii_serialization()
+        }
+    };
+    for doc in ["/.well-known/openid-configuration", "/.well-known/oauth-authorization-server"] {
+        let Ok(r) = http.get(format!("{issuer}{doc}")).send().await else { continue };
+        if let Ok(v) = r.json::<Value>().await {
+            if let Some(u) = v["revocation_endpoint"].as_str() {
+                return Ok(u.to_string());
+            }
+        }
+    }
+    Err(format!("{issuer} publishes no revocation endpoint"))
+}
+
+/// Revoke an OAuth sign-in at the provider: the refresh token (which ends the
+/// grant), then the access token. An API key cannot be revoked from here.
+pub async fn revoke(http: &reqwest::Client, settings: &Value, credential: &str, sink: &mut Sink) -> anyhow::Result<()> {
+    let a = &settings["auth"];
+    if a["kind"].as_str().unwrap_or("api_key") == "api_key" {
+        return sink.send(&Event::AuthRevoked { at_provider: false, detail: "an API key is revoked in the provider's console".into() }).await;
+    }
+    let c: Value = serde_json::from_str(credential).unwrap_or(Value::Null);
+    let url = match revocation_endpoint(http, a).await {
+        Ok(u) => u,
+        Err(m) => return sink.send(&Event::AuthRevoked { at_provider: false, detail: m }).await,
+    };
+    let client = a["client_id"].as_str().unwrap_or_default();
+    let mut revoked = vec![];
+    let mut failed = vec![];
+    for (hint, token) in [("refresh_token", c["refresh_token"].as_str()), ("access_token", c["access_token"].as_str())] {
+        let Some(token) = token.filter(|t| !t.is_empty()) else { continue };
+        let form = [("token", token), ("token_type_hint", hint), ("client_id", client)];
+        match http.post(&url).form(&form).send().await {
+            Ok(r) if r.status().is_success() => revoked.push(hint),
+            Ok(r) => failed.push(format!("{hint}: {}", r.status())),
+            Err(e) => failed.push(format!("{hint}: {e}")),
+        }
+    }
+    let at_provider = revoked.contains(&"refresh_token") || (!revoked.is_empty() && c["refresh_token"].as_str().is_none());
+    let detail = if failed.is_empty() { format!("revoked at {url}") } else { format!("{url}: {}", failed.join("; ")) };
+    sink.send(&Event::AuthRevoked { at_provider, detail }).await
+}

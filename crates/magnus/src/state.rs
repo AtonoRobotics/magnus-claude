@@ -190,6 +190,15 @@ pub struct Verdict {
 }
 
 /// The verdicts a person can give, best first.
+/// A secret the kill switch took out: `at_provider` is None until the
+/// provider answered.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Revoked {
+    pub adapter: Option<String>,
+    pub at_provider: Option<bool>,
+    pub detail: Option<String>,
+}
+
 pub const VERDICTS: [&str; 3] = ["right", "partly", "wrong"];
 
 /// A file in a person's library: one they uploaded, or one a task delivered.
@@ -357,6 +366,11 @@ pub struct State {
     pub approvals: Vec<Approval>,
     pub policies: BTreeMap<String, String>,
     pub kill_switch: bool,
+    /// Secrets the kill switch emptied from the vault, latest engagement
+    /// only: what the owner signs in to or enters again.
+    pub revoked: BTreeMap<String, Revoked>,
+    /// Secrets the kill switch kept, sealed: only their provider can revoke them.
+    pub sealed: Vec<String>,
     pub schedules: BTreeMap<String, Schedule>,
     /// Schedule cards from chat the person answered, by card id.
     pub cards: HashMap<String, CardState>,
@@ -440,6 +454,7 @@ impl State {
             }
             Ev::SecretSet { name } => {
                 self.secrets.insert(name.clone());
+                self.revoked.remove(name);
             }
             Ev::PolicySet { layer, cedar } => {
                 self.policies.insert(layer.clone(), cedar.clone());
@@ -448,6 +463,16 @@ impl State {
                 self.version_changes.push((e.seq, e.at, format!("policy:{layer}"), format!("v{n}")));
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
+            Ev::VaultSealed { revoking, kept } => {
+                self.revoked = revoking.iter().map(|n| (n.clone(), Revoked::default())).collect();
+                self.sealed = kept.clone();
+                for n in revoking {
+                    self.secrets.remove(n);
+                }
+            }
+            Ev::SecretRevoked { name, adapter, at_provider, detail } => {
+                self.revoked.insert(name.clone(), Revoked { adapter: Some(adapter.clone()), at_provider: Some(*at_provider), detail: Some(detail.clone()) });
+            }
             Ev::SignedIn { .. } | Ev::SignedOut { .. } => {}
             Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title } => {
                 self.schedules.insert(

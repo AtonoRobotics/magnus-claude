@@ -57,6 +57,10 @@ pub enum Request {
         flow: Value,
         input: Value,
     },
+    /// Revoke a credential at the provider (the kill switch). Answered with
+    /// `auth_revoked`, saying whether the provider took it back; an API key
+    /// cannot be revoked from here and says so.
+    AuthRevoke { settings: Value, credential: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -194,6 +198,10 @@ pub enum Event {
     },
     AuthDone {
         credential: String,
+    },
+    AuthRevoked {
+        at_provider: bool,
+        detail: String,
     },
 }
 

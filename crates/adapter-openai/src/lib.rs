@@ -177,7 +177,7 @@ async fn client_version(http: &reqwest::Client, url: &str, refresh_s: u64) -> Re
 
 async fn handle(http: reqwest::Client, mut req: Request, mut sink: Sink) -> anyhow::Result<()> {
     let settings = match &mut req {
-        Request::Hello {} => None,
+        Request::Hello {} | Request::AuthRevoke { .. } => None,
         Request::Catalog { settings, .. } | Request::AuthBegin { settings } | Request::AuthComplete { settings, .. } => Some(settings),
         Request::Complete(p) => Some(&mut p.settings),
     };
@@ -198,6 +198,7 @@ async fn handle(http: reqwest::Client, mut req: Request, mut sink: Sink) -> anyh
         },
         Request::AuthBegin { settings } => auth::begin(&http, &settings, &mut sink).await,
         Request::AuthComplete { settings, flow, input } => auth::complete(&http, &settings, &flow, &input, &mut sink).await,
+        Request::AuthRevoke { settings, credential } => auth::revoke(&http, &settings, &credential, &mut sink).await,
     }
 }
 

@@ -483,7 +483,8 @@ function describeChange(c) {
 
 route(/^#\/home$/, async main => {
   const draw = async () => {
-    const [health, { tasks }, model] = await Promise.all([api("GET", "/v1/health"), api("GET", "/v1/tasks"), api("GET", "/v1/model")]);
+    const [health, { tasks }, model, ks] = await Promise.all([api("GET", "/v1/health"), api("GET", "/v1/tasks"), api("GET", "/v1/model"),
+      isOwner() ? api("GET", "/v1/kill-switch") : null]);
     const v = App.versions;
     const seen = load("version", 0);
     const news = v ? v.changes.filter(c => c.seq > seen) : [];
@@ -508,15 +509,42 @@ route(/^#\/home$/, async main => {
       <h2>Running</h2>
       ${active.length ? `<table class="t"><tbody>${active.map(row).join("")}</tbody></table>` : `<p class="empty">Nothing is running. <a href="#/new">Start a task</a>.</p>`}
       <h2>Recent</h2>
-      ${recent.length ? `<table class="t"><tbody>${recent.map(row).join("")}</tbody></table>` : `<p class="empty">No finished tasks yet.</p>`}`);
+      ${recent.length ? `<table class="t"><tbody>${recent.map(row).join("")}</tbody></table>` : `<p class="empty">No finished tasks yet.</p>`}
+      ${ks ? killSwitch(ks) : ""}`);
   };
   main.onclick = e => {
     const r = e.target.closest("[data-href]"); if (r) location.hash = r.dataset.href;
     if (e.target.closest("[data-act=seen-versions]")) { save("version", App.versions?.latest_seq ?? 0); main._html = null; draw(); }
+    const kill = e.target.closest("[data-kill]");
+    if (kill) {
+      const on = kill.dataset.kill === "on";
+      const sure = on ? confirm("Stop everything? Every action is refused, every task is suspended, every sign-in in the vault is revoked at its provider, and every key in the vault is sealed. You will sign in to providers again afterwards.")
+        : confirm("Turn the kill switch off? Suspended tasks stay suspended until you resume each one.");
+      if (sure) api("POST", "/v1/kill-switch", { engaged: on }).then(() => { toast(on ? "Everything is stopped." : "The kill switch is off."); draw(); }).catch(err => toast(err.message));
+    }
   };
   await draw();
   every(4000, draw);
 });
+
+// The owner's kill switch (B11): one control that refuses every action,
+// suspends every task and revokes the vault's sign-ins and keys; after it,
+// what was revoked and what to connect again.
+function killSwitch(ks) {
+  const revoked = Object.entries(ks.revoked || {});
+  const state = r => r.at_provider === null || r.at_provider === undefined ? "revoking…" : r.at_provider ? "revoked by the provider" : `removed from the vault; the provider did not confirm (${r.detail || "no answer"})`;
+  return `<div class="card" data-kill-switch="${ks.engaged ? "on" : "off"}" style="margin-top:24px"><h2 style="margin-top:0">Kill switch</h2>
+    ${ks.engaged
+      ? `<p><strong>On.</strong> Every action is refused and every task is suspended. Nothing resumes when you turn it off; resume each task yourself.</p>
+         <button data-kill="off">Turn the kill switch off</button>`
+      : `<p class="small muted">Refuses every action, suspends every task, revokes every sign-in at its provider and seals the vault, at once.</p>
+         <button class="danger" data-kill="on">Stop everything</button>`}
+    ${(ks.sealed || []).length ? `<h3>Sealed until you turn it off</h3><p class="small muted">API keys and app secrets cannot be revoked from here; if you think one leaked, revoke it in that provider's console.</p>
+      <ul class="small" data-sealed>${ks.sealed.map(n => `<li class="mono" data-secret="${esc(n)}">${esc(n)}</li>`).join("")}</ul>` : ""}
+    ${revoked.length ? `<h3>Revoked${ks.engaged ? "" : ": connect these again"}</h3><table class="t" data-revoked><tbody>${revoked.map(([n, r]) => `<tr data-secret="${esc(n)}"><td class="mono small">${esc(r.adapter ? `${r.adapter} sign-in` : n)}</td><td class="small">${esc(state(r))}</td></tr>`).join("")}</tbody></table>
+      ${ks.engaged ? "" : `<p class="small"><a href="#/models">Models</a>: sign in or enter keys again.</p>`}` : ""}
+  </div>`;
+}
 
 // Where a task stands for the person looking: waiting on them, working,
 // waiting on something else (a set time), done, or failed or cancelled.

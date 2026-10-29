@@ -83,6 +83,9 @@ impl Kernel {
             state.apply(&e);
         }
         let vault = Arc::new(Vault::open(&cfg.appliance.state_dir)?);
+        if state.kill_switch {
+            vault.seal();
+        }
         let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
         let oidc = cfg.sign_in.oidc.clone().map(crate::oidc::Provider::new).transpose()?;
         let adapters = Adapters::new(&cfg.appliance.state_dir, vault.clone(), &cfg.adapters);

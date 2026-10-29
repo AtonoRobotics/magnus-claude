@@ -19,6 +19,9 @@ pub struct Vault {
     dir: PathBuf,
     cipher: XChaCha20Poly1305,
     lock: Mutex<()>,
+    /// Set while the kill switch is engaged: nothing is read or stored, so
+    /// no secret leaves and no refreshed token comes back in (B11).
+    sealed: std::sync::atomic::AtomicBool,
 }
 
 /// A secret value; formatting it never prints the value.
@@ -63,7 +66,7 @@ impl Vault {
         let key = std::fs::read(&key_path).context("read vault key")?;
         anyhow::ensure!(key.len() == 32, "vault key is corrupt");
         let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| anyhow::anyhow!("vault key"))?;
-        Ok(Vault { dir, cipher, lock: Mutex::new(()) })
+        Ok(Vault { dir, cipher, lock: Mutex::new(()), sealed: Default::default() })
     }
 
     fn path(&self) -> PathBuf {
@@ -80,6 +83,7 @@ impl Vault {
 
     pub fn put(&self, name: &str, value: &str) -> Result<()> {
         let _g = self.lock.lock().unwrap();
+        anyhow::ensure!(!self.is_sealed(), "the kill switch is engaged; nothing is stored in the vault");
         let mut all = self.read_all()?;
         let mut nonce = [0u8; 24];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
@@ -95,6 +99,13 @@ impl Vault {
 
     pub fn get(&self, name: &str) -> Result<Option<Secret>> {
         let _g = self.lock.lock().unwrap();
+        if self.is_sealed() {
+            return Ok(None);
+        }
+        self.get_locked(name)
+    }
+
+    fn get_locked(&self, name: &str) -> Result<Option<Secret>> {
         let all = self.read_all()?;
         let Some(b64) = all.get(name) else { return Ok(None) };
         let blob = base64::engine::general_purpose::STANDARD.decode(b64)?;
@@ -109,6 +120,37 @@ impl Vault {
     pub fn names(&self) -> Result<Vec<String>> {
         let _g = self.lock.lock().unwrap();
         Ok(self.read_all()?.into_keys().collect())
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        self.sealed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn unseal(&self) {
+        self.sealed.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Seal the vault and take the secrets named in `take` out of it,
+    /// returning them once (for revocation at the provider). The rest stay,
+    /// unreadable until the vault is unsealed.
+    pub fn seal_and_take(&self, take: &[String]) -> Result<Vec<(String, Secret)>> {
+        let _g = self.lock.lock().unwrap();
+        self.sealed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut all = self.read_all()?;
+        let mut out = vec![];
+        for n in take {
+            if let Some(v) = self.get_locked(n)? {
+                out.push((n.clone(), v));
+            }
+            all.remove(n);
+        }
+        write_private(&self.path(), &serde_json::to_vec(&all)?)?;
+        Ok(out)
+    }
+
+    /// Seal without emptying: a restart while the kill switch is engaged.
+    pub fn seal(&self) {
+        self.sealed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

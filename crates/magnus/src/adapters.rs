@@ -272,6 +272,37 @@ impl Adapters {
         }
     }
 
+    /// The adapter whose OAuth sign-in is the secret `name`, if any: a
+    /// sign-in the provider can revoke (an API key cannot be, from here).
+    pub async fn oauth_owner_of(&self, name: &str) -> Option<String> {
+        self.configs
+            .read()
+            .await
+            .values()
+            .find(|c| {
+                let (settings, cred) = Self::split_settings(c);
+                cred.as_deref() == Some(name) && settings["auth"]["kind"].as_str().is_some_and(|k| k != "api_key")
+            })
+            .map(|c| c.id.clone())
+    }
+
+    /// Ask adapter `id` to revoke `credential` at its provider (the kill
+    /// switch). Returns whether the provider took it back, and what happened.
+    pub async fn revoke(&self, id: &str, credential: String) -> (bool, String) {
+        let ask = async {
+            let r = self.get(id).await?;
+            let (settings, _) = Self::split_settings(&r.cfg);
+            let mut call = proto::Call::open(&r.socket, Request::AuthRevoke { settings, credential }).await?;
+            anyhow::Ok(call.next().await?)
+        };
+        match ask.await {
+            Ok(Some(Event::AuthRevoked { at_provider, detail })) => (at_provider, detail),
+            Ok(Some(Event::Error { message, .. })) => (false, message),
+            Ok(other) => (false, format!("unexpected answer: {other:?}")),
+            Err(e) => (false, format!("{e:#}")),
+        }
+    }
+
     /// The adapter's model list. A credential it refreshed on the way goes
     /// to the vault, never to the caller.
     pub async fn catalog(&self, id: &str) -> Result<Event> {

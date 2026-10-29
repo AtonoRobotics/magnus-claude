@@ -46,6 +46,10 @@ async fn handle(http: reqwest::Client, req: Request, mut sink: Sink) -> anyhow::
         }
         Request::Catalog { settings, credential } => catalog(&http, &settings, credential, &mut sink).await,
         Request::Complete(p) => complete(&http, p, &mut sink).await,
+        Request::AuthRevoke { .. } => {
+            let detail = "an API key is revoked in the Anthropic console (https://console.anthropic.com/settings/keys)".into();
+            sink.send(&Event::AuthRevoked { at_provider: false, detail }).await
+        }
         Request::AuthBegin { .. } => {
             let flow = json!({ "kind": "api_key" });
             sink.send(&Event::AuthStep {

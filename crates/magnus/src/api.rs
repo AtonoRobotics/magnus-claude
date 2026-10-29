@@ -127,7 +127,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/policies/{*layer}", put(put_policy))
         .route("/v1/secrets", get(secret_names))
         .route("/v1/secrets/{name}", put(put_secret))
-        .route("/v1/kill-switch", post(kill_switch))
+        .route("/v1/kill-switch", post(kill_switch).get(kill_switch_state))
         .route("/v1/adapters", get(adapters))
         .route("/v1/model", get(get_model).put(put_model))
         .route("/v1/models", get(models))
@@ -803,6 +803,9 @@ async fn put_secret(State(k): K, h: HeaderMap, Path(name): Path<String>, Json(b)
         Err(r) => return r,
     };
     let Some(value) = b["value"].as_str() else { return err(StatusCode::BAD_REQUEST, "no value") };
+    if k.vault.is_sealed() {
+        return err(StatusCode::CONFLICT, "the kill switch is engaged; turn it off before entering secrets");
+    }
     if let Err(e) = k.vault.put(&name, value) {
         return internal(e);
     }
@@ -810,6 +813,16 @@ async fn put_secret(State(k): K, h: HeaderMap, Path(name): Path<String>, Json(b)
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),
     }
+}
+
+/// The kill switch and the secrets it took out (owner only): what to sign
+/// in to or enter again, and whether each provider revoked it.
+async fn kill_switch_state(State(k): K, h: HeaderMap) -> Response {
+    if let Err(r) = owner(&k, &h) {
+        return r;
+    }
+    let (engaged, revoked, sealed) = k.read(|s| (s.kill_switch, s.revoked.clone(), s.sealed.clone()));
+    Json(json!({ "engaged": engaged, "revoked": revoked, "sealed": if engaged { sealed } else { vec![] } })).into_response()
 }
 
 async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
@@ -822,15 +835,52 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
     if let Err(e) = k.emit(&actor, Ev::KillSwitch { engaged }).await {
         return internal(e);
     }
-    if engaged {
-        let active: Vec<String> = k.read(|s| s.runs.values().filter(|r| r.status == Status::Running).map(|r| r.id.clone()).collect());
-        for run in active {
-            if let Err(e) = k.suspend(&run, "kill_switch", None).await {
-                return internal(e);
-            }
+    if !engaged {
+        // Released: the vault takes secrets again, but holds none; nothing
+        // resumes by itself (K53).
+        k.vault.unseal();
+        return Json(json!({ "engaged": false })).into_response();
+    }
+    // One control (B11): the policy is deny-all from the event above; every
+    // run is suspended; the vault is sealed, and each OAuth sign-in is taken
+    // out and revoked at its provider. API keys and app secrets stay sealed:
+    // only their provider's console can revoke them.
+    let active: Vec<String> = k.read(|s| s.runs.values().filter(|r| r.status == Status::Running).map(|r| r.id.clone()).collect());
+    for run in active {
+        if let Err(e) = k.suspend(&run, "kill_switch", None).await {
+            return internal(e);
         }
     }
-    Json(json!({ "engaged": engaged })).into_response()
+    let names = match k.vault.names() {
+        Ok(n) => n,
+        Err(e) => return internal(e),
+    };
+    let mut revoking = vec![];
+    for n in &names {
+        if let Some(adapter) = k.adapters.oauth_owner_of(n).await {
+            revoking.push((n.clone(), adapter));
+        }
+    }
+    let take: Vec<String> = revoking.iter().map(|(n, _)| n.clone()).collect();
+    let taken = match k.vault.seal_and_take(&take) {
+        Ok(t) => t,
+        Err(e) => return internal(e),
+    };
+    let kept: Vec<String> = names.iter().filter(|n| !take.contains(n)).cloned().collect();
+    if let Err(e) = k.emit(&actor, Ev::VaultSealed { revoking: take.clone(), kept: kept.clone() }).await {
+        return internal(e);
+    }
+    let kk = k.clone();
+    tokio::spawn(async move {
+        for (name, secret) in taken {
+            let adapter = revoking.iter().find(|(n, _)| *n == name).map(|(_, a)| a.clone()).unwrap_or_default();
+            let (at_provider, detail) = kk.adapters.revoke(&adapter, secret.expose().to_string()).await;
+            if let Err(e) = kk.emit("kernel", Ev::SecretRevoked { name, adapter, at_provider, detail }).await {
+                tracing::error!("could not record a revocation: {e:#}");
+            }
+        }
+    });
+    Json(json!({ "engaged": true, "revoking": take, "sealed": kept })).into_response()
 }
 
 async fn adapters(State(k): K, h: HeaderMap) -> Response {
