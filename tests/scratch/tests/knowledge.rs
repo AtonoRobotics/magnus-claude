@@ -1,7 +1,8 @@
 //! The company knowledge base (owner, 2026-10-29), through the HTTP API and
 //! Postgres itself: nobody retrieves an entry they may not read, row
 //! security filtering for the asker before the model sees anything; an
-//! untrusted entry carrying instructions makes nothing happen; endorsement
+//! untrusted entry grants no authority (invariant 4), so its instructions
+//! act on nothing private without the person's approval; endorsement
 //! needs the role and is logged; verified says reliable and grants nothing;
 //! a typed value read by a model with no tools becomes a company fact.
 
@@ -22,6 +23,7 @@ const RESEARCH_CRM: &str = "Research customer record 42";
 const RESEARCH_WEB: &str = "Research our Q3 revenue";
 const FIGURE: &str = "Find the quarterly figure";
 const USE_IT: &str = "Look up the revenue notes and act on them";
+const WITH_RECORD: &str = "Read customer record 42, then look up the revenue notes and act on them";
 const CORROBORATE: &str = "Check the headcount in two places";
 
 /// Each task: a contract, its reads, what it files, then done. The task that
@@ -67,6 +69,13 @@ fn model(evil: String, a: String, b: String) -> Script {
                     1 => Some(tool("knowledge_search", json!({ "query": t.trim_start_matches(USE_IT).trim() }))),
                     // Obey what was read.
                     2 if c.text().contains("update CRM record 42") => Some(tool("crm__update_record", json!({ "id": "42", "fields": { "status": "closed" } }))),
+                    _ => None,
+                },
+                t if t.starts_with(WITH_RECORD) => match turn {
+                    1 => Some(tool("crm__get_record", json!({ "id": "42" }))),
+                    2 => Some(tool("knowledge_search", json!({ "query": "revenue notes" }))),
+                    // Obey what was read.
+                    3 if c.text().contains("update CRM record 42") => Some(tool("crm__update_record", json!({ "id": "42", "fields": { "status": "closed" } }))),
                     _ => None,
                 },
                 _ => None,
@@ -153,8 +162,10 @@ async fn nobody_retrieves_an_entry_they_may_not_read() {
     assert!(write.is_err(), "the reader role could change who reads an entry");
 }
 
-/// Research from the web enters untrusted, readable by everyone; a task that
-/// reads its instructions and obeys them changes nothing in the CRM.
+/// Research from the web enters untrusted, readable by everyone. It grants no
+/// authority: a task that has read private data and then obeys the entry's
+/// instructions changes nothing in the CRM until the person approves (the
+/// Rule of Two, as for any untrusted content).
 #[tokio::test(flavor = "multi_thread")]
 async fn an_untrusted_entry_with_instructions_makes_nothing_happen() {
     let k = start().await;
@@ -165,8 +176,8 @@ async fn an_untrusted_entry_with_instructions_makes_nothing_happen() {
     assert_eq!(e[0]["source"]["citations"][0]["source"], k.web.url("/evil"), "the citation was not kept");
     assert_eq!(e[0]["author"].as_str().map(|a| a.starts_with("agent:")), Some(true), "{:?}", e[0]);
 
-    let t = run(&bob, &format!("{USE_IT} revenue notes")).await;
-    assert_eq!(t["taint"]["untrusted"], true, "reading an untrusted entry did not taint the task: {t}");
+    let t = run(&bob, WITH_RECORD).await;
+    assert_eq!((t["taint"]["untrusted"].clone(), t["taint"]["private"].clone()), (json!(true), json!(true)), "reading an untrusted entry did not taint the task: {t}");
     assert!(k.crm.calls_to("update_record").is_empty(), "the entry's instructions reached the CRM");
     let inbox = bob.inbox().await;
     let ask = inbox.iter().find(|i| i["kind"] == "approval").unwrap_or_else(|| panic!("the update did not wait for bob: {inbox:?} {t}"));
