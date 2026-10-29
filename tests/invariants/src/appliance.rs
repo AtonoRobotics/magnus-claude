@@ -167,8 +167,15 @@ pub fn bin(name: &str) -> PathBuf {
     p
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+/// The address in the appliance's "listening on http://…" line, written
+/// after `from` in its log.
+fn listening(log: &std::path::Path, from: u64) -> Option<String> {
+    let text = std::fs::read(log).ok()?;
+    let text = String::from_utf8_lossy(text.get(from as usize..)?);
+    let rest = &text[text.find("listening on http://")? + "listening on http://".len()..];
+    let host = rest.strip_prefix("127.0.0.1:")?;
+    let port: String = host.chars().take_while(char::is_ascii_digit).collect();
+    (!port.is_empty()).then(|| format!("127.0.0.1:{port}"))
 }
 
 pub struct Appliance {
@@ -193,12 +200,11 @@ impl Appliance {
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
-        let port = free_port();
         let (kernel, rootfs) = sandbox_assets();
         let firecracker = std::env::var("MAGNUS_FIRECRACKER").unwrap_or("/usr/local/bin/firecracker".into());
 
         let config = json!({
-            "appliance": { "state_dir": state_dir, "listen": format!("127.0.0.1:{port}") },
+            "appliance": { "state_dir": state_dir, "listen": "127.0.0.1:0" },
             "database": { "url": db.kernel_url() },
             // The kernel speaks the adapter contract to a separate adapter
             // process; the adapter speaks the provider's own API.
@@ -252,7 +258,8 @@ impl Appliance {
             model: model.clone(),
             provider_key: crate::canary("provider"),
             app_secrets: HashMap::new(),
-            base: format!("http://127.0.0.1:{port}"),
+            // Known once the first start names its port.
+            base: String::new(),
             config_path,
             child: None,
             starts: 0,
@@ -278,6 +285,8 @@ impl Appliance {
 
     async fn spawn(&mut self) {
         self.starts += 1;
+        // The log is kept across restarts; this start's lines begin here.
+        let from = std::fs::metadata(self.dir.path().join("serve.err")).map(|m| m.len()).unwrap_or(0);
         let log = |kind: &str| {
             std::fs::OpenOptions::new()
                 .create(true)
@@ -297,9 +306,21 @@ impl Appliance {
         let http = reqwest::Client::new();
         let start = std::time::Instant::now();
         loop {
-            if let Ok(r) = http.get(format!("{}/v1/health", self.base)).send().await {
-                if r.status().is_success() {
-                    return;
+            // Ready only once this start's own log names its port: a health
+            // answer alone may come from another test's appliance.
+            if let Some(addr) = listening(&self.dir.path().join("serve.err"), from) {
+                if self.base.is_empty() {
+                    // The first start took port 0; restarts keep the port it got.
+                    self.base = format!("http://{addr}");
+                    let mut cfg: toml::Table = toml::from_str(&std::fs::read_to_string(&self.config_path).unwrap()).unwrap();
+                    cfg["appliance"].as_table_mut().unwrap().insert("listen".into(), addr.clone().into());
+                    std::fs::write(&self.config_path, toml::to_string(&cfg).unwrap()).unwrap();
+                }
+                assert_eq!(format!("http://{addr}"), self.base, "a restart moved the appliance");
+                if let Ok(r) = http.get(format!("{}/v1/health", self.base)).send().await {
+                    if r.status().is_success() {
+                        return;
+                    }
                 }
             }
             if let Some(c) = self.child.as_mut() {

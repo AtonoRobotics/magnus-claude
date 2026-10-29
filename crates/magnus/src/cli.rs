@@ -97,6 +97,8 @@ async fn run(cfg: Config) -> Result<()> {
     };
     let k = crate::kernel::Kernel::boot(cfg).await?;
     let plain = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("listen on {listen}"))?;
+    // The bound address, which differs from `listen` when it names port 0.
+    let bound = plain.local_addr()?;
     let tls = match tls {
         Some((addr, server, fingerprint)) => Some((crate::tls::Listener::bind(&addr, server).await?, addr, fingerprint)),
         None => None,
@@ -106,7 +108,7 @@ async fn run(cfg: Config) -> Result<()> {
     crate::backup::schedule(k.clone());
     crate::update::schedule(k.clone());
     tokio::spawn(k.clone().sweep());
-    tracing::info!("magnus {} listening on http://{listen}", crate::update::version());
+    tracing::info!("magnus {} listening on http://{bound}", crate::update::version());
     let plain = axum::serve(plain, router(k.clone(), Transport::Plain).into_make_service_with_connect_info::<SocketAddr>());
     match tls {
         Some((l, addr, fingerprint)) => {
