@@ -365,6 +365,18 @@ pub struct Schedule {
     pub failures: Vec<(DateTime<Utc>, String)>,
 }
 
+/// A thread branched from another at one of its entries.
+#[derive(Clone, Debug)]
+pub struct Branch {
+    pub person: String,
+    pub from: String,
+    pub upto: String,
+    /// The entries up to `upto`, as they were shown then.
+    pub entries: Vec<Value>,
+    pub title: String,
+    pub at: DateTime<Utc>,
+}
+
 /// What became of a schedule proposed in chat.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CardState {
@@ -433,6 +445,10 @@ pub struct State {
     pub roles_set: HashMap<String, Vec<String>>,
     /// Each person's own settings, by person.
     pub preferences: HashMap<String, Value>,
+    /// Entries people deleted from their threads, by thread.
+    pub hidden: HashMap<String, std::collections::HashSet<String>>,
+    /// Threads branched from another, by thread.
+    pub branches: HashMap<String, Branch>,
     pub schedules: BTreeMap<String, Schedule>,
     /// Schedule cards from chat the person answered, by card id.
     pub cards: HashMap<String, CardState>,
@@ -596,6 +612,12 @@ impl State {
                         p.insert(k.clone(), v.clone());
                     }
                 }
+            }
+            Ev::ChatHidden { thread, entries, .. } => {
+                self.hidden.entry(thread.clone()).or_default().extend(entries.iter().cloned());
+            }
+            Ev::ThreadBranched { person, thread, from, upto, entries, title } => {
+                self.branches.insert(thread.clone(), Branch { person: person.clone(), from: from.clone(), upto: upto.clone(), entries: entries.clone(), title: title.clone(), at: e.at });
             }
             Ev::SignedIn { .. } | Ev::SignedOut { .. } => {}
             Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title } => {

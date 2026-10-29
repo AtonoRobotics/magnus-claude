@@ -264,7 +264,7 @@ impl Kernel {
             ("deletion_request", "done") | ("deletion_request", "decline") => {
                 self.emit(&actor, resolve(None)).await?;
             }
-            ("schedule_proposal", "reject") | ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") => {
+            ("schedule_proposal", "reject") | ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("shared", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") => {
                 self.emit(&actor, resolve(None)).await?;
             }
             // Only the kernel's own notices (which name a reason) can continue a

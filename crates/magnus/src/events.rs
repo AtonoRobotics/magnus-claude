@@ -220,6 +220,23 @@ pub enum Ev {
         person: String,
         prefs: Value,
     },
+    /// A person deleted entries from a thread: views leave them out; the
+    /// log keeps them.
+    ChatHidden {
+        person: String,
+        thread: String,
+        entries: Vec<String>,
+    },
+    /// A person branched a thread at an entry: a new thread starts with the
+    /// conversation up to there, as it was then.
+    ThreadBranched {
+        person: String,
+        thread: String,
+        from: String,
+        upto: String,
+        entries: Vec<Value>,
+        title: String,
+    },
     /// A person signed in from an app. The token itself is never logged.
     SignedIn {
         person: String,

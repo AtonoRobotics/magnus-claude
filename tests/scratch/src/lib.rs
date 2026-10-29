@@ -103,7 +103,7 @@ impl Flow {
         let web = FakeWeb::start(&[("/finance/q3", "<p>Q3 revenue: 41.7M. Q2 revenue: 38.2M.</p>")]).await;
         // Chat turns answer; tasks follow the script.
         let task = steps(replies(web.url("/finance/q3")));
-        let mut model = FakeModel::start(script(move |c| {
+        let s = script(move |c| {
             let task = task.clone();
             async move {
                 if c.body["system"].to_string().contains("in a chat") {
@@ -112,8 +112,13 @@ impl Flow {
                     task(c).await
                 }
             }
-        }))
-        .await;
+        });
+        Flow::start_with(web, s).await
+    }
+
+    /// The same appliance, with the model following `s` instead.
+    pub async fn start_with(web: FakeWeb, s: model::Script) -> Flow {
+        let mut model = FakeModel::start(s).await;
         model.url = provider(&model).await;
         let app = Appliance::start(Spec::default(), &model).await;
         // Ask before any file leaves a task, so the flow has an approval.
