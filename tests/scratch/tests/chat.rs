@@ -517,3 +517,113 @@ async fn a_person_chooses_the_model_for_a_task_and_a_chat_message() {
         assert_eq!(st.as_u16(), 400, "{bad}: {v}");
     }
 }
+
+/// A request set compared across models (the Experiments view): each trial is
+/// a chat message on a chosen model, once per model. The report shows what
+/// each model chose, the tasks it started, every policy stop on the way, and
+/// the cost and time, until everything ended or stopped for a person; the
+/// person's judgment of the choice is a grade they may change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_set_compares_models_in_chat_and_takes_the_persons_judgment() {
+    let mail = mcp::mail().start().await;
+    let mut m = FakeModel::start(model(
+        |said, turn| match (said, turn) {
+            ("Email Bob the agenda.", 0) => tool("create_task", json!({ "title": "Email Bob the agenda", "text": "Email Bob the agenda." })),
+            ("Every Monday, summarise my invoices.", 0) => tool("create_schedule", json!({ "title": "Invoice summary", "text": "Summarise my invoices.", "every_minutes": 10080, "scope": "Reads invoices." })),
+            ("Chase the invoices.", 0) => say("Which month do you mean?"),
+            (_, 0) => say("Eight."),
+            _ => say("Started."),
+        },
+        vec![simple_contract(), tool("mail__send", json!({ "to": "bob@corp.example", "subject": "Agenda", "body": "1. Budget" })), tool("task_complete", json!({ "summary": "Sent." }))],
+    ))
+    .await;
+    m.url = magnus_scratch::provider_with(&m, &["claude-test", "claude-other"]).await;
+    let mut spec = Spec::default().app("mail", &mail, "public", "private", &[("send", "irreversible")]);
+    spec.people.push(magnus_invariants::appliance::Person { id: "dana".into(), name: "Dana".into(), token: "tok-dana-requests".into(), groups: vec!["staff".into()], roles: vec!["developer".into()] });
+    let app = Appliance::start(spec, &m).await;
+    let dana = app.api("dana");
+    let cases = [("1", "How many legs has a spider?", "answer"), ("2", "Email Bob the agenda.", "task"), ("3", "Every Monday, summarise my invoices.", "schedule"), ("4", "Chase the invoices.", "asked")];
+    let models = ["claude-test", "claude-other"];
+    let mut turns = vec![];
+    for name in models {
+        for (case, text, _) in cases {
+            let body = json!({ "case": case, "trial": 0, "text": text, "via": "chat", "model": { "adapter": "anthropic", "model": name } });
+            let (st, v) = dana.post("/v1/dev/experiments/set1/trials", body.clone()).await;
+            assert_eq!(st.as_u16(), 201, "{v}");
+            assert!(v["thread"].is_string(), "a chat trial has no thread: {v}");
+            turns.push(v["task_id"].as_str().unwrap().to_string());
+            assert_eq!(dana.post("/v1/dev/experiments/set1/trials", body).await.0.as_u16(), 409, "a trial ran twice on one model");
+        }
+    }
+    for t in &turns {
+        dana.wait_settled(t).await;
+    }
+    let report = eventually("every request settled, the email task stopped for approval", PATIENCE, || {
+        let dana = dana.clone();
+        async move {
+            let x = dana.get("/v1/dev/experiments/set1").await.1;
+            let rs = x["requests"].as_array().cloned().unwrap_or_default();
+            (rs.len() == 8 && rs.iter().all(|r| r["settled"] == true && (r["case"] != "2" || !r["stops"].as_array().unwrap().is_empty()))).then_some(rs)
+        }
+    })
+    .await;
+    for (case, text, choice) in cases {
+        let rows: Vec<&Value> = report.iter().filter(|r| r["case"] == case).collect();
+        assert_eq!(rows.len(), 2, "case {case} is not on both models");
+        let on: std::collections::BTreeSet<String> = rows.iter().map(|r| r["config"].as_str().unwrap().split(" · ").next().unwrap().to_string()).collect();
+        assert_eq!(on, models.iter().map(|n| format!("anthropic/{n}")).collect(), "case {case}");
+        for r in rows {
+            assert_eq!(r["choice"], choice, "case {case}: {r}");
+            assert_eq!(r["text"], text);
+            assert!(r["usd"].is_number() && r["seconds"].as_f64().is_some_and(|s| s >= 0.0), "{r}");
+            assert!(r["judged_correct"].is_null());
+            if case == "2" {
+                assert_eq!(r["tasks"][0]["title"], "Email Bob the agenda", "{r}");
+                assert_eq!(r["tasks"][0]["status"], "suspended", "{r}");
+                assert!(r["stops"].as_array().unwrap().iter().any(|s| s["tool"] == "mail__send" && s["outcome"] == "ask"), "the approval stop is not counted: {r}");
+                assert!(r["model_calls"].as_u64().unwrap() >= 3, "the task's calls are not counted: {r}");
+            } else {
+                assert!(r["tasks"].as_array().unwrap().is_empty() && r["stops"].as_array().unwrap().is_empty(), "{r}");
+            }
+        }
+    }
+    assert_eq!(mail.effects("send"), 0, "an email went out during an experiment nobody approved");
+    // Cleaning up afterwards does not change how long a request took.
+    let took = |rs: &[Value]| rs.iter().filter(|r| r["case"] == "2").map(|r| (r["run"].to_string(), r["seconds"].as_f64().unwrap().to_bits())).collect::<std::collections::BTreeMap<_, _>>();
+    let before = took(&report);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    for r in report.iter().filter(|r| r["case"] == "2") {
+        let task = r["tasks"][0]["task"].as_str().unwrap();
+        assert!(dana.post(&format!("/v1/tasks/{task}/cancel"), json!({})).await.0.is_success());
+        dana.wait_status(task, &["cancelled"]).await;
+    }
+    let after = dana.get("/v1/dev/experiments/set1").await.1["requests"].as_array().unwrap().clone();
+    assert_eq!(took(&after), before, "cancelling a stopped task changed the request's time");
+    // The person judges a choice, then changes their mind.
+    let run = report.iter().find(|r| r["case"] == "4").unwrap()["run"].as_str().unwrap().to_string();
+    for passed in [false, true] {
+        assert!(dana.post(&format!("/v1/dev/runs/{run}/grades"), json!({ "grader": "choice", "passed": passed })).await.0.is_success());
+    }
+    let x = dana.get("/v1/dev/experiments/set1").await.1;
+    let judged = x["requests"].as_array().unwrap().iter().find(|r| r["run"] == run.as_str()).unwrap().clone();
+    assert_eq!(judged["judged_correct"], true, "the latest judgment does not count: {judged}");
+    let passed: Vec<&Value> = x["configs"].as_array().unwrap().iter().flat_map(|c| c["cases"].as_array().unwrap()).filter(|c| c["case"] == "4").flat_map(|c| c["passed_runs"].as_array().unwrap()).collect();
+    assert!(passed.iter().any(|r| *r == run.as_str()), "a changed judgment still counts as failed");
+
+    // The same, as the developer sees it.
+    assert!(magnus_scratch::set_password(&app, "dana", magnus_scratch::PASSWORD));
+    let out = tokio::process::Command::new("node")
+        .arg(magnus_invariants::appliance::workspace_root().join("desktop/tests/requests.mjs"))
+        .env("MAGNUS_URL", &app.base)
+        .env("MAGNUS_PERSON", "dana")
+        .env("MAGNUS_PASSWORD", magnus_scratch::PASSWORD)
+        .env("MAGNUS_EXPERIMENT", "set1")
+        .env("MAGNUS_MODELS", models.len().to_string())
+        .env("MAGNUS_CHROMIUM", magnus_scratch::chromium())
+        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .output()
+        .await
+        .unwrap();
+    let log = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "the Experiments view check failed:\n{log}");
+}

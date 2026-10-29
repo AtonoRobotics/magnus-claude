@@ -32,14 +32,21 @@ pub enum CardRefusal {
 impl Kernel {
     /// The person writes in a thread of theirs, or starts one, with the
     /// model they chose for this message (the appliance's when none).
-    pub async fn chat_say(self: &Arc<Self>, person: &str, text: String, thread: Option<String>, model: Option<(String, String)>) -> Result<Option<(String, String)>> {
+    pub async fn chat_say(
+        self: &Arc<Self>,
+        person: &str,
+        text: String,
+        thread: Option<String>,
+        model: Option<(String, String)>,
+        experiment: Option<crate::events::ExperimentTag>,
+    ) -> Result<Option<(String, String)>> {
         let thread = match thread {
             Some(t) if self.thread(person, &t).is_empty() => return Ok(None),
             Some(t) => t,
             None => new_id("thread"),
         };
         let conversation = self.conversation(person, &thread);
-        let o = NewRun { chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation }), model, ..Default::default() };
+        let o = NewRun { chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation }), model, experiment, ..Default::default() };
         let (task, _) = self.create_run(&format!("person:{person}"), person, text, vec![], o).await?;
         Ok(Some((thread, task)))
     }

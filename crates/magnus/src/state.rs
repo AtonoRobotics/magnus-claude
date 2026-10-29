@@ -112,6 +112,9 @@ pub struct Run {
     pub grades: Vec<(String, bool, Option<f64>, Value)>,
     pub created_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
+    /// When it first ended or stopped (for a person, or to wait): how long a
+    /// request took, whatever was done with it afterwards.
+    pub first_stop: Option<DateTime<Utc>>,
     /// Time of the latest event for this run, to spot stalled runs.
     pub last_at: DateTime<Utc>,
     /// Boundary decisions, in order (E4).
@@ -458,6 +461,7 @@ impl State {
                         created_at: e.at,
                         ended_at: None,
                         last_at: e.at,
+                        first_stop: None,
                         decisions: vec![],
                         suspensions: vec![],
                         tokens: Tokens::default(),
@@ -616,6 +620,7 @@ impl State {
             Ev::Suspended { run, reason, item } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.suspensions.push(reason.clone());
+                    r.first_stop.get_or_insert(e.at);
                     if !r.status.terminal() {
                         r.status = Status::Suspended;
                         r.reason = Some(reason.clone());
@@ -641,6 +646,7 @@ impl State {
                     r.spoken = spoken.clone();
                     r.reason = None;
                     r.ended_at = Some(e.at);
+                    r.first_stop.get_or_insert(e.at);
                 }
             }
             Ev::Failed { run, reason, .. } => {
@@ -649,6 +655,7 @@ impl State {
                     r.summary = Some(reason.clone());
                     r.reason = None;
                     r.ended_at = Some(e.at);
+                    r.first_stop.get_or_insert(e.at);
                 }
             }
             Ev::Cancelled { run } => {
@@ -656,6 +663,7 @@ impl State {
                     r.status = Status::Cancelled;
                     r.reason = None;
                     r.ended_at = Some(e.at);
+                    r.first_stop.get_or_insert(e.at);
                 }
             }
             Ev::Item { id, item_kind, task, run, person, summary, details } => {

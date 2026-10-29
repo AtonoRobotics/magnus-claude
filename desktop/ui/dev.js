@@ -144,10 +144,63 @@ route(/^#\/dev\/experiments$/, async main => {
   every(10000, draw);
 });
 
+// A request set run in chat: each request against each model, what the
+// model chose, what stopped it, and what it cost; the person judges each
+// choice, and the judgment is the trial's grade.
+const CHOICE = { answer: "Answered", asked: "Asked back", task: "Started tasks", schedule: "Proposed a schedule" };
+const secs = s => s === null || s === undefined ? "–" : s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
+const usd = v => v === null || v === undefined ? "–" : `$${v < 0.1 ? v.toFixed(3) : v.toFixed(2)}`;
+const median = xs => { const v = xs.slice().sort((a, b) => a - b); return v.length ? (v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2) : null; };
+const modelOf = key => key.split(" · ")[0];
+
+function requestSet(x) {
+  const configs = [...new Set(x.requests.map(r => r.config))];
+  const cases = [...new Set(x.requests.map(r => r.case))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const summary = configs.map(c => {
+    const rs = x.requests.filter(r => r.config === c);
+    const judged = rs.filter(r => r.judged_correct !== null);
+    const choices = Object.entries(rs.reduce((m, r) => ({ ...m, [r.choice]: (m[r.choice] || 0) + 1 }), {}));
+    return `<tr><td class="mono small">${esc(modelOf(c))}</td>
+      <td class="n">${judged.length ? `${judged.filter(r => r.judged_correct).length} of ${judged.length}` : "–"}${judged.length < rs.length ? ` <span class="faint small">(${rs.length - judged.length} to judge)</span>` : ""}</td>
+      <td class="small">${choices.map(([k, n]) => `${esc(CHOICE[k] || k)} ${n}`).join(" · ")}</td>
+      <td class="n">${rs.reduce((n, r) => n + r.stops.length, 0)} <span class="faint small">in ${rs.filter(r => r.stops.length).length}</span></td>
+      <td class="n">${usd(rs.reduce((n, r) => n + (r.usd || 0), 0))}</td>
+      <td class="n">${secs(median(rs.map(r => r.seconds)))}</td>
+      <td class="n">${rs.filter(r => r.settled).length}/${rs.length}</td></tr>`;
+  }).join("");
+  const row = r => `<tr data-request="${esc(r.case)}" data-config="${esc(r.config)}"><td class="mono small">${esc(modelOf(r.config))}</td>
+    <td><span class="chip ${r.choice === "task" ? "run" : r.choice === "schedule" ? "warn" : ""}">${esc(CHOICE[r.choice] || r.choice)}</span>
+      ${r.tasks.length ? `<div class="small">${r.tasks.map(t => `${esc(t.title)} <span class="faint">${esc(t.status)}${t.reason ? `: ${esc(t.reason)}` : ""}</span>`).join("<br>")}</div>` : ""}
+      ${r.answer ? `<details data-key="answer:${esc(r.run)}"><summary class="small">What it said</summary><div class="small" style="white-space:pre-wrap">${esc(r.answer)}</div></details>` : ""}</td>
+    <td class="n">${r.stops.length ? `<span title="${esc(r.stops.map(s => `${s.tool}: ${s.outcome} at ${s.stage}${s.rule ? ` (${s.rule})` : ""}`).join("\n"))}">${r.stops.length}</span>` : "0"}</td>
+    <td class="n">${usd(r.usd)}</td><td class="n">${secs(r.seconds)}${r.settled ? "" : ` <span class="chip run">running</span>`}</td>
+    <td class="n" style="white-space:nowrap"><button data-judge="${esc(r.run)}" data-ok="1" class="${r.judged_correct === true ? "primary" : ""}" aria-label="Correct choice">✓</button>
+      <button data-judge="${esc(r.run)}" data-ok="0" class="${r.judged_correct === false ? "danger" : ""}" aria-label="Wrong choice">✗</button>
+      <a class="small" href="#/dev/run/${enc(r.run)}">run</a></td></tr>`;
+  return `<h2>By model</h2><table class="t" data-summary><thead><tr><th>Model</th><th class="n">Correct choice</th><th>Choices</th><th class="n">Policy stops</th><th class="n">Cost</th><th class="n">Median time</th><th class="n">Settled</th></tr></thead><tbody>${summary}</tbody></table>
+    <p class="small faint">Time runs from the message to the moment the reply and every task it started ended or stopped for a person. Policy stops are actions the boundary asked about or refused, in the reply and its tasks.</p>
+    <h2>By request</h2>${cases.map(c => {
+      const rs = x.requests.filter(r => r.case === c);
+      return `<div class="card" data-case="${esc(c)}"><div style="font-weight:600">${esc(rs[0].text)}</div>
+        <table class="t req"><thead><tr><th>Model</th><th>Choice</th><th class="n">Stops</th><th class="n">Cost</th><th class="n">Time</th><th class="n">Correct?</th></tr></thead><tbody>${rs.map(row).join("")}</tbody></table></div>`;
+    }).join("")}`;
+}
+
 route(/^#\/dev\/experiment\/([^/?]+)(?:\?k=(\d+))?$/, async (main, id, k) => {
   if (devOnly(main)) return;
+  main.onclick = async e => {
+    const b = e.target.closest("button[data-judge]");
+    if (!b) return;
+    await api("POST", `/v1/dev/runs/${enc(b.dataset.judge)}/grades`, { grader: "choice", passed: b.dataset.ok === "1" });
+    await draw();
+  };
   const draw = async () => {
     const x = await api("GET", `/v1/dev/experiments/${enc(id)}${k ? `?k=${k}` : ""}`);
+    if (x.requests?.length) {
+      paint(main, `<p class="small"><a href="#/dev/experiments">Experiments</a></p><h1 class="mono">${esc(x.id)}</h1>
+        <p class="muted">${x.cases.length} requests, each sent as a chat message to every model. Judge each choice with ✓ or ✗.</p>${requestSet(x)}`);
+      return;
+    }
     const metric = (m, fmt) => `${fmt(m.mean)}${m.se !== null ? ` <span class="faint">± ${fmt(m.se)}</span>` : ""}`;
     paint(main, `<p class="small"><a href="#/dev/experiments">Experiments</a></p><h1 class="mono">${esc(x.id)}</h1>
       <p class="muted">${x.cases.length} cases. k = ${x.k} <span class="small">(pass@k: at least one of k trials passes; pass^k: all k pass; ± one standard error over cases)</span></p>

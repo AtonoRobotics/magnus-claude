@@ -130,7 +130,7 @@ async function go() {
   for (const [re, view] of App.routes) {
     const m = h.match(re);
     if (m) {
-      try { await view(main, ...m.slice(1).map(decodeURIComponent)); }
+      try { await view(main, ...m.slice(1).map(x => x === undefined ? x : decodeURIComponent(x))); }
       catch (e) { paint(main, `<div class="banner bad">${esc(e.message)}</div>`); }
       return;
     }

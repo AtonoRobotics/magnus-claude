@@ -489,7 +489,7 @@ async fn submit(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
 
 /// The model a request chose (`"model": {"adapter", "model"}`), if any,
 /// once its adapter confirms it offers it.
-async fn chosen_model(k: &Kernel, b: &Value) -> Result<Option<(String, String)>, Response> {
+pub(crate) async fn chosen_model(k: &Kernel, b: &Value) -> Result<Option<(String, String)>, Response> {
     if b["model"].is_null() {
         return Ok(None);
     }
@@ -535,7 +535,7 @@ async fn chat_post(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response 
         Ok(m) => m,
         Err(r) => return r,
     };
-    match k.chat_say(&p.id, text, b["thread"].as_str().map(String::from), model).await {
+    match k.chat_say(&p.id, text, b["thread"].as_str().map(String::from), model, None).await {
         Ok(Some((thread, task))) => (StatusCode::CREATED, Json(json!({ "thread": thread, "task_id": task }))).into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "no such thread"),
         Err(e) => internal(e),

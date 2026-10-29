@@ -207,3 +207,8 @@ label.model select { max-width: 220px; }
 }
 details.result > summary::before { content: "▸"; color: var(--faint); }
 details.result[open] > summary::before { content: "▾"; }
+/* A request set: every request's table has the same columns. */
+table.req { table-layout: fixed; }
+table.req th:nth-child(1) { width: 22%; }
+table.req th:nth-child(2) { width: 40%; }
+table.req th:nth-child(3), table.req th:nth-child(4), table.req th:nth-child(5) { width: 9%; }

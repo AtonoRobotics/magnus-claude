@@ -67,11 +67,13 @@ pub fn failure(s: &State, r: &Run, stall_minutes: u32) -> Option<&'static str> {
     }
 }
 
-/// A trial passes when every grader passed it; with no grader, when the
-/// kernel verified it (and the result says which).
+/// A trial passes when every grader passed it, each by its latest verdict
+/// (a person may change a judgment); with no grader, when the kernel
+/// verified it (and the result says which).
 fn verdict(r: &Run) -> (bool, &'static str) {
     if !r.grades.is_empty() {
-        (r.grades.iter().all(|g| g.1), "grader")
+        let latest: HashMap<&str, bool> = r.grades.iter().map(|g| (g.0.as_str(), g.1)).collect();
+        (latest.values().all(|p| *p), "grader")
     } else {
         (r.status == Status::Completed, "kernel")
     }
@@ -379,7 +381,9 @@ async fn grade(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Jso
     }
 }
 
-/// Start one trial of an experiment case, acting for the developer.
+/// Start one trial of an experiment case, acting for the developer: a task,
+/// or with `"via": "chat"` a chat message (in a new thread, or in `thread`),
+/// on the appliance's model or the one in `model`.
 async fn add_trial(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
     let p = dev!(k, h);
     let text = b["text"].as_str().unwrap_or_default().trim().to_string();
@@ -387,13 +391,26 @@ async fn add_trial(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Json(b):
     if text.is_empty() {
         return err(StatusCode::BAD_REQUEST, "the task has no text");
     }
+    let model = match crate::api::chosen_model(&k, &b).await {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    // The same trial may run once on each model, to compare them.
     let tag = ExperimentTag { id, case: case.into(), trial: trial as u32 };
-    let dup = k.read(|s| s.runs.values().any(|r| r.experiment.as_ref() == Some(&tag)));
+    let on = model.clone().unwrap_or_else(|| k.default_model());
+    let dup = k.read(|s| s.runs.values().any(|r| r.experiment.as_ref() == Some(&tag) && (r.config.adapter.as_str(), r.config.model.as_str()) == (on.0.as_str(), on.1.as_str())));
     if dup {
         return err(StatusCode::CONFLICT, "this trial already exists");
     }
+    if b["via"] == "chat" {
+        return match k.chat_say(&p.id, text, b["thread"].as_str().map(String::from), model, Some(tag)).await {
+            Ok(Some((thread, task))) => (StatusCode::CREATED, Json(json!({ "thread": thread, "task_id": task }))).into_response(),
+            Ok(None) => err(StatusCode::NOT_FOUND, "no such thread"),
+            Err(e) => internal(e),
+        };
+    }
     let attachments = b["attachments"].as_array().cloned().unwrap_or_default();
-    match k.create_tagged(&format!("person:{}", p.id), &p.id, text, attachments, Some(tag)).await {
+    match k.create_tagged(&format!("person:{}", p.id), &p.id, text, attachments, Some(tag), model).await {
         Ok((task, run)) => (StatusCode::CREATED, Json(json!({ "task_id": task, "run_id": run }))).into_response(),
         Err(e) => internal(e),
     }
@@ -551,12 +568,66 @@ async fn experiment(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Query(q
                 }));
             }
         }
-        Some(json!({ "id": id, "k": kk, "cases": cases, "configs": configs, "paired": paired }))
+        let mut requests: Vec<Value> = rs.iter().filter(|r| s.tasks.get(&r.task).is_some_and(|t| t.is_chat_turn())).map(|r| request_trial(s, r)).collect();
+        requests.sort_by_key(|v| (v["case"].as_str().unwrap_or_default().to_string(), v["config"].as_str().unwrap_or_default().to_string(), v["trial"].as_u64()));
+        Some(json!({ "id": id, "k": kk, "cases": cases, "configs": configs, "paired": paired, "requests": requests }))
     });
     match v {
         Some(v) => Json(v).into_response(),
         None => err(StatusCode::NOT_FOUND, "no such experiment"),
     }
+}
+
+/// A chat trial and what it led to: what the model chose (answer, a
+/// question back, tasks, a schedule), the tasks its message started, every
+/// policy stop (ask or deny) on the way, and the cost and time of it all,
+/// until each run first ended or stopped (for the person, or to wait). The person's judgment of
+/// the choice is a grade from grader `choice`.
+fn request_trial(s: &State, r: &Run) -> Value {
+    let kids: Vec<&Run> = s
+        .tasks
+        .values()
+        .filter(|t| t.chat.as_ref().is_some_and(|c| c.from_run.as_deref() == Some(r.id.as_str())))
+        .filter_map(|t| s.runs.get(&t.run_id))
+        .collect();
+    let card = r.results.values().any(|res| res.data.as_ref().is_some_and(|d| d["card"].is_string()));
+    let answer = r.summary.as_deref().unwrap_or_default().trim();
+    let choice = if card {
+        "schedule"
+    } else if !kids.is_empty() {
+        "task"
+    } else if r.status != Status::Completed {
+        status_str(r.status)
+    } else if answer.ends_with('?') {
+        "asked"
+    } else {
+        "answer"
+    };
+    let all: Vec<&Run> = std::iter::once(r).chain(kids.iter().copied()).collect();
+    let stops: Vec<Value> = all
+        .iter()
+        .flat_map(|x| x.decisions.iter().filter(|d| d.outcome != "allow").map(move |d| json!({ "run": x.id, "tool": d.tool, "outcome": d.outcome, "stage": d.stage, "rule": d.rule })))
+        .collect();
+    let settled = all.iter().all(|x| x.status.terminal() || x.status == Status::Suspended);
+    let end = all.iter().map(|x| x.first_stop.unwrap_or(x.last_at)).max().unwrap_or(r.created_at);
+    let tag = r.experiment.as_ref().unwrap();
+    let judged = r.grades.iter().rev().find(|g| g.0 == "choice").map(|g| g.1);
+    json!({
+        "case": tag.case, "trial": tag.trial, "config": config_key(r), "run": r.id, "task": r.task,
+        "thread": s.tasks.get(&r.task).and_then(|t| t.chat.as_ref()).map(|c| c.thread.clone()),
+        "text": s.tasks.get(&r.task).map(|t| t.text.clone()),
+        "choice": choice, "answer": (!answer.is_empty()).then_some(answer),
+        "tasks": kids.iter().map(|k| json!({
+            "task": k.task, "title": s.tasks.get(&k.task).map(|t| crate::api::title_of(t, k)),
+            "status": status_str(k.status), "reason": k.reason, "stopped_for": k.suspensions,
+        })).collect::<Vec<_>>(),
+        "stops": stops,
+        "usd": num(all.iter().map(|x| x.usd).sum()),
+        "model_calls": all.iter().map(|x| x.model_calls).sum::<u32>(),
+        "seconds": (end - r.created_at).num_milliseconds() as f64 / 1000.0,
+        "settled": settled,
+        "judged_correct": judged,
+    })
 }
 
 fn panel(id: &str, title: &str, value: Value, unit: &str, runs: Vec<String>, breakdown: Vec<Value>) -> Value {
