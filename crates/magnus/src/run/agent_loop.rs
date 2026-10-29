@@ -57,6 +57,11 @@ impl Kernel {
             });
         }
 
+        // A removable module: a run going in circles is reset, escalated, or stopped.
+        if let Some(flow) = self.when_lost(&run).await? {
+            return Ok(flow);
+        }
+
         // Ask the model for the next step.
         let budget = &run.config.budget;
         if run.model_calls >= budget.max_model_calls {
@@ -77,6 +82,7 @@ impl Kernel {
             hex::encode(&sha2::Sha256::digest(serde_json::to_vec(&tools)?)[..16])
         };
         let step = run.replies.len() as u32;
+        let (adapter, model) = run.model();
         let mut attempt = 0u32;
         loop {
             let calls = self.read(|s| s.runs.get(run_id).map(|r| r.model_calls)).unwrap_or(0);
@@ -104,7 +110,7 @@ impl Kernel {
             let rid = run_id.to_string();
             let out = self
                 .adapters
-                .complete(&run.config.adapter, &run.config.model, &system, messages.clone(), tools.clone(), run.config.max_tokens, |t| {
+                .complete(adapter, model, &system, messages.clone(), tools.clone(), run.config.max_tokens, |t| {
                     let _ = live.send((rid.clone(), t.to_string()));
                 })
                 .await;

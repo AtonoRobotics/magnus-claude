@@ -3,6 +3,8 @@
 //! that the loop writes to the log itself (K21). Run records grant nothing.
 
 mod agent_loop;
+pub mod lost;
+mod verify;
 
 pub use agent_loop::Flow;
 
@@ -132,8 +134,16 @@ impl Kernel {
             let _ = s;
             first.push(Block::Text { text: text.clone() });
         }
+        // A reset (the lost-reset module) takes the replies it cut out of the
+        // context and leaves its note where they were.
+        let cut = |i: usize| run.cuts.iter().any(|c| (c.from as usize..c.to as usize).contains(&i));
+        let notes = |i: usize| run.cuts.iter().filter(move |c| c.from as usize == i).map(|c| Block::Text { text: c.note.clone() });
+        first.extend(notes(0));
         msgs.push(Message { role: Role::User, content: first, state: None });
         for (i, reply) in run.replies.iter().enumerate() {
+            if cut(i) {
+                continue;
+            }
             msgs.push(Message { role: Role::Assistant, content: reply.blocks.clone(), state: reply.state.clone() });
             let mut user = vec![];
             for (id, _, _) in reply.calls() {
@@ -148,6 +158,7 @@ impl Kernel {
             for (_, _, text) in run.notices.iter().filter(|(s, _, _)| *s as usize == i + 1) {
                 user.push(Block::Text { text: text.clone() });
             }
+            user.extend(notes(i + 1));
             if !user.is_empty() {
                 msgs.push(Message { role: Role::User, content: user, state: None });
             }
@@ -391,7 +402,12 @@ impl Kernel {
                 }
                 Ok(labelled) => {
                     let version = run.contract_version + 1;
-                    let note = self_checked_note(&labelled);
+                    let mut note = self_checked_note(&labelled);
+                    if run.config.module("verifier") {
+                        if let Some(r) = self.review_criteria(run, &labelled).await? {
+                            note.push_str(&format!(" The verifier's review of your criteria (change them with task_contract if it is right): {r}"));
+                        }
+                    }
                     let labelled = self.with_conversation(run, labelled);
                     self.emit("model", Ev::Contract { run: rid.into(), version, contract: labelled, approved_by: None }).await?;
                     let frozen = if run.work_started {
@@ -696,8 +712,15 @@ impl Kernel {
             return Ok(Flow::Continue);
         }
         let summary = input["summary"].as_str().unwrap_or_default().to_string();
+        if !unchecked.is_empty() && run.config.module("verifier") {
+            let goal = contract["goal"].as_str().unwrap_or_default();
+            match self.verifier_on_completion(run, call_id, step_id, goal, unchecked, &summary).await? {
+                Ok(left) => unchecked = left,
+                Err(flow) => return Ok(flow),
+            }
+        }
         if !unchecked.is_empty() {
-            // No executable check and no verifier: the person reviews (K37).
+            // No executable check, and the verifier off or unsure: the person reviews (K37).
             let item = self
                 .item(
                     run,

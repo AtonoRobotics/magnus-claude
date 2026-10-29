@@ -49,6 +49,28 @@ pub struct RunConfig {
     /// The playbook version the run started with (I3).
     #[serde(default)]
     pub playbook: u64,
+    /// Removable modules on or off for this run, pinned at its start (K9).
+    #[serde(default)]
+    pub modules: std::collections::BTreeMap<String, bool>,
+    /// Where a lost run escalates to (`adapter/model`), if anywhere.
+    #[serde(default)]
+    pub escalate_to: Option<String>,
+    #[serde(default)]
+    pub lost: crate::run::lost::Thresholds,
+    /// The verifier's model (`adapter/model`); the run's own when unset.
+    #[serde(default)]
+    pub verifier_model: Option<String>,
+}
+
+impl RunConfig {
+    /// A removable module's switch for this run. Runs from before modules
+    /// were pinned had none of them, except the verifier's flag.
+    pub fn module(&self, name: &str) -> bool {
+        match self.modules.get(name) {
+            Some(v) => *v,
+            None => name == "verifier" && self.verifier,
+        }
+    }
 }
 
 /// A task started as one trial of an experiment case (V2).
@@ -86,6 +108,32 @@ pub enum Ev {
     },
     KillSwitch {
         engaged: bool,
+    },
+    /// The lost-reset module found a no-progress signal and sent the run back
+    /// to the reply where the loop began, with a note; the replies from
+    /// `from` to `to` leave the model's context (they stay in the log).
+    ContextReset {
+        run: String,
+        from: u32,
+        to: u32,
+        signal: String,
+        note: String,
+    },
+    /// One model call of the verifier module: reviewing the contract's
+    /// criteria before work (`criteria`), or the work against them (`work`).
+    VerifierReply {
+        run: String,
+        purpose: String,
+        model: String,
+        blocks: Vec<magnus_adapter_proto::Block>,
+        usage: magnus_adapter_proto::Usage,
+    },
+    /// The escalation module moved a lost run to a stronger model.
+    Escalated {
+        run: String,
+        adapter: String,
+        model: String,
+        signal: String,
     },
     /// The kill switch sealed the vault (B11): OAuth sign-ins taken out to be
     /// revoked at their providers, and the secrets kept sealed (API keys and
@@ -499,6 +547,9 @@ impl Ev {
             | Playbook { run, .. }
             | Graded { run, .. }
             | Verification { run, .. }
+            | ContextReset { run, .. }
+            | Escalated { run, .. }
+            | VerifierReply { run, .. }
             | Suspended { run, .. }
             | Resumed { run }
             | Completed { run, .. }

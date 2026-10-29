@@ -324,6 +324,15 @@ impl FakeIdp {
     }
 }
 
+/// Change the appliance's config file, then restart it.
+pub async fn reconfigure(app: &mut Appliance, f: impl FnOnce(&mut toml::Table)) {
+    let path = app.dir.path().join("magnus.toml");
+    let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    f(&mut cfg);
+    std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+    app.restart().await;
+}
+
 /// Base64url without padding, for the fake provider's tokens.
 mod base64_url {
     pub fn encode(s: &str) -> String {

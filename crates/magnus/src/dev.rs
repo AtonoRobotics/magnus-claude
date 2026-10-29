@@ -31,6 +31,7 @@ pub fn router() -> Router<Arc<Kernel>> {
         .route("/v1/dev/experiments/{id}/trials", post(add_trial))
         .route("/v1/dev/policy", get(policy))
         .route("/v1/dev/playbook", get(playbook))
+        .route("/v1/dev/modules", get(modules))
 }
 
 macro_rules! dev {
@@ -81,8 +82,78 @@ fn verdict(r: &Run) -> (bool, &'static str) {
 
 fn config_key(r: &Run) -> String {
     let c = &r.config;
-    format!("{}/{} · {} · {} · playbook v{}", c.adapter, c.model, c.harness, c.instructions, c.playbook)
+    let off: Vec<&str> = MODULES.iter().filter(|m| !c.module(m.name)).map(|m| m.name).collect();
+    let off = if off.is_empty() { String::new() } else { format!(" · without {}", off.join(", ")) };
+    format!("{}/{} · {} · {} · playbook v{}{off}", c.adapter, c.model, c.harness, c.instructions, c.playbook)
 }
+
+/// A removable module: what model weakness it compensates for, and the
+/// experiment that shows whether it still does (its ablation suite: the same
+/// cases with it on and off, per model).
+pub struct Module {
+    pub name: &'static str,
+    pub compensates: &'static str,
+    pub ablation_suite: &'static str,
+}
+
+/// The removable modules: what each compensates for, its ablation suite,
+/// whether it is on for the appliance's model and each model set apart, and
+/// how often it acted.
+async fn modules(AxState(k): K, h: HeaderMap) -> Response {
+    dev!(k, h);
+    let (a, m) = k.default_model();
+    let first = format!("{a}/{m}");
+    let mut models = vec![first.clone()];
+    models.extend(k.cfg.modules.model.iter().map(|x| x.model.clone()).filter(|x| *x != first));
+    let acted = k.read(|s| {
+        let mut n: HashMap<&str, usize> = HashMap::new();
+        for r in s.runs.values() {
+            *n.entry("lost_reset").or_default() += r.cuts.len();
+            *n.entry("escalation").or_default() += r.escalated.is_some() as usize;
+            *n.entry("verifier").or_default() += r.verified.values().filter(|v| v.2 == "verifier").count();
+        }
+        n.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<HashMap<String, usize>>()
+    });
+    let list: Vec<Value> = MODULES
+        .iter()
+        .map(|md| {
+            let on: Map<String, Value> = models
+                .iter()
+                .map(|key| {
+                    let (a, m) = key.split_once('/').unwrap_or((key, ""));
+                    let (on, to) = k.cfg.modules_for(a, m);
+                    let v = if md.name == "escalation" { json!({ "on": on[md.name], "escalate_to": to }) } else { json!({ "on": on[md.name] }) };
+                    (key.clone(), v)
+                })
+                .collect();
+            json!({ "name": md.name, "compensates": md.compensates, "ablation_suite": md.ablation_suite, "models": on, "acted": acted.get(md.name).copied().unwrap_or(0) })
+        })
+        .collect();
+    Json(json!({ "modules": list, "lost_thresholds": k.cfg.modules.lost })).into_response()
+}
+
+/// Each removable module on or off for a run, as pinned at its start.
+fn modules_of(r: &Run) -> Value {
+    MODULES.iter().map(|m| (m.name.to_string(), json!(r.config.module(m.name)))).collect::<Map<String, Value>>().into()
+}
+
+pub const MODULES: &[Module] = &[
+    Module {
+        name: "verifier",
+        compensates: "models that report work as done when the world says otherwise",
+        ablation_suite: "tests/scratch/tests/modules.rs: the_verifier_catches_work_its_own_report_overstates",
+    },
+    Module {
+        name: "lost_reset",
+        compensates: "models that repeat a failing step instead of changing approach",
+        ablation_suite: "tests/scratch/tests/modules.rs: a_looping_run_is_reset_and_recovers_and_without_the_module_runs_to_its_budget",
+    },
+    Module {
+        name: "escalation",
+        compensates: "models too weak for a task they keep failing at",
+        ablation_suite: "tests/scratch/tests/modules.rs: a_run_lost_again_escalates_to_the_stronger_model",
+    },
+];
 
 fn summary(s: &State, r: &Run, stall: u32) -> Value {
     let title = s.tasks.get(&r.task).map(|t| t.text.chars().take(100).collect::<String>()).unwrap_or_default();
@@ -90,7 +161,9 @@ fn summary(s: &State, r: &Run, stall: u32) -> Value {
         "run": r.id, "task": r.task, "person": r.person, "title": title,
         "status": status_str(r.status), "reason": r.reason,
         "created_at": r.created_at, "ended_at": r.ended_at,
+        "escalated_to": r.escalated.as_ref().map(|(a, m)| format!("{a}/{m}")),
         "config": {
+            "modules": modules_of(r),
             "adapter": r.config.adapter, "model": r.config.model, "harness": r.config.harness,
             "instructions": r.config.instructions, "playbook": r.config.playbook, "key": config_key(r),
         },
@@ -273,7 +346,7 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
             }
             Ev::Decision { call_id, tool, outcome, stage, reason, rule, .. } => {
                 let ix = *action_ix.entry(call_id.clone()).or_insert_with(|| {
-                    actions.push(json!({ "call_id": call_id, "tool": tool, "issuer": if call_id.starts_with("check:") { "code (a check the model wrote)" } else { "model" }, "decisions": [], "result": null }));
+                    actions.push(json!({ "call_id": call_id, "tool": tool, "issuer": if call_id.starts_with("check:") { "code (a check the model wrote)" } else if call_id.starts_with("verify:") { "the verifier" } else { "model" }, "decisions": [], "result": null }));
                     actions.len() - 1
                 });
                 actions[ix]["decisions"].as_array_mut().unwrap().push(json!({ "seq": e.seq, "stage": stage, "outcome": outcome, "reason": reason, "rule": rule }));
@@ -383,7 +456,8 @@ async fn grade(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Jso
 
 /// Start one trial of an experiment case, acting for the developer: a task,
 /// or with `"via": "chat"` a chat message (in a new thread, or in `thread`),
-/// on the appliance's model or the one in `model`.
+/// on the appliance's model or the one in `model`. `modules` switches
+/// removable modules on or off for a task trial (their ablation).
 async fn add_trial(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
     let p = dev!(k, h);
     let text = b["text"].as_str().unwrap_or_default().trim().to_string();
@@ -395,10 +469,28 @@ async fn add_trial(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Json(b):
         Ok(m) => m,
         Err(r) => return r,
     };
-    // The same trial may run once on each model, to compare them.
+    let mut modules = BTreeMap::new();
+    for (name, on) in b["modules"].as_object().into_iter().flatten() {
+        let Some(on) = on.as_bool().filter(|_| MODULES.iter().any(|m| m.name == name)) else {
+            return err(StatusCode::BAD_REQUEST, &format!("no removable module {name}, or not true/false"));
+        };
+        modules.insert(name.clone(), on);
+    }
+    if !modules.is_empty() && b["via"] == "chat" {
+        return err(StatusCode::BAD_REQUEST, "module switches apply to task trials");
+    }
+    // The same trial may run once on each model and module setting, to compare them.
     let tag = ExperimentTag { id, case: case.into(), trial: trial as u32 };
     let on = model.clone().unwrap_or_else(|| k.default_model());
-    let dup = k.read(|s| s.runs.values().any(|r| r.experiment.as_ref() == Some(&tag) && (r.config.adapter.as_str(), r.config.model.as_str()) == (on.0.as_str(), on.1.as_str())));
+    let (mut want, _) = k.cfg.modules_for(&on.0, &on.1);
+    want.extend(modules.clone());
+    let dup = k.read(|s| {
+        s.runs.values().any(|r| {
+            r.experiment.as_ref() == Some(&tag)
+                && (r.config.adapter.as_str(), r.config.model.as_str()) == (on.0.as_str(), on.1.as_str())
+                && MODULES.iter().all(|m| r.config.module(m.name) == want[m.name])
+        })
+    });
     if dup {
         return err(StatusCode::CONFLICT, "this trial already exists");
     }
@@ -410,7 +502,7 @@ async fn add_trial(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Json(b):
         };
     }
     let attachments = b["attachments"].as_array().cloned().unwrap_or_default();
-    match k.create_tagged(&format!("person:{}", p.id), &p.id, text, attachments, Some(tag), model).await {
+    match k.create_tagged(&format!("person:{}", p.id), &p.id, text, attachments, Some(tag), model, modules).await {
         Ok((task, run)) => (StatusCode::CREATED, Json(json!({ "task_id": task, "run_id": run }))).into_response(),
         Err(e) => internal(e),
     }
@@ -542,7 +634,7 @@ async fn experiment(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Query(q
             let sample = by_case.values().next().and_then(|v| v.first()).unwrap();
             configs.push(json!({
                 "key": key,
-                "config": { "adapter": sample.config.adapter, "model": sample.config.model, "harness": sample.config.harness, "instructions": sample.config.instructions, "playbook": sample.config.playbook },
+                "config": { "adapter": sample.config.adapter, "model": sample.config.model, "harness": sample.config.harness, "instructions": sample.config.instructions, "playbook": sample.config.playbook, "modules": modules_of(sample) },
                 "pass_rate": { "mean": num(m1), "se": num(se1) },
                 "pass_at_k": { "mean": num(ma), "se": num(sea) },
                 "pass_hat_k": { "mean": num(mh), "se": num(seh) },

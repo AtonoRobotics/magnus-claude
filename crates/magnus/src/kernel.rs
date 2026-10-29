@@ -72,6 +72,9 @@ pub struct NewRun {
     pub files: Vec<String>,
     /// The project it starts in.
     pub project: Option<String>,
+    /// Removable modules switched on or off for this run alone, over the
+    /// model's settings (an ablation trial).
+    pub modules: std::collections::BTreeMap<String, bool>,
 }
 
 impl Kernel {
@@ -223,7 +226,7 @@ impl Kernel {
 
     /// Create a task for `person` with the current model and budgets.
     pub async fn create_task(self: &Arc<Self>, actor: &str, person: &str, text: String, attachments: Vec<serde_json::Value>) -> Result<(String, String)> {
-        self.create_tagged(actor, person, text, attachments, None, None).await
+        self.create_tagged(actor, person, text, attachments, None, None, Default::default()).await
     }
 
     /// Create a task, optionally as a trial of an experiment case (V2).
@@ -235,8 +238,9 @@ impl Kernel {
         attachments: Vec<serde_json::Value>,
         experiment: Option<crate::events::ExperimentTag>,
         model: Option<(String, String)>,
+        modules: std::collections::BTreeMap<String, bool>,
     ) -> Result<(String, String)> {
-        self.create_run(actor, person, text, attachments, NewRun { experiment, model, ..Default::default() }).await
+        self.create_run(actor, person, text, attachments, NewRun { experiment, model, modules, ..Default::default() }).await
     }
 
     /// The adapter and model new runs use unless the person chooses one.
@@ -285,13 +289,19 @@ impl Kernel {
         };
         let m = &self.cfg.model;
         let (adapter, model) = o.model.clone().unwrap_or_else(|| self.default_model());
+        let (mut modules, escalate_to) = self.cfg.modules_for(&adapter, &model);
+        modules.extend(o.modules.clone());
         let config = crate::events::RunConfig {
             adapter,
             model,
             max_retries: m.max_retries,
             max_tokens: m.max_tokens,
             budget: o.budget.unwrap_or_else(|| self.cfg.budget.clone()),
-            verifier: self.cfg.verifier.enabled,
+            verifier: modules.get("verifier").copied().unwrap_or(false),
+            modules,
+            escalate_to,
+            lost: self.cfg.modules.lost.clone(),
+            verifier_model: self.cfg.verifier.model.clone(),
             instructions: if o.chat.as_ref().is_some_and(|c| c.turn) { crate::run::chat_instructions_version() } else { crate::run::instructions_version() },
             harness: HARNESS_VERSION.into(),
             playbook: self.read(|s| s.playbook_version),

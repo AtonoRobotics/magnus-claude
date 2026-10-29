@@ -128,6 +128,21 @@ pub struct Run {
     pub checks_failed: u32,
     /// The inbox item a suspended run waits on.
     pub waiting_item: Option<String>,
+    /// Replies the lost-reset module took out of the model's context.
+    pub cuts: Vec<Cut>,
+    /// The reply lost-detection reads from: after the latest reset or
+    /// escalation, what came before is no longer the run's current attempt.
+    pub lost_since: u32,
+    /// The stronger model the escalation module moved this run to; its
+    /// pinned configuration stays what it started with.
+    pub escalated: Option<(String, String)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Cut {
+    pub from: u32,
+    pub to: u32,
+    pub note: String,
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +164,14 @@ pub struct Tokens {
 }
 
 impl Run {
+    /// The adapter and model the run's next call goes to.
+    pub fn model(&self) -> (&str, &str) {
+        match &self.escalated {
+            Some((a, m)) => (a, m),
+            None => (&self.config.adapter, &self.config.model),
+        }
+    }
+
     /// Tool calls from the latest reply that have no result yet, in order.
     pub fn pending_calls(&self) -> Vec<(usize, String, String, Value)> {
         let Some(r) = self.replies.last() else { return vec![] };
@@ -466,6 +489,18 @@ impl State {
                 self.version_changes.push((e.seq, e.at, format!("policy:{layer}"), format!("v{n}")));
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
+            Ev::ContextReset { run, from, to, note, .. } => {
+                if let Some(r) = self.runs.get_mut(run) {
+                    r.cuts.push(Cut { from: *from, to: *to, note: note.clone() });
+                    r.lost_since = *to;
+                }
+            }
+            Ev::Escalated { run, adapter, model, .. } => {
+                if let Some(r) = self.runs.get_mut(run) {
+                    r.escalated = Some((adapter.clone(), model.clone()));
+                    r.lost_since = r.replies.len() as u32;
+                }
+            }
             Ev::VaultSealed { revoking, kept } => {
                 self.revoked = revoking.iter().map(|n| (n.clone(), Revoked::default())).collect();
                 self.sealed = kept.clone();
@@ -606,6 +641,9 @@ impl State {
                         model_errors: 0,
                         checks_failed: 0,
                         waiting_item: None,
+                        cuts: vec![],
+                        lost_since: 0,
+                        escalated: None,
                     },
                 );
             }
@@ -622,6 +660,16 @@ impl State {
                     r.tokens.cache_read += usage.cache_read_tokens;
                     r.tokens.cache_write += usage.cache_write_tokens;
                     r.replies.push(Reply { step: *step, seq: e.seq, blocks: blocks.clone(), state: state.clone() });
+                }
+            }
+            Ev::VerifierReply { run, usage, .. } => {
+                if let Some(r) = self.runs.get_mut(run) {
+                    r.model_calls += 1;
+                    r.usd += usage.cost_usd;
+                    r.tokens.input += usage.input_tokens;
+                    r.tokens.output += usage.output_tokens;
+                    r.tokens.cache_read += usage.cache_read_tokens;
+                    r.tokens.cache_write += usage.cache_write_tokens;
                 }
             }
             Ev::ModelError { run, .. } => {

@@ -15,6 +15,9 @@ pub struct Config {
     pub budget: Budget,
     #[serde(default)]
     pub verifier: Verifier,
+    /// Removable modules, on or off for every model, and per model.
+    #[serde(default)]
+    pub modules: Modules,
     #[serde(default)]
     pub web: Web,
     #[serde(default)]
@@ -195,6 +198,66 @@ impl Default for Budget {
 pub struct Verifier {
     #[serde(default)]
     pub enabled: bool,
+    /// Its model, `adapter/model`; the run's own when unset.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Removable modules (each compensates for a model weakness and is kept
+/// only while its ablation shows it helps): the default for every model,
+/// then per model (`adapter/model`). The verifier's default is
+/// `[verifier] enabled`.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct Modules {
+    #[serde(default)]
+    pub lost_reset: Option<bool>,
+    #[serde(default)]
+    pub escalation: Option<bool>,
+    #[serde(default)]
+    pub lost: crate::run::lost::Thresholds,
+    #[serde(default)]
+    pub model: Vec<ModelModules>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct ModelModules {
+    /// `adapter/model`.
+    pub model: String,
+    #[serde(default)]
+    pub verifier: Option<bool>,
+    #[serde(default)]
+    pub lost_reset: Option<bool>,
+    #[serde(default)]
+    pub escalation: Option<bool>,
+    /// The stronger model a lost run escalates to, `adapter/model`.
+    #[serde(default)]
+    pub escalate_to: Option<String>,
+}
+
+impl Config {
+    /// Each removable module on or off for a model, and where it escalates:
+    /// per-model settings over the defaults. Lost-reset and escalation are
+    /// on unless turned off: they act only on a run that is lost.
+    pub fn modules_for(&self, adapter: &str, model: &str) -> (std::collections::BTreeMap<String, bool>, Option<String>) {
+        let key = format!("{adapter}/{model}");
+        let per = self.modules.model.iter().find(|m| m.model == key);
+        let pick = |name: &str, default: bool| {
+            let p = per.and_then(|m| match name {
+                "verifier" => m.verifier,
+                "lost_reset" => m.lost_reset,
+                _ => m.escalation,
+            });
+            (name.to_string(), p.unwrap_or(default))
+        };
+        let on = [
+            pick("verifier", self.verifier.enabled),
+            pick("lost_reset", self.modules.lost_reset.unwrap_or(true)),
+            pick("escalation", self.modules.escalation.unwrap_or(true)),
+        ]
+        .into_iter()
+        .collect();
+        (on, per.and_then(|m| m.escalate_to.clone()))
+    }
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]

@@ -23,6 +23,9 @@ pub enum Issuer {
     Model,
     /// A check the model wrote into its contract, run as written (K26).
     Check,
+    /// The verifier module reading the world to judge the work (R1: quality,
+    /// not a control). Like a check, it may only read or run in a check VM.
+    Verifier,
 }
 
 impl Issuer {
@@ -30,7 +33,13 @@ impl Issuer {
         match self {
             Issuer::Model => "model",
             Issuer::Check => "kernel:contract_check",
+            Issuer::Verifier => "kernel:verifier",
         }
+    }
+
+    /// Reads only, in a check VM, and never waits for approval.
+    fn reads_only(self) -> bool {
+        matches!(self, Issuer::Check | Issuer::Verifier)
     }
 }
 
@@ -155,24 +164,24 @@ impl Kernel {
 
     #[allow(clippy::too_many_arguments)]
     async fn record_from(&self, a: &Action, key: Option<String>, status: &str, text: String, is_error: bool, label: Label, sources: Vec<String>, data: Option<Value>) -> Result<Verdict> {
-        if a.issuer == Issuer::Model || a.issuer == Issuer::Check {
-            self.emit(
-                "kernel",
-                Ev::ToolResult {
-                    run: a.run.clone(),
-                    call_id: a.call_id.clone(),
-                    key,
-                    status: status.into(),
-                    text: text.clone(),
-                    is_error,
-                    label,
-                    data: data.clone(),
-                    sources,
-                    check: a.issuer == Issuer::Check,
-                },
-            )
-            .await?;
-        }
+        // What the verifier reads taints the run like the model's own reads:
+        // its words go back to the model.
+        self.emit(
+            "kernel",
+            Ev::ToolResult {
+                run: a.run.clone(),
+                call_id: a.call_id.clone(),
+                key,
+                status: status.into(),
+                text: text.clone(),
+                is_error,
+                label,
+                data: data.clone(),
+                sources,
+                check: a.issuer == Issuer::Check,
+            },
+        )
+        .await?;
         Ok(Verdict::Done { text, is_error, data })
     }
 
@@ -455,8 +464,8 @@ impl Kernel {
             let why = "record a task contract with task_contract before changing anything; then retry";
             return Ok(Err(self.deny(a, "policy", why, true, None).await?));
         }
-        if a.issuer == Issuer::Check && !crate::tools::checkable(&f.name, f.risk) {
-            return Ok(Err(self.deny(a, "policy", "contract checks may only read or run in the sandbox", false, None).await?));
+        if a.issuer.reads_only() && !crate::tools::checkable(&f.name, f.risk) {
+            return Ok(Err(self.deny(a, "policy", "contract checks and the verifier may only read or run in the sandbox", false, None).await?));
         }
         // A check's input was written with the contract, so it is judged by
         // the taint the run had then; reading its result taints nothing.
@@ -501,8 +510,8 @@ impl Kernel {
     }
 
     async fn approval_stage(&self, a: &Action, run: &Run, f: &Facts, why: &str, rule: Option<String>) -> Result<Gate> {
-        if a.issuer == Issuer::Check {
-            return Ok(Gate::Stop(self.deny(a, "approval", "a contract check cannot wait for approval", false, rule).await?));
+        if a.issuer.reads_only() {
+            return Ok(Gate::Stop(self.deny(a, "approval", "a contract check or the verifier cannot wait for approval", false, rule).await?));
         }
         let hash = input_hash(&a.tool, &a.input);
         let now = chrono::Utc::now();
@@ -681,7 +690,7 @@ impl Kernel {
                 "create_schedule" => Ok(self.chat_card(a, key)),
                 "sandbox_exec" => {
                     let t = a.input["timeout_s"].as_u64().unwrap_or(120);
-                    let v = if a.issuer == Issuer::Check {
+                    let v = if a.issuer.reads_only() {
                         self.sandboxes.exec_check(&a.run, &s("command"), t).await?
                     } else {
                         self.sandboxes.exec(&a.run, &s("command"), t).await?
@@ -712,7 +721,7 @@ impl Kernel {
                     }
                 }
                 "sandbox_read_file" => {
-                    let bytes = if a.issuer == Issuer::Check { self.sandboxes.read_check(&a.run, &s("path")).await? } else { self.sandboxes.read(&a.run, &s("path")).await? };
+                    let bytes = if a.issuer.reads_only() { self.sandboxes.read_check(&a.run, &s("path")).await? } else { self.sandboxes.read(&a.run, &s("path")).await? };
                     match String::from_utf8(bytes) {
                         Ok(t) => Ok((t, false, None)),
                         Err(e) => {
