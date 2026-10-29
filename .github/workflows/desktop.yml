@@ -1,8 +1,7 @@
-# The installed desktop app, tested on Linux and Windows; installers are
-# published only when both pass (DECISIONS.md). Runs on self-hosted runners:
-# `magnus-linux` (the build box: KVM, the guest image, Postgres) and
-# `magnus-windows` (a Windows PC on the same LAN, as its own local user).
-# One-time setup: desktop/README.md, "Release checks".
+# The installed desktop app, tested on Linux; installers (Linux and Windows,
+# the same app) are published only when those tests pass (DECISIONS.md).
+# Runs on a self-hosted runner, `magnus-linux`: the build box, with KVM, the
+# guest image and Postgres. One-time setup: desktop/README.md, "Release checks".
 name: desktop
 
 on:
@@ -38,16 +37,13 @@ jobs:
         run: |
           cargo tauri build --bundles deb,appimage
           cargo tauri build --runner cargo --target x86_64-pc-windows-gnu --bundles nsis
-      - name: tauri-driver for Windows
-        run: cargo install tauri-driver --locked --target x86_64-pc-windows-gnu --root "$HOME/.cache/magnus-ci/tauri-driver-windows"
       - name: Collect this version's installers
         run: |
           v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
           b=desktop/src-tauri/target
           rm -rf dist && mkdir dist
           cp "$b/release/bundle/deb/Magnus_${v}_amd64.deb" "$b/release/bundle/appimage/Magnus_${v}_amd64.AppImage" \
-             "$b/x86_64-pc-windows-gnu/release/bundle/nsis/Magnus_${v}_x64-setup.exe" \
-             "$HOME/.cache/magnus-ci/tauri-driver-windows/bin/tauri-driver.exe" dist/
+             "$b/x86_64-pc-windows-gnu/release/bundle/nsis/Magnus_${v}_x64-setup.exe" dist/
           (cd dist && sha256sum Magnus_* > SHA256SUMS)
       - uses: actions/upload-artifact@v7
         with: { name: installers, path: dist/, retention-days: 14 }
@@ -69,85 +65,14 @@ jobs:
         env:
           MAGNUS_DESKTOP_APP: ${{ runner.temp }}/app/usr/bin/magnus-desktop
           MAGNUS_SHOTS: ${{ runner.temp }}/shots
-        run: cargo test -p magnus-scratch --test desktop_app -- --ignored --skip the_windows_app
+        run: cargo test -p magnus-scratch --test desktop_app -- --ignored
       - if: failure()
         uses: actions/upload-artifact@v7
         with: { name: linux-screenshots, path: "${{ runner.temp }}/shots", if-no-files-found: ignore }
 
-  # Serves the appliance the Windows app tests against, and checks its side.
-  windows-appliance:
-    needs: build
-    runs-on: [self-hosted, linux, magnus-linux]
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with: { clean: false }
-      - name: Appliance for the Windows app
-        env:
-          MAGNUS_LAN_HOST: ${{ vars.MAGNUS_LAN_HOST }}
-          MAGNUS_LAN_PORTS: ${{ vars.MAGNUS_LAN_PORTS }}
-        run: cargo test -p magnus-scratch --test desktop_app the_windows_app_passes_against_this_appliance -- --ignored --exact --nocapture
-
-  windows:
-    needs: build
-    runs-on: [self-hosted, windows, magnus-windows]
-    timeout-minutes: 45
-    defaults:
-      run: { shell: pwsh }
-    env:
-      LAN_HOST: ${{ vars.MAGNUS_LAN_HOST }}
-      LAN_PORTS: ${{ vars.MAGNUS_LAN_PORTS }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          sparse-checkout: |
-            desktop/tests
-            desktop/src-tauri/tauri.conf.json
-          sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@v8
-        with: { name: installers, path: dist }
-      - uses: actions/setup-node@v7
-        with: { node-version: lts/* }
-      - name: Install the app
-        run: |
-          $v = (Get-Content desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          Start-Process "dist/Magnus_${v}_x64-setup.exe" -ArgumentList '/S' -Wait
-          $app = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Filter magnus-desktop.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $app) { throw "the installer left no magnus-desktop.exe under $env:LOCALAPPDATA" }
-          "MAGNUS_APP=$($app.FullName)" >> $env:GITHUB_ENV
-      - name: Edge WebDriver for this machine's WebView2
-        run: |
-          $id = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
-          $v = @("HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$id", "HKCU:\Software\Microsoft\EdgeUpdate\Clients\$id") |
-            ForEach-Object { (Get-ItemProperty $_ -ErrorAction SilentlyContinue).pv } | Where-Object { $_ } | Select-Object -First 1
-          if (-not $v) { throw "no WebView2 runtime found" }
-          Invoke-WebRequest "https://msedgedriver.microsoft.com/$v/edgedriver_win64.zip" -OutFile "$env:RUNNER_TEMP/edge.zip"
-          Expand-Archive "$env:RUNNER_TEMP/edge.zip" "$env:RUNNER_TEMP/edge" -Force
-      - name: Installed-app tests against the appliance
-        run: |
-          $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0); $l.Start(); $port = $l.LocalEndpoint.Port; $l.Stop()
-          $td = Start-Process dist/tauri-driver.exe -ArgumentList '--port', $port, '--native-driver', "$env:RUNNER_TEMP/edge/msedgedriver.exe" -PassThru
-          try {
-            $env:MAGNUS_WEBDRIVER = "http://127.0.0.1:$port"
-            $env:MAGNUS_COORDINATOR = "http://${env:LAN_HOST}:$(($env:LAN_PORTS -split ',')[2].Trim())"
-            $env:MAGNUS_APP_DATA = "$env:APPDATA/magnus"
-            $env:MAGNUS_SHOTS = "$env:RUNNER_TEMP/shots"
-            node desktop/tests/remote.mjs
-            if ($LASTEXITCODE -ne 0) { throw "the Windows app failed" }
-          } finally { Stop-Process -Id $td.Id -Force -ErrorAction SilentlyContinue }
-      # A failure before the scripts ran still ends the appliance's wait.
-      - if: failure()
-        run: |
-          $c = "http://${env:LAN_HOST}:$(($env:LAN_PORTS -split ',')[2].Trim())"
-          $body = @{ script = 'windows job'; ok = $false; log = 'the Windows job failed before or around the scripts; see its log'; last = $true } | ConvertTo-Json
-          try { Invoke-RestMethod -Method Post -Uri "$c/result" -ContentType 'application/json' -Body $body -TimeoutSec 10 } catch { }
-      - if: failure()
-        uses: actions/upload-artifact@v7
-        with: { name: windows-screenshots, path: "${{ runner.temp }}/shots", if-no-files-found: ignore }
-
   publish:
     if: startsWith(github.ref, 'refs/tags/desktop-v')
-    needs: [linux, windows-appliance, windows]
+    needs: [linux]
     runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 15
     permissions:

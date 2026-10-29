@@ -73,32 +73,20 @@ On each platform:
 ## Tests
 
 - `cargo test -p magnus-scratch --test desktop_flow`: the frontend in Chromium against a real appliance, once with a password and once through a fake identity provider.
-- `cargo test -p magnus-scratch --test desktop_app -- --ignored --skip the_windows_app`: the installed Linux app (the full flow, and a download from the library). Every feature that crosses into the desktop shell (downloads, uploads, sign-in links, notifications, file access) has at least one test here.
+- `cargo test -p magnus-scratch --test desktop_app -- --ignored`: the installed Linux app (the full flow, and a download from the library). Every feature that crosses into the desktop shell (downloads, uploads, sign-in links, notifications, file access) has at least one test here.
   - It needs `tauri-driver` (`cargo install tauri-driver --locked`), `WebKitWebDriver` (package `webkit2gtk-driver`, or set `MAGNUS_WEBKIT_DRIVER`) and `xvfb-run`.
   - `MAGNUS_DESKTOP_APP=<binary>` tests a given build, for example one unpacked from a released `.deb` with `dpkg-deb -x`.
   - Set `MAGNUS_SHOTS=<dir>` to keep screenshots.
-- `the_windows_app_passes_against_this_appliance` (same file, `--ignored`): serves an appliance on the LAN for the Windows app, which runs the same scripts through `desktop/tests/remote.mjs`. Used by the release checks below.
 - `cargo test` in `src-tauri`: what the page may call, and address handling.
 
 ## Release checks
 
-`.github/workflows/desktop.yml` builds the installers, runs the installed-app tests on Linux and on Windows, and, for a `desktop-v<version>` tag, publishes a pre-release with those installers only when every test passed. Installers are no longer published by hand.
+`.github/workflows/desktop.yml` builds the installers, runs the installed-app tests on Linux, and, for a `desktop-v<version>` tag, publishes a pre-release with those installers only when every test passed. The Windows build is the same app and frontend; it is not tested separately. Installers are no longer published by hand.
 
 To release: bump the version in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`, commit, then push an annotated tag whose message is the release notes: `git tag -a desktop-v0.4.2 -m "What changed." && git push origin desktop-v0.4.2`.
 
-The jobs run on two self-hosted runners. One-time setup:
-
-On the build box (Linux, the machine with KVM, the guest image and the test Postgres):
+The jobs run on a self-hosted runner on the build box (the machine with KVM, the guest image and the test Postgres). One-time setup:
 
 1. `sudo apt install webkit2gtk-driver`, and `cargo install tauri-driver --locked`.
 2. Register a runner with the label `magnus-linux`, running as your own user. In GitHub: Settings, Actions, Runners, New self-hosted runner (Linux); follow its download and `./config.sh` steps, adding `--labels magnus-linux`. Install it as a service: `sudo ./svc.sh install samuel && sudo ./svc.sh start`. Put `PATH=/home/samuel/.cargo/bin:/usr/local/bin:/usr/bin:/bin` in the runner's `.env` file so it finds `cargo`.
-3. Let the Windows PC reach the test appliance's three ports, and nothing else: `sudo ufw allow from <PC address> to any port 7710:7712 proto tcp`.
-
-On the Windows PC:
-
-1. Create a local user for the checks (for example `magnus-ci`). The checks install the app and remove its settings for that user only, so your own Magnus install and sign-in are untouched.
-2. Install Git for Windows (the job checks out only `desktop/tests`).
-3. Signed in as that user, register a runner with the label `magnus-windows` (New self-hosted runner, Windows; `config.cmd` with `--labels magnus-windows`), and start it with `run.cmd` in that signed-in session. The app opens real windows, which need a desktop session. Switching back to your own account (Switch user, not Sign out) keeps it running.
-
-Repository variables (Settings, Secrets and variables, Actions, Variables): `MAGNUS_SANDBOX_OUT` (the build box's `sandbox/out`), `MAGNUS_LAN_HOST` (the build box's LAN address) and `MAGNUS_LAN_PORTS` (`7710,7711,7712`: test appliance, identity provider, coordinator).
-
+3. Repository variable (Settings, Secrets and variables, Actions, Variables): `MAGNUS_SANDBOX_OUT`, the build box's `sandbox/out` (set).

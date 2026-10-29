@@ -123,17 +123,10 @@ impl Flow {
     /// Serve HTTPS as well, as a real appliance does. Returns its address and
     /// the certificate fingerprint it printed.
     pub async fn with_tls(&mut self) -> (String, String) {
-        self.with_tls_on("127.0.0.1:0").await
-    }
-
-    /// HTTPS on `addr` (host:port; port 0 picks a free one), so an app on
-    /// another machine can connect.
-    pub async fn with_tls_on(&mut self, addr: &str) -> (String, String) {
-        let bound = std::net::TcpListener::bind(addr).unwrap().local_addr().unwrap();
-        let (host, port) = (bound.ip(), bound.port());
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let path = self.app.dir.path().join("magnus.toml");
         let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
-        cfg["appliance"].as_table_mut().unwrap().insert("tls_listen".into(), toml::Value::String(format!("{host}:{port}")));
+        cfg["appliance"].as_table_mut().unwrap().insert("tls_listen".into(), toml::Value::String(format!("127.0.0.1:{port}")));
         std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
         self.app.restart().await;
         let fp = eventually("the certificate fingerprint in the log", PATIENCE, || {
@@ -141,7 +134,7 @@ impl Flow {
             async move { logs.lines().rev().find_map(|l| l.split("certificate SHA-256 ").nth(1).map(|f| f.trim().to_string())) }
         })
         .await;
-        (format!("https://{host}:{port}"), fp)
+        (format!("https://127.0.0.1:{port}"), fp)
     }
 
     /// What the person saw is what the log says.
@@ -197,13 +190,7 @@ pub struct FakeIdp {
 
 impl FakeIdp {
     pub async fn start(username: &str) -> FakeIdp {
-        FakeIdp::start_on(username, "127.0.0.1:0").await
-    }
-
-    /// The provider listening on `addr` (host:port), so an app on another
-    /// machine can open its page.
-    pub async fn start_on(username: &str, addr: &str) -> FakeIdp {
-        let l = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let issuer = format!("http://{}/realms/test", l.local_addr().unwrap());
         let state = Arc::new(Mutex::new(IdpState { username: username.into(), audience: IDP_CLIENT.into(), ..Default::default() }));
         type S = State<(String, Arc<Mutex<IdpState>>)>;
