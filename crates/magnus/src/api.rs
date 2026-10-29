@@ -402,14 +402,21 @@ fn needs(s: &crate::state::State, p: &Person, run: &Run) -> bool {
 /// person, and the request it came from (a chat message or a schedule).
 pub(crate) fn task_row(k: &Kernel, s: &crate::state::State, p: &Person, t: &crate::state::Task, r: &Run) -> Value {
     let mut v = task_json(k, t, r, false);
+    let mine = t.person == p.id;
     v["needs_you"] = json!(needs(s, p, r));
-    v["project"] = crate::library::project_ref(s, &t.task_id);
+    // Another person's projects and conversations are theirs alone: the
+    // owner sees that a task came from a chat, not what was said in it.
+    v["project"] = if mine { crate::library::project_ref(s, &t.task_id) } else { Value::Null };
     v["waiting_item"] = json!(r.waiting_item);
     v["ended_at"] = json!(r.ended_at);
     v["group"] = if let Some(sc) = t.schedule.as_ref().and_then(|id| s.schedules.get(id)) {
         json!({ "kind": "schedule", "id": sc.id, "title": sc.title.clone().unwrap_or_else(|| sc.text.clone()) })
     } else if let Some((c, turn)) = t.chat.as_ref().and_then(|c| c.from_run.as_ref().and_then(|f| s.runs.get(f)).and_then(|r| s.tasks.get(&r.task)).map(|turn| (c, turn))) {
-        json!({ "kind": "chat", "id": turn.task_id, "title": turn.text, "thread": c.thread })
+        if mine {
+            json!({ "kind": "chat", "id": turn.task_id, "title": turn.text, "thread": c.thread })
+        } else {
+            json!({ "kind": "chat", "id": turn.task_id, "title": format!("A conversation of {}", t.person) })
+        }
     } else {
         Value::Null
     };
@@ -638,7 +645,16 @@ async fn task(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
         Err(r) => return r,
     };
     match find(&k, &p, &id) {
-        Some((t, r)) => Json(task_json(&k, &t, &r, true)).into_response(),
+        Some((t, r)) => {
+            let mut v = task_json(&k, &t, &r, true);
+            // The owner sees every task, but not another person's library or
+            // projects (theirs alone).
+            if t.person != p.id {
+                v["files"] = json!([]);
+                v["project"] = Value::Null;
+            }
+            Json(v).into_response()
+        }
         None => err(StatusCode::NOT_FOUND, "no such task"),
     }
 }
@@ -726,7 +742,9 @@ async fn verdict(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Jso
         Err(r) => return r,
     };
     let Some((task, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
-    if task.person != p.id {
+    // An experiment's trials run as the eval people, who have no sign-in of
+    // their own: the owner judges them.
+    if task.person != p.id && !(p.is_owner() && run.experiment.is_some()) {
         return err(StatusCode::FORBIDDEN, "only the person it is for gives a verdict");
     }
     let Some(v) = b["verdict"].as_str().filter(|v| crate::state::VERDICTS.contains(v)) else {
@@ -1245,7 +1263,7 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
                     "id": x.id, "person": x.person, "text": x.text, "title": x.title.clone().unwrap_or_else(|| x.text.clone()),
                     "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due(), "last_fired": x.last_fired,
                     "last": last, "last_failed": last_failed, "failures": failures, "runs": rows,
-                    "project": s.project_of(&x.id).and_then(|id| s.projects.get(&id)).map(|p| json!({ "id": p.id, "name": p.name })),
+                    "project": s.project_of(&x.id).filter(|_| x.person == p.id).and_then(|id| s.projects.get(&id)).map(|p| json!({ "id": p.id, "name": p.name })),
                 })
             })
             .collect()
@@ -1325,11 +1343,7 @@ async fn output(State(k): K, h: HeaderMap, Path((id, out)): Path<(String, String
         return err(StatusCode::NOT_FOUND, "no such file");
     }
     match k.output_bytes(&run.id, &out).await {
-        Ok(Some((name, mt, bytes))) => Response::builder()
-            .header("content-type", mt)
-            .header("content-disposition", format!("attachment; filename=\"{}\"", name.replace('"', "")))
-            .body(axum::body::Body::from(bytes))
-            .unwrap(),
+        Ok(Some((name, mt, bytes))) => crate::library::attachment(&name, &mt, bytes),
         Ok(None) => err(StatusCode::NOT_FOUND, "no such file"),
         Err(e) => internal(e),
     }

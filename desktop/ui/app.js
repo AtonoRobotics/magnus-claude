@@ -123,6 +123,10 @@ function shell() {
     }
   });
   paint($("nav.side"), nav());
+  // The page-wide controls below are added once: shell() runs at every
+  // sign-in, and a second copy would act twice on one click.
+  if (shell.wired) return;
+  shell.wired = true;
   // A library file downloads from wherever it is listed; a move control
   // moves its item into a project or out, wherever it is shown.
   document.addEventListener("click", async e => {
@@ -1724,6 +1728,8 @@ function stop() {
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   window.onhashchange = null;
   App.me = null; App.inbox = [];
+  // What one person was typing is not shown to the next who signs in here.
+  for (const k of Object.keys(drafts)) delete drafts[k];
 }
 
 async function start() {

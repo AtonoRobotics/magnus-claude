@@ -979,7 +979,8 @@ impl State {
                 }
             }
             Ev::Verdict { task, person, verdict, note } => {
-                if let Some(t) = self.tasks.get_mut(task).filter(|t| &t.person == person) {
+                let trial = self.tasks.get(task).and_then(|t| self.runs.get(&t.run_id)).is_some_and(|r| r.experiment.is_some());
+                if let Some(t) = self.tasks.get_mut(task).filter(|t| &t.person == person || trial) {
                     t.verdict = Some(Verdict { verdict: verdict.clone(), note: note.clone(), at: e.at });
                 }
             }
