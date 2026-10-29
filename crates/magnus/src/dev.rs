@@ -480,6 +480,8 @@ async fn experiments(AxState(k): K, h: HeaderMap) -> Response {
 #[derive(serde::Deserialize, Default)]
 struct ExpQuery {
     k: Option<u64>,
+    /// The earlier run of the same requests to compare with.
+    base: Option<String>,
 }
 
 /// One experiment: each configuration across its repeated trials, case by
@@ -568,9 +570,9 @@ async fn experiment(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Query(q
                 }));
             }
         }
-        let mut requests: Vec<Value> = rs.iter().filter(|r| s.tasks.get(&r.task).is_some_and(|t| t.is_chat_turn())).map(|r| request_trial(s, r)).collect();
-        requests.sort_by_key(|v| (v["case"].as_str().unwrap_or_default().to_string(), v["config"].as_str().unwrap_or_default().to_string(), v["trial"].as_u64()));
-        Some(json!({ "id": id, "k": kk, "cases": cases, "configs": configs, "paired": paired, "requests": requests }))
+        let requests = request_rows(s, &id);
+        let compared = if requests.is_empty() { Value::Null } else { compare(s, &id, &requests, q.base.as_deref()) };
+        Some(json!({ "id": id, "k": kk, "cases": cases, "configs": configs, "paired": paired, "requests": requests, "compare": compared }))
     });
     match v {
         Some(v) => Json(v).into_response(),
@@ -581,8 +583,8 @@ async fn experiment(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Query(q
 /// A chat trial and what it led to: what the model chose (answer, a
 /// question back, tasks, a schedule), the tasks its message started, every
 /// policy stop (ask or deny) on the way, and the cost and time of it all,
-/// until each run first ended or stopped (for the person, or to wait). The person's judgment of
-/// the choice is a grade from grader `choice`.
+/// until each run first ended or stopped (for the person, or to wait), and
+/// the person's verdict on the outcome.
 fn request_trial(s: &State, r: &Run) -> Value {
     let kids: Vec<&Run> = s
         .tasks
@@ -611,7 +613,7 @@ fn request_trial(s: &State, r: &Run) -> Value {
     let settled = all.iter().all(|x| x.status.terminal() || x.status == Status::Suspended);
     let end = all.iter().map(|x| x.first_stop.unwrap_or(x.last_at)).max().unwrap_or(r.created_at);
     let tag = r.experiment.as_ref().unwrap();
-    let judged = r.grades.iter().rev().find(|g| g.0 == "choice").map(|g| g.1);
+    let (verdict, note, verdict_from) = request_verdict(s, r, &kids);
     json!({
         "case": tag.case, "trial": tag.trial, "config": config_key(r), "run": r.id, "task": r.task,
         "thread": s.tasks.get(&r.task).and_then(|t| t.chat.as_ref()).map(|c| c.thread.clone()),
@@ -626,7 +628,121 @@ fn request_trial(s: &State, r: &Run) -> Value {
         "model_calls": all.iter().map(|x| x.model_calls).sum::<u32>(),
         "seconds": (end - r.created_at).num_milliseconds() as f64 / 1000.0,
         "settled": settled,
-        "judged_correct": judged,
+        "verdict": verdict, "note": note, "verdict_from": verdict_from,
+        "model": format!("{}/{}", r.config.adapter, r.config.model),
+        "setup": { "harness": r.config.harness, "instructions": r.config.instructions, "playbook": r.config.playbook },
+    })
+}
+
+/// A request's verdict: the person's on the chat answer; where the message
+/// started tasks and the answer has none, theirs once every task has one
+/// (right only if all are right, wrong if any is wrong, else partly).
+fn request_verdict(s: &State, r: &Run, kids: &[&Run]) -> (Option<String>, Option<String>, &'static str) {
+    if let Some(v) = s.tasks.get(&r.task).and_then(|t| t.verdict.as_ref()) {
+        return (Some(v.verdict.clone()), v.note.clone(), "answer");
+    }
+    let vs: Vec<&crate::state::Verdict> = kids.iter().filter_map(|k| s.tasks.get(&k.task).and_then(|t| t.verdict.as_ref())).collect();
+    if kids.is_empty() || vs.len() < kids.len() {
+        return (None, None, "none");
+    }
+    let worst = vs.iter().map(|v| rank(&v.verdict)).max().unwrap_or(0);
+    let combined = if vs.iter().all(|v| v.verdict == "right") { "right" } else if worst == rank("wrong") { "wrong" } else { "partly" };
+    let notes: Vec<String> = vs.iter().filter_map(|v| v.note.clone()).collect();
+    (Some(combined.into()), (!notes.is_empty()).then(|| notes.join(" · ")), "tasks")
+}
+
+/// Right first: a lower rank is a better verdict.
+fn rank(v: &str) -> usize {
+    crate::state::VERDICTS.iter().position(|x| *x == v).unwrap_or(crate::state::VERDICTS.len())
+}
+
+/// The request trials of one experiment, in case, model and trial order.
+fn request_rows(s: &State, id: &str) -> Vec<Value> {
+    let mut rows: Vec<Value> = s
+        .runs
+        .values()
+        .filter(|r| r.experiment.as_ref().is_some_and(|t| t.id == id) && s.tasks.get(&r.task).is_some_and(|t| t.is_chat_turn()))
+        .map(|r| request_trial(s, r))
+        .collect();
+    rows.sort_by_key(|v| (v["case"].as_str().unwrap_or_default().to_string(), v["config"].as_str().unwrap_or_default().to_string(), v["trial"].as_u64()));
+    rows
+}
+
+/// This run of a request set against an earlier one (`base`, or else the
+/// latest earlier experiment sharing a request): each request on each model,
+/// side by side, what changed between them, and once every trial here has
+/// settled, how many improved, stayed the same or regressed by verdict.
+fn compare(s: &State, id: &str, rows: &[Value], base: Option<&str>) -> Value {
+    let started = |e: &str| s.runs.values().filter(|r| r.experiment.as_ref().is_some_and(|t| t.id == e)).map(|r| r.created_at).min();
+    let cases: BTreeSet<&str> = rows.iter().filter_map(|r| r["case"].as_str()).collect();
+    let base_id = base.map(String::from).or_else(|| {
+        let mine = started(id)?;
+        let mut others: BTreeMap<String, chrono::DateTime<chrono::Utc>> = BTreeMap::new();
+        for r in s.runs.values() {
+            let Some(t) = r.experiment.as_ref() else { continue };
+            if t.id != id && cases.contains(t.case.as_str()) && s.tasks.get(&r.task).is_some_and(|t| t.is_chat_turn()) && r.created_at < mine {
+                let e = others.entry(t.id.clone()).or_insert(r.created_at);
+                *e = (*e).min(r.created_at);
+            }
+        }
+        others.into_iter().max_by_key(|(_, at)| *at).map(|(e, _)| e)
+    });
+    let Some(base_id) = base_id else { return Value::Null };
+    let before = request_rows(s, &base_id);
+    let key = |r: &Value| (r["case"].as_str().unwrap_or_default().to_string(), r["model"].as_str().unwrap_or_default().to_string(), r["trial"].as_u64());
+    let earlier: BTreeMap<_, &Value> = before.iter().map(|r| (key(r), r)).collect();
+    let (mut improved, mut unchanged, mut regressed, mut unjudged) = (0, 0, 0, 0);
+    let pairs: Vec<Value> = rows
+        .iter()
+        .filter_map(|now| {
+            let then = *earlier.get(&key(now))?;
+            let mut changed = vec![];
+            for f in ["verdict", "choice"] {
+                if then[f] != now[f] {
+                    changed.push(f);
+                }
+            }
+            let stops = |r: &Value| -> Vec<String> {
+                let mut v: Vec<String> = r["stops"].as_array().into_iter().flatten().map(|x| format!("{} {} {}", x["tool"], x["outcome"], x["rule"])).collect();
+                v.sort();
+                v
+            };
+            if stops(then) != stops(now) {
+                changed.push("stops");
+            }
+            let tasks = |r: &Value| -> Vec<String> {
+                let mut v: Vec<String> = r["tasks"].as_array().into_iter().flatten().map(|x| x["status"].as_str().unwrap_or_default().to_string()).collect();
+                v.sort();
+                v
+            };
+            if tasks(then) != tasks(now) {
+                changed.push("tasks");
+            }
+            if then["setup"] != now["setup"] {
+                changed.push("setup");
+            }
+            let outcome = match (then["verdict"].as_str(), now["verdict"].as_str()) {
+                (Some(a), Some(b)) if rank(b) < rank(a) => { improved += 1; "improved" }
+                (Some(a), Some(b)) if rank(b) > rank(a) => { regressed += 1; "regressed" }
+                (Some(_), Some(_)) => { unchanged += 1; "unchanged" }
+                _ => { unjudged += 1; "unjudged" }
+            };
+            let delta = |f: &str| match (then[f].as_f64(), now[f].as_f64()) {
+                (Some(a), Some(b)) => num(b - a),
+                _ => Value::Null,
+            };
+            Some(json!({
+                "case": now["case"], "model": now["model"], "trial": now["trial"], "text": now["text"],
+                "before": then, "after": now, "changed": changed, "outcome": outcome,
+                "usd_change": delta("usd"), "seconds_change": delta("seconds"),
+            }))
+        })
+        .collect();
+    let settled = rows.iter().filter(|r| r["settled"] == true).count();
+    json!({
+        "base": base_id, "pairs": pairs, "settled": settled, "trials": rows.len(),
+        "complete": settled == rows.len() && !rows.is_empty(),
+        "summary": { "improved": improved, "unchanged": unchanged, "regressed": regressed, "unjudged": unjudged },
     })
 }
 

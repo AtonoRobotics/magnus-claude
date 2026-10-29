@@ -420,6 +420,15 @@ pub enum Ev {
         addresses: Option<String>,
         label: Label,
     },
+    /// The person's verdict on an outcome (a task's, or a chat answer's):
+    /// right, partly or wrong, with an optional note. The latest counts.
+    Verdict {
+        task: String,
+        person: String,
+        verdict: String,
+        #[serde(default)]
+        note: Option<String>,
+    },
     /// A grader's verdict on a run, recorded by the evaluation runner (V2).
     Graded {
         run: String,

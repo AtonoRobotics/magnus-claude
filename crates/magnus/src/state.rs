@@ -177,7 +177,20 @@ pub struct Task {
     pub files: Vec<String>,
     /// The project it started in, as it stood then.
     pub project: Option<crate::events::ProjectContext>,
+    /// The person's latest verdict on its outcome.
+    pub verdict: Option<Verdict>,
 }
+
+/// A person's verdict on an outcome.
+#[derive(Clone, Debug, Serialize)]
+pub struct Verdict {
+    pub verdict: String,
+    pub note: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+/// The verdicts a person can give, best first.
+pub const VERDICTS: [&str; 3] = ["right", "partly", "wrong"];
 
 /// A file in a person's library: one they uploaded, or one a task delivered.
 #[derive(Clone, Debug)]
@@ -511,6 +524,7 @@ impl State {
                         schedule: None,
                         files: files.clone(),
                         project: project.clone(),
+                        verdict: None,
                     },
                 );
                 self.runs.insert(
@@ -695,6 +709,11 @@ impl State {
                         }
                     }
                     _ => {}
+                }
+            }
+            Ev::Verdict { task, person, verdict, note } => {
+                if let Some(t) = self.tasks.get_mut(task).filter(|t| &t.person == person) {
+                    t.verdict = Some(Verdict { verdict: verdict.clone(), note: note.clone(), at: e.at });
                 }
             }
             Ev::Graded { run, grader, passed, score, details } => {

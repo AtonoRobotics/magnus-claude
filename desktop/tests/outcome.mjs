@@ -1,7 +1,8 @@
 // The outcome page shows the deliverable in full, first, without opening a
 // file or the trace: each day with its places, times and costs, drawn from
 // the fixed components; a delivered file the agent did not place is shown
-// too. Then the summary, the evidence, the cost, and the trace, folded.
+// too. Then the summary, the evidence, the cost, and the trace, folded. A
+// verdict tapped on it (right, partly, wrong), and its note, are kept.
 //
 // MAGNUS_URL, MAGNUS_PERSON, MAGNUS_PASSWORD  where and who
 // MAGNUS_TASK      the task to look at
@@ -62,6 +63,20 @@ await step("then the summary, evidence, cost and trace", async () => {
   await page.locator("[data-summary]", { hasText: "Nothing was booked." }).waitFor({ timeout: T });
   await page.locator("details.trace > summary").click();
   await page.locator(".call").first().waitFor({ timeout: T });
+});
+
+await step("a one-tap verdict with a note is kept", async () => {
+  const bar = () => page.locator(`[data-verdict-for="${task}"]`);
+  await bar().getByRole("button", { name: "Partly", exact: true }).click();
+  await page.getByText("Recorded.").waitFor({ timeout: T });
+  await bar().locator("details.vnote > summary").click();
+  await bar().getByLabel("Note").fill("Lodging is far from the coast.");
+  await bar().getByRole("button", { name: "Save note" }).click();
+  await page.getByText("Note saved.").waitFor({ timeout: T });
+  await page.reload();
+  await bar().locator('button[data-verdict="partly"][aria-pressed="true"]').waitFor({ timeout: T });
+  const note = await bar().getByLabel("Note").inputValue();
+  if (note !== "Lodging is far from the coast.") throw new Error(`the note reads "${note}" after a reload`);
 });
 
 if (errors.length) { console.error(`page errors: ${errors.join("; ")}`); process.exit(1); }

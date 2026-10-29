@@ -60,6 +60,10 @@ async fn the_outcome_page_leads_with_the_full_deliverable() {
         .unwrap();
     let log = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "the outcome check failed:\n{log}");
+    // The verdict tapped on the page is in the log.
+    let t = alice.get(&format!("/v1/tasks/{id}")).await.1;
+    assert_eq!(t["verdict"]["verdict"], "partly", "{t}");
+    assert_eq!(t["verdict"]["note"], "Lodging is far from the coast.", "{t}");
 }
 
 /// A completion must carry a deliverable: one that is missing, an empty list,

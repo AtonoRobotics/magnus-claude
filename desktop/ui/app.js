@@ -126,6 +126,21 @@ function shell() {
     e.preventDefault();
     try { toast(`Saved ${await Magnus.download(`/v1/files/${enc(b.dataset.fileDownload)}`, b.dataset.name)}`); } catch (err) { toast(err.message); }
   });
+  document.addEventListener("click", async e => {
+    const b = e.target.closest("[data-verdict], [data-verdict-save]");
+    if (!b) return;
+    const bar = b.closest("[data-verdict-for]"), id = bar.dataset.verdictFor;
+    const verdict = b.dataset.verdict || $("[data-verdict].on", bar)?.dataset.verdict;
+    if (!verdict) { toast("Pick right, partly or wrong first."); return; }
+    const box = $("textarea", bar);
+    try {
+      await api("POST", `/v1/tasks/${enc(id)}/verdict`, { verdict, note: box.value });
+      delete drafts[box.dataset.draft];
+      $$("[data-verdict]", bar).forEach(x => { const on = x.dataset.verdict === verdict; x.classList.toggle("on", on); x.setAttribute("aria-pressed", on); });
+      toast(b.dataset.verdictSave !== undefined ? "Note saved." : "Recorded.");
+      await App.redraw?.();
+    } catch (err) { toast(err.message); }
+  });
   document.addEventListener("change", async e => {
     const sel = e.target.closest("select[data-move]");
     if (!sel) return;
@@ -145,6 +160,15 @@ const kb = n => `${Math.max(1, Math.round(n / 1024))} KB`;
 // A file wherever it is listed: its name opens it, Download saves it.
 function fileChip(f) {
   return `<span class="fchip"><a href="#/file/${enc(f.id)}">${esc(f.name)}</a> <span class="small faint">${esc(kb(f.size))}</span> <button class="link small" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}" aria-label="Download ${esc(f.name)}">Download</button></span>`;
+}
+// One tap records the person's verdict on an outcome; a note is optional.
+const VERDICTS = [["right", "Right"], ["partly", "Partly"], ["wrong", "Wrong"]];
+const ENDED = ["completed", "failed", "cancelled"];
+function verdictBar(taskId, v) {
+  return `<div class="verdict" data-verdict-for="${esc(taskId)}"><span class="small muted">Was this right?</span>
+    ${VERDICTS.map(([k, label]) => `<button class="${v?.verdict === k ? "on" : ""}" data-verdict="${k}" aria-pressed="${v?.verdict === k}">${label}</button>`).join("")}
+    <details class="vnote" data-key="note:${esc(taskId)}"${v?.note ? " open" : ""}><summary class="small">${v?.note ? "Note" : "Add a note"}</summary>
+    <textarea rows="2" aria-label="Note" data-draft="note:${esc(taskId)}">${esc(v?.note || "")}</textarea> <button data-verdict-save>Save note</button></details></div>`;
 }
 // Where a library file came from, as a link.
 const fileFrom = f => f.origin.kind === "task" ? `<a href="#/task/${enc(f.origin.task_id)}">${esc(f.origin.title)}</a>`
@@ -771,7 +795,7 @@ function waitingLink(e) {
 function entry(e) {
   switch (e.kind) {
     case "message": return `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div>${e.files?.length ? `<div class="small files">${e.files.map(fileChip).join(" ")}</div>` : ""}</div>`;
-    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div></div>`;
+    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div>${verdictBar(e.task_id, e.verdict)}</div>`;
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
       : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}${waitingLink(e)}</div></div>`;
@@ -779,7 +803,7 @@ function entry(e) {
       <ul class="tlist">${e.tasks.map(t => `<li class="crow" data-chat-task="${esc(t.task_id)}"><a class="ttl" href="#/task/${enc(t.task_id)}" title="${esc(t.text)}">${esc(t.title)}</a><span class="small why">${t.waiting_item ? `<a href="#/inbox" data-waiting="${esc(t.waiting_item)}">${esc(WAITING[t.waiting_on] || "waiting for you")}</a>` : ""}</span>${chip(t.status)}</li>`).join("")}</ul>
       <div class="small muted">${e.tasks.length === 1 ? "It is" : "They are"} in Tasks; results post here.</div></div>`;
     case "result": return `<details class="result" data-key="result:${esc(e.task_id)}" data-result="${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
-      <div class="pre">${esc(e.summary || "")}</div>${e.files?.length ? `<div class="small files">${e.files.map(fileChip).join(" ")}</div>` : ""}<a class="small" href="#/task/${enc(e.task_id)}">Open the task</a></details>`;
+      <div class="pre">${esc(e.summary || "")}</div>${e.files?.length ? `<div class="small files">${e.files.map(fileChip).join(" ")}</div>` : ""}<a class="small" href="#/task/${enc(e.task_id)}">Open the task</a>${ENDED.includes(e.status) ? verdictBar(e.task_id, e.verdict) : ""}</details>`;
     case "schedule_card": {
       const b = e.budget || {};
       const decided = e.state === "confirmed" ? `<p class="small"><span class="chip ok">Scheduled</span></p>` : e.state === "declined" ? `<p class="small"><span class="chip">Declined</span></p>` : "";
@@ -1121,6 +1145,7 @@ route(/^#\/task\/([^/]+)$/, async (main, id) => {
     const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="view"></iframe>` : ""}
       ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
       ${t.outputs?.length ? `<h3>Files</h3>${t.outputs.map(o => `<div class="row"><button class="link" data-act="download" data-out="${esc(o.id)}" data-name="${esc(o.name)}">${esc(o.name)}</button><span class="small faint">${esc(o.media_type)} · ${Math.max(1, Math.round(o.size / 1024))} KB</span></div>`).join("")}` : ""}
+      ${ENDED.includes(t.status) ? verdictBar(t.task_id, t.verdict) : ""}
       ${t.outcome_view && t.summary ? `<h3>Summary</h3><p data-summary>${esc(t.summary)}</p>` : ""}
       <h3>Evidence</h3>${doneLine(t)}${criteria(t)}
       <h3>Cost</h3><p class="small" data-cost>${esc(t.model?.adapter)} · ${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} model calls · ${t.usage?.actions ?? 0} actions · $${(t.usage?.cost_usd ?? 0).toFixed(2)}</p>

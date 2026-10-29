@@ -232,3 +232,9 @@ label.move select { padding: 3px 6px; font-size: 13px; }
 .thread-head { margin-bottom: 4px; }
 details.trace { margin-top: 18px; }
 details.trace > summary { cursor: pointer; }
+.verdict { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0; }
+.verdict button[data-verdict] { padding: 4px 12px; }
+.verdict button.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.verdict .vnote { flex-basis: 100%; }
+.verdict .vnote summary { cursor: pointer; }
+.verdict textarea { width: 100%; max-width: 60ch; margin-top: 4px; }

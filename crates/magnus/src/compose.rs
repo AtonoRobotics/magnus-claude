@@ -7,7 +7,7 @@ use serde_json::Value;
 pub const KINDS: &[&str] = &["heading", "text", "list", "table", "stat", "bar_chart", "line_chart", "image", "file"];
 
 const MAX_COMPONENTS: usize = 40;
-const MAX_TEXT: usize = 4000;
+pub const MAX_TEXT: usize = 4000;
 pub const MAX_ROWS: usize = 200;
 /// A delivered file shown in full on the page holds at most as much text as
 /// a composition may, and a table from it at most as many rows; the rest is

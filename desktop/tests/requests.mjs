@@ -1,9 +1,10 @@
 // A request set compared across models, in a real browser: the Experiments
 // view lists each request against each model with its choice, stops, cost
-// and time, and a judgment the person clicks is kept.
+// and time; a rerun shows one summary against the run before it (improved,
+// unchanged, regressed); a verdict the person taps, and its note, are kept.
 //
 // MAGNUS_URL, MAGNUS_PERSON, MAGNUS_PASSWORD  where and who (a developer)
-// MAGNUS_EXPERIMENT  the experiment; MAGNUS_MODELS  how many models ran it
+// MAGNUS_EXPERIMENT  a rerun, with one request left to judge; MAGNUS_MODELS  how many models ran it
 // MAGNUS_CHROMIUM  Chrome to drive; MAGNUS_SHOTS  where to keep screenshots
 import { createRequire } from "node:module";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -52,21 +53,53 @@ await step("each request against each model", async () => {
   await page.locator("[data-case]", { hasText: "Every Monday" }).getByText("Proposed a schedule").first().waitFor({ timeout: T });
 });
 
-await step("a judgment is kept", async () => {
-  const row = () => page.locator("[data-case]", { hasText: "How many legs" }).locator("tr[data-request]").first();
-  const model = (await row().locator("td").first().innerText()).trim();
-  const judged = async () => {
-    const t = await page.locator("table[data-summary] tr", { hasText: model }).locator("td").nth(1).innerText();
-    const m = t.match(/(\d+) of (\d+)/);
-    return m ? Number(m[2]) : 0;
-  };
-  const before = await judged();
-  await row().getByRole("button", { name: "Correct choice" }).click();
-  await row().getByRole("button", { name: "Correct choice" }).and(page.locator(".primary")).waitFor({ timeout: T });
+const compare = () => page.evaluate(async x => (await (await fetch(`/v1/dev/experiments/${x}`)).json()).compare, experiment);
+const shown = async () => Object.fromEntries(await Promise.all(["improved", "unchanged", "regressed"].map(async k => [k, Number(await page.locator(`[data-compare-summary] [data-${k}]`).innerText())])));
+
+await step("the rerun against the run before", async () => {
+  await page.locator("[data-compare-summary]").waitFor({ timeout: T });
+  const c = await compare();
+  const ui = await shown();
+  for (const k of Object.keys(ui)) if (ui[k] !== c.summary[k]) throw new Error(`${k}: the page shows ${ui[k]}, the log has ${c.summary[k]}`);
+  if (!c.summary.regressed) throw new Error("the rerun has no regression to show first");
+  const first = page.locator("table[data-compare] tr[data-pair]").first();
+  if (await first.getAttribute("data-outcome") !== "regressed") throw new Error("a regression is not listed first");
+  await first.locator('[data-changed="verdict"]').waitFor({ timeout: T });
+  await page.getByText(`${c.summary.unjudged} not judged yet`).waitFor({ timeout: T });
+});
+
+// The request left to judge.
+const open = async () => {
+  const c = await compare();
+  const p = c.pairs.find(p => p.outcome === "unjudged");
+  if (!p) throw new Error("no request is left to judge");
+  return { c, row: page.locator(`[data-case="${p.case}"] tr[data-request]`).filter({ hasText: p.model }) };
+};
+
+await step("a verdict is kept and the summary counts it", async () => {
+  const { c, row } = await open();
+  await row.getByRole("button", { name: "Right", exact: true }).click();
+  await row.locator('button[data-verdict="right"][aria-pressed="true"]').waitFor({ timeout: T });
+  const after = await compare();
+  if (after.summary.unjudged !== c.summary.unjudged - 1) throw new Error(`still ${after.summary.unjudged} to judge`);
+  await page.locator(`[data-compare-summary] [data-unchanged]`).filter({ hasText: String(after.summary.unchanged) }).waitFor({ timeout: T });
   await page.reload();
-  await row().getByRole("button", { name: "Correct choice" }).and(page.locator(".primary")).waitFor({ timeout: T });
-  const after = await judged();
-  if (after !== before + 1) throw new Error(`${model} shows ${after} judged after the click, ${before} before`);
+  await page.locator(`[data-compare-summary] [data-unchanged]`).filter({ hasText: String(after.summary.unchanged) }).waitFor({ timeout: T });
+  const ui = await shown();
+  for (const k of Object.keys(ui)) if (ui[k] !== after.summary[k]) throw new Error(`${k}: the page shows ${ui[k]}, the log has ${after.summary[k]}`);
+});
+
+await step("a note is kept", async () => {
+  const p = (await compare()).pairs.find(p => p.after.verdict === "right" && !p.after.note && p.after.verdict_from === "answer");
+  const row = page.locator(`[data-case="${p.case}"] tr[data-request]`).filter({ hasText: p.model });
+  await row.locator("details.vnote > summary").click();
+  await row.getByLabel("Note").fill("Fine, but slow.");
+  await row.getByRole("button", { name: "Save note" }).click();
+  await page.getByText("Note saved.").waitFor({ timeout: T });
+  await page.reload();
+  await page.locator("[data-compare-summary]").waitFor({ timeout: T });
+  const kept = await page.locator(`[data-case="${p.case}"] tr[data-request]`).filter({ hasText: p.model }).getByLabel("Note").inputValue();
+  if (kept !== "Fine, but slow.") throw new Error(`the note reads "${kept}" after a reload`);
 });
 
 if (errors.length) { console.error(`FAIL page errors:\n${errors.join("\n")}`); await browser.close(); process.exit(1); }

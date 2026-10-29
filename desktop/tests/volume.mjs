@@ -85,7 +85,7 @@ await step("a chat message's tasks are one card, results one-liners", async () =
   const results = page.locator("details.result");
   await until("three folded results", async () => await results.count() === 3);
   if (await page.locator("details.result[open]").count()) throw new Error("a result is not folded");
-  await results.first().locator("summary").click();
+  await results.first().locator(":scope > summary").click();
   await results.first().getByText("The details are in the task.").waitFor({ timeout: T });
 });
 

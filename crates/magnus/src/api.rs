@@ -120,6 +120,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/tasks/{id}/timeline", get(timeline))
         .route("/v1/tasks/{id}/resume", post(resume))
         .route("/v1/tasks/{id}/cancel", post(cancel))
+        .route("/v1/tasks/{id}/verdict", post(verdict))
         .route("/v1/inbox", get(inbox_list))
         .route("/v1/inbox/{id}", post(respond))
         .route("/v1/policies", get(policies))
@@ -405,6 +406,7 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Va
         "waiting_on": run.reason,
         "summary": run.summary,
         "thread": task.chat.as_ref().map(|c| c.thread.clone()),
+        "verdict": task.verdict,
     });
     if full {
         let criteria: Vec<Value> = run
@@ -692,6 +694,34 @@ async fn cancel(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
     }
     k.on_stop(&run.id, true).await;
     Json(json!({ "ok": true })).into_response()
+}
+
+/// The person's verdict on an outcome that has ended: right, partly or
+/// wrong, with an optional note. A later verdict replaces it.
+async fn verdict(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some((task, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
+    if task.person != p.id {
+        return err(StatusCode::FORBIDDEN, "only the person it is for gives a verdict");
+    }
+    let Some(v) = b["verdict"].as_str().filter(|v| crate::state::VERDICTS.contains(v)) else {
+        return err(StatusCode::BAD_REQUEST, "verdict is right, partly or wrong");
+    };
+    let note = b["note"].as_str().map(str::trim).filter(|n| !n.is_empty()).map(String::from);
+    if note.as_ref().is_some_and(|n| n.chars().count() > crate::compose::MAX_TEXT) {
+        return err(StatusCode::BAD_REQUEST, format!("the note is longer than {} characters", crate::compose::MAX_TEXT));
+    }
+    if !run.status.terminal() {
+        return err(StatusCode::CONFLICT, "the task has not ended");
+    }
+    let ev = Ev::Verdict { task: task.task_id.clone(), person: p.id.clone(), verdict: v.into(), note };
+    match k.emit(&format!("person:{}", p.id), ev).await {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => internal(e),
+    }
 }
 
 async fn inbox_list(State(k): K, h: HeaderMap) -> Response {

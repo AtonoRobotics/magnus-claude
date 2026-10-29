@@ -521,8 +521,9 @@ async fn a_person_chooses_the_model_for_a_task_and_a_chat_message() {
 /// A request set compared across models (the Experiments view): each trial is
 /// a chat message on a chosen model, once per model. The report shows what
 /// each model chose, the tasks it started, every policy stop on the way, and
-/// the cost and time, until everything ended or stopped for a person; the
-/// person's judgment of the choice is a grade they may change.
+/// the cost and time, until everything ended or stopped for a person. The
+/// person's verdict on each outcome (right, partly, wrong) is in the log; a
+/// rerun of the set is compared with the first, request by request.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_set_compares_models_in_chat_and_takes_the_persons_judgment() {
     let mail = mcp::mail().start().await;
@@ -576,7 +577,7 @@ async fn a_request_set_compares_models_in_chat_and_takes_the_persons_judgment() 
             assert_eq!(r["choice"], choice, "case {case}: {r}");
             assert_eq!(r["text"], text);
             assert!(r["usd"].is_number() && r["seconds"].as_f64().is_some_and(|s| s >= 0.0), "{r}");
-            assert!(r["judged_correct"].is_null());
+            assert!(r["verdict"].is_null() && r["verdict_from"] == "none", "{r}");
             if case == "2" {
                 assert_eq!(r["tasks"][0]["title"], "Email Bob the agenda", "{r}");
                 assert_eq!(r["tasks"][0]["status"], "suspended", "{r}");
@@ -594,21 +595,101 @@ async fn a_request_set_compares_models_in_chat_and_takes_the_persons_judgment() 
     tokio::time::sleep(Duration::from_millis(1500)).await;
     for r in report.iter().filter(|r| r["case"] == "2") {
         let task = r["tasks"][0]["task"].as_str().unwrap();
+        assert_eq!(dana.post(&format!("/v1/tasks/{task}/verdict"), json!({ "verdict": "right" })).await.0.as_u16(), 409, "a verdict on a task that has not ended");
         assert!(dana.post(&format!("/v1/tasks/{task}/cancel"), json!({})).await.0.is_success());
         dana.wait_status(task, &["cancelled"]).await;
     }
     let after = dana.get("/v1/dev/experiments/set1").await.1["requests"].as_array().unwrap().clone();
     assert_eq!(took(&after), before, "cancelling a stopped task changed the request's time");
-    // The person judges a choice, then changes their mind.
-    let run = report.iter().find(|r| r["case"] == "4").unwrap()["run"].as_str().unwrap().to_string();
-    for passed in [false, true] {
-        assert!(dana.post(&format!("/v1/dev/runs/{run}/grades"), json!({ "grader": "choice", "passed": passed })).await.0.is_success());
+    // A verdict per outcome, in the log: the latest counts, only the person
+    // it is for gives one, and only right, partly or wrong.
+    let row = |rs: &[Value], case: &str, model: &str| rs.iter().find(|r| r["case"] == case && r["model"] == format!("anthropic/{model}")).unwrap().clone();
+    let say = |task: Value, verdict: &'static str, note: Option<&'static str>| {
+        let dana = dana.clone();
+        async move {
+            let (st, v) = dana.post(&format!("/v1/tasks/{}/verdict", task.as_str().unwrap()), json!({ "verdict": verdict, "note": note })).await;
+            assert!(st.is_success(), "{verdict}: {v}");
+        }
+    };
+    let spider = row(&report, "1", "claude-test")["task"].clone();
+    let path = format!("/v1/tasks/{}/verdict", spider.as_str().unwrap());
+    assert_eq!(dana.post(&path, json!({ "verdict": "maybe" })).await.0.as_u16(), 400);
+    let (st, _) = app.api("bob").post(&path, json!({ "verdict": "wrong" })).await;
+    assert!(matches!(st.as_u16(), 403 | 404), "someone else gave a verdict: {st}");
+    say(spider.clone(), "wrong", Some("Spiders have eight legs; it said so, but late.")).await;
+    say(spider.clone(), "right", None).await;
+    let task = dana.get(&format!("/v1/tasks/{}", spider.as_str().unwrap())).await.1;
+    assert_eq!(task["verdict"]["verdict"], "right", "the latest verdict does not count: {task}");
+    assert!(task["verdict"]["note"].is_null(), "{task}");
+    // The first run's verdicts. Where the message started a task, the
+    // request's verdict is the task's.
+    say(row(&report, "1", "claude-other")["task"].clone(), "right", None).await;
+    say(row(&report, "2", "claude-test")["tasks"][0]["task"].clone(), "right", Some("Agenda went to Bob.")).await;
+    say(row(&report, "2", "claude-other")["task"].clone(), "wrong", None).await;
+    for m in models {
+        say(row(&report, "3", m)["task"].clone(), "partly", None).await;
+        say(row(&report, "4", m)["task"].clone(), "right", None).await;
     }
-    let x = dana.get("/v1/dev/experiments/set1").await.1;
-    let judged = x["requests"].as_array().unwrap().iter().find(|r| r["run"] == run.as_str()).unwrap().clone();
-    assert_eq!(judged["judged_correct"], true, "the latest judgment does not count: {judged}");
-    let passed: Vec<&Value> = x["configs"].as_array().unwrap().iter().flat_map(|c| c["cases"].as_array().unwrap()).filter(|c| c["case"] == "4").flat_map(|c| c["passed_runs"].as_array().unwrap()).collect();
-    assert!(passed.iter().any(|r| *r == run.as_str()), "a changed judgment still counts as failed");
+    let first = dana.get("/v1/dev/experiments/set1").await.1;
+    let rs = first["requests"].as_array().unwrap();
+    let email = row(rs, "2", "claude-test");
+    assert_eq!((email["verdict"].as_str(), email["verdict_from"].as_str(), email["note"].as_str()), (Some("right"), Some("tasks"), Some("Agenda went to Bob.")), "{email}");
+    assert!(rs.iter().all(|r| r["verdict"].is_string()), "a verdict is missing: {rs:?}");
+    assert!(first["compare"].is_null(), "the first run of a set has nothing to compare with: {}", first["compare"]);
+
+    // A rerun of the set, compared with the first request by request.
+    let mut rerun = vec![];
+    for name in models {
+        for (case, text, _) in cases {
+            let body = json!({ "case": case, "trial": 0, "text": text, "via": "chat", "model": { "adapter": "anthropic", "model": name } });
+            let (st, v) = dana.post("/v1/dev/experiments/set2/trials", body).await;
+            assert_eq!(st.as_u16(), 201, "{v}");
+            rerun.push(v["task_id"].as_str().unwrap().to_string());
+        }
+    }
+    for t in &rerun {
+        dana.wait_settled(t).await;
+    }
+    let second = eventually("the rerun settled", PATIENCE, || {
+        let dana = dana.clone();
+        async move {
+            let x = dana.get("/v1/dev/experiments/set2").await.1;
+            (x["compare"]["complete"] == true).then_some(x)
+        }
+    })
+    .await;
+    let c = &second["compare"];
+    assert_eq!(c["base"], "set1", "{c}");
+    assert_eq!((c["settled"].as_u64(), c["trials"].as_u64()), (Some(8), Some(8)), "{c}");
+    let rs = second["requests"].as_array().unwrap();
+    // The rerun's email tasks stopped for approval too; they end as the
+    // first run's did.
+    for r in rs.iter().filter(|r| r["case"] == "2") {
+        let task = r["tasks"][0]["task"].as_str().unwrap();
+        assert!(dana.post(&format!("/v1/tasks/{task}/cancel"), json!({})).await.0.is_success());
+        dana.wait_status(task, &["cancelled"]).await;
+    }
+    say(row(rs, "1", "claude-test")["task"].clone(), "right", None).await; // unchanged
+    say(row(rs, "1", "claude-other")["task"].clone(), "wrong", Some("Said six.")).await; // regressed
+    say(row(rs, "2", "claude-test")["task"].clone(), "right", None).await; // unchanged
+    say(row(rs, "2", "claude-other")["task"].clone(), "right", None).await; // improved
+    say(row(rs, "3", "claude-test")["task"].clone(), "right", None).await; // improved
+    say(row(rs, "3", "claude-other")["task"].clone(), "partly", None).await; // unchanged
+    say(row(rs, "4", "claude-other")["task"].clone(), "right", None).await; // unchanged; claude-test's is left to judge
+    let c = dana.get("/v1/dev/experiments/set2").await.1["compare"].clone();
+    assert_eq!(c["summary"], json!({ "improved": 2, "unchanged": 4, "regressed": 1, "unjudged": 1 }), "{c}");
+    let pairs = c["pairs"].as_array().unwrap();
+    assert_eq!(pairs.len(), 8, "{c}");
+    let pair = |case: &str, model: &str| pairs.iter().find(|p| p["case"] == case && p["model"] == format!("anthropic/{model}")).unwrap();
+    let spider = pair("1", "claude-other");
+    assert_eq!((spider["outcome"].as_str(), spider["changed"].clone()), (Some("regressed"), json!(["verdict"])), "{spider}");
+    assert_eq!(spider["after"]["note"], "Said six.");
+    assert!(spider["usd_change"].is_number() && spider["seconds_change"].is_number(), "{spider}");
+    // The same model made the same choices both times, so nothing else changed.
+    for p in pairs {
+        assert_eq!(p["before"]["choice"], p["after"]["choice"], "{p}");
+        assert!(p["changed"].as_array().unwrap().iter().all(|f| f == "verdict"), "{p}");
+    }
 
     // The same, as the developer sees it.
     assert!(magnus_scratch::set_password(&app, "dana", magnus_scratch::PASSWORD));
@@ -617,7 +698,7 @@ async fn a_request_set_compares_models_in_chat_and_takes_the_persons_judgment() 
         .env("MAGNUS_URL", &app.base)
         .env("MAGNUS_PERSON", "dana")
         .env("MAGNUS_PASSWORD", magnus_scratch::PASSWORD)
-        .env("MAGNUS_EXPERIMENT", "set1")
+        .env("MAGNUS_EXPERIMENT", "set2")
         .env("MAGNUS_MODELS", models.len().to_string())
         .env("MAGNUS_CHROMIUM", magnus_scratch::chromium())
         .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))

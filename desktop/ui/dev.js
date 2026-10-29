@@ -145,23 +145,51 @@ route(/^#\/dev\/experiments$/, async main => {
 });
 
 // A request set run in chat: each request against each model, what the
-// model chose, what stopped it, and what it cost; the person judges each
-// choice, and the judgment is the trial's grade.
+// model chose, what stopped it, and what it cost; the person gives each
+// request a verdict (right, partly, wrong) on its answer, and a rerun is
+// compared with the run before it.
 const CHOICE = { answer: "Answered", asked: "Asked back", task: "Started tasks", schedule: "Proposed a schedule" };
 const secs = s => s === null || s === undefined ? "–" : s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
 const usd = v => v === null || v === undefined ? "–" : `$${v < 0.1 ? v.toFixed(3) : v.toFixed(2)}`;
 const median = xs => { const v = xs.slice().sort((a, b) => a - b); return v.length ? (v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2) : null; };
 const modelOf = key => key.split(" · ")[0];
+const VERDICT_WORDS = [["right", "right"], ["partly", "partly"], ["wrong", "wrong"]];
+const CHANGED = { verdict: "verdict", choice: "choice", stops: "policy stops", tasks: "tasks", setup: "instructions or harness" };
+const signed = (v, f) => v === null || v === undefined ? "–" : `${v > 0 ? "+" : v < 0 ? "−" : "±"}${f(Math.abs(v))}`;
+
+// This run of the requests against the run before: one summary once every
+// trial has settled, then each request on each model side by side with what
+// changed, regressions first.
+function comparison(x, experiments) {
+  const c = x.compare;
+  if (!c) return "";
+  const side = r => `<div><span class="chip ${r.verdict === "right" ? "ok" : r.verdict === "wrong" ? "bad" : r.verdict ? "warn" : ""}">${esc(r.verdict || "no verdict")}</span>
+    <span class="small">${esc(CHOICE[r.choice] || r.choice)} · ${r.stops.length} stops · ${usd(r.usd)} · ${secs(r.seconds)}</span></div>`;
+  const order = { regressed: 0, improved: 1, unjudged: 2, unchanged: 3 };
+  const pairs = c.pairs.slice().sort((a, b) => order[a.outcome] - order[b.outcome] || b.changed.length - a.changed.length);
+  const others = experiments.filter(e => e.id !== x.id);
+  return `<h2>Against an earlier run</h2>
+    <div class="row"><label class="small muted" for="base">Compared with</label> <select id="base">${others.map(e => `<option value="${esc(e.id)}"${e.id === c.base ? " selected" : ""}>${esc(e.id)}</option>`).join("")}</select></div>
+    ${c.complete
+      ? `<div class="grid" data-compare-summary style="margin:12px 0">${[["improved", "Improved", "ok"], ["unchanged", "Unchanged", ""], ["regressed", "Regressed", "bad"]].map(([k, w, cls]) => `<div><div class="small muted">${w}</div><div class="num ${cls}" style="font-size:22px;font-weight:650" data-${k}>${c.summary[k]}</div></div>`).join("")}</div>
+        ${c.summary.unjudged ? `<p class="small faint">${c.summary.unjudged} not judged yet: a verdict is missing on one side.</p>` : ""}`
+      : `<p class="muted" data-compare-waiting>${c.settled} of ${c.trials} trials have settled; the summary shows when the rerun completes.</p>`}
+    <table class="t" data-compare><thead><tr><th>Request</th><th>Model</th><th>${esc(c.base)}</th><th>${esc(x.id)}</th><th>Changed</th></tr></thead><tbody>
+    ${pairs.map(p => `<tr data-pair="${esc(p.case)}" data-outcome="${esc(p.outcome)}"><td class="small">${esc(p.text || p.case)}</td><td class="mono small">${esc(p.model)}</td>
+      <td>${side(p.before)}</td><td>${side(p.after)}</td>
+      <td class="small">${p.outcome !== "unchanged" && p.outcome !== "unjudged" ? `<span class="chip ${p.outcome === "improved" ? "ok" : "bad"}">${esc(p.outcome)}</span> ` : ""}${p.changed.map(f => `<span class="chip warn" data-changed="${esc(f)}">${esc(CHANGED[f] || f)}</span>`).join(" ")}
+        <div class="faint">cost ${signed(p.usd_change, usd)} · time ${signed(p.seconds_change, secs)}</div></td></tr>`).join("")}</tbody></table>`;
+}
 
 function requestSet(x) {
   const configs = [...new Set(x.requests.map(r => r.config))];
   const cases = [...new Set(x.requests.map(r => r.case))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   const summary = configs.map(c => {
     const rs = x.requests.filter(r => r.config === c);
-    const judged = rs.filter(r => r.judged_correct !== null);
+    const judged = rs.filter(r => r.verdict);
     const choices = Object.entries(rs.reduce((m, r) => ({ ...m, [r.choice]: (m[r.choice] || 0) + 1 }), {}));
     return `<tr><td class="mono small">${esc(modelOf(c))}</td>
-      <td class="n">${judged.length ? `${judged.filter(r => r.judged_correct).length} of ${judged.length}` : "–"}${judged.length < rs.length ? ` <span class="faint small">(${rs.length - judged.length} to judge)</span>` : ""}</td>
+      <td class="n">${judged.length ? VERDICT_WORDS.map(([k, w]) => `${judged.filter(r => r.verdict === k).length} ${w}`).join(" · ") : "–"}${judged.length < rs.length ? ` <span class="faint small">(${rs.length - judged.length} to judge)</span>` : ""}</td>
       <td class="small">${choices.map(([k, n]) => `${esc(CHOICE[k] || k)} ${n}`).join(" · ")}</td>
       <td class="n">${rs.reduce((n, r) => n + r.stops.length, 0)} <span class="faint small">in ${rs.filter(r => r.stops.length).length}</span></td>
       <td class="n">${usd(rs.reduce((n, r) => n + (r.usd || 0), 0))}</td>
@@ -174,31 +202,31 @@ function requestSet(x) {
       ${r.answer ? `<details data-key="answer:${esc(r.run)}"><summary class="small">What it said</summary><div class="small" style="white-space:pre-wrap">${esc(r.answer)}</div></details>` : ""}</td>
     <td class="n">${r.stops.length ? `<span title="${esc(r.stops.map(s => `${s.tool}: ${s.outcome} at ${s.stage}${s.rule ? ` (${s.rule})` : ""}`).join("\n"))}">${r.stops.length}</span>` : "0"}</td>
     <td class="n">${usd(r.usd)}</td><td class="n">${secs(r.seconds)}${r.settled ? "" : ` <span class="chip run">running</span>`}</td>
-    <td class="n" style="white-space:nowrap"><button data-judge="${esc(r.run)}" data-ok="1" class="${r.judged_correct === true ? "primary" : ""}" aria-label="Correct choice">✓</button>
-      <button data-judge="${esc(r.run)}" data-ok="0" class="${r.judged_correct === false ? "danger" : ""}" aria-label="Wrong choice">✗</button>
+    <td>${r.settled ? verdictBar(r.task, r.verdict_from === "answer" ? { verdict: r.verdict, note: r.note } : null) : ""}
+      ${r.verdict_from === "tasks" ? `<div class="small muted">From its tasks: ${esc(r.verdict)}${r.note ? ` · ${esc(r.note)}` : ""}</div>` : ""}
       <a class="small" href="#/dev/run/${enc(r.run)}">run</a></td></tr>`;
-  return `<h2>By model</h2><table class="t" data-summary><thead><tr><th>Model</th><th class="n">Correct choice</th><th>Choices</th><th class="n">Policy stops</th><th class="n">Cost</th><th class="n">Median time</th><th class="n">Settled</th></tr></thead><tbody>${summary}</tbody></table>
+  return `<h2>By model</h2><table class="t" data-summary><thead><tr><th>Model</th><th class="n">Verdicts</th><th>Choices</th><th class="n">Policy stops</th><th class="n">Cost</th><th class="n">Median time</th><th class="n">Settled</th></tr></thead><tbody>${summary}</tbody></table>
     <p class="small faint">Time runs from the message to the moment the reply and every task it started ended or stopped for a person. Policy stops are actions the boundary asked about or refused, in the reply and its tasks.</p>
     <h2>By request</h2>${cases.map(c => {
       const rs = x.requests.filter(r => r.case === c);
       return `<div class="card" data-case="${esc(c)}"><div style="font-weight:600">${esc(rs[0].text)}</div>
-        <table class="t req"><thead><tr><th>Model</th><th>Choice</th><th class="n">Stops</th><th class="n">Cost</th><th class="n">Time</th><th class="n">Correct?</th></tr></thead><tbody>${rs.map(row).join("")}</tbody></table></div>`;
+        <table class="t req"><thead><tr><th>Model</th><th>Choice</th><th class="n">Stops</th><th class="n">Cost</th><th class="n">Time</th><th>Verdict</th></tr></thead><tbody>${rs.map(row).join("")}</tbody></table></div>`;
     }).join("")}`;
 }
 
-route(/^#\/dev\/experiment\/([^/?]+)(?:\?k=(\d+))?$/, async (main, id, k) => {
+route(/^#\/dev\/experiment\/([^/?]+)(?:\?(.*))?$/, async (main, id, query) => {
   if (devOnly(main)) return;
-  main.onclick = async e => {
-    const b = e.target.closest("button[data-judge]");
-    if (!b) return;
-    await api("POST", `/v1/dev/runs/${enc(b.dataset.judge)}/grades`, { grader: "choice", passed: b.dataset.ok === "1" });
-    await draw();
-  };
+  const qs = new URLSearchParams(query || ""), k = qs.get("k"), base = qs.get("base");
+  main.onchange = e => { if (e.target.id === "base") location.hash = `#/dev/experiment/${enc(id)}?base=${enc(e.target.value)}`; };
   const draw = async () => {
-    const x = await api("GET", `/v1/dev/experiments/${enc(id)}${k ? `?k=${k}` : ""}`);
+    const want = new URLSearchParams();
+    if (k) want.set("k", k);
+    if (base) want.set("base", base);
+    const x = await api("GET", `/v1/dev/experiments/${enc(id)}${want.size ? `?${want}` : ""}`);
     if (x.requests?.length) {
+      const { experiments } = x.compare ? await api("GET", "/v1/dev/experiments") : { experiments: [] };
       paint(main, `<p class="small"><a href="#/dev/experiments">Experiments</a></p><h1 class="mono">${esc(x.id)}</h1>
-        <p class="muted">${x.cases.length} requests, each sent as a chat message to every model. Judge each choice with ✓ or ✗.</p>${requestSet(x)}`);
+        <p class="muted">${x.cases.length} requests, each sent as a chat message to every model. Give each answer a verdict: right, partly or wrong.</p>${comparison(x, experiments)}${requestSet(x)}`);
       return;
     }
     const metric = (m, fmt) => `${fmt(m.mean)}${m.se !== null ? ` <span class="faint">± ${fmt(m.se)}</span>` : ""}`;
@@ -219,6 +247,8 @@ route(/^#\/dev\/experiment\/([^/?]+)(?:\?k=(\d+))?$/, async (main, id, k) => {
         <p style="margin-top:8px">Mean difference in pass rate over ${p.cases} shared cases: <strong class="num">${p.mean_difference === null ? "–" : `${p.mean_difference >= 0 ? "+" : ""}${pct(p.mean_difference)}`}</strong>${p.se !== null ? ` <span class="faint">± ${pct(p.se)}</span>` : ""}. Better on ${p.better}, worse on ${p.worse}, same on ${p.same}.</p>
         <table class="t small"><tbody>${p.by_case.map(c => `<tr><td class="mono">${esc(c.case)}</td><td class="n">${c.difference > 0 ? "+" : ""}${pct(c.difference)}</td></tr>`).join("")}</tbody></table></div>`).join("")}` : ""}`);
   };
+  App.redraw = draw;
+  onLeave(() => { App.redraw = null; });
   await draw();
   every(10000, draw);
 });

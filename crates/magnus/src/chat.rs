@@ -139,7 +139,7 @@ impl Kernel {
                     Status::Completed => out.push((
                         r.ended_at.unwrap_or(t.created_at),
                         i64::MAX,
-                        json!({ "kind": "answer", "text": r.summary, "at": r.ended_at, "task_id": t.task_id, "model": { "adapter": r.config.adapter, "model": r.config.model } }),
+                        json!({ "kind": "answer", "text": r.summary, "at": r.ended_at, "task_id": t.task_id, "model": { "adapter": r.config.adapter, "model": r.config.model }, "verdict": t.verdict }),
                     )),
                     _ => out.push((
                         r.ended_at.unwrap_or(t.created_at),
@@ -155,7 +155,7 @@ impl Kernel {
                 if let Some(end) = r.ended_at {
                     let after = t.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| answered.get(f)).map_or(end, |a| end.max(*a));
                     let files: Vec<Value> = r.outputs.iter().map(|(id, name, mt, size)| json!({ "id": id, "name": name, "media_type": mt, "size": size })).collect();
-                    out.push((after, i64::MAX, json!({ "kind": "result", "task_id": t.task_id, "title": title, "text": t.text, "status": status, "summary": r.summary, "at": end, "files": files })));
+                    out.push((after, i64::MAX, json!({ "kind": "result", "task_id": t.task_id, "title": title, "text": t.text, "status": status, "summary": r.summary, "at": end, "files": files, "verdict": t.verdict })));
                 }
             }
         }
