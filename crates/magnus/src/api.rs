@@ -1077,7 +1077,7 @@ async fn memory(State(k): K, h: HeaderMap) -> Response {
         s.memory
             .iter()
             .filter(|m| m.person == p.id)
-            .map(|m| json!({ "id": m.id, "fact": m.fact, "topic": m.topic, "label": m.label, "run": m.run, "at": m.at }))
+            .map(|m| json!({ "id": m.id, "fact": m.fact, "topic": m.topic, "label": m.label, "run": m.run, "by": m.by.as_deref().unwrap_or("model"), "at": m.at }))
             .collect()
     });
     Json(json!({ "memory": items })).into_response()
@@ -1206,11 +1206,14 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
                     s.tasks.values().filter(|t| t.schedule.as_deref() == Some(x.id.as_str())).filter_map(|t| s.runs.get(&t.run_id).map(|r| (t, r))).collect();
                 runs.sort_by(|a, b| b.0.created_at.cmp(&a.0.created_at));
                 let rows: Vec<Value> = runs.iter().map(|(t, r)| task_row(&k, s, &p, t, r)).collect();
-                let last = rows.iter().find(|r| !r["ended_at"].is_null()).cloned();
+                // Every firing shows: the newest task whatever its state, and firings that could not start one.
+                let last = rows.first().cloned();
+                let failures: Vec<Value> = x.failures.iter().rev().map(|(at, why)| json!({ "at": at, "error": why })).collect();
+                let last_failed = x.failures.last().filter(|(at, _)| rows.first().and_then(|r| r["created_at"].as_str()).and_then(|c| chrono::DateTime::parse_from_rfc3339(c).ok()).is_none_or(|c| c < *at)).map(|(at, why)| json!({ "at": at, "error": why }));
                 json!({
                     "id": x.id, "person": x.person, "text": x.text, "title": x.title.clone().unwrap_or_else(|| x.text.clone()),
                     "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due(), "last_fired": x.last_fired,
-                    "last": last, "runs": rows,
+                    "last": last, "last_failed": last_failed, "failures": failures, "runs": rows,
                     "project": s.project_of(&x.id).and_then(|id| s.projects.get(&id)).map(|p| json!({ "id": p.id, "name": p.name })),
                 })
             })
@@ -1220,8 +1223,9 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
 }
 
 fn schedule_rule(b: &Value) -> Result<(Option<u32>, Option<String>), String> {
-    let every = b["every_minutes"].as_u64().map(|m| m as u32);
-    let daily = b["daily_at"].as_str().map(String::from);
+    // A model that must fill every field sends 0 or "" for the one it does not mean.
+    let every = b["every_minutes"].as_u64().filter(|m| *m > 0).map(|m| m as u32);
+    let daily = b["daily_at"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
     match (every, &daily) {
         (Some(m), None) if m >= 5 => Ok((Some(m), None)),
         (Some(_), None) => Err("schedules run at most every 5 minutes".into()),

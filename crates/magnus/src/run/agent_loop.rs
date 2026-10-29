@@ -151,6 +151,12 @@ impl Kernel {
                     if !has_call && chat {
                         self.emit("kernel", Ev::Completed { run: run_id.into(), summary: answer, view: None, spoken: None }).await?;
                         self.on_stop(run_id, true).await;
+                        // What the person asked for and did not happen is in the inbox too (K24).
+                        let unfinished = self.unfinished_chat_actions(&run);
+                        if !unfinished.is_empty() {
+                            self.notice(&run, format!("Not done: {}", self.title_of(&run)), json!({ "reason": "chat_action_failed", "evidence": unfinished })).await?;
+                        }
+                        self.after_end(run_id);
                         return Ok(Flow::Stop);
                     }
                     if !has_call {

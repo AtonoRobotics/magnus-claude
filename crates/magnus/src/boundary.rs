@@ -26,6 +26,9 @@ pub enum Issuer {
     /// The verifier module reading the world to judge the work (R1: quality,
     /// not a control). Like a check, it may only read or run in a check VM.
     Verifier,
+    /// The memory pass filing what the exchange taught about the person; it
+    /// may only write memory.
+    Memory,
 }
 
 impl Issuer {
@@ -34,6 +37,7 @@ impl Issuer {
             Issuer::Model => "model",
             Issuer::Check => "kernel:contract_check",
             Issuer::Verifier => "kernel:verifier",
+            Issuer::Memory => "kernel:memory_pass",
         }
     }
 
@@ -456,11 +460,18 @@ impl Kernel {
         if is_chat_tool(f) && !chat_turn {
             return Ok(Err(self.deny(a, "policy", &format!("{} is for chat; in a task, do the work, or propose a schedule with propose_schedule", a.tool), false, None).await?));
         }
-        if chat_turn && f.risk != Risk::Read && !is_chat_tool(f) {
+        if a.issuer == Issuer::Memory && f.name != "memory_write" {
+            return Ok(Err(self.deny(a, "policy", "the memory pass may only write memory", false, None).await?));
+        }
+        // The person's own memory is not the world: writing it changes
+        // nothing outside the appliance and keeps the run's taint (M1), so
+        // chat may write it and it needs no contract.
+        let own_memory = f.connector.is_none() && f.app == "memory";
+        if chat_turn && f.risk != Risk::Read && !is_chat_tool(f) && !own_memory {
             let why = format!("in chat you may only read; {} changes something, so start a task with create_task to do it", a.tool);
             return Ok(Err(self.deny(a, "policy", &why, false, None).await?));
         }
-        if f.risk.changes_state() && run.contract.is_none() && a.issuer == Issuer::Model && !chat_turn {
+        if f.risk.changes_state() && run.contract.is_none() && a.issuer == Issuer::Model && !chat_turn && !own_memory {
             let why = "record a task contract with task_contract before changing anything; then retry";
             return Ok(Err(self.deny(a, "policy", why, true, None).await?));
         }
@@ -484,7 +495,7 @@ impl Kernel {
         // travel there even when it only reads).
         // Starting a task from chat sends nothing out: the task carries the
         // turn's taint, and the rules apply to what it sends.
-        let transmits = !is_chat_tool(f) && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private));
+        let transmits = !is_chat_tool(f) && !own_memory && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private));
         // These override a policy ask: the approval must then cover this exact
         // action, not a broader scope granted for policy reasons.
         if transmits && untrusted && private {
@@ -564,8 +575,8 @@ impl Kernel {
                 .find(|i| i.run.as_deref() == Some(&a.run) && i.kind == "approval" && i.resolution.is_none() && i.details["call_id"] == a.call_id.as_str())
                 .map(|i| i.id.clone())
         });
-        let id = match open {
-            Some(id) => id,
+        let (id, item) = match open {
+            Some(id) => (id, None),
             None => {
                 let id = new_id("item");
                 // One question for all of a task's (or a conversation's) web
@@ -585,9 +596,7 @@ impl Kernel {
                 } else {
                     format!("Approve {} ({})?", a.tool, f.risk.as_str())
                 };
-                self.emit(
-                    "kernel",
-                    Ev::Item {
+                let ev = Ev::Item {
                         id: id.clone(),
                         item_kind: "approval".into(),
                         task: Some(run.task.clone()),
@@ -600,13 +609,11 @@ impl Kernel {
                             "why": why, "rule": rule, "web_lookups": lookup.then_some(if chat_turn { "conversation" } else { "task" }),
                             "taint": { "untrusted": run.untrusted, "private": run.private }
                         }),
-                    },
-                )
-                .await?;
-                id
+                    };
+                (id, Some(ev))
             }
         };
-        self.suspend(&a.run, "approval", Some(id)).await?;
+        self.suspend_on(&a.run, "approval", id, item).await?;
         Ok(Gate::Stop(Verdict::Suspended))
     }
 
@@ -781,6 +788,7 @@ impl Kernel {
                             topic: a.input["topic"].as_str().map(String::from),
                             label,
                             sources,
+                            by: (a.issuer == Issuer::Memory).then(|| "memory_pass".to_string()),
                         },
                     )
                     .await?;
@@ -852,7 +860,17 @@ impl Kernel {
     }
 
     fn memory_hits(&self, run: &str, query: &str) -> Vec<crate::state::MemoryEntry> {
-        let terms: Vec<String> = query.to_lowercase().split_whitespace().map(String::from).collect();
+        // Each word by its stem (its first two thirds, at least four
+        // letters), so "allergy" finds "allergic" and "schedules" "scheduled".
+        let terms: Vec<String> = query
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() >= 3)
+            .map(|w| {
+                let n = w.chars().count();
+                w.chars().take(if n > 4 { (n * 2 / 3).max(4) } else { n }).collect()
+            })
+            .collect();
         self.read(|s| {
             let Some(person) = s.runs.get(run).map(|r| r.person.clone()) else { return vec![] };
             let mut hits: Vec<_> = s

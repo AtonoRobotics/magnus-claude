@@ -173,6 +173,15 @@ impl Run {
     }
 
     /// Tool calls from the latest reply that have no result yet, in order.
+    /// Every tool call with its result, in the order the model made them.
+    pub fn results_in_order(&self) -> Vec<Value> {
+        self.replies
+            .iter()
+            .flat_map(|r| r.calls())
+            .filter_map(|(id, name, _)| self.results.get(&id).map(|x| serde_json::json!({ "tool": name, "text": x.text, "is_error": x.is_error, "status": x.status, "seq": x.seq })))
+            .collect()
+    }
+
     pub fn pending_calls(&self) -> Vec<(usize, String, String, Value)> {
         let Some(r) = self.replies.last() else { return vec![] };
         r.calls()
@@ -309,6 +318,8 @@ pub struct MemoryEntry {
     pub topic: Option<String>,
     pub label: Label,
     pub sources: Vec<String>,
+    /// The memory pass, or None for the run's own model.
+    pub by: Option<String>,
     pub at: DateTime<Utc>,
 }
 
@@ -350,6 +361,8 @@ pub struct Schedule {
     pub card: Option<String>,
     pub label: Label,
     pub title: Option<String>,
+    /// Firings that could not start a task: when, and why.
+    pub failures: Vec<(DateTime<Utc>, String)>,
 }
 
 /// What became of a schedule proposed in chat.
@@ -585,6 +598,7 @@ impl State {
                         card: card.clone(),
                         label: label.unwrap_or_default(),
                         title: title.clone(),
+                        failures: vec![],
                     },
                 );
                 if let Some(c) = card {
@@ -597,6 +611,13 @@ impl State {
             Ev::MemoryForgotten { id } => self.memory.retain(|m| &m.id != id),
             Ev::ScheduleRemoved { id } => {
                 self.schedules.remove(id);
+            }
+            // A firing that failed still counts as fired: the next one is due as usual.
+            Ev::ScheduleFailed { id, reason } => {
+                if let Some(s) = self.schedules.get_mut(id) {
+                    s.last_fired = Some(e.at);
+                    s.failures.push((e.at, reason.clone()));
+                }
             }
             Ev::ScheduleFired { id, task } => {
                 if let Some(s) = self.schedules.get_mut(id) {
@@ -717,7 +738,7 @@ impl State {
                     r.replies.push(Reply { step: *step, seq: e.seq, blocks: blocks.clone(), state: state.clone() });
                 }
             }
-            Ev::VerifierReply { run, usage, .. } => {
+            Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.model_calls += 1;
                     r.usd += usage.cost_usd;
@@ -1005,7 +1026,7 @@ impl State {
             Ev::AdapterVerified { adapter_id, version, model, passed, report, .. } => {
                 self.conformance.insert(adapter_id.clone(), (version.clone(), model.clone(), *passed, report.clone()));
             }
-            Ev::Memory { id, person, run, fact, topic, label, sources } => self.memory.push(MemoryEntry {
+            Ev::Memory { id, person, run, fact, topic, label, sources, by } => self.memory.push(MemoryEntry {
                 id: id.clone(),
                 person: person.clone(),
                 run: run.clone(),
@@ -1013,6 +1034,7 @@ impl State {
                 topic: topic.clone(),
                 label: *label,
                 sources: sources.clone(),
+                by: by.clone(),
                 at: e.at,
             }),
         }

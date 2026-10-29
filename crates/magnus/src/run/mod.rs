@@ -4,6 +4,7 @@
 
 mod agent_loop;
 pub mod lost;
+mod memory;
 mod verify;
 
 pub use agent_loop::Flow;
@@ -188,7 +189,7 @@ impl Kernel {
         let chat = self.is_chat_turn(run);
         let mut specs = tools::builtin_specs(self.sandboxes.available(), self.web.can_search(), self.browser.available());
         if chat {
-            specs.retain(|t| tools::builtin(&t.name).is_some_and(|b| b.risk == Risk::Read));
+            specs.retain(|t| tools::builtin(&t.name).is_some_and(|b| b.risk == Risk::Read || b.name == "memory_write"));
             specs.extend(tools::chat_specs());
         }
         // project_read only where there are reference files to read.
@@ -348,7 +349,8 @@ impl Kernel {
 
     /// An inbox item for a run record. Its id comes from the call, so a crash
     /// between the item and the call's result does not make a second one.
-    async fn item(&self, run: &Run, kind: &str, summary: String, mut details: Value) -> Result<String> {
+    /// An inbox item for the run, unless it is already there: its id, and the event to write when it is new.
+    fn item_event(&self, run: &Run, kind: &str, summary: String, mut details: Value) -> (String, Option<Ev>) {
         use sha2::Digest;
         let call = details["call_id"].as_str().unwrap_or_default().to_string();
         let id = if call.is_empty() {
@@ -357,22 +359,18 @@ impl Kernel {
             format!("item_{}", &hex::encode(sha2::Sha256::digest(format!("{}\n{call}\n{kind}", run.id).as_bytes()))[..32])
         };
         if self.read(|s| s.items.contains_key(&id)) {
-            return Ok(id);
+            return (id, None);
         }
         details["taint"] = json!({ "untrusted": run.untrusted, "private": run.private });
-        self.emit(
-            "kernel",
-            Ev::Item {
-                id: id.clone(),
-                item_kind: kind.into(),
-                task: Some(run.task.clone()),
-                run: Some(run.id.clone()),
-                person: run.person.clone(),
-                summary,
-                details,
-            },
-        )
-        .await?;
+        let ev = Ev::Item { id: id.clone(), item_kind: kind.into(), task: Some(run.task.clone()), run: Some(run.id.clone()), person: run.person.clone(), summary, details };
+        (id, Some(ev))
+    }
+
+    async fn item(&self, run: &Run, kind: &str, summary: String, details: Value) -> Result<String> {
+        let (id, ev) = self.item_event(run, kind, summary, details);
+        if let Some(ev) = ev {
+            self.emit("kernel", ev).await?;
+        }
         Ok(id)
     }
 
@@ -388,15 +386,13 @@ impl Kernel {
                 // Work has started: the change goes to the person, old and new
                 // side by side, and only an approved version counts (K37).
                 Ok(labelled) if run.contract_frozen.is_some() => {
-                    let item = self
-                        .item(
-                            run,
-                            "contract_change",
-                            format!("The agent asks to change the done-criteria of: {}", run.contract.as_ref().and_then(|c| c["goal"].as_str()).unwrap_or("the task")),
-                            json!({ "call_id": call_id, "version": run.contract_version, "old": run.contract, "new": self.with_conversation(run, labelled) }),
-                        )
-                        .await?;
-                    self.suspend(rid, "contract_change", Some(item)).await?;
+                    let (item, ev) = self.item_event(
+                        run,
+                        "contract_change",
+                        format!("The agent asks to change the done-criteria of: {}", run.contract.as_ref().and_then(|c| c["goal"].as_str()).unwrap_or("the task")),
+                        json!({ "call_id": call_id, "version": run.contract_version, "old": run.contract, "new": self.with_conversation(run, labelled) }),
+                    );
+                    self.suspend_on(rid, "contract_change", item, ev).await?;
                     return Ok(Flow::Stop);
                 }
                 Ok(labelled) => {
@@ -434,14 +430,17 @@ impl Kernel {
             "task_fail" => {
                 let reason = input["reason"].as_str().unwrap_or("no reason given").to_string();
                 self.result(rid, call_id, "Recorded.", false).await?;
-                self.emit("model", Ev::Failed { run: rid.into(), reason, by: "model".into() }).await?;
+                self.emit("model", Ev::Failed { run: rid.into(), reason: reason.clone(), by: "model".into() }).await?;
                 self.on_stop(rid, true).await;
+                // A failure is never silent (K24): the person's inbox says so, with the evidence.
+                self.notice(&run, format!("Failed: {}", self.title_of(&run)), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run) } })).await?;
+                self.after_end(rid);
                 return Ok(Flow::Stop);
             }
             "ask_principal" => {
                 let q = input["question"].as_str().unwrap_or_default().to_string();
-                let item = self.item(run, "question", q.clone(), json!({ "call_id": call_id, "question": q, "options": input["options"] })).await?;
-                self.suspend(rid, "question", Some(item)).await?;
+                let (item, ev) = self.item_event(run, "question", q.clone(), json!({ "call_id": call_id, "question": q, "options": input["options"] }));
+                self.suspend_on(rid, "question", item, ev).await?;
                 return Ok(Flow::Stop);
             }
             "propose_policy" => {
@@ -720,20 +719,21 @@ impl Kernel {
         }
         if !unchecked.is_empty() {
             // No executable check, and the verifier off or unsure: the person reviews (K37).
-            let item = self
-                .item(
-                    run,
-                    "review",
-                    format!("Review: {}", contract["goal"].as_str().unwrap_or("the task")),
-                    json!({ "call_id": call_id, "summary": summary, "criteria": unchecked, "view": view, "spoken": spoken }),
-                )
-                .await?;
-            self.suspend(rid, "review", Some(item)).await?;
+            let (item, ev) = self.item_event(
+                run,
+                "review",
+                format!("Review: {}", contract["goal"].as_str().unwrap_or("the task")),
+                json!({ "call_id": call_id, "summary": summary, "criteria": unchecked, "view": view, "spoken": spoken }),
+            );
+            self.suspend_on(rid, "review", item, ev).await?;
+            // The work is done; only the person's review is left.
+            self.after_end(rid);
             return Ok(Flow::Stop);
         }
         self.result(rid, call_id, "Verified and completed.", false).await?;
         self.emit("kernel", Ev::Completed { run: rid.into(), summary, view: Some(view), spoken }).await?;
         self.on_stop(rid, true).await;
+        self.after_end(rid);
         Ok(Flow::Stop)
     }
 }

@@ -153,6 +153,11 @@ pub const MODULES: &[Module] = &[
         compensates: "models too weak for a task they keep failing at",
         ablation_suite: "tests/scratch/tests/modules.rs: a_run_lost_again_escalates_to_the_stronger_model",
     },
+    Module {
+        name: "memory_pass",
+        compensates: "models that rarely choose to write down what they learn about the person",
+        ablation_suite: "tests/scratch/tests/memory.rs: a_fact_stated_in_one_chat_is_recalled_in_a_new_one",
+    },
 ];
 
 fn summary(s: &State, r: &Run, stall: u32) -> Value {

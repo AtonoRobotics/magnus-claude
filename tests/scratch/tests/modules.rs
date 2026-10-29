@@ -168,7 +168,7 @@ async fn the_verifier_catches_work_its_own_report_overstates() {
     let t = dana.wait_settled(&on).await;
     assert_eq!(t["status"], "completed", "the verifier's verdict did not complete it: {t}");
     assert_eq!(mail.effects("send"), 1);
-    let agent = m.requests().into_iter().filter(|c| !c.offered_tools().is_empty() && !c.offered_tools().contains(&"verdict".to_string())).last().unwrap();
+    let agent = m.requests().into_iter().filter(|c| c.offered_tools().contains(&"task_complete".to_string())).last().unwrap();
     assert!(agent.text().contains("The verifier's review of your criteria") && agent.text().contains("subject"), "the criteria review did not reach the agent");
     let (_, log) = dana.get(&format!("/v1/dev/runs/{on_run}/log")).await;
     let verdicts: Vec<bool> = log["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "verification" && e["body"]["by"] == "verifier").map(|e| e["body"]["passed"].as_bool().unwrap()).collect();

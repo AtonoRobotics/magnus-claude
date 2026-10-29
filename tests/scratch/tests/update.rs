@@ -230,7 +230,9 @@ async fn a_signed_release_installs_while_a_task_runs_and_goes_back_one_step() {
     let done = alice.wait_settled(&task).await;
     assert_eq!(done["waiting_on"], "review", "{done}");
     assert_eq!(mail.calls_to("list_inbox").len(), 1, "a tool call was repeated");
-    assert_eq!(m.requests().len(), 3, "a model reply was asked for again");
+    // The memory pass reads the ended task with a request of its own.
+    let task_requests = m.requests().into_iter().filter(|c| !c.body["system"].to_string().contains("You keep the person's long-term memory")).count();
+    assert_eq!(task_requests, 3, "a model reply was asked for again");
     let db = app.db.admin().await;
     let kinds: Vec<(String, Value)> = db
         .query("SELECT kind, body FROM public.events WHERE run_id = (SELECT run_id FROM public.events WHERE kind = 'task_created' ORDER BY seq DESC LIMIT 1) ORDER BY seq", &[])

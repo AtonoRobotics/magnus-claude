@@ -122,6 +122,26 @@ impl Log {
         Ok(Event { seq: row.get(0), at: row.get(1), actor: actor.into(), ev: ev.clone() })
     }
 
+    /// Several events in one statement: all are in the log or none is.
+    pub async fn append_all(&self, actor: &str, evs: &[Ev]) -> Result<Vec<Event>> {
+        let bodies = evs.iter().map(serde_json::to_value).collect::<Result<Vec<Value>, _>>()?;
+        let kinds: Vec<String> = bodies.iter().map(|b| b["kind"].as_str().unwrap_or_default().to_string()).collect();
+        let runs: Vec<Option<String>> = evs.iter().map(|e| e.run().map(String::from)).collect();
+        let rows = self
+            .client
+            .query(
+                "INSERT INTO public.events (kind, actor, run_id, body)
+                 SELECT k, $2, r, b FROM unnest($1::text[], $3::text[], $4::jsonb[]) WITH ORDINALITY AS e(k, r, b, n) ORDER BY n
+                 RETURNING seq, at",
+                &[&kinds, &actor, &runs, &bodies],
+            )
+            .await
+            .context("append to the event log")?;
+        let mut at: Vec<(i64, chrono::DateTime<chrono::Utc>)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        at.sort_by_key(|(seq, _)| *seq);
+        Ok(at.into_iter().zip(evs).map(|((seq, at), ev)| Event { seq, at, actor: actor.into(), ev: ev.clone() }).collect())
+    }
+
     /// One delivered file's content, read straight from the log.
     pub async fn output(&self, run: &str, id: &str) -> Result<Option<(String, String, Vec<u8>)>> {
         let row = self

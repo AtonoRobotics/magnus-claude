@@ -159,6 +159,19 @@ impl Kernel {
         Ok(e)
     }
 
+    /// Append several events in one write and apply them together: no
+    /// reader sees some of them without the rest.
+    pub async fn emit_all(&self, actor: &str, evs: Vec<Ev>) -> Result<Vec<Event>> {
+        let _g = self.write.lock().await;
+        let es = self.log.append_all(actor, &evs).await?;
+        self.capture.lock().unwrap().appends += es.len() as u64;
+        let mut s = self.state.lock().unwrap();
+        for e in &es {
+            s.apply(e);
+        }
+        Ok(es)
+    }
+
     pub async fn run_events(&self, run: &str) -> Result<Vec<Event>> {
         self.log.run_events(run).await
     }
@@ -220,6 +233,14 @@ impl Kernel {
             k.drivers.lock().unwrap().remove(&run);
             if let Err(e) = r {
                 tracing::error!("run {run}: {e:#}");
+                // Stop it with a notice rather than retry it unseen (K24).
+                let running = k.read(|s| s.runs.get(&run).is_some_and(|r| r.status == Status::Running));
+                if running {
+                    let title = k.read(|s| s.runs.get(&run).cloned()).map(|r| k.title_of(&r)).unwrap_or_default();
+                    if let Err(e2) = k.suspend_with_notice(&run, "error", format!("Stopped by an error: {title}"), serde_json::json!({ "error": format!("{e:#}") })).await {
+                        tracing::error!("run {run}: could not record the error: {e2:#}");
+                    }
+                }
             }
         });
     }
@@ -366,7 +387,13 @@ impl Kernel {
                     Ok((task, _)) => {
                         let _ = self.emit("kernel", Ev::ScheduleFired { id: sc.id.clone(), task }).await;
                     }
-                    Err(e) => tracing::error!("schedule {}: {e:#}", sc.id),
+                    Err(e) => {
+                        tracing::error!("schedule {}: {e:#}", sc.id);
+                        let _ = self.emit("kernel", Ev::ScheduleFailed { id: sc.id.clone(), reason: format!("{e:#}") }).await;
+                        let _ = self
+                            .post_notice(None, None, sc.person.clone(), format!("A schedule could not start: {}", sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect())), serde_json::json!({ "reason": "schedule_failed", "evidence": { "schedule": sc.id, "error": format!("{e:#}") } }))
+                            .await;
+                    }
                 }
             }
             let (running, due): (Vec<String>, Vec<(String, u32)>) = self.read(|s| {
@@ -415,23 +442,60 @@ impl Kernel {
         Ok(())
     }
 
+    /// Stop a run on an inbox item (`item`, when it is new) in one write:
+    /// nobody sees the item while the run still shows as running.
+    pub async fn suspend_on(&self, run: &str, reason: &str, id: String, item: Option<Ev>) -> Result<()> {
+        let stop = Ev::Suspended { run: run.into(), reason: reason.into(), item: Some(id) };
+        self.emit_all("kernel", item.into_iter().chain([stop]).collect()).await?;
+        self.on_stop(run, false).await;
+        Ok(())
+    }
+
     /// Code stops a run and tells the person why, with the evidence (K24).
     pub async fn suspend_with_notice(&self, run: &str, reason: &str, summary: String, details: serde_json::Value) -> Result<()> {
         let (task, person) = self.read(|s| s.runs.get(run).map(|r| (r.task.clone(), r.person.clone()))).unwrap_or_default();
-        let id = new_id("item");
-        self.emit(
-            "kernel",
-            Ev::Item {
-                id: id.clone(),
-                item_kind: "notice".into(),
-                task: Some(task),
-                run: Some(run.into()),
-                person,
-                summary,
-                details: serde_json::json!({ "reason": reason, "evidence": details }),
-            },
-        )
-        .await?;
-        self.suspend(run, reason, Some(id)).await
+        let (id, ev) = notice_event(Some(task), Some(run.into()), person, summary, serde_json::json!({ "reason": reason, "evidence": details }));
+        self.suspend_on(run, reason, id, Some(ev)).await
     }
+
+    /// A notice in the person's inbox: something ended or stopped, with the evidence.
+    pub async fn post_notice(&self, task: Option<String>, run: Option<String>, person: String, summary: String, details: serde_json::Value) -> Result<String> {
+        let (id, ev) = notice_event(task, run, person, summary, details);
+        self.emit("kernel", ev).await?;
+        Ok(id)
+    }
+
+    pub async fn notice(&self, run: &crate::state::Run, summary: String, details: serde_json::Value) -> Result<String> {
+        self.post_notice(Some(run.task.clone()), Some(run.id.clone()), run.person.clone(), summary, details).await
+    }
+
+    /// The task's title, or the start of what the person asked.
+    pub fn title_of(&self, run: &crate::state::Run) -> String {
+        self.read(|s| s.tasks.get(&run.task).map(|t| t.title.clone().unwrap_or_else(|| t.text.chars().take(80).collect()))).unwrap_or_default()
+    }
+
+    /// The run's last few tool results, for a notice's evidence.
+    pub fn last_results(&self, run: &crate::state::Run) -> Vec<serde_json::Value> {
+        let r = self.read(|s| s.runs.get(&run.id).cloned()).unwrap_or_else(|| run.clone());
+        r.results_in_order().into_iter().rev().take(3).collect()
+    }
+
+    /// In a chat turn: the actions the person asked for (start a task,
+    /// propose a schedule) whose every attempt failed, with the reason.
+    pub fn unfinished_chat_actions(&self, run: &crate::state::Run) -> Vec<serde_json::Value> {
+        let r = self.read(|s| s.runs.get(&run.id).cloned()).unwrap_or_else(|| run.clone());
+        let mut out: Vec<serde_json::Value> = vec![];
+        for tool in ["create_task", "create_schedule"] {
+            let tried: Vec<serde_json::Value> = r.results_in_order().into_iter().filter(|v| v["tool"] == tool).collect();
+            if !tried.is_empty() && tried.iter().all(|v| v["is_error"] == true) {
+                out.push(serde_json::json!({ "tool": tool, "attempts": tried.len(), "error": tried.last().map(|v| v["text"].clone()) }));
+            }
+        }
+        out
+    }
+}
+
+fn notice_event(task: Option<String>, run: Option<String>, person: String, summary: String, details: serde_json::Value) -> (String, Ev) {
+    let id = new_id("item");
+    (id.clone(), Ev::Item { id, item_kind: "notice".into(), task, run, person, summary, details })
 }

@@ -249,6 +249,11 @@ pub enum Ev {
     ScheduleRemoved {
         id: String,
     },
+    /// A due schedule could not start its task.
+    ScheduleFailed {
+        id: String,
+        reason: String,
+    },
     ScheduleFired {
         id: String,
         task: String,
@@ -571,6 +576,16 @@ pub enum Ev {
         label: Label,
         #[serde(default)]
         sources: Vec<String>,
+        /// Who filed it: the run's model (None) or the memory pass.
+        #[serde(default)]
+        by: Option<String>,
+    },
+    /// One model call of the memory pass after a chat turn or a run ended.
+    MemoryPass {
+        run: String,
+        model: String,
+        blocks: Vec<magnus_adapter_proto::Block>,
+        usage: magnus_adapter_proto::Usage,
     },
     /// The person had a memory forgotten; it is never read back again.
     MemoryForgotten {
@@ -609,6 +624,7 @@ impl Ev {
             | Wait { run, .. }
             | BudgetExtended { run, .. }
             | Memory { run, .. }
+            | MemoryPass { run, .. }
             | Output { run, .. } => Some(run),
             Item { run, .. } => run.as_deref(),
             _ => None,

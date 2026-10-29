@@ -307,6 +307,8 @@ pub struct Modules {
     #[serde(default)]
     pub escalation: Option<bool>,
     #[serde(default)]
+    pub memory_pass: Option<bool>,
+    #[serde(default)]
     pub lost: crate::run::lost::Thresholds,
     #[serde(default)]
     pub model: Vec<ModelModules>,
@@ -322,6 +324,8 @@ pub struct ModelModules {
     pub lost_reset: Option<bool>,
     #[serde(default)]
     pub escalation: Option<bool>,
+    #[serde(default)]
+    pub memory_pass: Option<bool>,
     /// The stronger model a lost run escalates to, `adapter/model`.
     #[serde(default)]
     pub escalate_to: Option<String>,
@@ -338,6 +342,7 @@ impl Config {
             let p = per.and_then(|m| match name {
                 "verifier" => m.verifier,
                 "lost_reset" => m.lost_reset,
+                "memory_pass" => m.memory_pass,
                 _ => m.escalation,
             });
             (name.to_string(), p.unwrap_or(default))
@@ -346,6 +351,7 @@ impl Config {
             pick("verifier", self.verifier.enabled),
             pick("lost_reset", self.modules.lost_reset.unwrap_or(true)),
             pick("escalation", self.modules.escalation.unwrap_or(true)),
+            pick("memory_pass", self.modules.memory_pass.unwrap_or(true)),
         ]
         .into_iter()
         .collect();
