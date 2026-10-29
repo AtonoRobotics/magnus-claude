@@ -42,6 +42,16 @@ struct Driver {
     _driver: tokio::process::Child,
 }
 
+/// The app, its display and the drivers share the driver's process group;
+/// killing xvfb-run alone left them running after the test.
+impl Drop for Driver {
+    fn drop(&mut self) {
+        if let Some(pid) = self._driver.id() {
+            let _ = std::process::Command::new("kill").args(["-TERM", "--", &format!("-{pid}")]).status();
+        }
+    }
+}
+
 impl Driver {
     async fn start() -> Driver {
         Driver::start_with(&[]).await
@@ -59,6 +69,7 @@ impl Driver {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let native_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let child = tokio::process::Command::new("xvfb-run")
+            .process_group(0)
             .args(["-a", "-s", "-screen 0 1280x900x24"])
             .arg(&driver)
             .args(["--port", &port.to_string(), "--native-port", &native_port.to_string(), "--native-driver"])
@@ -184,6 +195,65 @@ async fn the_owner_adds_an_app_and_signs_in_to_it_from_the_installed_app() {
     assert_eq!((c["name"].as_str(), c["signed_in"].as_bool()), (Some("calendar"), Some(true)), "{list}");
     let risk = |t: &str| c["tools"].as_array().unwrap().iter().find(|x| x["name"] == t).unwrap()["risk"].clone();
     assert_eq!((risk("list_events"), risk("create_event")), (json!("read"), serde_json::Value::Null), "{list}");
+}
+
+/// Asked for by the owner (2026-10-29), after schedules failed in real use
+/// and no test had followed one from chat to its runs: in the installed app,
+/// a schedule asked for in chat and confirmed on its card runs, and each run
+/// shows in the Schedules view, across an appliance restart. The model fills
+/// `daily_at` with "" beside `every_minutes`, as the live model did. Every
+/// five minutes (the shortest a schedule may be), three runs: the owner's
+/// own check, about a quarter of an hour.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn a_schedule_asked_for_in_chat_runs_in_the_installed_app_across_a_restart() {
+    use magnus_invariants::{complete, script, tool, FakeWeb, Reply};
+    let s = script(|c| async move {
+        if c.body["system"].to_string().contains("in a chat") {
+            return match c.turn() {
+                0 => tool("create_schedule", json!({ "title": "Tell me the time", "text": "Tell me the time.", "every_minutes": 5, "daily_at": "", "scope": "Reads the clock; sends nothing.", "budget": { "max_usd": 0.1 } })),
+                _ => Reply::Text("Confirm the card and I'll tell you the time every 5 minutes.".into()),
+            };
+        }
+        match c.turn() {
+            0 => tool("task_contract", json!({ "goal": "tell the time", "assumptions": [], "irreversible_actions": [],
+                "criteria": [{ "id": "c1", "description": "the time is told", "check": { "tool": "sandbox_exec", "input": { "command": "date" }, "expect": [{ "pointer": "/exit_code", "equals": 0 }] } }] })),
+            _ => complete("It is time."),
+        }
+    });
+    let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
+    let idp = FakeIdp::start(PERSON).await;
+    idp.configure(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let alice = f.app.api(PERSON);
+    let starts = f.app.starts();
+    let fired = || async {
+        let (_, s) = alice.get("/v1/schedules").await;
+        s["schedules"][0]["runs"].as_array().map_or(0, |r| r.len())
+    };
+
+    // The app asks, confirms and watches; the appliance restarts after the first run.
+    let d = Driver::start().await;
+    let watch = d.script("app-schedule.mjs", &url, &fingerprint, &[("MAGNUS_ASK", "Every 5 minutes, tell me the time."), ("MAGNUS_RUNS", "3")]);
+    // Without a first run there is nothing to restart under; the app's own
+    // account of what it saw is then the failure.
+    let restart = async {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(7 * 60);
+        while fired().await < 1 {
+            if std::time::Instant::now() > end {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        f.app.restart().await;
+        true
+    };
+    let ((ok, log), restarted) = tokio::join!(watch, restart);
+    let (_, s) = alice.get("/v1/schedules").await;
+    assert!(ok && restarted, "the schedule did not run as the app shows it (restarted: {restarted}):\n{log}\nschedules: {s}\n{}", f.report().await);
+    let runs = s["schedules"][0]["runs"].as_array().unwrap();
+    assert!(runs.len() >= 3 && runs.iter().all(|r| r["status"] == "completed"), "{s}");
+    assert_eq!(f.app.starts(), starts + 1, "the appliance did not restart between runs");
 }
 
 /// The processes of the app at `path`: an AppImage's own runtime, and what
