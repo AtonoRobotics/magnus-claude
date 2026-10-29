@@ -8,6 +8,9 @@
 //!   the other, each with their own rights.
 //! - `desktop/tests/app-apps.mjs`: the owner adds one of the person's apps
 //!   and signs in to it through a loopback address the shell opens.
+//! - `desktop/tests/app-update.mjs`: the app, an AppImage, updates itself
+//!   from the appliance while a task waits there, and restarts as the new
+//!   version (two builds signed with a test key: MAGNUS_UPDATE_BUILDS).
 //!
 //! Needs the built app (`cargo tauri build` in desktop/src-tauri, or
 //! MAGNUS_DESKTOP_APP), `tauri-driver`, `WebKitWebDriver`
@@ -41,6 +44,11 @@ struct Driver {
 
 impl Driver {
     async fn start() -> Driver {
+        Driver::start_with(&[]).await
+    }
+
+    /// With more environment for the app it launches.
+    async fn start_with(envs: &[(&str, &str)]) -> Driver {
         let native = std::env::var("MAGNUS_WEBKIT_DRIVER").map(PathBuf::from).ok().or_else(|| which("WebKitWebDriver")).expect("WebKitWebDriver (set MAGNUS_WEBKIT_DRIVER)");
         let driver = which("tauri-driver").or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo/bin/tauri-driver"))).expect("tauri-driver");
         let home = tempfile::tempdir().unwrap();
@@ -59,6 +67,7 @@ impl Driver {
             .env("XDG_CONFIG_HOME", &config)
             .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
             .env("NO_AT_BRIDGE", "1")
+            .envs(envs.iter().copied())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true)
@@ -175,4 +184,103 @@ async fn the_owner_adds_an_app_and_signs_in_to_it_from_the_installed_app() {
     assert_eq!((c["name"].as_str(), c["signed_in"].as_bool()), (Some("calendar"), Some(true)), "{list}");
     let risk = |t: &str| c["tools"].as_array().unwrap().iter().find(|x| x["name"] == t).unwrap()["risk"].clone();
     assert_eq!((risk("list_events"), risk("create_event")), (json!("read"), serde_json::Value::Null), "{list}");
+}
+
+/// The processes of the app at `path`: an AppImage's own runtime, and what
+/// it runs (which carries the AppImage's path in `APPIMAGE`).
+fn processes_of(path: &Path) -> Vec<i32> {
+    let mark = format!("APPIMAGE={}", path.display());
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| {
+            let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let env = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+            cmd.split(|b| *b == 0).next() == Some(path.as_os_str().as_encoded_bytes()) || env.split(|b| *b == 0).any(|v| v == mark.as_bytes())
+        })
+        .collect()
+}
+
+/// Requested with the update (owner, 2026-10-29): an update downloads,
+/// installs on restart, and a task running on the appliance is unaffected.
+/// The app restarts outside the driver's session; the test stops that copy
+/// before it shows anything, and a new session opens the updated app.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs two AppImage builds (MAGNUS_UPDATE_BUILDS), tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn the_installed_app_updates_itself_from_the_appliance_while_a_task_waits() {
+    let builds = PathBuf::from(std::env::var("MAGNUS_UPDATE_BUILDS").expect("MAGNUS_UPDATE_BUILDS: old.AppImage, new.AppImage and its .sig, new.version"));
+    let fresh = std::fs::read_to_string(builds.join("new.version")).unwrap().trim().to_string();
+    let notes = format!("Tasks now show their sources. {}", canary("notes"));
+
+    // The appliance serves the new release to the apps.
+    let mut f = Flow::start().await;
+    let updates = f.app.dir.path().join("updates");
+    let path = f.app.dir.path().join("magnus.toml");
+    let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    cfg.insert("updates".into(), toml::Value::Table(toml::toml! { dir = (updates.display().to_string()) }));
+    std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+    let idp = FakeIdp::start(PERSON).await;
+    idp.configure(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let desktop = updates.join("desktop");
+    std::fs::create_dir_all(&desktop).unwrap();
+    let file = format!("Magnus_{fresh}_amd64.AppImage");
+    std::fs::copy(builds.join("new.AppImage"), desktop.join(&file)).unwrap();
+    let signature = std::fs::read_to_string(builds.join("new.AppImage.sig")).unwrap();
+    let manifest = json!({ "version": fresh, "notes": notes, "platforms": { "linux-x86_64": { "file": file, "signature": signature } } });
+    std::fs::write(desktop.join("latest.json"), manifest.to_string()).unwrap();
+
+    // A task waits on the appliance for the person's approval.
+    let alice = f.app.api(PERSON);
+    let task = alice.submit(TASK).await;
+    alice.wait_item(&task, "approval").await;
+    let before = f.model.requests().len();
+
+    // The installed app, an AppImage the person can write.
+    let d = Driver::start_with(&[("APPIMAGE_EXTRACT_AND_RUN", "1")]).await;
+    let app = d.home.path().join("Magnus.AppImage");
+    std::fs::copy(builds.join("old.AppImage"), &app).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let app_s = app.display().to_string();
+    let envs = [("MAGNUS_APP", app_s.as_str()), ("MAGNUS_NEW", fresh.as_str())];
+
+    let (ok, log) = d.script("app-update.mjs", &url, &fingerprint, &[envs[0], envs[1], ("MAGNUS_PHASE", "before")]).await;
+    assert!(ok, "the update was not offered:\n{log}");
+    let new = std::fs::read(builds.join("new.AppImage")).unwrap();
+    eventually("the AppImage is replaced by the new release", PATIENCE, || {
+        let (app, new) = (app.clone(), new.clone());
+        async move { (std::fs::read(&app).ok()? == new).then_some(()) }
+    })
+    .await;
+    let whats_new = d.config().join("app.magnus.desktop/whats-new.json");
+    let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&whats_new).expect("what's new was not kept for after the restart")).unwrap();
+    assert_eq!((kept["version"].as_str(), kept["notes"].as_str()), (Some(fresh.as_str()), Some(notes.as_str())), "{kept}");
+    // The copy the app restarted, outside the session.
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < end {
+        for pid in processes_of(&app) {
+            let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(whats_new.exists(), "the restarted copy showed what's new before it was stopped; nothing left to check");
+
+    let (ok, log) = d.script("app-update.mjs", &url, &fingerprint, &[envs[0], envs[1], ("MAGNUS_PHASE", "after"), ("MAGNUS_NOTES", &notes)]).await;
+    assert!(ok, "the updated app failed:\n{log}\n{}", f.report().await);
+    assert!(!whats_new.exists(), "what's new was not shown once");
+
+    // The task waited through the update untouched, then finished.
+    let done = alice.wait_status(&task, &["completed"]).await;
+    assert_eq!(done["status"], "completed", "{done}");
+    assert!(f.model.requests().len() > before, "the task did not go on after its approval");
+    let db = f.app.db.admin().await;
+    let stops: Vec<String> = db
+        .query("SELECT body->>'reason' FROM public.events WHERE kind = 'suspended' AND run_id = (SELECT run_id FROM public.events WHERE kind = 'task_created' ORDER BY seq DESC LIMIT 1) ORDER BY seq", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(stops, ["approval", "review"], "the task was stopped other than for the person's approval and review");
 }

@@ -48,17 +48,32 @@ impl ServerCertVerifier for Pinned {
     }
 }
 
-fn build(want: Option<String>) -> Result<(reqwest::Client, Arc<Mutex<Option<String>>>), String> {
+fn config(want: Option<String>, seen: Arc<Mutex<Option<String>>>) -> Result<rustls::ClientConfig, String> {
     let provider = Arc::new(ring::default_provider());
-    let seen = Arc::new(Mutex::new(None));
-    let verifier = Arc::new(Pinned { want, seen: seen.clone(), provider: provider.clone() });
-    let tls = rustls::ClientConfig::builder_with_provider(provider)
+    let verifier = Arc::new(Pinned { want, seen, provider: provider.clone() });
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
+        .with_no_client_auth())
+}
+
+/// TLS that trusts only the pinned certificate, for the updater's own client.
+pub fn tls(pin: Option<&str>) -> Result<rustls::ClientConfig, String> {
+    config(pin.map(String::from), Arc::new(Mutex::new(None)))
+}
+
+fn build(want: Option<String>) -> Result<(reqwest::Client, Arc<Mutex<Option<String>>>), String> {
+    let seen = Arc::new(Mutex::new(None));
+    let tls = config(want, seen.clone())?;
+    // Versions both ways: the appliance answers with its own and refuses an app too old for it.
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(&crate::app_version()) {
+        headers.insert("x-magnus-app", v);
+    }
     let client = reqwest::Client::builder()
+        .default_headers(headers)
         .use_preconfigured_tls(tls)
         .connect_timeout(Duration::from_secs(10))
         .build()

@@ -1,0 +1,45 @@
+# Appliance releases: a tag `appliance-vX.Y.Z` (the workspace version) is
+# built, tested with the invariants and the scratch suites, and only then put,
+# signed, in the build box's appliance updates directory, where the appliance
+# installs it within the hour (DECISIONS.md, "Appliance updates").
+# Same build box as the desktop checks (desktop/README.md, "Release checks").
+name: appliance
+
+on:
+  push:
+    tags: ["appliance-v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: appliance-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  MAGNUS_GUEST_KERNEL: ${{ vars.MAGNUS_SANDBOX_OUT }}/vmlinux
+  MAGNUS_GUEST_ROOTFS: ${{ vars.MAGNUS_SANDBOX_OUT }}/rootfs.ext4
+
+jobs:
+  release:
+    runs-on: [self-hosted, linux, magnus-linux]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with: { clean: false }
+      - name: Programs the tests launch
+        run: cargo build --workspace --bins
+      - name: Invariants and scratch suites
+        run: cargo test -p magnus-invariants -p magnus-scratch
+      - name: Release programs
+        run: cargo build --release --workspace --bins
+      - name: Into the appliance's updates
+        if: startsWith(github.ref, 'refs/tags/appliance-v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 | python3 -I -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='magnus'))")
+          [ "$TAG" = "appliance-v$v" ] || { echo "tag $TAG does not match version $v"; exit 1; }
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG" > "$RUNNER_TEMP/notes"
+          release/publish.sh appliance "$v" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" \
+            target/release/magnus target/release/magnus-adapter-anthropic target/release/magnus-adapter-openai

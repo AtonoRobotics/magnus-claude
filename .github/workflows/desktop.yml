@@ -1,5 +1,7 @@
 # The installed desktop app, tested on Linux; installers (Linux and Windows,
 # the same app) are published only when those tests pass (DECISIONS.md).
+# A tagged release is also put in the build box's appliance updates
+# directory, signed, from where the installed apps update themselves.
 # Runs on a self-hosted runner, `magnus-linux`: the build box, with KVM, the
 # guest image and Postgres. One-time setup: desktop/README.md, "Release checks".
 # One job: the steps share the build box's disk, so nothing goes through
@@ -34,9 +36,12 @@ jobs:
       # Keep target/ between runs: a clean build of everything is long.
       - uses: actions/checkout@v7
         with: { clean: false }
+      # The updater packages (AppImage, setup.exe) are signed with the release
+      # key, which is on the build box only, bound to the version.
       - name: Installers
         working-directory: desktop/src-tauri
         run: |
+          export TAURI_SIGNING_PRIVATE_KEY="$HOME/.magnus-release/update.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
           cargo tauri build --bundles deb,appimage
           cargo tauri build --runner cargo --target x86_64-pc-windows-gnu --bundles nsis
       - name: Collect this version's installers
@@ -47,6 +52,23 @@ jobs:
           cp "$b/release/bundle/deb/Magnus_${v}_amd64.deb" "$b/release/bundle/appimage/Magnus_${v}_amd64.AppImage" \
              "$b/x86_64-pc-windows-gnu/release/bundle/nsis/Magnus_${v}_x64-setup.exe" dist/
           (cd dist && sha256sum Magnus_* > SHA256SUMS)
+      # The update test's two AppImages: this version and the next, with a
+      # key made for the run, so nothing it signs could install anywhere.
+      - name: Two builds for the update test
+        working-directory: desktop/src-tauri
+        run: |
+          v=$(node -p "require('./tauri.conf.json').version")
+          t="$RUNNER_TEMP/update-test" && rm -rf "$t" && mkdir -p "$t"
+          cargo tauri signer generate --ci -p "" -f -w "$t/test.key" >/dev/null
+          export TAURI_SIGNING_PRIVATE_KEY="$t/test.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          next="${v%.*}.$(( ${v##*.} + 1 ))"
+          for build in "old $v" "new $next"; do
+            set -- $build
+            cargo tauri build --bundles appimage --config "{\"version\":\"$2\",\"plugins\":{\"updater\":{\"pubkey\":\"$(cat "$t/test.key.pub")\"}}}"
+            cp "target/release/bundle/appimage/Magnus_$2_amd64.AppImage" "$t/$1.AppImage"
+            cp "target/release/bundle/appimage/Magnus_$2_amd64.AppImage.sig" "$t/$1.AppImage.sig"
+          done
+          echo "$next" > "$t/new.version"
       - name: Install the app from its package
         run: |
           v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
@@ -59,6 +81,7 @@ jobs:
         env:
           MAGNUS_DESKTOP_APP: ${{ runner.temp }}/app/usr/bin/magnus-desktop
           MAGNUS_SHOTS: ${{ runner.temp }}/shots
+          MAGNUS_UPDATE_BUILDS: ${{ runner.temp }}/update-test
         run: cargo test -p magnus-scratch --test desktop_app -- --ignored
       - name: Keep the screenshots of a failure on the build box
         if: failure()
@@ -77,3 +100,12 @@ jobs:
           (cd dist && sha256sum -c SHA256SUMS)
           gh release create "$TAG" --verify-tag --prerelease --title "Desktop $v" --notes-from-tag \
             "dist/Magnus_${v}_amd64.deb" "dist/Magnus_${v}_amd64.AppImage" "dist/Magnus_${v}_x64-setup.exe"
+      - name: Updates for the installed apps
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG" > "$RUNNER_TEMP/notes"
+          release/publish.sh desktop "$v" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist

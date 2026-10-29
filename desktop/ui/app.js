@@ -13,6 +13,7 @@ const App = {
   appliance: "",
   inbox: [],
   versions: null,
+  update: null,
   timers: [],
   leave: [],
   routes: [],
@@ -85,8 +86,11 @@ function nav() {
   const batched = App.inbox.filter(i => i.status === "open" && i.can_respond && !i.blocking).length;
   const link = (href, label, extra = "") => `<a href="${href}" class="${route === href || route.startsWith(href + "/") ? "on" : ""}">${label}${extra}</a>`;
   const badges = (blocking ? `<span class="badge" title="Needs you now">${blocking}</span>` : "") + (batched ? ` <span class="badge quiet" title="When you have a moment">${batched}</span>` : "");
+  const ready = App.update?.ready;
   return `
     <div class="brand">Magnus</div>
+    ${ready ? `<div class="update-ready" title="${esc(ready.notes || "")}"><div class="small">Magnus ${esc(ready.version)} is ready.</div>
+      <button class="primary small" data-act="restart-update">Restart to update</button></div>` : ""}
     ${link("#/home", "Home")}
     ${link("#/chat", "Chat")}
     ${link("#/inbox", "Inbox", `<span>${badges}</span>`)}
@@ -111,6 +115,7 @@ function nav() {
 function shell() {
   document.body.innerHTML = `<div class="shell"><nav class="side" aria-label="Sections"></nav><main id="main" tabindex="-1"></main></div>`;
   $("nav.side").addEventListener("click", async e => {
+    if (e.target.closest("[data-act=restart-update]")) return restartToUpdate();
     if (e.target.closest("[data-act=sign-out]")) {
       stop();
       await Magnus.signOut();
@@ -650,7 +655,8 @@ route(/^#\/schedules$/, async main => {
       const waiting = sc.runs.filter(r => r.needs_you), last = sc.last;
       return `<div class="card sched" data-schedule="${esc(sc.id)}">
         <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))} ${moveControl(sc.id, sc.project, projects)}</span></div>
-        <div class="small muted">Next run ${esc(until(sc.next))} · ${last ? `Last result: ${chip(last.status)} <a href="#/task/${enc(last.task_id)}">${esc(firstLine(last.summary) || last.title)}</a> <span class="faint">${esc(when(last.ended_at))}</span>` : "No results yet"}</div>
+        <div class="small muted" data-last>Next run ${esc(until(sc.next))} · ${sc.last_failed ? `Last firing <span class="chip bad">could not start</span> ${esc(sc.last_failed.error)} <span class="faint">${esc(when(sc.last_failed.at))}</span>`
+          : last ? `Last result: ${chip(last.status)} <a href="#/task/${enc(last.task_id)}">${esc(firstLine(last.summary) || last.title)}</a> <span class="faint">${esc(when(last.ended_at || last.created_at))}</span>` : "No results yet"}</div>
         ${waiting.length ? `<ul class="tlist">${waiting.map(taskRow).join("")}</ul>` : ""}
         ${sc.runs.length ? `<details data-key="sched:${esc(sc.id)}"><summary class="small muted">${sc.runs.length} run${sc.runs.length === 1 ? "" : "s"}</summary><ul class="tlist">${sc.runs.map(taskRow).join("")}</ul></details>` : ""}
       </div>`;
@@ -1392,9 +1398,67 @@ route(/^#\/apps$/, async main => {
 // ---------- start ----------
 
 let background = [];
+// ---------- the app's own updates ----------
+
+// `look`: ask the appliance now, as when a session begins (the app's hourly
+// look may have run before it was connected).
+async function refreshUpdate(look = false) {
+  try { App.update = await (look ? Magnus.updateLook() : Magnus.updateState()); } catch { App.update = await Magnus.updateState().catch(() => null); }
+  if ($("nav.side")) paint($("nav.side"), nav());
+}
+
+async function restartToUpdate() {
+  toast("Installing the update; Magnus restarts in a moment.", 10000);
+  try { await Magnus.updateInstall(); } catch (e) { toast(`The update did not install: ${e.message}`); refreshUpdate(); }
+}
+
+// What changed, in the release's own plain words, once after an update.
+async function showWhatsNew() {
+  let n = null;
+  try { n = await Magnus.whatsNew(); } catch { return; }
+  if (!n) return;
+  const box = document.createElement("div");
+  box.className = "whats-new card"; box.setAttribute("role", "dialog"); box.setAttribute("aria-label", "What's new");
+  box.innerHTML = `<h3>What's new in Magnus ${esc(n.version)}</h3>
+    <div class="notes">${esc(n.notes || "Fixes and improvements.").split(/\n+/).map(l => `<p>${l}</p>`).join("")}</div>
+    <div class="row"><button class="primary" data-act="close">Got it</button></div>`;
+  box.querySelector("[data-act=close]").onclick = () => box.remove();
+  document.body.append(box);
+}
+
+// The appliance no longer accepts this version of the app: only updating helps.
+let updateScreen = null;
+async function updateRequiredScreen(info) {
+  if (updateScreen) return;
+  stop();
+  document.body.innerHTML = `<div class="signin"><h1>Magnus</h1><h3>Update required</h3>
+    <p class="muted">${esc(info?.error || "The appliance needs a newer version of this app.")}</p><div class="card" id="ur"></div></div>`;
+  const draw = async () => {
+    let st = null;
+    try { st = await Magnus.updateState(); } catch { /* shown below */ }
+    const box = $("#ur");
+    if (!box) return;
+    if (!st) paint(box, `<p>Open the appliance's address in a browser to use it until the app is updated.</p>`);
+    else if (st.ready) paint(box, `<p>Magnus ${esc(st.ready.version)} is downloaded and checked.</p><div class="row"><button class="primary" data-act="restart-update">Restart to update</button></div>`);
+    else if (st.can_update) paint(box, `<p>${esc(st.can_update)}</p>`);
+    else paint(box, `<p>${st.error ? `The update could not be fetched: ${esc(st.error)}` : "Downloading the update…"}</p><div class="row"><button data-act="look">Try again</button></div>`);
+  };
+  document.body.addEventListener("click", async e => {
+    if (e.target.closest("[data-act=restart-update]")) restartToUpdate();
+    if (e.target.closest("[data-act=look]")) { try { await Magnus.updateLook(); } catch { /* drawn */ } draw(); }
+  });
+  Magnus.onUpdateReady(draw);
+  updateScreen = setInterval(draw, 5000);
+  draw();
+}
+window.addEventListener("magnus-update-required", e => updateRequiredScreen(e.detail));
+
 async function boot() {
   shell();
   window.onhashchange = go;
+  Magnus.onUpdateReady(() => refreshUpdate());
+  refreshUpdate(true);
+  showWhatsNew();
   await Promise.all([pollInbox(), pollVersions()]);
   background = [setInterval(pollInbox, 5000), setInterval(pollVersions, 30000)];
   go();
@@ -1411,6 +1475,7 @@ function stop() {
 async function start() {
   try {
     const r = await Magnus.restore();
+    if (r && r.update_required) return updateRequiredScreen(r.update_required);
     if (r && r.person) { App.me = r.person; App.appliance = r.appliance; return boot(); }
     signInScreen(r && r.note);
   } catch (e) { signInScreen(e.message || String(e)); }

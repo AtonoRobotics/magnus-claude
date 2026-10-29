@@ -6,6 +6,7 @@
 mod pin;
 mod speech;
 mod store;
+mod update;
 
 use base64::Engine;
 use futures_util::StreamExt;
@@ -17,6 +18,13 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 type Res<T> = Result<T, String>;
+
+static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// This app's version, as its bundle declares it.
+pub fn app_version() -> String {
+    VERSION.get().cloned().unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
 
 struct App {
     store: store::Store,
@@ -85,6 +93,8 @@ async fn restore(app: State<'_, App>) -> Res<Value> {
             app.store.clear_token(&url);
             Ok(json!({ "note": "Your session ended. Sign in again." }))
         }
+        // The appliance no longer accepts this version; the updater still can reach it.
+        Ok(r) if r.status().as_u16() == 426 => Ok(json!({ "update_required": body_of(r).await.1, "appliance": url })),
         Ok(r) => {
             let (s, b) = body_of(r).await;
             Ok(json!({ "note": message(&b, s) }))
@@ -333,6 +343,19 @@ async fn stop_speaking(app: State<'_, App>) -> Res<()> {
     Ok(())
 }
 
+/// This app's version and the appliance's, as each declares it.
+#[tauri::command]
+async fn app_info(app: State<'_, App>) -> Res<Value> {
+    let appliance = match app.conn() {
+        Ok((url, c)) => match c.get(format!("{url}/v1/version")).send().await {
+            Ok(r) => body_of(r).await.1,
+            Err(_) => Value::Null,
+        },
+        Err(_) => Value::Null,
+    };
+    Ok(json!({ "app": app_version(), "appliance": appliance }))
+}
+
 /// Open a provider's sign-in page in the person's browser.
 #[tauri::command]
 fn open_url(handle: AppHandle, url: String) -> Res<()> {
@@ -402,8 +425,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(update::Updates::default())
+        .setup(|app| {
+            let _ = VERSION.set(app.package_info().version.to_string());
+            update::start(app.handle().clone());
+            Ok(())
+        })
         .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default(), loopback: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, device_start, device_poll, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait])
+        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, device_start, device_poll, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait, app_info, update::update_state, update::update_look, update::update_install, update::whats_new])
         .run(tauri::generate_context!())
         .expect("start the Magnus app");
 }

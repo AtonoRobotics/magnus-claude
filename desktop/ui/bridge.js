@@ -30,6 +30,7 @@ const appBridge = tauri && {
   async signOut() { return this.invoke("sign_out"); },
   async api(method, path, body) {
     const r = await this.invoke("api", { method, path, body: body === undefined ? null : body });
+    if (r.status === 426) window.dispatchEvent(new CustomEvent("magnus-update-required", { detail: r.body }));
     if (r.status >= 400) throw errorOf(r.status, r.body);
     return r.body;
   },
@@ -48,6 +49,12 @@ const appBridge = tauri && {
   async loopbackOpen() { return this.invoke("loopback_open"); },
   async loopbackWait() { return this.invoke("loopback_wait"); },
   async dataUrl(path, mediaType) { const b64 = await this.invoke("fetch_bytes", { path }); return `data:${mediaType};base64,${b64}`; },
+  // The app's own updates, served by the appliance and signed with the release key.
+  async updateState() { return this.invoke("update_state"); },
+  async updateLook() { return this.invoke("update_look"); },
+  async updateInstall() { return this.invoke("update_install"); },
+  async whatsNew() { return this.invoke("whats_new"); },
+  onUpdateReady(fn) { tauri.event.listen("update-ready", e => fn(e.payload)); },
 };
 
 const webBridge = {
@@ -105,6 +112,11 @@ const webBridge = {
     return name;
   },
   async openExternal(url) { window.open(url, "_blank", "noopener"); },
+  // The appliance serves this page, so it is always the appliance's own version.
+  async updateState() { return null; },
+  async updateLook() { return null; },
+  async whatsNew() { return null; },
+  onUpdateReady() {},
   async dataUrl(path) {
     const r = await fetch(path, { credentials: "same-origin" });
     if (!r.ok) throw errorOf(r.status, await r.text());

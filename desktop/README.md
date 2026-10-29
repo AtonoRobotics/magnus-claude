@@ -83,10 +83,15 @@ On each platform:
 
 `.github/workflows/desktop.yml` builds the installers, runs the installed-app tests on Linux, and, for a `desktop-v<version>` tag, publishes a pre-release with those installers only when every test passed. The Windows build is the same app and frontend; it is not tested separately. Installers are no longer published by hand.
 
-To release: bump the version in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`, commit, then push an annotated tag whose message is the release notes: `git tag -a desktop-v0.4.2 -m "What changed." && git push origin desktop-v0.4.2`.
+To release: bump the version in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`, commit, then push an annotated tag whose message is the release notes: `git tag -a desktop-v0.5.0 -m "What changed, in plain words." && git push origin desktop-v0.5.0`.
 
 The jobs run on a self-hosted runner on the build box (the machine with KVM, the guest image and the test Postgres). One-time setup:
 
 1. `sudo apt install webkit2gtk-driver`, and `cargo install tauri-driver --locked`.
 2. Register a runner with the label `magnus-linux`, running as your own user. In GitHub: Settings, Actions, Runners, New self-hosted runner (Linux); follow its download and `./config.sh` steps, adding `--labels magnus-linux`. Install it as a service: `sudo ./svc.sh install samuel && sudo ./svc.sh start`. Put `PATH=/home/samuel/.cargo/bin:/home/samuel/.local/bin:/usr/local/bin:/usr/bin:/bin` in the runner's `.env` file so it finds `cargo` and `node`. (Done on the build box on 2026-10-29: runner `build-box` in `~/actions-runner`, running as a systemd service.) The workflow is one job: its steps share the build box's disk, because GitHub's artifact storage for this private repository is full.
-3. Repository variable (Settings, Secrets and variables, Actions, Variables): `MAGNUS_SANDBOX_OUT`, the build box's `sandbox/out` (set).
+3. Repository variables (Settings, Secrets and variables, Actions, Variables): `MAGNUS_SANDBOX_OUT`, the build box's `sandbox/out` (set); `MAGNUS_UPDATES_DIR`, the appliance's updates directory (set: `~/.magnus-appliance/state/updates`).
+4. The release key, `~/.magnus-release/update.key` (mode 600, on the build box only; its public half is `release/update.pub` and `plugins.updater.pubkey`). Keep an offline copy: without it no installed app or appliance accepts another update.
+
+## Updates
+
+A tagged release that passes its tests is also put, signed, in the appliance's updates directory (`release/publish.sh`). Installed apps ask the appliance for it when a session begins and every hour, download it in the background, and offer "Restart to update"; after the restart they show the tag's message as "What's new", so write it for the person. On Windows the installer updates the app in place; on Linux the AppImage updates itself, and a .deb is updated with the package manager. Version 0.5.0 is the first with the updater: 0.4.5 and earlier are replaced by hand once.
