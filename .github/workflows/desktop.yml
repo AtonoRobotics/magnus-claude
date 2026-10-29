@@ -2,6 +2,8 @@
 # the same app) are published only when those tests pass (DECISIONS.md).
 # Runs on a self-hosted runner, `magnus-linux`: the build box, with KVM, the
 # guest image and Postgres. One-time setup: desktop/README.md, "Release checks".
+# One job: the steps share the build box's disk, so nothing goes through
+# GitHub's artifact storage (its quota is small for a private repository).
 name: desktop
 
 on:
@@ -16,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: never
@@ -25,9 +27,9 @@ env:
   MAGNUS_GUEST_ROOTFS: ${{ vars.MAGNUS_SANDBOX_OUT }}/rootfs.ext4
 
 jobs:
-  build:
+  release-checks:
     runs-on: [self-hosted, linux, magnus-linux]
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       # Keep target/ between runs: a clean build of everything is long.
       - uses: actions/checkout@v7
@@ -45,18 +47,6 @@ jobs:
           cp "$b/release/bundle/deb/Magnus_${v}_amd64.deb" "$b/release/bundle/appimage/Magnus_${v}_amd64.AppImage" \
              "$b/x86_64-pc-windows-gnu/release/bundle/nsis/Magnus_${v}_x64-setup.exe" dist/
           (cd dist && sha256sum Magnus_* > SHA256SUMS)
-      - uses: actions/upload-artifact@v7
-        with: { name: installers, path: dist/, retention-days: 14 }
-
-  linux:
-    needs: build
-    runs-on: [self-hosted, linux, magnus-linux]
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with: { clean: false }
-      - uses: actions/download-artifact@v8
-        with: { name: installers, path: dist }
       - name: Install the app from its package
         run: |
           v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
@@ -66,23 +56,14 @@ jobs:
           MAGNUS_DESKTOP_APP: ${{ runner.temp }}/app/usr/bin/magnus-desktop
           MAGNUS_SHOTS: ${{ runner.temp }}/shots
         run: cargo test -p magnus-scratch --test desktop_app -- --ignored
-      - if: failure()
-        uses: actions/upload-artifact@v7
-        with: { name: linux-screenshots, path: "${{ runner.temp }}/shots", if-no-files-found: ignore }
-
-  publish:
-    if: startsWith(github.ref, 'refs/tags/desktop-v')
-    needs: [linux]
-    runs-on: [self-hosted, linux, magnus-linux]
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-        with: { clean: false }
-      - uses: actions/download-artifact@v8
-        with: { name: installers, path: dist }
+      - name: Keep the screenshots of a failure on the build box
+        if: failure()
+        run: |
+          d="$HOME/magnus-ci/shots/${{ github.run_id }}"
+          mkdir -p "$d" && cp -r "$RUNNER_TEMP/shots/." "$d/" 2>/dev/null || true
+          echo "screenshots: $d"
       - name: Pre-release with the tested installers
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
