@@ -497,14 +497,37 @@ impl Kernel {
     }
 
     /// In a chat turn: the actions the person asked for (start a task,
-    /// propose a schedule) whose every attempt failed, with the reason.
+    /// propose a schedule) that failed and were not made good later, with
+    /// the reason.
     pub fn unfinished_chat_actions(&self, run: &crate::state::Run) -> Vec<serde_json::Value> {
         let r = self.read(|s| s.runs.get(&run.id).cloned()).unwrap_or_else(|| run.clone());
         let mut out: Vec<serde_json::Value> = vec![];
         for tool in ["create_task", "create_schedule"] {
-            let tried: Vec<serde_json::Value> = r.results_in_order().into_iter().filter(|v| v["tool"] == tool).collect();
-            if !tried.is_empty() && tried.iter().all(|v| v["is_error"] == true) {
-                out.push(serde_json::json!({ "tool": tool, "attempts": tried.len(), "error": tried.last().map(|v| v["text"].clone()) }));
+            // Each attempt with its title and whether it worked, in order.
+            let tried: Vec<(String, bool, String)> = r
+                .replies
+                .iter()
+                .flat_map(|x| x.calls())
+                .filter(|(_, name, _)| name == tool)
+                .filter_map(|(id, _, input)| r.results.get(&id).map(|x| (input["title"].as_str().unwrap_or_default().trim().to_lowercase(), x.is_error, x.text.clone())))
+                .collect();
+            // A failed attempt is made good by a later success of the same
+            // thing (the same title, or any title when it had none); one
+            // success makes good one failure.
+            let mut used = vec![false; tried.len()];
+            let mut failed = vec![];
+            for (i, (title, err, text)) in tried.iter().enumerate() {
+                if !err {
+                    continue;
+                }
+                let later = (i + 1..tried.len()).find(|&j| !used[j] && !tried[j].1 && (title.is_empty() || tried[j].0 == *title));
+                match later {
+                    Some(j) => used[j] = true,
+                    None => failed.push(text.clone()),
+                }
+            }
+            if !failed.is_empty() {
+                out.push(serde_json::json!({ "tool": tool, "attempts": tried.iter().filter(|t| t.1).count(), "error": failed.last() }));
             }
         }
         out

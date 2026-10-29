@@ -33,14 +33,19 @@ impl Kernel {
             return Ok(());
         }
         let Some(text) = self.exchange(&run) else { return Ok(()) };
-        let known: Vec<String> = self.read(|s| s.memory.iter().filter(|m| m.person == run.person).map(|m| format!("- {}", m.fact)).collect());
+        // Only facts the run's own taint already covers: the pass reads them
+        // outside execute(), and what it writes carries the run's label, so
+        // an untrusted or private fact shown to a cleaner run would be filed
+        // again without its label.
+        let label = crate::tools::Label { untrusted: run.untrusted, private: run.private };
+        let known: Vec<String> = self.read(|s| s.memory.iter().filter(|m| m.person == run.person && m.label.join(label) == label).map(|m| format!("- {}", m.fact)).collect());
         let known = if known.is_empty() { "nothing yet".to_string() } else { known.join("\n") };
         let msg = Message { role: Role::User, content: vec![Block::Text { text: format!("{text}\n\nAlready remembered:\n{known}") }], state: None };
         let tools: Vec<_> = crate::tools::builtin_specs(false, false, false).into_iter().filter(|t| t.name == "memory_write").collect();
         let (adapter, model) = (run.model().0.to_string(), run.model().1.to_string());
         let out = self.adapters.complete(&adapter, &model, MEMORY, vec![msg], tools, run.config.max_tokens, |_| {}).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let blocks = out.blocks.clone();
-        self.emit("kernel:memory_pass", Ev::MemoryPass { run: run.id.clone(), model: format!("{adapter}/{model}"), blocks: out.blocks, usage: out.usage }).await?;
+        let pass = self.emit("kernel:memory_pass", Ev::MemoryPass { run: run.id.clone(), model: format!("{adapter}/{model}"), blocks: out.blocks, usage: out.usage }).await?.seq;
         let mut n = 0;
         for b in blocks {
             // Only what it was offered; the boundary refuses anything else too.
@@ -49,7 +54,7 @@ impl Kernel {
                     continue;
                 }
                 n += 1;
-                let a = Action { run: run.id.clone(), call_id: format!("memory:{n}"), step_id: format!("memory.{n}"), tool: name, input, issuer: Issuer::Memory };
+                let a = Action { run: run.id.clone(), call_id: format!("memory:{pass}:{n}"), step_id: format!("memory.{pass}.{n}"), tool: name, input, issuer: Issuer::Memory };
                 self.execute(a).await?;
             }
         }

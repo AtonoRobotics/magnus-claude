@@ -225,3 +225,13 @@ One line per choice the brief left open, with its reason. The brief and the owne
 - Dev Postgres (`magnus-claude-pg`) now runs `dev/postgres.Dockerfile`: the same `postgres:16` image by digest plus pgvector 0.8.7 from PGDG, on the same data volume (the old container is kept as `magnus-claude-pg-old`). Reason: `pgvector/pgvector:pg16` is 16.15 on Debian 12; the data was written on Debian 13, and another glibc can change collations under existing indexes.
 - `magnus migrate` (with the admin URL) now also creates the vector extension, the knowledge table, its reader role and policies. Appliance updates do not migrate, so a release with the knowledge base needs `migrate` once when installed; until then knowledge calls fail and say so. Reason: the kernel's role may not create extensions or roles, by design.
 - Bug (master's desktop run after #10, 2026-10-29): Settings' "What's new" made the app mark `whats-new.json` as shown instead of removing it, so the self-update test's check that the note is shown once (the file is gone after the first show) failed. Fix: once shown, the note moves to `whats-new-shown.json`, which only Settings reads. Reason: the product meets the test's contract again; the test was not changed.
+
+## Review of master fixes (2026-10-29, `master-fixes`)
+
+- The memory pass shows a run only the remembered facts its own taint covers (an untrusted or private fact only to a run that already holds that taint). Reason: it reads them outside `execute()` and what it writes carries the run's label, so a clean run shown an untrusted fact filed it again as trusted (M1, invariant 4). Test: `runs_review.rs`.
+- Each memory pass names its calls after its own `MemoryPass` event (`memory:<seq>:<n>`). Reason: a second pass on the same run (after a rejected review) reused the first pass's step ids, and the boundary deduplicated or refused its writes.
+- The verifier judges only criteria without a check; a criterion whose check was refused or could not run goes to the person unchanged. Reason: K37 and the decision above; the verifier's "holds" completed such tasks.
+- A reset's note (and a notice) at a reply that an earlier reset cut is shown where the context resumes. Reason: two resets in a row dropped the second note, so the stronger model never learnt its cut calls had run.
+- A chat turn's failed `create_task`/`create_schedule` is reported (K24) unless a later attempt of the same thing (same title, or any title when it had none) succeeded. Reason: one success hid every other failure.
+- Writing the person's memory does not start the work. Reason: it changes nothing in the world and needs no contract; it froze the first contract.
+- The unknown-outcome card and its suspension are one write (`suspend_on`), like every other card.

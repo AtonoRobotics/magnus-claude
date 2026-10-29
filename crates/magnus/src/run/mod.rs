@@ -143,6 +143,15 @@ impl Kernel {
         msgs.push(Message { role: Role::User, content: first, state: None });
         for (i, reply) in run.replies.iter().enumerate() {
             if cut(i) {
+                // A later reset can start inside an earlier one's cut: its
+                // note (and any notice there) goes where the context resumes.
+                let after: Vec<Block> = run.notices.iter().filter(|(s, _, _)| *s as usize == i + 1).map(|(_, _, t)| Block::Text { text: t.clone() }).chain(notes(i + 1)).collect();
+                if !after.is_empty() {
+                    match msgs.last_mut() {
+                        Some(m) if m.role == Role::User => m.content.extend(after),
+                        _ => msgs.push(Message { role: Role::User, content: after, state: None }),
+                    }
+                }
                 continue;
             }
             msgs.push(Message { role: Role::Assistant, content: reply.blocks.clone(), state: reply.state.clone() });
@@ -754,12 +763,18 @@ impl Kernel {
             return Ok(Flow::Continue);
         }
         let summary = input["summary"].as_str().unwrap_or_default().to_string();
-        if !unchecked.is_empty() && run.config.module("verifier") {
+        // The verifier judges only criteria without a check: one whose check
+        // could not run goes to the person unchanged (K37).
+        let (no_check, could_not_run): (Vec<Value>, Vec<Value>) = unchecked.into_iter().partition(|cr| cr.get("check").is_none_or(|v| v.is_null()));
+        unchecked = could_not_run;
+        if !no_check.is_empty() && run.config.module("verifier") {
             let goal = contract["goal"].as_str().unwrap_or_default();
-            match self.verifier_on_completion(run, call_id, step_id, goal, unchecked, &summary).await? {
-                Ok(left) => unchecked = left,
+            match self.verifier_on_completion(run, call_id, step_id, goal, no_check, &summary).await? {
+                Ok(left) => unchecked.extend(left),
                 Err(flow) => return Ok(flow),
             }
+        } else {
+            unchecked.extend(no_check);
         }
         if !unchecked.is_empty() {
             // No executable check, and the verifier off or unsure: the person reviews (K37).
