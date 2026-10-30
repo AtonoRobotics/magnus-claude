@@ -39,10 +39,12 @@ const CHROME = s => [[s], [s, "row-sel"], [s, "search"], [s, "seg"]];
 const READING = [["main"], ["surface"], ["raised"], ["bubble"], ["group-head"], ["approval-bg"], ["seg-on"]];
 const PAIRS = [["accent-fg", "accent"], ["ok", "ok-soft"], ["warn", "warn-soft"], ["sch", "sch-soft"], ["bad", "bad-soft"], ["warn", "approval-bg"], ["accent-text", "accent-soft"]];
 
-// The backdrops behind glass: anything on the desktop (black to white, and
-// greys between, the luminance extremes) and the drawn wallpaper's colors.
-const wallpaper = look => [...Theme.GLASS[look.mode].backdrop.matchAll(/#[0-9a-f]{6}/gi)].map(m => m[0]);
-const backdrops = look => ["#000000", "#ffffff", "#808080", ...wallpaper(look)].map(rgba);
+// The backdrops that can be behind glass: the system's material over
+// anything on the desktop (its tint over black, white and grey between, the
+// luminance extremes; Windows 11's Mica stays within them), and the drawn
+// wallpaper's colors where the system has no material.
+const wallpaper = look => [...Theme.GLASS[look.mode].backdrop.matchAll(/#[0-9a-f]{6}/gi)].map(m => rgba(m[0]));
+const backdrops = look => ["#000000", "#ffffff", "#808080"].map(d => over(rgba(Theme.GLASS[look.mode].system), rgba(d))).concat(wallpaper(look));
 
 const failures = [];
 const report = [];

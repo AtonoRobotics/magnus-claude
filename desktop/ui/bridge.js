@@ -57,7 +57,7 @@ const appBridge = tauri && {
   async whatsNew(again = false) { return this.invoke("whats_new", { again }); },
   onUpdateReady(fn) { tauri.event.listen("update-ready", e => fn(e.payload)); },
   // Glass from the system's own window material where it has one.
-  async setMaterial(glass, dark) { return this.invoke("set_material", { glass, dark }).catch(() => ({ native: false })); },
+  async setMaterial(glass, dark, tint) { return this.invoke("set_material", { glass, dark, tint }).catch(() => ({ native: false })); },
   async systemLook() { return this.invoke("system_look").catch(() => ({ reduce_transparency: false })); },
 };
 

@@ -32,17 +32,22 @@
     "t-read": "#A1A1A8", "t-reversible": "#A9BAFF", "t-irreversible": "#FFAA55", "t-financial": "#FF8A80",
     "k-question": "#C4B5FD", "k-review": "#5EEAD4", "k-notice": "#FFBE78", "k-proposal": "#A5B4FC", "k-message": "#A1A1A8", "k-tool": "#FDBA74",
   };
-  // Glass: the chrome's tint, its blur, and the drawn backdrop for systems
-  // with no window material. Text on glass is a step stronger than on solid.
+  // Glass: the chrome's tint (the design canvas's), its blur, the drawn
+  // backdrop for systems with no window material, and `system`, the tint
+  // Magnus gives a material it chooses itself (Acrylic on Windows 10;
+  // Windows 11's Mica keeps its own, within that tint's range). Text on
+  // glass is a step stronger than on solid.
   const GLASS = {
     light: {
-      side: "rgba(248,248,246,0.84)", panel: "rgba(250,250,248,0.86)", search: "rgba(255,255,255,0.55)", seg: "rgba(0,0,0,0.06)",
+      system: "rgba(248,248,246,0.63)",
+      side: "rgba(248,248,246,0.62)", panel: "rgba(250,250,248,0.70)", search: "rgba(255,255,255,0.55)", seg: "rgba(0,0,0,0.06)",
       muted: "#45454A", faint: "#45454A", chev: "#5E5E63", "panel-edge": "rgba(255,255,255,0.6)", "main-edge": "rgba(0,0,0,0.05)",
       "main-shadow": "0 10px 40px rgba(40,50,90,0.12)",
       backdrop: "radial-gradient(60% 50% at 12% 18%, #F7C8A6 0%, rgba(247,200,166,0) 70%), radial-gradient(55% 55% at 88% 12%, #AFC2F7 0%, rgba(175,194,247,0) 70%), radial-gradient(60% 60% at 72% 92%, #BFE5D2 0%, rgba(191,229,210,0) 70%), #E4E6EE",
     },
     dark: {
-      side: "rgba(26,26,30,0.88)", panel: "rgba(28,28,32,0.90)", search: "rgba(255,255,255,0.10)", seg: "rgba(255,255,255,0.08)",
+      system: "rgba(24,24,28,0.63)",
+      side: "rgba(26,26,30,0.58)", panel: "rgba(28,28,32,0.66)", search: "rgba(255,255,255,0.08)", seg: "rgba(255,255,255,0.08)",
       muted: "#C2C2C8", faint: "#C2C2C8", chev: "#A1A1A8", "panel-edge": "rgba(255,255,255,0.08)", "main-edge": "rgba(255,255,255,0.06)",
       "main-shadow": "0 10px 40px rgba(0,0,0,0.45)",
       backdrop: "radial-gradient(60% 50% at 12% 18%, #4B2A5E 0%, rgba(75,42,94,0) 70%), radial-gradient(55% 55% at 88% 12%, #173F66 0%, rgba(23,63,102,0) 70%), radial-gradient(60% 60% at 72% 92%, #5A2F1C 0%, rgba(90,47,28,0) 70%), #0D0F1A",
@@ -87,6 +92,8 @@
     // Solid: the conversation fills its column. Glass: it floats, inset,
     // over the backdrop the chrome is frosted from.
     t.blur = "none"; t["main-gap"] = "0px"; t["main-radius"] = "0px"; t["main-shadow"] = "none"; t.backdrop = t.bg;
+    // What glass looks like in this mode, for the preview in Appearance.
+    t["glass-backdrop"] = GLASS[look.mode].backdrop; t["glass-side"] = GLASS[look.mode].side; t["glass-edge"] = GLASS[look.mode]["panel-edge"];
     if (look.material === "glass") {
       Object.assign(t, GLASS[look.mode]);
       t.blur = "blur(40px) saturate(170%)"; t["main-gap"] = "10px"; t["main-radius"] = "18px";
@@ -117,7 +124,8 @@
     // The system's own material behind the window where it has one; the
     // page's drawn backdrop where it has none.
     const glass = look.material === "glass";
-    if (root.Magnus?.setMaterial) root.Magnus.setMaterial(glass, look.mode === "dark").then(m => { el.dataset.backdrop = glass && m.native ? "native" : "drawn"; });
+    const tint = GLASS[look.mode].system.match(/[\d.]+/g).map(Number);
+    if (root.Magnus?.setMaterial) root.Magnus.setMaterial(glass, look.mode === "dark", [...tint.slice(0, 3), Math.round(tint[3] * 255)]).then(m => { el.dataset.backdrop = glass && m.native ? "native" : "drawn"; });
     else el.dataset.backdrop = "drawn";
     return look;
   };

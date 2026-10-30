@@ -13,26 +13,27 @@ pub struct Material {
 }
 
 /// Put the window on glass or take it off. `dark` picks the material's
-/// dark variant where the system has one.
+/// dark variant where the system has one; `tint` (r, g, b, alpha 0-255) is
+/// the page's tint for a material Magnus colors itself (Acrylic).
 #[tauri::command]
-pub fn set_material(window: tauri::WebviewWindow, glass: bool, dark: bool) -> Material {
-    Material { native: apply(&window, glass, dark) }
+pub fn set_material(window: tauri::WebviewWindow, glass: bool, dark: bool, tint: (u8, u8, u8, u8)) -> Material {
+    Material { native: apply(&window, glass, dark, tint) }
 }
 
 #[cfg(target_os = "windows")]
-fn apply(window: &tauri::WebviewWindow, glass: bool, dark: bool) -> bool {
+fn apply(window: &tauri::WebviewWindow, glass: bool, dark: bool, tint: (u8, u8, u8, u8)) -> bool {
     use window_vibrancy::{apply_acrylic, apply_mica, clear_acrylic, clear_mica};
     let _ = clear_mica(window);
     let _ = clear_acrylic(window);
     if !glass {
         return false;
     }
-    // Mica on Windows 11; Acrylic, tinted for the mode, on Windows 10.
-    apply_mica(window, Some(dark)).is_ok() || apply_acrylic(window, Some(if dark { (24, 24, 28, 160) } else { (248, 248, 246, 160) })).is_ok()
+    // Mica on Windows 11; Acrylic, in the page's tint, on Windows 10.
+    apply_mica(window, Some(dark)).is_ok() || apply_acrylic(window, Some(tint)).is_ok()
 }
 
 #[cfg(not(target_os = "windows"))]
-fn apply(_window: &tauri::WebviewWindow, _glass: bool, _dark: bool) -> bool {
+fn apply(_window: &tauri::WebviewWindow, _glass: bool, _dark: bool, _tint: (u8, u8, u8, u8)) -> bool {
     false
 }
 

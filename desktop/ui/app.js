@@ -1918,18 +1918,18 @@ route(/^#\/apps$/, () => { location.hash = "#/settings/connectors"; });
 // takes effect at once; the computer's own settings for less motion and less
 // transparency still apply on top.
 function appearanceSection(el) {
-  const radio = (look, value, label, inner = label, cls = "") => {
+  const radio = (look, value, label, inner = label, cls = "", style = "") => {
     const on = Theme.prefs()[look] === value;
-    return `<button class="${cls}${on ? " on" : ""}" role="radio" aria-checked="${on}" data-look="${look}" data-value="${value}" title="${esc(label)}">${inner}</button>`;
+    return `<button class="${cls}${on ? " on" : ""}" role="radio" aria-checked="${on}" data-look="${look}" data-value="${value}" title="${esc(label)}"${style ? ` style="${style}"` : ""}>${inner}</button>`;
   };
   const draw = () => {
     const p = Theme.prefs(), os = Theme.os(), look = Theme.look;
     paint(el, `<h2>Appearance</h2><div class="appearance">
       <h3 id="mode-h">Mode</h3><div class="seg" role="radiogroup" aria-labelledby="mode-h">${Theme.MODES.map(([k, l]) => radio("mode", k, l)).join("")}</div>
       <h3 id="mat-h">Material</h3><div class="materials" role="radiogroup" aria-labelledby="mat-h">${Theme.MATERIALS.map(([k, l, hint]) => radio("material", k, l,
-        `<span class="mprev ${k}" aria-hidden="true"><span class="ms"></span><span class="mm"></span></span><span class="ml">${esc(l)}</span><span class="small muted">${esc(hint)}</span>`, "material")).join("")}</div>
+        `<span class="mprev ${k}" aria-hidden="true"><span class="ms"></span><span class="mm"></span></span><span class="mt"><span class="ml">${esc(l)}</span><span class="small muted">${esc(hint)}</span></span>`, "material")).join("")}</div>
       ${p.material === "glass" && os.reduceTransparency ? `<p class="small muted" data-look-note>Your computer asks for less transparency, so Magnus stays solid.</p>` : ""}
-      <h3 id="acc-h">Accent</h3><div class="swatches" role="radiogroup" aria-labelledby="acc-h">${Theme.ACCENTS.map(a => radio("accent", a.id, a.label, `<span class="sw" style="background:${a.swatch}"></span><span class="sr">${esc(a.label)}</span>`, "swatch")).join("")}</div>
+      <h3 id="acc-h">Accent</h3><div class="swatches" role="radiogroup" aria-labelledby="acc-h">${Theme.ACCENTS.map(a => radio("accent", a.id, a.label, `<span class="sr">${esc(a.label)}</span>`, "swatch", `--swatch:${a.swatch};background:${a.swatch}`)).join("")}</div>
       <h3 id="mot-h">Motion</h3><div class="seg" role="radiogroup" aria-labelledby="mot-h">${Theme.MOTIONS.map(([k, l]) => radio("motion", k, l)).join("")}</div>
       <p class="small muted" data-motion-hint>${esc(Theme.MOTION_HINTS[p.motion])}${look.motion !== p.motion ? " Your computer asks for reduced motion, so Magnus uses quick fades." : ""}</p>
       <p class="small faint">Magnus also follows your computer's settings for reduced motion and reduced transparency.</p></div>`);

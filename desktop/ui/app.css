@@ -380,24 +380,32 @@ label.toggle input { margin-top: 3px; }
 .share-to { margin-top: 4px; gap: 6px; align-items: center; }
 .msg.editing textarea { width: 100%; min-width: 40ch; }
 
-/* Settings > Appearance */
-.appearance h3 { margin-top: 22px; }
-.materials { display: grid; grid-template-columns: repeat(2, minmax(0, 220px)); gap: 12px; }
-button.material { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left; padding: 10px; border-radius: 14px; border: 2px solid var(--btn-border); }
+/* Settings > Appearance, as the design canvas draws it: sentence-case
+   headings, full-width segmented controls, material tiles that preview
+   each material in the current mode, and round accent swatches. */
+.appearance { max-width: 616px; display: flex; flex-direction: column; }
+.appearance h3 { font-size: 14px; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--fg); margin: 26px 0 10px; }
+.appearance h3:first-child { margin-top: 8px; }
+.appearance .seg { display: flex; gap: 4px; padding: 4px; border-radius: 12px; }
+.appearance .seg button { flex: 1; height: 40px; border-radius: 9px; font-size: 14px; font-weight: 500; }
+.appearance .seg button.on { font-weight: 600; }
+.appearance [data-motion-hint] { margin-top: 10px; }
+.appearance > p:last-child { margin-top: 26px; font-size: 12px; }
+.materials { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+button.material { display: flex; flex-direction: column; align-items: stretch; gap: 12px; text-align: left; padding: 12px; border-radius: 14px; border: 2px solid var(--line); background: var(--surface); color: var(--fg); }
+button.material:hover { border-color: var(--line-strong); }
 button.material.on { border-color: var(--accent); }
-.material .ml { font-weight: 600; }
-.mprev { display: grid; grid-template-columns: 30% 1fr; width: 100%; height: 76px; border-radius: 9px; overflow: hidden; margin-bottom: 6px; background: var(--bg); }
-.mprev.glass { background: radial-gradient(circle at 15% 20%, #F7C8A6, transparent 60%), radial-gradient(circle at 85% 15%, #AFC2F7, transparent 60%), radial-gradient(circle at 70% 95%, #BFE5D2, transparent 60%), #E4E6EE; }
-html[data-mode="dark"] .mprev.glass { background: radial-gradient(circle at 15% 20%, #4B2A5E, transparent 60%), radial-gradient(circle at 85% 15%, #173F66, transparent 60%), radial-gradient(circle at 70% 95%, #5A2F1C, transparent 60%), #0D0F1A; }
-.mprev .ms { background: var(--side); }
-.mprev.solid .ms { background: var(--bg); border-right: 1px solid var(--line); }
-.mprev.glass .ms { background: rgba(255,255,255,.35); }
-html[data-mode="dark"] .mprev.glass .ms { background: rgba(0,0,0,.3); }
-.mprev .mm { background: var(--main); margin: 6px 6px 6px 4px; border-radius: 6px; }
+.material .ml { font-weight: 600; font-size: 14px; }
+.material .mt { display: flex; flex-direction: column; gap: 2px; }
+.mprev { display: flex; gap: 6px; height: 88px; padding: 8px; border-radius: 10px; background: var(--seg); }
+.mprev.glass { background: var(--glass-backdrop); }
+.mprev .ms { flex: 0 0 34%; border-radius: 6px; background: var(--bg); }
+.mprev.glass .ms { background: var(--glass-side); backdrop-filter: blur(12px); border: 1px solid var(--glass-edge); }
+.mprev .mm { flex: 1; border-radius: 6px; background: var(--main); }
 .swatches { display: flex; gap: 12px; }
-button.swatch { width: 44px; height: 44px; border-radius: 50%; padding: 4px; border: 2px solid transparent; background: none; }
-button.swatch.on { border-color: var(--fg); }
-button.swatch .sw { display: block; width: 100%; height: 100%; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(127,127,127,.35); }
+button.swatch { width: 44px; height: 44px; border-radius: 50%; padding: 0; border: 3px solid var(--surface); box-shadow: 0 0 0 1px var(--line-strong); }
+button.swatch.on { box-shadow: 0 0 0 2px var(--swatch); }
+button.swatch:hover { border-color: var(--surface); }
 
 /* Motion (U7): springs for the panel and cards, gentle status changes and a
    quiet moment when work finishes; quick fades when reduced; nothing when

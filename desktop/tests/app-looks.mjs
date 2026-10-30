@@ -3,7 +3,8 @@
 // (the sidebar, the panel beside the conversation) is glass only when glass
 // is chosen; the conversation and what is read in it stay solid; and every
 // text on screen reaches 4.5:1 against what is under it, glass measured over
-// the worst case behind the window, black and white. Then: the accent, the
+// the worst case behind it: the system's material over a black or white
+// desktop, or the backdrop the page draws where there is no material. Then: the accent, the
 // motion setting, and the choice kept on this device across a restart of the
 // page. Runs the same on Windows, where glass is the system's Mica or Acrylic.
 //
@@ -33,8 +34,8 @@ const choose = async (label, value) => {
 
 // Everything the page shows, measured as it is drawn: each surface's
 // background (glass is any surface not opaque), and each text's contrast
-// against the surfaces under it, laid over black and over white wherever
-// they let the backdrop through.
+// against the surfaces under it, laid over every backdrop that can be
+// behind them wherever they let it through.
 const MEASURE = `
   const rgba = c => { const p = (c.match(/[\\d.]+/g) || []).map(Number); return p.length === 3 ? [...p, 1] : p; };
   const over = (t, u) => [0, 1, 2].map(i => t[i] * t[3] + u[i] * (1 - t[3])).concat(1);
@@ -42,7 +43,14 @@ const MEASURE = `
   const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
   // The layers under an element, top first, down to the first opaque one.
   const under = el => { const ls = []; for (let e = el; e && e !== document.documentElement; e = e.parentElement) { const c = rgba(getComputedStyle(e).backgroundColor); if (c[3] === 0) continue; ls.push(c); if (c[3] === 1) return ls; } return ls; };
-  const backs = el => { const ls = under(el); const opaque = ls.length && ls[ls.length - 1][3] === 1; return (opaque ? [ls.pop()] : [[0, 0, 0, 1], [255, 255, 255, 1]]).map(b => ls.reduceRight((acc, l) => over(l, acc), b)); };
+  // Behind glass: the system's material over anything on the desktop (its
+  // tint over black, grey and white), or the drawn wallpaper's colors where
+  // the page draws its own backdrop.
+  const glass = Theme.GLASS[document.documentElement.dataset.mode];
+  const behind = document.documentElement.dataset.backdrop === "native"
+    ? [[0, 0, 0, 1], [128, 128, 128, 1], [255, 255, 255, 1]].map(d => over(rgba(glass.system), d))
+    : [...glass.backdrop.matchAll(/#([0-9a-f]{6})/gi)].map(m => [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16)).concat(1));
+  const backs = el => { const ls = under(el); const opaque = ls.length && ls[ls.length - 1][3] === 1; return (opaque ? [ls.pop()] : behind).map(b => ls.reduceRight((acc, l) => over(l, acc), b)); };
   const shown = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.opacity !== "0" && !el.closest(".sr, [hidden], option"); };
   const texts = root => [...root.querySelectorAll("*")].filter(el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()) && shown(el));
   const low = [];
