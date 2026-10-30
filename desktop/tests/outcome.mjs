@@ -35,13 +35,15 @@ await step("sign in", async () => {
   await page.getByLabel("Your name on the appliance").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("heading", { name: "Home" }).waitFor({ timeout: T });
+  // Signed in: the workspace, with Needs you in the sidebar.
+  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
 await step("the itinerary is on the page in full", async () => {
+  // A task's link opens it beside the conversation.
   await page.goto(`${base}/#/task/${task}`);
-  await page.locator(".chip", { hasText: "Done" }).waitFor({ timeout: T });
-  const frame = page.frameLocator("iframe.composed");
+  await page.locator("#detail .detail-head .chip", { hasText: "Done" }).waitFor({ timeout: T });
+  const frame = page.frameLocator("#detail iframe.composed");
   for (const s of ["Day 1: Balboa Park", "Day 2: The harbor", "Day 3: La Jolla Cove", "13:00 Check in at Mission View Inn, 641 Camino del Rio S ($67 a night)", "12:30 Lunch at Tacos El Gordo ($28)", "8:30 Sea lions at La Jolla Cove (free)", "$914"]) {
     await frame.getByText(s, { exact: false }).first().waitFor({ timeout: T });
   }
@@ -49,20 +51,21 @@ await step("the itinerary is on the page in full", async () => {
   // shown as one too.
   await frame.locator('[data-file="San Diego itinerary.md"] table').getByRole("cell", { name: "Lodging", exact: true }).waitFor({ timeout: T });
   await frame.locator('[data-file="costs.csv"] td', { hasText: "food" }).waitFor({ timeout: T });
-  // Nothing was opened to see it: no file, and the trace stays folded.
-  if (await page.locator("details.trace[open]").count()) throw new Error("the trace is open");
-  if (await page.getByRole("tab", { name: "Outcome" }).getAttribute("aria-selected") !== "true") throw new Error("not on the outcome");
+  // Nothing was opened to see it: no file, and the steps stay behind their tab.
+  if (await page.locator("#detail .call").count()) throw new Error("the steps are shown");
+  if (await page.getByRole("tab", { name: "Result" }).getAttribute("aria-selected") !== "true") throw new Error("not on the result");
 });
 
-await step("then the summary, evidence, cost and trace", async () => {
-  const order = await page.evaluate(() => ["iframe.composed", "[data-summary]", "[data-done-line]", "[data-cost]", "details.trace"].map(q => {
-    const el = document.querySelector(q);
-    return el ? el.getBoundingClientRect().top + window.scrollY : null;
+await step("then the summary, evidence and cost; the steps a tab away", async () => {
+  const order = await page.evaluate(() => ["iframe.composed", "[data-summary]", "[data-done-line]", "[data-cost]"].map(q => {
+    const el = document.querySelector(`#detail ${q}`);
+    return el ? el.getBoundingClientRect().top : null;
   }));
-  if (order.some(y => y === null) || order.some((y, i) => i && y <= order[i - 1])) throw new Error(`out of order (deliverable, summary, evidence, cost, trace): ${order}`);
-  await page.locator("[data-summary]", { hasText: "Nothing was booked." }).waitFor({ timeout: T });
-  await page.locator("details.trace > summary").click();
-  await page.locator(".call").first().waitFor({ timeout: T });
+  if (order.some(y => y === null) || order.some((y, i) => i && y <= order[i - 1])) throw new Error(`out of order (deliverable, summary, evidence, cost): ${order}`);
+  await page.locator("#detail [data-summary]", { hasText: "Nothing was booked." }).waitFor({ timeout: T });
+  await page.getByRole("tab", { name: "Steps" }).click();
+  await page.locator("#detail .call").first().waitFor({ timeout: T });
+  await page.getByRole("tab", { name: "Result" }).click();
 });
 
 await step("a one-tap verdict with a note is kept", async () => {
@@ -73,7 +76,9 @@ await step("a one-tap verdict with a note is kept", async () => {
   await bar().getByLabel("Note").fill("Lodging is far from the coast.");
   await bar().getByRole("button", { name: "Save note" }).click();
   await page.getByText("Note saved.").waitFor({ timeout: T });
+  // Opened again from its link after a restart of the page, it is kept.
   await page.reload();
+  await page.goto(`${base}/#/task/${task}`);
   await bar().locator('button[data-verdict="partly"][aria-pressed="true"]').waitFor({ timeout: T });
   const note = await bar().getByLabel("Note").inputValue();
   if (note !== "Lodging is far from the coast.") throw new Error(`the note reads "${note}" after a reload`);

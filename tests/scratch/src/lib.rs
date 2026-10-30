@@ -167,15 +167,22 @@ pub fn set_password(app: &Appliance, person: &str, pw: &str) -> bool {
 impl Flow {
     pub async fn start() -> Flow {
         let web = FakeWeb::start(&[("/finance/q3", "<p>Q3 revenue: 41.7M. Q2 revenue: 38.2M.</p>")]).await;
-        // Chat turns answer; tasks follow the script.
+        // Chat turns answer, except that asking for TASK in a conversation
+        // starts it as a task (work is started in a conversation); tasks
+        // follow the script.
         let task = steps(replies(web.url("/finance/q3")));
         let s = script(move |c| {
             let task = task.clone();
             async move {
-                if c.body["system"].to_string().contains("in a chat") {
-                    Reply::Text(CHAT_ANSWER.into())
-                } else {
-                    task(c).await
+                if !c.body["system"].to_string().contains("in a chat") {
+                    return task(c).await;
+                }
+                let first = c.messages().first().cloned().unwrap_or_default();
+                let said = first["content"].as_array().and_then(|b| b.last()).and_then(|b| b["text"].as_str()).unwrap_or_default().to_string();
+                match (said == TASK, c.turn()) {
+                    (true, 0) => tool("create_task", json!({ "title": "Q3 revenue summary", "text": TASK })),
+                    (true, _) => Reply::Text("Started; it shows here as it goes.".into()),
+                    _ => Reply::Text(CHAT_ANSWER.into()),
                 }
             }
         });
@@ -233,9 +240,9 @@ impl Flow {
     pub async fn report(&self) -> String {
         let alice = self.app.api(PERSON);
         let tasks = alice.tasks().await;
-        let id = tasks["tasks"][0]["task_id"].as_str().unwrap_or_default().to_string();
+        let Some(id) = tasks["tasks"][0]["task_id"].as_str() else { return "--- no task was started ---".into() };
         let (_, tl) = alice.get(&format!("/v1/tasks/{id}/timeline")).await;
-        format!("--- task ---\n{}\n--- trace ---\n{}", alice.task(&id).await, serde_json::to_string_pretty(&tl).unwrap())
+        format!("--- task ---\n{}\n--- trace ---\n{}", alice.task(id).await, serde_json::to_string_pretty(&tl).unwrap())
     }
 }
 

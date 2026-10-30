@@ -1,6 +1,7 @@
 // The operator flow, through the page a person uses: sign in, connect
-// Claude, type a plain-language task, approve in the inbox, and see the
-// outcome with its evidence. It checks behavior, not appearance (U7).
+// Claude, ask for work in a conversation, approve under Needs you, and see
+// the outcome with its evidence beside the conversation. It checks behavior,
+// not appearance (U7).
 //
 // MAGNUS_URL       the appliance (its own page, or a page that loads ../ui)
 // MAGNUS_PERSON    the person signing in, with either
@@ -8,7 +9,7 @@
 //   MAGNUS_PROVIDER  the identity provider's name on the sign-in button
 //                    (the person approves on the provider's page)
 // MAGNUS_API_KEY   the key to paste when connecting Claude
-// MAGNUS_TASK      the task to type
+// MAGNUS_TASK      the work to ask for in a conversation
 // MAGNUS_CHAT_QUESTION, MAGNUS_CHAT_ANSWER  optionally, a question to ask in
 //                  chat and the answer the model gives
 // MAGNUS_CHROMIUM  Chrome to drive; MAGNUS_SHOTS  where to keep screenshots
@@ -37,6 +38,10 @@ const step = async (name, f) => {
   catch (e) { await shot(`FAILED-${name}`); console.error(`FAIL ${name}: ${e.message}`); await browser.close(); process.exit(1); }
 };
 const T = 60_000;
+// Signed in: the workspace, with Needs you in the sidebar.
+const home = () => page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+const panel = page.locator("#detail");
+const conversations = () => page.locator('#side a[href^="#/chat/"]').count();
 
 if (provider) await step(`sign in with ${provider}`, async () => {
   await page.goto(base);
@@ -48,7 +53,7 @@ if (provider) await step(`sign in with ${provider}`, async () => {
   const code = (await page.locator("#code").innerText()).trim();
   if (!idp.url().includes(code)) throw new Error(`the provider's page ${idp.url()} is not for code ${code}`);
   await idp.getByText(`Signed in as ${person}`).waitFor({ timeout: T });
-  await page.getByRole("heading", { name: "Home" }).waitFor({ timeout: T });
+  await home();
   const page_kept = await page.evaluate(() => JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie);
   if (page_kept.includes("mgs_")) throw new Error("the session token reached the page");
 });
@@ -61,7 +66,7 @@ if (!provider) await step("sign in", async () => {
   await page.getByRole("alert").filter({ hasText: "wrong" }).waitFor({ timeout: T });
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("heading", { name: "Home" }).waitFor({ timeout: T });
+  await home();
 });
 
 await step("connect Claude", async () => {
@@ -83,20 +88,18 @@ await step("connect Claude", async () => {
   await page.getByText("New tasks will use this model.").waitFor({ timeout: T });
 });
 
-let taskUrl;
-await step("type a task", async () => {
-  await page.getByRole("link", { name: "New task" }).click();
+await step("ask for the work in a conversation", async () => {
+  await page.getByRole("link", { name: "New conversation" }).click();
   await page.getByLabel("Model").waitFor({ timeout: T });
-  await page.getByRole("textbox").fill(task);
-  await page.getByRole("button", { name: "Start" }).click();
-  await page.waitForURL(/#\/task\//, { timeout: T });
-  taskUrl = page.url();
-  await page.getByRole("heading", { name: task.slice(0, 40) }).waitFor({ timeout: T }).catch(() => {});
+  await page.getByLabel("Message").fill(task);
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.waitForURL(/#\/chat\/(?!new)/, { timeout: T });
+  await page.locator("#thread [data-chat-task]").waitFor({ timeout: T });
 });
 
-await step("approve in the inbox", async () => {
-  await page.getByRole("link", { name: /Inbox/ }).click();
-  const card = page.locator("article.item.approval").first();
+await step("approve under Needs you", async () => {
+  await page.getByRole("button", { name: /^Needs you/ }).click();
+  const card = panel.locator("article.item.approval").first();
   await card.waitFor({ timeout: T });
   // The card says exactly what will happen, and that a task waits on it.
   await card.getByText("A task is waiting").waitFor({ timeout: T });
@@ -106,7 +109,7 @@ await step("approve in the inbox", async () => {
   await card.getByRole("button", { name: "Approve once" }).click();
   await page.getByText("Approved.").waitFor({ timeout: T });
   // A criterion no check can settle comes back as a review card.
-  const review = page.locator("article.item.review").first();
+  const review = panel.locator("article.item.review").first();
   await review.waitFor({ timeout: T });
   await shot("review card");
   await review.getByRole("button", { name: "Accept" }).click();
@@ -114,51 +117,53 @@ await step("approve in the inbox", async () => {
 });
 
 await step("see the outcome with its evidence", async () => {
-  await page.goto(taskUrl);
-  await page.locator(".chip", { hasText: "Done" }).waitFor({ timeout: T });
-  await page.locator(".evidence.pass").first().waitFor({ timeout: T });
-  const holds = await page.locator(".evidence.pass .chip.ok", { hasText: "holds" }).count();
+  await page.locator("#thread [data-chat-task][data-status=completed]").waitFor({ timeout: T });
+  await page.locator("#thread [data-chat-task] a.rg-row").click();
+  await panel.locator(".detail-head .chip", { hasText: "Done" }).waitFor({ timeout: T });
+  await panel.locator(".evidence.pass").first().waitFor({ timeout: T });
+  const holds = await panel.locator(".evidence.pass .chip.ok", { hasText: "holds" }).count();
   if (!holds) throw new Error("no criterion shows that it holds in the world");
-  const confirmed = await page.locator(".evidence.pass .chip.ok", { hasText: `confirmed by ${person}` }).count();
+  const confirmed = await panel.locator(".evidence.pass .chip.ok", { hasText: `confirmed by ${person}` }).count();
   if (!confirmed) throw new Error("the reviewed criterion does not say who confirmed it");
-  await page.getByText(/1 of 2 criteria checked against the world, 1 confirmed by a person/).waitFor({ timeout: T });
+  await panel.getByText("1 of 2 checks verified by the appliance").waitFor({ timeout: T });
   // The outcome says where each verdict came from (the kernel's labels).
-  await page.getByText("Done: 1 appliance-verified, 0 self-checked, 1 confirmed by a person").waitFor({ timeout: T });
-  await page.locator(".evidence.pass details").first().click();
-  await page.locator(".evidence.pass pre").first().waitFor({ timeout: T });
-  const frame = page.frameLocator("iframe.composed");
+  await panel.getByText("Done: 1 appliance-verified, 0 self-checked, 1 confirmed by a person").waitFor({ timeout: T });
+  await panel.locator(".evidence.pass details").first().click();
+  await panel.locator(".evidence.pass pre").first().waitFor({ timeout: T });
+  const frame = page.frameLocator("#detail iframe.composed");
   await frame.locator("body").getByText(/\S/).first().waitFor({ timeout: T });
   // The deliverable leads, with the delivered file shown in full, before the
-  // summary, the evidence, the cost and the trace.
+  // summary, the evidence and the cost.
   await frame.getByText("Q3 revenue: 41.7M, up from 38.2M in Q2.").waitFor({ timeout: T });
-  const order = await page.evaluate(() => ["iframe.composed", "[data-summary]", "[data-done-line]", "[data-cost]", "details.trace"].map(q => {
-    const el = document.querySelector(q);
-    return el ? el.getBoundingClientRect().top + window.scrollY : null;
+  const order = await page.evaluate(() => ["iframe.composed", "[data-summary]", "[data-done-line]", "[data-cost]"].map(q => {
+    const el = document.querySelector(`#detail ${q}`);
+    return el ? el.getBoundingClientRect().top : null;
   }));
-  if (order.some(y => y === null) || order.some((y, i) => i && y <= order[i - 1])) throw new Error(`the outcome page is out of order (deliverable, summary, evidence, cost, trace): ${order}`);
+  if (order.some(y => y === null) || order.some((y, i) => i && y <= order[i - 1])) throw new Error(`the outcome is out of order (deliverable, summary, evidence, cost): ${order}`);
   // The composed outcome cannot run scripts.
-  const sandbox = await page.locator("iframe.composed").getAttribute("sandbox");
+  const sandbox = await panel.locator("iframe.composed").getAttribute("sandbox");
   if (sandbox === null || /allow-scripts/.test(sandbox)) throw new Error(`the outcome frame may run scripts: ${sandbox}`);
-  const files = await page.locator("button[data-act=download]").count();
+  const files = await panel.locator("button[data-file-download]").count();
   if (!files) throw new Error("the delivered file is not offered");
   await shot("outcome");
   // The plan left u1 active; once the task is done, nothing shows as active.
-  await page.getByRole("tab", { name: "Contract and plan" }).click();
-  await page.locator("[data-unit-status]").first().waitFor({ timeout: T });
-  await page.locator("ol .chip", { hasText: "appliance-verified" }).first().waitFor({ timeout: T });
-  const states = await page.locator("[data-unit-status]").evaluateAll(els => els.map(e => e.dataset.unitStatus));
+  await panel.getByRole("tab", { name: "Plan" }).click();
+  await panel.locator("[data-unit-status]").first().waitFor({ timeout: T });
+  await panel.locator("ol .chip", { hasText: "appliance-verified" }).first().waitFor({ timeout: T });
+  const states = await panel.locator("[data-unit-status]").evaluateAll(els => els.map(e => e.dataset.unitStatus));
   if (states.some(s => s === "active" || s === "pending")) throw new Error(`a finished task shows plan units as ${states.join(", ")}`);
-  await page.getByRole("tab", { name: "Outcome" }).click();
-  await page.locator("details.trace > summary").click();
-  await page.locator(".call").first().waitFor({ timeout: T });
+  await panel.getByRole("tab", { name: "Steps" }).click();
+  await panel.locator(".call").first().waitFor({ timeout: T });
 });
 
 const [question, answer] = [process.env.MAGNUS_CHAT_QUESTION, process.env.MAGNUS_CHAT_ANSWER];
-if (question) await step("ask in chat and see the answer", async () => {
-  const answers = n => page.locator("[data-answer]", { hasText: answer }).nth(n - 1).waitFor({ timeout: T });
-  const convos = () => page.locator(".convos li").count();
-  await page.getByRole("link", { name: "Chat", exact: true }).click();
-  await page.getByRole("button", { name: "New conversation" }).waitFor({ timeout: T });
+if (question) await step("ask in a new conversation and see the answer", async () => {
+  const answers = n => page.locator("#thread [data-answer]", { hasText: answer }).nth(n - 1).waitFor({ timeout: T });
+  const before = await conversations();
+  await page.getByRole("link", { name: "New conversation" }).click();
+  await page.waitForURL(/#\/chat\/new$/, { timeout: T });
+  await page.getByText("Magnus answers, starts a task, or proposes a schedule").waitFor({ timeout: T });
+  if (await page.locator("#thread [data-answer]").count()) throw new Error("a new conversation shows the old one's answers");
   await page.getByLabel("Model").waitFor({ timeout: T });
   await page.getByLabel("Message").fill(question);
   await page.getByRole("button", { name: "Send" }).click();
@@ -167,25 +172,16 @@ if (question) await step("ask in chat and see the answer", async () => {
   await page.getByLabel("Message").fill("And the quarter before?");
   await page.getByRole("button", { name: "Send" }).click();
   await answers(2);
-  if (await convos() !== 1) throw new Error(`a reply started a new conversation: ${await convos()} listed`);
+  await page.waitForFunction(n => document.querySelectorAll('#side a[href^="#/chat/"]').length === n, before + 1, { timeout: T });
   await shot("chat thread");
   // A chat turn is a conversation, not a task.
-  await page.getByRole("link", { name: "Tasks", exact: true }).click();
-  await page.locator("section.tsec").first().waitFor({ timeout: T });
-  if (await page.getByText(question).count()) throw new Error("the chat message is listed as a task");
-  // Chat reopens the latest conversation, not a blank one.
-  await page.getByRole("link", { name: "Chat", exact: true }).click();
+  await page.getByRole("link", { name: /^Tasks/ }).click();
+  await panel.locator("section.tsec").first().waitFor({ timeout: T });
+  if (await panel.getByText(question).count()) throw new Error("the chat message is listed as a task");
+  // Opening Magnus again returns to the latest conversation, not a blank one.
+  await page.goto(base);
+  await home();
   await answers(2);
-  // A new conversation starts only from its button, and both are listed.
-  await page.getByRole("button", { name: "New conversation" }).click();
-  await page.waitForURL(/#\/chat\/new$/, { timeout: T });
-  await page.getByText("Magnus answers, starts a task, or proposes a schedule").waitFor({ timeout: T });
-  if (await page.locator("[data-answer]").count()) throw new Error("a new conversation shows the old one's answers");
-  await page.getByLabel("Message").fill("Something else.");
-  await page.getByRole("button", { name: "Send" }).click();
-  await answers(1);
-  await page.waitForFunction(() => document.querySelectorAll(".convos li").length === 2, null, { timeout: T });
-  if (await page.locator("[data-answer]").count() !== 1) throw new Error("the new conversation carries the old one's turns");
 });
 
 if (errors.length) { console.error(`FAIL page errors:\n${errors.join("\n")}`); await browser.close(); process.exit(1); }

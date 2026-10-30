@@ -47,6 +47,14 @@ struct Driver {
     _driver: tokio::process::Child,
 }
 
+impl Drop for Driver {
+    fn drop(&mut self) {
+        if let Some(pid) = self._driver.id() {
+            let _ = std::process::Command::new("kill").args(["--", &format!("-{pid}")]).status();
+        }
+    }
+}
+
 impl Driver {
     async fn start() -> Driver {
         Driver::start_with(&[]).await
@@ -75,6 +83,9 @@ impl Driver {
             .envs(envs.iter().copied())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            // Its own process group, so the driver, the app and whatever
+            // the app opens (the sign-in page in a browser) end with it.
+            .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .expect("start tauri-driver");

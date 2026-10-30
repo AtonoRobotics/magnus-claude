@@ -41,11 +41,13 @@ await step("sign in", async () => {
   await page.getByLabel("Your name on the appliance").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("heading", { name: "Home" }).waitFor({ timeout: T });
+  // Signed in: the workspace, with Needs you in the sidebar.
+  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
 await step("make a project with instructions", async () => {
-  await page.getByRole("link", { name: "Projects", exact: true }).click();
+  // Projects, and a new one, open beside the conversation.
+  await page.getByRole("link", { name: "All", exact: true }).click();
   await page.getByLabel("Name").fill("Kitchen remodel");
   await page.getByLabel(/Instructions for everything in it/).fill(instructions);
   await page.getByRole("button", { name: "Create" }).click();
@@ -54,20 +56,20 @@ await step("make a project with instructions", async () => {
 });
 
 await step("upload a file into the project", async () => {
-  await page.locator("section", { hasText: "Upload to this project" }).locator("input[data-attach]").setInputFiles({ name: "prices.csv", mimeType: "text/csv", buffer: Buffer.from(prices) });
+  await page.locator("#detail input[data-attach]").setInputFiles({ name: "prices.csv", mimeType: "text/csv", buffer: Buffer.from(prices) });
   await page.locator("[data-project-file]", { hasText: "prices.csv" }).waitFor({ timeout: T });
 });
 
-let taskUrl;
-await step("start a task in the project and see its output in full", async () => {
-  await page.locator("#ptt").fill("Total the prices in prices.csv.");
-  await page.getByRole("button", { name: "Start task" }).click();
-  await page.waitForURL(/#\/task\//, { timeout: T });
-  taskUrl = page.url();
-  await page.getByRole("link", { name: "Kitchen remodel" }).waitFor({ timeout: T });
-  await page.locator(".chip", { hasText: "Done" }).waitFor({ timeout: T });
-  // The delivered report is on the page, drawn as a table, without opening it.
-  const frame = page.frameLocator("iframe.composed");
+await step("ask for work in the project and see its output in full", async () => {
+  await page.getByRole("link", { name: "New conversation in this project" }).click();
+  await page.locator(".conv-head").getByRole("link", { name: "Kitchen remodel" }).waitFor({ timeout: T });
+  await page.getByLabel("Message").fill("Total the prices in prices.csv.");
+  await page.getByRole("button", { name: "Send" }).click();
+  await page.locator("#thread [data-chat-task][data-status=completed]").waitFor({ timeout: T });
+  await page.locator("#thread [data-chat-task] a.rg-row").click();
+  await page.locator("#detail .detail-head .chip", { hasText: "Done" }).waitFor({ timeout: T });
+  // The delivered report is in the panel, drawn as a table, without opening it.
+  const frame = page.frameLocator("#detail iframe.composed");
   await frame.getByText("Total: 42 EUR").waitFor({ timeout: T });
   await frame.locator("td", { hasText: "widget" }).waitFor({ timeout: T });
 });
@@ -95,35 +97,39 @@ await step("search the library by content and download a file", async () => {
 });
 
 await step("open files from the library", async () => {
-  // A delivered report opens on its own page, drawn in full, with where it
-  // came from and a way to save it.
+  // A delivered report opens beside the conversation, drawn in full, with
+  // where it came from and a way to save it.
   await page.locator("[data-lib-file]", { hasText: "report.md" }).getByRole("link", { name: "report.md" }).click();
   await page.getByRole("heading", { name: "report.md" }).waitFor({ timeout: T });
-  const frame = page.frameLocator("iframe.composed");
+  const frame = page.frameLocator("#detail iframe.composed");
   await frame.getByText("Total: 42 EUR").waitFor({ timeout: T });
   await frame.getByRole("cell", { name: "widget", exact: true }).waitFor({ timeout: T });
-  await page.getByRole("link", { name: "Total the prices" }).waitFor({ timeout: T });
-  const [download] = await Promise.all([page.waitForEvent("download", { timeout: T }), page.getByRole("button", { name: "Download", exact: true }).click()]);
+  await page.locator("#detail").getByRole("link", { name: "Total the prices" }).waitFor({ timeout: T });
+  const [download] = await Promise.all([page.waitForEvent("download", { timeout: T }), page.locator("#detail").getByRole("button", { name: "Download", exact: true }).click()]);
   if (download.suggestedFilename() !== "report.md") throw new Error(`downloaded ${download.suggestedFilename()}`);
   // An uploaded CSV opens as a table.
   await page.getByRole("link", { name: "Library", exact: true }).first().click();
   await page.locator("[data-lib-file]", { hasText: "prices.csv" }).getByRole("link", { name: "prices.csv" }).click();
   await page.getByRole("heading", { name: "prices.csv" }).waitFor({ timeout: T });
-  await page.frameLocator("iframe.composed").getByRole("cell", { name: "bolt", exact: true }).waitFor({ timeout: T });
-  await page.getByText("Uploaded by you").waitFor({ timeout: T });
+  await page.frameLocator("#detail iframe.composed").getByRole("cell", { name: "bolt", exact: true }).waitFor({ timeout: T });
+  await page.locator("#detail").getByText("Uploaded by you").waitFor({ timeout: T });
 });
 
 await step("the task is listed in Tasks", async () => {
-  await page.getByRole("link", { name: "Tasks", exact: true }).click();
-  await page.locator(".trow", { hasText: "Total the prices" }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Tasks/ }).click();
+  // Under the request that started it, a conversation; done work is folded.
+  const group = page.locator("#detail .tgroup", { hasText: "Total the prices" });
+  await group.locator("summary").click();
+  await group.locator(".trow", { hasText: "Total the prices" }).waitFor({ timeout: T });
 });
 
 await step("chat in the project with a file attached", async () => {
-  await page.getByRole("link", { name: "Projects", exact: true }).click();
+  await page.getByRole("link", { name: "All", exact: true }).click();
   await page.locator(".plist").getByRole("link", { name: /Kitchen remodel/ }).click();
   await page.getByRole("heading", { name: "Kitchen remodel" }).waitFor({ timeout: T });
-  await page.getByRole("link", { name: "New chat in this project" }).click();
-  await page.getByText("In the project").waitFor({ timeout: T });
+  await page.getByRole("link", { name: "New conversation in this project" }).click();
+  await page.locator(".conv-head").getByRole("heading", { name: "New conversation" }).waitFor({ timeout: T });
+  await page.locator(".conv-head").getByRole("link", { name: "Kitchen remodel" }).waitFor({ timeout: T });
   await page.locator("#say input[data-attach]").setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("Bathroom tiles next.") });
   await page.locator("#pending").getByText("notes.txt").waitFor({ timeout: T });
   await page.getByLabel("Message").fill("Keep these notes for later.");
@@ -131,7 +137,7 @@ await step("chat in the project with a file attached", async () => {
   await page.waitForURL(/#\/chat\/thread_/, { timeout: T });
   await page.locator(".msg.me").getByRole("link", { name: "notes.txt" }).waitFor({ timeout: T });
   await page.locator("[data-answer]", { hasText: "Noted." }).waitFor({ timeout: T });
-  await page.locator(".thread-head").getByRole("link", { name: "Kitchen remodel" }).waitFor({ timeout: T });
+  await page.locator(".conv-head").getByRole("link", { name: "Kitchen remodel" }).waitFor({ timeout: T });
 });
 
 if (errors.length) { console.error(`page errors: ${errors.join("; ")}`); process.exit(1); }

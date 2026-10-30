@@ -57,6 +57,7 @@ const App = {
   timers: [],
   leave: [],
   routes: [],
+  seq: 0,
 };
 
 function toast(msg, ms = 3200) {
@@ -223,6 +224,9 @@ function wireDocument() {
     const o = e.target.closest("[data-open]");
     if (!o || e.button !== 0 || e.ctrlKey || e.metaKey) return;
     e.preventDefault();
+    // From Settings, Trash or a developer view: back to the conversation,
+    // with it open beside.
+    if (!App.workspace) { App.openAfter = o.dataset.open; location.hash = "#/home"; return; }
     openPanel(o.dataset.open);
   });
   // A decision is made from its card wherever the card is shown: in its
@@ -361,6 +365,9 @@ async function go() {
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   const h = location.hash || "#/home";
+  // A view still loading when the person moves on stops where it is: only
+  // the latest navigation draws.
+  const seq = ++App.seq;
   const main = $("#main");
   main._html = null;
   // Each view sets its own handlers on main; none outlives its view.
@@ -368,10 +375,11 @@ async function go() {
   for (const [re, view, workspace] of App.routes) {
     const m = h.match(re);
     if (m) {
+      App.workspace = workspace;
       if (!workspace) { App.thread = null; closePanel(); }
       sidebar();
       try { await view(main, ...m.slice(1).map(x => x === undefined ? x : decodeURIComponent(x))); }
-      catch (e) { paint(main, `<div class="banner bad">${esc(e.message)}</div>`); }
+      catch (e) { if (seq === App.seq) paint(main, `<div class="banner bad">${esc(e.message)}</div>`); }
       return;
     }
   }
@@ -743,15 +751,20 @@ function wireComposer(thread, project) {
   };
 }
 
+// Lays out a conversation; false when the person moved on while it loaded.
 async function chatLayout(main, thread, project) {
+  const seq = App.seq;
   App.thread = thread;
   sidebar();
   paint(main, `<section class="conv"><header class="conv-head" id="conv-head"></header><div id="banners"></div><div id="thread" class="thread" aria-live="polite"></div><div id="composer"></div></section>`);
   convHead(thread, project);
   banners();
   $("#banners", main).onclick = e => { if (e.target.closest("[data-act=seen-versions]")) { save("version", App.versions?.latest_seq ?? 0); banners(); } };
-  paint($("#composer", main), composer(thread ? "Reply, or give Magnus more to do" : "Ask anything, or give Magnus work to do", await modelPicker()));
+  const picker = await modelPicker();
+  if (seq !== App.seq) return false;
+  paint($("#composer", main), composer(thread ? "Reply, or give Magnus more to do" : "Ask anything, or give Magnus work to do", picker));
   wireComposer(thread, project);
+  return true;
 }
 
 // Above the conversation: its project (a link to it) and its title, and
@@ -767,12 +780,12 @@ function convHead(thread, project) {
 }
 
 async function showNewChat(main, project) {
-  await chatLayout(main, null, project);
+  if (!await chatLayout(main, null, project)) return;
   paint($("#thread", main), `<p class="muted hello">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm. What it starts shows here as it goes.</p>`);
 }
 
 async function showThread(main, thread) {
-  await chatLayout(main, thread);
+  if (!await chatLayout(main, thread)) return;
   // An answer being written shows as it streams; `live` holds its text so far.
   const ui = { editing: null, sharing: null, people: [], live: {} };
   const listening = {};
@@ -873,9 +886,12 @@ function showChat(main, hash, view, panel) {
 
 // Home is the latest conversation (a new one when there is none), with
 // `panel` open beside it.
-async function home(main, panel) {
+async function home(main, panel = App.openAfter) {
+  App.openAfter = null;
+  const seq = App.seq;
   const threads = (await api("GET", "/v1/chat")).threads;
   App.threads = threads;
+  if (seq !== App.seq) return;
   if (threads.length) {
     const id = threads[0].thread;
     return showChat(main, `#/chat/${enc(id)}`, m => showThread(m, id), panel);
@@ -895,7 +911,9 @@ route(/^#\/file\/([^/]+)$/, (main, id) => home(main, `file:${id}`), true);
 route(/^#\/project\/([^/]+)$/, (main, id) => home(main, `project:${id}`), true);
 // A task opens beside the conversation it came from.
 route(/^#\/task\/([^/]+)$/, async (main, id) => {
+  const seq = App.seq;
   const t = await api("GET", `/v1/tasks/${enc(id)}`);
+  if (seq !== App.seq) return;
   if (!t.thread) return home(main, `task:${id}`);
   return showChat(main, `#/chat/${enc(t.thread)}`, m => showThread(m, t.thread), `task:${id}`);
 }, true);
@@ -1583,7 +1601,7 @@ async function libraryView() {
   return plain(`<div class="row lib-bar"><label class="sr" for="lq">Search files</label><input id="lq" type="search" data-draft="lib-q" placeholder="Name, task, project or text" autocomplete="off">
     <label class="sr" for="lp">Project</label><select id="lp" aria-label="Filter by project"><option value="">All files</option><option value="none"${project === "none" ? " selected" : ""}>In no project</option>${App.projects.map(p => `<option value="${esc(p.id)}"${p.id === project ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
     ${attachButton("Upload")}</div>
-    ${files.length ? `<ul class="flist">${files.map(f => `<li data-lib-file="${esc(f.id)}">${fileChip(f)}<span class="small faint">${f.source === "delivered" ? "delivered" : "uploaded"} ${esc(when(f.at))}</span><span class="small">${fileFrom(f)}</span></li>`).join("")}</ul>`
+    ${files.length ? `<ul class="flist">${files.map(f => `<li data-lib-file="${esc(f.id)}"><div class="rg-main">${fileChip(f)}<span class="small muted">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"} · ${esc(when(f.at))} · ${fileFrom(f)}</span></div>${moveControl(f.id, f.project, App.projects, true)}</li>`).join("")}</ul>`
       : `<p class="empty">${q || project ? "No file matches." : "No files yet. Upload one, or ask Magnus for a document."}</p>`}`);
 }
 

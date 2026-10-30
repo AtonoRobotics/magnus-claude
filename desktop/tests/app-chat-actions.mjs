@@ -39,7 +39,7 @@ const ask = async text => {
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await d.step("two questions, two answers", async () => {
-  await d.click(d.xpath("//nav//a[normalize-space()='Chat']"));
+  // The conversation is home: signing in opens a new one.
   await ask("First question");
   await ask("Second question");
 });

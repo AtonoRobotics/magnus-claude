@@ -65,6 +65,15 @@ await step("a conversation to look at, with Needs you open beside it", async () 
   await xpath("//aside[@id='detail']//h2[normalize-space()='Needs you']");
 });
 
+await step("Settings > Appearance offers mode, material, accent and motion", async () => {
+  await appearance();
+  const offered = JSON.parse(await run(`return JSON.stringify([...document.querySelectorAll("[data-look]")].map(b => b.dataset.look + ":" + (b.getAttribute("title") || b.innerText.trim())))`));
+  for (const want of ["mode:Light", "mode:Dark", "mode:Match computer", "material:Solid", "material:Glass", "accent:Blue", "accent:Teal", "accent:Clay", "accent:Graphite", "motion:Full", "motion:Reduced", "motion:Off"]) {
+    if (!offered.includes(want)) throw new Error(`Appearance does not offer ${want}: ${offered.join(", ")}`);
+  }
+  await d.seen("Magnus also follows your computer's settings for reduced motion and reduced transparency.");
+});
+
 for (const [mode, material] of [["light", "solid"], ["light", "glass"], ["dark", "solid"], ["dark", "glass"]]) {
   await step(`${mode} ${material}`, async () => {
     await appearance();

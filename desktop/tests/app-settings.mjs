@@ -29,7 +29,7 @@ await pinAndSignIn(d, { url, fingerprint, provider, person });
 await d.step("Settings has every section", async () => {
   await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
   const tabs = await d.run("return [...document.querySelectorAll('nav[aria-label=Settings] a')].map(a => a.innerText.trim())");
-  const want = ["Models", "Connectors", "Account", "Notifications", "Updates", "Data and privacy"];
+  const want = ["Models", "Connectors", "Account", "Appearance", "Notifications", "Updates", "Data and privacy", "Kill switch"];
   if (JSON.stringify(tabs) !== JSON.stringify(want)) throw new Error(`the sections are ${tabs}`);
 });
 

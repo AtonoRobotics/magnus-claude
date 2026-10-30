@@ -36,7 +36,8 @@ await step("sign in", async () => {
   await page.getByLabel("Your name on the appliance").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("heading", { name: "Home" }).waitFor({ timeout: T });
+  // Signed in: the workspace, with Needs you in the sidebar.
+  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
 await step("each request against each model", async () => {

@@ -18,8 +18,9 @@ const d = await open(wd, app, process.env.MAGNUS_SHOTS, "library");
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await d.step("download a file from the library", async () => {
+  // Library opens beside the conversation.
   await d.click(d.xpath("//nav//a[normalize-space()='Library']"));
-  const row = `//tr[@data-lib-file][.//*[normalize-space()='${name}']]`;
+  const row = `//aside[@id='detail']//li[@data-lib-file][.//*[normalize-space()='${name}']]`;
   // The shell says where it saved the file, or why it could not; a toast
   // with no words is a failure the person could not read.
   const body = readFileSync(await savedPath(d, () => d.click(d.xpath(`${row}//button[@data-file-download]`))), "utf8");

@@ -20,10 +20,13 @@ const shows = t => d.run("return document.body.innerText.includes(arguments[0])"
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await d.step("the owner sees the owner's controls and their task", async () => {
-  await d.css('[data-kill-switch="off"]');
   await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
   await d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Models']");
-  await d.click(d.xpath("//nav//a[normalize-space()='Tasks']"));
+  await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Kill switch']"));
+  await d.css('[data-kill-switch="off"]');
+  // Tasks, from Settings, opens beside the conversation.
+  await d.click(d.xpath("//nav//a[starts-with(normalize-space(),'Tasks')]"));
+  await d.xpath("//aside[@id='detail']//h2[normalize-space()='Tasks']");
   await d.seen(title);
 });
 
@@ -40,14 +43,14 @@ await d.step("sign out; the next person keeps the pinned appliance", async () =>
 await signIn(d, { provider, person, as: other });
 
 await d.step("the colleague has only their own rights", async () => {
-  const who = await d.text(d.css("nav .who"));
-  if (!who.includes(`(${other})`)) throw new Error(`signed in as ${who}`);
+  const who = await d.attr(d.css("nav .who .whoami [title]"), "title");
+  if (who !== other) throw new Error(`signed in as ${who}`);
   if (await d.run("return !!document.querySelector('[data-kill-switch]')")) throw new Error("a colleague sees the kill switch");
   await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
   await d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Account']");
-  if (await d.run("return [...document.querySelectorAll('nav a')].some(a => ['Models', 'Connectors'].includes(a.innerText.trim()))")) throw new Error("a colleague sees Models or Connectors");
-  await d.click(d.xpath("//nav//a[normalize-space()='Tasks']"));
-  await d.xpath("//h1[normalize-space()='Tasks']");
+  if (await d.run("return [...document.querySelectorAll('nav a')].some(a => ['Models', 'Connectors', 'Kill switch'].includes(a.innerText.trim()))")) throw new Error("a colleague sees Models, Connectors or the kill switch");
+  await d.click(d.xpath("//nav//a[starts-with(normalize-space(),'Tasks')]"));
+  await d.xpath("//aside[@id='detail']//h2[normalize-space()='Tasks']");
   await new Promise(r => setTimeout(r, 1500));
   if (await shows(title)) throw new Error("a colleague sees the owner's task");
 });

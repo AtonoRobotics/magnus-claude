@@ -41,8 +41,8 @@ svg.ic { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor
 /* One workspace: the sidebar, the conversation, and what is open beside it. */
 /* The workspace never scrolls as a page: each column scrolls itself, and a
    panel gliding in does not push the window sideways. */
-.shell { display: grid; grid-template-columns: 260px minmax(0, 1fr); height: 100vh; overflow: hidden; }
-body:has(> .shell) { overflow: hidden; }
+.shell { display: grid; grid-template-columns: 260px minmax(0, 1fr); height: 100vh; overflow: hidden; overflow: clip; }
+body:has(> .shell) { overflow: hidden; overflow: clip; }
 body.with-detail .shell { grid-template-columns: 260px minmax(0, 1fr) minmax(380px, 42%); }
 nav.side { background: var(--side); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); border-right: 1px solid var(--panel-edge); padding: 14px 10px 12px; display: flex; flex-direction: column; gap: 2px; height: 100vh; overflow-y: auto; }
 nav.side .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -0.01em; font-size: 16px; padding: 2px 4px 12px 6px; }
@@ -83,7 +83,7 @@ nav.side .who { display: flex; align-items: center; gap: 10px; padding: 12px 4px
 /* The conversation: a solid reading surface; with glass it floats, inset. */
 main { background: var(--main); margin: var(--main-gap) 0; height: calc(100vh - 2 * var(--main-gap)); border-radius: var(--main-radius); box-shadow: var(--main-shadow); outline: 1px solid var(--main-edge); padding: 28px 36px 64px; width: 100%; overflow-y: auto; min-width: 0; }
 body.with-detail main { border-radius: var(--main-radius); }
-main:has(> .conv) { padding: 0 28px; scroll-padding-bottom: 170px; }
+main:has(> .conv) { padding: 0 28px; scroll-padding-top: 88px; scroll-padding-bottom: 170px; }
 .conv { max-width: 760px; margin: 0 auto; min-height: 100%; display: flex; flex-direction: column; }
 .conv .thread { flex: 1; }
 .conv-head { position: sticky; top: 0; z-index: 3; background: var(--main); display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 0 12px; border-bottom: 1px solid var(--hair); }
@@ -161,7 +161,12 @@ svg.chev { width: 16px; height: 16px; color: var(--chev); stroke-width: 1.8; }
 .tsec h2 .count { font-size: 13px; color: var(--muted); font-weight: 500; }
 .tsec[data-section="needs"] h2 { color: var(--warn); }
 .tlist { list-style: none; margin: 0; padding: 0; }
-.trow a { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 14rem) 6.5rem; gap: 10px; align-items: center; padding: 5px 8px; border-radius: 6px; color: var(--fg); }
+/* The title takes the room; why it waits gives way first, so a row reads
+   in the narrow panel as well as on a wide page. */
+.trow a { display: flex; gap: 10px; align-items: center; padding: 5px 8px; border-radius: 6px; color: var(--fg); }
+.trow a > * { flex: none; }
+.trow a > .ttl { flex: 1 0 8rem; }
+.trow a > .why { flex: 0 1 auto; min-width: 0; max-width: 14rem; }
 .trow a:hover { background: var(--raised); text-decoration: none; }
 .trow .ttl, .ghead .ttl, .sched .ttl, .result .ttl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .trow .why { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -192,7 +197,6 @@ svg.chev { width: 16px; height: 16px; color: var(--chev); stroke-width: 1.8; }
 .fprev .glimpse pre { font-size: 11px; line-height: 1.4; }
 .fprev .fchip { margin: 0; }
 @media (max-width: 720px) {
-  .trow a { grid-template-columns: minmax(0, 1fr) auto; }
   .trow .why, .trow .when { display: none; }
   .ghead { flex-direction: column; gap: 2px; }
 }
@@ -268,7 +272,9 @@ table.t tr.click:hover td { background: var(--raised); }
 iframe.composed { width: 100%; border: 0; display: block; background: var(--surface); min-height: 40px; }
 .banner { background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 12px; padding: 10px 14px; margin: 12px 0 16px; }
 .banner.bad { background: var(--bad-soft); border-color: var(--bad); }
-#toasts { position: fixed; bottom: 20px; right: 20px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; z-index: 30; }
+/* Toasts say what happened; they never cover what can be clicked: they sit
+   at the top, in the middle, and let clicks through. */
+#toasts { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 30; pointer-events: none; }
 .toast { background: var(--fg); color: var(--main); padding: 10px 16px; border-radius: 12px; font-weight: 550; max-width: 420px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
 .empty { color: var(--muted); padding: 24px 0; }
 .stack { display: flex; height: 14px; border-radius: 3px; overflow: hidden; background: var(--line); }
@@ -410,3 +416,5 @@ html[data-motion="full"] .tcard.finished .rg-row { animation: warm 1.8s var(--ea
 html[data-motion="full"] :is(a, button, .rg-row, .seg button) { transition: background-color .18s var(--ease), color .18s var(--ease), border-color .18s var(--ease); }
 html[data-motion="reduced"] :is(.entry.enter, aside.detail.opening, .tcard.changed .chip, .tcard.finished .chip) { animation: fade .15s linear both; }
 html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="off"] *::after { animation: none !important; transition: none !important; }
+.flist li .rg-main { gap: 2px; }
+.flist li label.move { margin-left: auto; }
