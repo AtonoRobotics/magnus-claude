@@ -1,8 +1,8 @@
 //! Local speech to text with whisper.cpp, so voice never leaves the appliance.
 //! The `[speech]` config names `whisper-cli` and a model; audio is converted
-//! with ffmpeg.
+//! with ffmpeg. Read-aloud is the other way, with Kokoro (`[read_aloud]`).
 
-use crate::config::Speech;
+use crate::config::{ReadAloud, Speech};
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use std::path::Path;
@@ -36,4 +36,27 @@ pub async fn transcribe(speech: Option<&Speech>, state_dir: &Path, data_b64: &st
     let _ = std::fs::remove_dir_all(&dir);
     anyhow::ensure!(out.status.success(), "speech to text failed: {}", String::from_utf8_lossy(&out.stderr));
     Ok(String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Text to speech on the appliance: MP3 of `text` in the configured voice.
+pub async fn speak(cfg: &ReadAloud, text: &str) -> Result<Vec<u8>> {
+    use tokio::io::AsyncWriteExt;
+    let mut c = tokio::process::Command::new(&cfg.speak)
+        .arg("--model")
+        .arg(&cfg.model)
+        .arg("--voices")
+        .arg(&cfg.voices)
+        .args(["--voice", &cfg.voice])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("run {}", cfg.speak.display()))?;
+    let mut stdin = c.stdin.take().expect("piped");
+    stdin.write_all(text.as_bytes()).await?;
+    drop(stdin);
+    let out = c.wait_with_output().await?;
+    anyhow::ensure!(out.status.success() && !out.stdout.is_empty(), "read-aloud failed: {}", String::from_utf8_lossy(&out.stderr));
+    Ok(out.stdout)
 }

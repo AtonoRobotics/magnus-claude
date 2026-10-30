@@ -308,6 +308,56 @@ async fn composed_answers_stream_text_first_and_reach_no_network_in_the_installe
     assert_eq!(beacon.hits().len(), 1, "the beacon records nothing, so the check above proves nothing");
 }
 
+/// Requested by the owner (2026-10-29): Magnus reads aloud in its own voice,
+/// made on the appliance, not the system's. A stand-in voice speaks each
+/// sentence for a second, so the test hears how long the app played.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver, xvfb-run and ffmpeg"]
+async fn the_installed_app_reads_aloud_in_the_appliances_voice() {
+    use magnus_invariants::{complete, contract_unchecked, script, FakeWeb, Reply};
+    use std::os::unix::fs::PermissionsExt;
+    const SCRIPT: &str = "Revenue went up every quarter. The third was the best, at forty one point seven million. Nothing needs you today.";
+    let s = script(|c| async move {
+        let system = c.body["system"].to_string();
+        if system.contains("to be heard rather than read") {
+            return Reply::Text(SCRIPT.into());
+        }
+        if system.contains("in a chat") {
+            return Reply::Text("Revenue rose every quarter, to 41.7M in Q3.".into());
+        }
+        match c.turn() {
+            0 => contract_unchecked("do the work", "the work is done"),
+            _ => complete("done"),
+        }
+    });
+    let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
+    let dir = f.app.dir.path().to_path_buf();
+    let (speak, log) = (dir.join("speak"), dir.join("spoken.log"));
+    let seconds = 1;
+    std::fs::write(&speak, format!("#!/bin/sh\n{{ cat; echo; }} >> {}\nexec ffmpeg -loglevel error -f lavfi -i anullsrc=r=24000:cl=mono -t {seconds} -f mp3 -\n", log.display())).unwrap();
+    std::fs::set_permissions(&speak, std::fs::Permissions::from_mode(0o755)).unwrap();
+    magnus_scratch::reconfigure(&mut f.app, |c| {
+        let mut r = toml::Table::new();
+        r.insert("speak".into(), speak.display().to_string().into());
+        for (k, v) in [("model", "kokoro.onnx"), ("voices", "voices.bin"), ("voice", "af_heart")] {
+            r.insert(k.into(), v.into());
+        }
+        c.insert("read_aloud".into(), r.into());
+    })
+    .await;
+    let idp = FakeIdp::start(PERSON).await;
+    idp.configure(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let d = Driver::start().await;
+    let sentences = SCRIPT.split(". ").count().to_string();
+    let (ok, out) = d
+        .script("app-read-aloud.mjs", &url, &fingerprint, &[("MAGNUS_SPOKEN_LOG", &log.display().to_string()), ("MAGNUS_SENTENCES", &sentences), ("MAGNUS_SECONDS", &seconds.to_string())])
+        .await;
+    assert!(ok, "read aloud failed:\n{out}");
+    let read: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().take(3).map(String::from).collect();
+    assert_eq!(read, ["Revenue went up every quarter.", "The third was the best, at forty one point seven million.", "Nothing needs you today."]);
+}
+
 /// The sign-in link crosses into the shell, and so does the kept session:
 /// signing out must leave nothing of the first person for the second.
 #[tokio::test(flavor = "multi_thread")]

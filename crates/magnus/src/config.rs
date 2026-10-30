@@ -34,6 +34,9 @@ pub struct Config {
     /// Local speech to text for voice input (`config/install-whisper.sh`).
     #[serde(default)]
     pub speech: Option<Speech>,
+    /// The read-aloud voice, run on the appliance (`config/install-voice.sh`).
+    #[serde(default)]
+    pub read_aloud: Option<ReadAloud>,
     #[serde(default)]
     pub knowledge: Knowledge,
     #[serde(default)]
@@ -384,6 +387,17 @@ pub struct Speech {
     pub whisper: PathBuf,
     /// A ggml model file.
     pub model: PathBuf,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct ReadAloud {
+    /// The `speak` program: text on stdin, MP3 on stdout.
+    pub speak: PathBuf,
+    /// Kokoro's model and voices files.
+    pub model: PathBuf,
+    pub voices: PathBuf,
+    /// One of Kokoro's voices, such as `af_heart`.
+    pub voice: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
