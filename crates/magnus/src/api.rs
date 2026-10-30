@@ -110,6 +110,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/tasks/{id}/live", get(live))
         .route("/v1/tasks/{id}/outputs/{out}", get(output))
         .route("/v1/transcribe", post(transcribe))
+        .route("/v1/speak", post(speak))
         .route("/v1/me", get(me))
         .route("/v1/versions", get(versions))
         .route("/v1/tasks", post(submit).get(list_tasks))
@@ -342,7 +343,7 @@ const FONTS: &[(&str, &[u8])] = &[
     ("ibm-plex-mono-latin-400-normal.woff2", include_bytes!("../../../desktop/ui/fonts/ibm-plex-mono-latin-400-normal.woff2")),
     ("ibm-plex-mono-latin-500-normal.woff2", include_bytes!("../../../desktop/ui/fonts/ibm-plex-mono-latin-500-normal.woff2")),
 ];
-const UI_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self' about:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+const UI_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src blob:; font-src 'self'; connect-src 'self'; frame-src 'self' about:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 
 fn static_file(media: &str, body: &'static [u8]) -> Response {
     Response::builder()
@@ -1161,6 +1162,20 @@ async fn transcribe(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response
     match crate::speech::transcribe(k.cfg.speech.as_ref(), &k.cfg.appliance.state_dir, data).await {
         Ok(text) => Json(json!({ "text": text })).into_response(),
         Err(e) => err(StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")),
+    }
+}
+
+/// Text to speech on the appliance, so every app and browser hears the same
+/// voice. 503 when no voice is installed: the app then uses its system's own.
+async fn speak(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    if let Err(r) = who(&k, &h) {
+        return r;
+    }
+    let Some(cfg) = &k.cfg.read_aloud else { return err(StatusCode::SERVICE_UNAVAILABLE, "no read-aloud voice is installed on this appliance") };
+    let Some(text) = b["text"].as_str().filter(|t| !t.trim().is_empty()) else { return err(StatusCode::BAD_REQUEST, "no text") };
+    match crate::speech::speak(cfg, text).await {
+        Ok(mp3) => Json(json!({ "media_type": "audio/mpeg", "audio_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, mp3) })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }
 

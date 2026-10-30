@@ -8,6 +8,40 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": 
 const api = (m, p, b) => Magnus.api(m, p, b);
 const enc = encodeURIComponent;
 
+// Read aloud in the appliance's own voice, a sentence at a time, so the first
+// is heard while the next is made. With no voice on the appliance, the
+// system's own voice reads it.
+const voice = { run: 0, audio: null, done: null };
+function hush() {
+  voice.run++;
+  if (voice.audio) voice.audio.pause();
+  if (voice.done) voice.done();
+  voice.audio = voice.done = null;
+  return Magnus.stopSpeaking();
+}
+async function readAloud(text) {
+  await hush();
+  const run = voice.run, parts = text.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+  const make = s => { const p = api("POST", "/v1/speak", { text: s }); p.catch(() => {}); return p; };
+  let next = parts.length ? make(parts[0]) : null;
+  for (let i = 0; i < parts.length; i++) {
+    let r;
+    try { r = await next; } catch (e) { if (e.status === 503 && i === 0) return run === voice.run && Magnus.speak(text); throw e; }
+    if (run !== voice.run) return;
+    next = i + 1 < parts.length ? make(parts[i + 1]) : null;
+    const src = URL.createObjectURL(new Blob([Uint8Array.from(atob(r.audio_b64), c => c.charCodeAt(0))], { type: r.media_type }));
+    await new Promise((done, fail) => {
+      const a = voice.audio = new Audio(src);
+      voice.done = done;
+      a.onended = done;
+      a.onerror = () => fail(new Error("Could not play the audio."));
+      a.play().catch(fail);
+    }).finally(() => URL.revokeObjectURL(src));
+    if (run !== voice.run) return;
+  }
+  voice.audio = voice.done = null;
+}
+
 const App = {
   me: null,
   appliance: "",
@@ -840,8 +874,8 @@ async function showThread(main, thread) {
       }
       case "export": return toast(`Saved ${await Magnus.download(path(id, "export"), safeName(e))}`);
       case "save": await api("POST", path(id, "save"), {}); return toast("Saved to the library.");
-      case "listen": { b.disabled = true; try { await Magnus.speak((await api("POST", path(id, "spoken"), {})).script); } finally { b.disabled = false; } return; }
-      case "hush": return Magnus.stopSpeaking();
+      case "listen": { b.disabled = true; try { await readAloud((await api("POST", path(id, "spoken"), {})).script); } finally { b.disabled = false; } return; }
+      case "hush": return hush();
       case "task": { const r = await api("POST", path(id, "task"), {}); toast("Started a task."); await draw(); return r; }
       case "delete":
         if (!confirm("Delete this message? It leaves this chat and what Magnus reads next; the record keeps it.")) return;
@@ -849,7 +883,7 @@ async function showThread(main, thread) {
     }
   };
   App.redraw = draw;
-  onLeave(() => { App.redraw = null; listen([]); Magnus.stopSpeaking(); });
+  onLeave(() => { App.redraw = null; listen([]); hush(); });
   $("#thread", main).onclick = async e => {
     const m = e.target.closest("[data-msg-act]");
     if (m) { try { await msgAct(m, m.closest("[data-entry]")); } catch (err) { toast(err.message); m.disabled = false; } return; }
@@ -1332,14 +1366,14 @@ route(/^#\/task\/([^/]+)$/, async (main, id) => {
     if (!a) return;
     const t = main._task;
     try {
-      if (a.dataset.act === "speak") await Magnus.speak(t.spoken);
-      if (a.dataset.act === "hush") await Magnus.stopSpeaking();
+      if (a.dataset.act === "speak") await readAloud(t.spoken);
+      if (a.dataset.act === "hush") await hush();
       if (a.dataset.act === "download") { const where = await Magnus.download(`/v1/tasks/${enc(id)}/outputs/${enc(a.dataset.out)}`, a.dataset.name); toast(`Saved ${where}`); }
       if (a.dataset.act === "cancel" && confirm("Cancel this task? What it already did stays done.")) { await api("POST", `/v1/tasks/${enc(id)}/cancel`, {}); draw(); }
       if (a.dataset.act === "resume") { await api("POST", `/v1/tasks/${enc(id)}/resume`, {}); draw(); }
     } catch (err) { toast(err.message); }
   };
-  onLeave(() => { if (stopLive) stopLive(); Magnus.stopSpeaking(); });
+  onLeave(() => { if (stopLive) stopLive(); hush(); });
   await draw();
   every(2500, draw);
 });
