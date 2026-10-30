@@ -11,6 +11,11 @@
 //! - `desktop/tests/app-update.mjs`: the app, an AppImage, updates itself
 //!   from the appliance while a task waits there, and restarts as the new
 //!   version (two builds signed with a test key: MAGNUS_UPDATE_BUILDS).
+//! - `desktop/tests/app-workspace.mjs`: research, approval, result, file and
+//!   schedule in one conversation, each flow held to its ease-of-use budget
+//!   (`desktop/tests/ease-budgets.json`).
+//! - `desktop/tests/app-looks.mjs`: the four looks, each readable, glass on
+//!   the chrome only.
 //!
 //! Needs the built app (`cargo tauri build` in desktop/src-tauri, or
 //! MAGNUS_DESKTOP_APP), `tauri-driver`, `WebKitWebDriver`
@@ -579,6 +584,8 @@ async fn research_approval_result_file_and_schedule_happen_in_one_conversation_i
     let d = Driver::start().await;
     let (ok, log) = d.script("app-workspace.mjs", &url, &fingerprint, &[("MAGNUS_RESEARCH", RESEARCH), ("MAGNUS_SCHEDULE", SCHEDULE)]).await;
     assert!(ok, "the workspace flow failed:\n{log}\n{}", f.report().await);
+    // What each flow took, against its ease-of-use budget.
+    println!("{log}");
 
     let alice = f.app.api(PERSON);
     let tasks = alice.tasks().await;
@@ -592,4 +599,31 @@ async fn research_approval_result_file_and_schedule_happen_in_one_conversation_i
     assert_eq!(sc["schedules"][0]["daily_at"], "09:00", "{sc}");
     let saved = std::fs::read_to_string(d.downloads().join("summary.txt")).expect("the file was not downloaded");
     assert!(saved.contains("41.7M"), "{saved}");
+}
+
+/// The four looks (U7, amended): light and dark, solid and glass, chosen in
+/// Settings > Appearance; glass on the chrome only, reading surfaces solid,
+/// every text on screen at 4.5:1 or more against the worst case behind it;
+/// the accent and the motion setting take effect, and the look is kept on
+/// the device.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn each_of_the_four_looks_keeps_text_readable_and_reading_surfaces_solid_in_the_installed_app() {
+    use magnus_invariants::{complete, contract_unchecked, script, FakeWeb, Reply};
+    let s = script(|c| async move {
+        if c.body["system"].to_string().contains("in a chat") {
+            return Reply::Text("Hello. Ask me anything, or give me work to do.".into());
+        }
+        match c.turn() {
+            0 => contract_unchecked("do the work", "the work is done"),
+            _ => complete("done"),
+        }
+    });
+    let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
+    let idp = FakeIdp::start(PERSON).await;
+    idp.configure(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let d = Driver::start().await;
+    let (ok, log) = d.script("app-looks.mjs", &url, &fingerprint, &[]).await;
+    assert!(ok, "a look failed:\n{log}");
 }

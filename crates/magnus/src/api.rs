@@ -335,6 +335,7 @@ const UI: &[(&str, &str, &[u8])] = &[
     ("index.html", "text/html; charset=utf-8", include_bytes!("../../../desktop/ui/index.html")),
     ("app.css", "text/css; charset=utf-8", include_bytes!("../../../desktop/ui/app.css")),
     ("bridge.js", "text/javascript; charset=utf-8", include_bytes!("../../../desktop/ui/bridge.js")),
+    ("theme.js", "text/javascript; charset=utf-8", include_bytes!("../../../desktop/ui/theme.js")),
     ("compose.js", "text/javascript; charset=utf-8", include_bytes!("../../../desktop/ui/compose.js")),
     ("app.js", "text/javascript; charset=utf-8", include_bytes!("../../../desktop/ui/app.js")),
     ("dev.js", "text/javascript; charset=utf-8", include_bytes!("../../../desktop/ui/dev.js")),

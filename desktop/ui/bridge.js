@@ -56,6 +56,9 @@ const appBridge = tauri && {
   // `again`: also after it was shown once (for Settings).
   async whatsNew(again = false) { return this.invoke("whats_new", { again }); },
   onUpdateReady(fn) { tauri.event.listen("update-ready", e => fn(e.payload)); },
+  // Glass from the system's own window material where it has one.
+  async setMaterial(glass, dark) { return this.invoke("set_material", { glass, dark }).catch(() => ({ native: false })); },
+  async systemLook() { return this.invoke("system_look").catch(() => ({ reduce_transparency: false })); },
 };
 
 const webBridge = {
@@ -118,6 +121,9 @@ const webBridge = {
   async updateLook() { return null; },
   async whatsNew() { return null; },
   onUpdateReady() {},
+  // A browser has no window material: the page draws its backdrop.
+  async setMaterial() { return { native: false }; },
+  async systemLook() { return { reduce_transparency: false }; },
   async dataUrl(path) {
     const r = await fetch(path, { credentials: "same-origin" });
     if (!r.ok) throw errorOf(r.status, await r.text());

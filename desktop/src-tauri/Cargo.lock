@@ -2250,6 +2250,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "url",
+ "window-vibrancy",
 ]
 
 [[package]]

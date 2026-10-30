@@ -129,38 +129,75 @@ const chip = st => { const [c, l] = STATUS[st] || ["", st]; return `<span class=
 // appears, and acting on it anywhere redraws every place it is shown.
 const needsMe = () => App.inbox.filter(i => i.status === "open" && i.can_respond);
 
+// The workspace's icons, drawn as in the Magnus Workspace design: 24px
+// outlines in the current color.
+const UI = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  tasks: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/>',
+  file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+  chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  done: '<circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/>',
+  need: '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>',
+  working: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  stopped: '<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  attach: '<path d="m21 11-8.6 8.6a5 5 0 0 1-7-7l8.5-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.3-2.3l8-8"/>',
+  send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  shield: '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/>',
+  close: '<path d="M18 6 6 18M6 6l12 12"/>',
+  download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+  chev: '<path d="m9 6 6 6-6 6"/>',
+};
+const icon = (k, cls = "") => `<svg class="ic${cls ? ` ${cls}` : ""}" viewBox="0 0 24 24" aria-hidden="true">${UI[k]}</svg>`;
+
 function nav() {
   const route = location.hash || "#/home";
-  const link = (href, label) => `<a href="${href}" class="${route === href || route.startsWith(href + "/") ? "on" : ""}">${label}</a>`;
+  const link = (href, label, ic) => `<a href="${href}" class="${route === href || route.startsWith(href + "/") ? "on" : ""}">${ic ? icon(ic) : ""}<span class="ttl">${label}</span></a>`;
   const on = what => Panel.what === what ? " on" : "";
   const waiting = needsMe(), blocking = waiting.filter(i => i.blocking).length;
   const ready = App.update?.ready;
+  // A project's conversations sit under it; the rest, each with its icon.
+  const conv = (t, nested = true) => `<a href="#/chat/${enc(t.thread)}" class="${nested ? "conv" : ""}${t.thread === App.thread ? " on" : ""}"${t.thread === App.thread ? ` aria-current="page"` : ""} title="${esc(t.title)}">${nested ? "" : icon("chat")}<span class="ttl">${esc(t.title)}</span></a>`;
+  const loose = App.threads.filter(t => !t.project);
+  const running = App.tasks.filter(t => t.status === "running").length;
+  const count = n => n ? `<span class="count">${n}</span>` : "";
   return `
     ${ready ? `<div class="update-ready" title="${esc(ready.notes || "")}"><div class="small">Magnus ${esc(ready.version)} is ready.</div>
       <button class="primary small" data-act="restart-update">Restart to update</button></div>` : ""}
-    <button class="needs${waiting.length ? " some" : ""}${on("needs")}" data-open="needs" title="${blocking ? `${blocking} waiting on you now` : "Approvals, questions and reviews"}">Needs you <span class="badge${blocking ? "" : " quiet"}" data-needs-count>${waiting.length}</span></button>
-    <div class="views">${[["tasks", "Tasks"], ["schedules", "Schedules"], ["library", "Library"]].map(([k, l]) => `<a href="#/${k}" data-open="${k}" class="${on(k)}">${l}</a>`).join("")}</div>
-    <div class="group spread"><span>Projects</span><a href="#/projects" data-open="projects" class="small${on("projects")}" title="All projects, and a new one">All</a></div>
-    ${App.projects.map(p => `<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" class="${on(`project:${p.id}`)}"><span class="ttl">${esc(p.name)}</span></a>`).join("") || `<p class="small faint pad">None yet.</p>`}
-    <div class="group">Conversations</div>
-    <div class="convos">${App.threads.map(t => `<a href="#/chat/${enc(t.thread)}" class="${t.thread === App.thread ? "on" : ""}"${t.thread === App.thread ? ` aria-current="page"` : ""} title="${esc(t.title)}"><span class="ttl">${esc(t.title)}</span></a>`).join("") || `<p class="small faint pad">None yet.</p>`}</div>
-    <div class="foot">${link("#/trash", "Trash")}${link("#/settings", "Settings")}
-    ${isDev() ? `<div class="group">Developer</div>
+    <button class="needs${waiting.length ? " some" : ""}${on("needs")}" data-open="needs" title="${blocking ? `${blocking} waiting on you now` : "Approvals, questions and reviews"}">${icon("bell")}<span class="ttl">Needs you</span><span class="pill${blocking ? "" : " quiet"}" data-needs-count>${waiting.length}</span></button>
+    <div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more${on("projects")}" title="All projects, and a new one">All</a></div>
+    ${App.projects.map(p => `<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" class="${on(`project:${p.id}`).trim()}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>
+      ${App.threads.filter(t => t.project?.id === p.id).map(conv).join("")}`).join("") || `<p class="small faint pad">None yet.</p>`}
+    ${loose.length ? `<div class="group"><span>Conversations</span></div>${loose.map(t => conv(t, false)).join("")}` : ""}
+    <div class="group"><span>Across everything</span></div>
+    <div class="views">
+      <a href="#/tasks" data-open="tasks" class="${on("tasks").trim()}">${icon("tasks")}<span class="ttl">Tasks</span>${running ? `<span class="count">${running} running</span>` : ""}</a>
+      <a href="#/schedules" data-open="schedules" class="${on("schedules").trim()}">${icon("calendar")}<span class="ttl">Schedules</span>${count(App.schedules.length)}</a>
+      <a href="#/library" data-open="library" class="${on("library").trim()}">${icon("file")}<span class="ttl">Library</span></a></div>
+    <div class="foot">${link("#/trash", "Trash", "trash")}
+    ${isDev() ? `<div class="group"><span>Developer</span></div>
       ${link("#/dev/runs", "Runs")}
       ${link("#/dev/experiments", "Experiments")}
       ${link("#/dev/system", "System")}
       ${link("#/dev/policy", "Policy")}
       ${link("#/dev/playbook", "Playbook")}` : ""}
-    <div class="who"><div>${esc(App.me?.name)} <span class="faint">(${esc(App.me?.id)})</span></div>
-      <div class="faint small">${esc(App.appliance)}</div>
-      <button class="link small" data-act="sign-out" style="margin-top:6px">Sign out</button></div></div>`;
+    <div class="who"><span class="avatar" aria-hidden="true">${esc((App.me?.name || "?").trim().charAt(0).toUpperCase())}</span>
+      <div class="whoami"><div class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</div><div class="faint small ttl">${esc(App.appliance)}</div>
+      <button class="link small" data-act="sign-out">Sign out</button></div>
+      <a href="#/settings" class="icon-btn${route.startsWith("#/settings") ? " on" : ""}" title="Settings">${icon("gear")}<span class="sr">Settings</span></a></div></div>`;
 }
 const sidebar = () => paint($("#side"), nav());
 
 function shell() {
-  document.body.innerHTML = `<div class="shell"><nav class="side" aria-label="Sections"><div class="brand">Magnus</div>
-    <a href="#/chat/new" class="button primary new-chat">New conversation</a>
-    <form id="find" role="search"><label class="sr" for="q">Search conversations, tasks and files</label><input id="q" type="search" placeholder="Search conversations, tasks, files" autocomplete="off"></form>
+  document.body.innerHTML = `<div class="shell"><nav class="side" aria-label="Sections"><div class="brand"><span class="logo" aria-hidden="true">M</span><span>Magnus</span>
+    <a href="#/chat/new" class="icon-btn new-chat" title="New conversation">${icon("plus")}<span class="sr">New conversation</span></a></div>
+    <form id="find" role="search">${icon("search")}<label class="sr" for="q">Search conversations, tasks and files</label><input id="q" type="search" placeholder="Search chats, tasks, files" autocomplete="off"></form>
     <div id="side"></div></nav>
     <main id="main" tabindex="-1"></main><aside id="detail" class="detail" aria-label="Details" hidden></aside></div>`;
   $("nav.side").addEventListener("click", async e => {
@@ -260,7 +297,7 @@ function fileChip(f) {
 const VERDICTS = [["right", "Right"], ["partly", "Partly"], ["wrong", "Wrong"]];
 const ENDED = ["completed", "failed", "cancelled"];
 function verdictBar(taskId, v) {
-  return `<div class="verdict" data-verdict-for="${esc(taskId)}"><span class="small muted">Was this right?</span>
+  return `<div class="verdict" data-verdict-for="${esc(taskId)}"><span class="vq">How did Magnus do?</span>
     ${VERDICTS.map(([k, label]) => `<button class="${v?.verdict === k ? "on" : ""}" data-verdict="${k}" aria-pressed="${v?.verdict === k}">${label}</button>`).join("")}
     <details class="vnote" data-key="note:${esc(taskId)}"${v?.note ? " open" : ""}><summary class="small">${v?.note ? "Note" : "Add a note"}</summary>
     <textarea rows="2" aria-label="Note" data-draft="note:${esc(taskId)}">${esc(v?.note || "")}</textarea> <button data-verdict-save>Save note</button></details></div>`;
@@ -286,12 +323,13 @@ function projectOptions(projects, current, none = "No project") {
   return `<option value="">${esc(none)}</option>${projects.map(p => `<option value="${esc(p.id)}"${p.id === current ? " selected" : ""}>${esc(p.name)}</option>`).join("")}`;
 }
 // A control that moves an item into one of the person's projects, or out.
-function moveControl(item, current, projects) {
-  return `<label class="small move"><span class="muted">Project</span> <select data-move="${esc(item)}" aria-label="Project">${projectOptions(projects, current?.id)}</select></label>`;
+function moveControl(item, current, projects, compact = false) {
+  return `<label class="small move"><span class="${compact ? "sr" : "muted"}">Project</span> <select data-move="${esc(item)}" aria-label="Project">${projectOptions(projects, current?.id)}</select></label>`;
 }
 // A file input behind a button; `onFiles` gets the chosen files.
-function attachButton(label = "Add files") {
-  return `<label class="button attach">${esc(label)}<input type="file" multiple hidden data-attach></label>`;
+function attachButton(label = "Add files", iconOnly = false) {
+  return iconOnly ? `<label class="icon-btn attach" title="${esc(label)}">${icon("attach")}<span class="sr">${esc(label)}</span><input type="file" multiple hidden data-attach></label>`
+    : `<label class="button attach">${esc(label)}<input type="file" multiple hidden data-attach></label>`;
 }
 
 // A file shown where it is mentioned: a glimpse of it (an image, or the
@@ -662,9 +700,9 @@ function chosenModel(root) {
 // as it goes: tasks with their status, the decisions they wait on (the same
 // cards as under Needs you), schedules, results and their files.
 function composer(placeholder, picker) {
-  return `<form id="say" class="say"><div class="say-main"><label for="msg" class="sr">Message</label><textarea id="msg" rows="2" data-draft="chat-${esc(location.hash)}" placeholder="${esc(placeholder)}" required></textarea>
-    <div class="row small" id="pending"></div></div>
-    <div class="say-side">${picker}${attachButton("Attach")}<button class="primary" id="send">Send</button></div></form>`;
+  return `<form id="say" class="say"><label for="msg" class="sr">Message</label><textarea id="msg" rows="1" data-draft="chat-${esc(location.hash)}" placeholder="${esc(placeholder)}" required></textarea>
+    <div class="row small" id="pending"></div>
+    <div class="say-bar">${picker}<span class="grow"></span>${attachButton("Attach files", true)}<button class="send" id="send" title="Send">${icon("send")}<span class="sr">Send</span></button></div></form>`;
 }
 // Files added to the next message: uploaded at once, sent with it.
 function wireComposer(thread, project) {
@@ -678,6 +716,10 @@ function wireComposer(thread, project) {
   const box = $("#msg");
   box.focus();
   box.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#say").requestSubmit(); } };
+  // The box grows with the message, up to a third of the window.
+  const fit = () => { box.style.height = "auto"; box.style.height = `${Math.min(box.scrollHeight, innerHeight / 3)}px`; };
+  box.oninput = fit;
+  fit();
   $("#say").onsubmit = async e => {
     e.preventDefault();
     const text = box.value.trim();
@@ -690,6 +732,7 @@ function wireComposer(thread, project) {
       const r = await api("POST", "/v1/chat", body);
       delete drafts[`chat-${location.hash}`];
       box.value = "";
+      fit();
       files = [];
       shown();
       // A new conversation becomes the one shown, in place.
@@ -703,17 +746,29 @@ function wireComposer(thread, project) {
 async function chatLayout(main, thread, project) {
   App.thread = thread;
   sidebar();
-  paint(main, `<section class="conv"><h1 class="sr">Conversation</h1><div id="banners"></div><div id="thread" class="thread" aria-live="polite"></div><div id="composer"></div></section>`);
+  paint(main, `<section class="conv"><header class="conv-head" id="conv-head"></header><div id="banners"></div><div id="thread" class="thread" aria-live="polite"></div><div id="composer"></div></section>`);
+  convHead(thread, project);
   banners();
   $("#banners", main).onclick = e => { if (e.target.closest("[data-act=seen-versions]")) { save("version", App.versions?.latest_seq ?? 0); banners(); } };
-  paint($("#composer", main), composer(thread ? "Reply" : "Ask a question, or say what you want done. For example: Every Monday, summarise my open invoices.", await modelPicker()));
+  paint($("#composer", main), composer(thread ? "Reply, or give Magnus more to do" : "Ask anything, or give Magnus work to do", await modelPicker()));
   wireComposer(thread, project);
+}
+
+// Above the conversation: its project (a link to it) and its title, and
+// what can be done to the whole conversation.
+function convHead(thread, project) {
+  const el = $("#conv-head");
+  if (!el) return;
+  const here = thread && App.threads.find(t => t.thread === thread);
+  const p = here ? here.project : project && App.projects.find(x => x.id === project);
+  paint(el, `<div class="conv-title"><div class="small muted">${p ? `<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}">${esc(p.name)}</a>` : thread ? "No project" : ""}</div>
+    <h1 title="${esc(here?.title || "")}">${esc(here?.title || "New conversation")}</h1></div>
+    ${thread ? `<div class="row">${moveControl(thread, here?.project, App.projects, true)}<button class="icon-btn" data-trash="${esc(thread)}" data-then="#/home" title="Delete conversation">${icon("trash")}<span class="sr">Delete conversation</span></button></div>` : ""}`);
 }
 
 async function showNewChat(main, project) {
   await chatLayout(main, null, project);
-  const p = project && App.projects.find(x => x.id === project);
-  paint($("#thread", main), `${p ? `<p class="small">In the project <a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}">${esc(p.name)}</a></p>` : ""}<p class="muted">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm. What it starts shows here as it goes.</p>`);
+  paint($("#thread", main), `<p class="muted hello">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm. What it starts shows here as it goes.</p>`);
 }
 
 async function showThread(main, thread) {
@@ -738,13 +793,13 @@ async function showThread(main, thread) {
     // A decision the thread now waits on, not read yet: read the inbox first.
     const waits = entries.flatMap(e => e.kind === "tasks" ? e.tasks.map(t => t.waiting_item) : [e.waiting_item]).filter(Boolean);
     if (waits.some(id => !App.inbox.some(i => i.id === id))) await pollInbox();
-    const here = App.threads.find(t => t.thread === thread);
-    const head = `<div class="spread thread-head"><span class="small">${here?.project ? `In the project <a href="#/project/${enc(here.project.id)}" data-open="project:${esc(here.project.id)}">${esc(here.project.name)}</a>` : ""}</span><span class="row">${moveControl(thread, here?.project, App.projects)}${trashButton(thread, "Delete conversation", "#/home")}</span></div>`;
+    convHead(thread);
     ui.composed = [];
     const body = entries.map(e => `<div class="entry ${e.kind === "message" ? "me" : "them"}" data-entry="${esc(e.id || "")}" data-kind="${esc(e.kind)}">${entry(e, ui)}${msgActions(e, ui)}</div>`).join("");
     const el = $("#thread", main);
     if (!el) return;
-    const grew = paint(el, head + body);
+    const grew = paint(el, body);
+    motion(el, ui);
     for (const e of entries.filter(e => e.view)) fill($(`iframe[data-shown="${CSS.escape(e.id)}"]`, main), e.view);
     for (const [id, view, , task] of ui.composed) fill($(`iframe[data-view="${CSS.escape(id)}"]`, el), view, task);
     listen(entries);
@@ -788,6 +843,13 @@ async function showThread(main, thread) {
   $("#thread", main).onclick = async e => {
     const m = e.target.closest("[data-msg-act]");
     if (m) { try { await msgAct(m, m.closest("[data-entry]")); } catch (err) { toast(err.message); m.disabled = false; } return; }
+    if (e.target.closest("[data-act=change-schedule]")) {
+      const box = $("#msg");
+      box.value = "Change the schedule: ";
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+      return;
+    }
     const b = e.target.closest("[data-decide]");
     if (!b) return;
     const card = b.closest("[data-card]").dataset.card;
@@ -855,20 +917,55 @@ function waitingCard(id, ui) {
   const i = id && App.inbox.find(x => x.id === id && x.status === "open");
   return i ? card(i, ui.composed || []) : "";
 }
-// A task in its conversation: its title opens it beside the thread; its
-// status is live; what it waits on from the person is right under it.
-function taskCard(t, ui) {
-  const why = t.status === "suspended" ? WAITING[t.waiting_on] || "" : t.status === "running" ? "working on it" : "";
-  return `<li class="tcard" data-chat-task="${esc(t.task_id)}" data-status="${esc(t.status)}"><div class="crow"><a class="ttl" href="#/task/${enc(t.task_id)}" data-open="task:${esc(t.task_id)}" title="${esc(t.text)}">${esc(t.title)}</a><span class="small why muted">${esc(why)}</span>${chip(t.status)}</div>
-    ${waitingCard(t.waiting_item, ui)}</li>`;
+// Where a task stands, as the design draws it: an icon and a pill. A task
+// waiting on a decision the person can make needs them.
+const needsYou = t => !!t.waiting_item && App.inbox.some(i => i.id === t.waiting_item && i.status === "open" && i.can_respond);
+function standing(t) {
+  if (needsYou(t)) return ["need", `<span class="chip warn">Needs you</span>`];
+  return [{ completed: "done", running: "working", failed: "stopped", cancelled: "stopped" }[t.status] || "working", chip(t.status)];
 }
-// A confirmed schedule where it was confirmed: when it runs next and how
-// its last run went.
+// A task in its conversation: one row that opens it beside the thread, its
+// status live; what it waits on from the person follows the request's rows.
+function taskCard(t) {
+  const why = t.status === "suspended" ? WAITING[t.waiting_on] || "" : t.status === "running" ? "working on it" : "";
+  const [ic, pill] = standing(t);
+  return `<li class="tcard" data-chat-task="${esc(t.task_id)}" data-status="${esc(t.status)}"><a class="rg-row" href="#/task/${enc(t.task_id)}" data-open="task:${esc(t.task_id)}" title="${esc(t.text)}">
+    <span class="st ${ic}">${icon(ic)}</span><span class="rg-main"><span class="ttl">${esc(t.title)}</span>${why ? `<span class="sub why">${esc(why)}</span>` : `<span class="sub">${esc(firstLine(t.text))}</span>`}</span>${pill}${icon("chev", "chev")}</a></li>`;
+}
+// A schedule where it was confirmed: a row that opens it, with when it runs
+// next and how its last run went.
+function scheduleText(sc) {
+  const last = sc.last;
+  return `Next run ${until(sc.next)} · ${sc.last_failed ? `Last firing could not start: ${sc.last_failed.error}` : last ? `Last result: ${(STATUS[last.status] || ["", last.status])[1]}, ${when(last.ended_at || last.created_at)}` : "No results yet"}`;
+}
 function scheduleLine(e) {
   if (e.state === "declined") return `<p class="small"><span class="chip">Declined</span></p>`;
   if (e.state !== "confirmed") return "";
   const sc = App.schedules.find(x => x.id === e.schedule);
-  return `<div class="small sched-state" data-schedule="${esc(e.schedule || "")}"><span class="chip ok">Scheduled</span> ${sc ? `<span data-last>${scheduleState(sc)}</span> · <a href="#/schedules" data-open="schedule:${esc(sc.id)}">Open the schedule</a>` : ""}</div>`;
+  if (!sc) return "";
+  return `<div class="reqgroup sched-state" data-schedule="${esc(sc.id)}"><a class="rg-row" href="#/schedules" data-open="schedule:${esc(sc.id)}" title="Open the schedule">
+    <span class="st sch">${icon("calendar")}</span><span class="rg-main"><span class="ttl">${esc(sc.title)}</span><span class="sub" data-last>${esc(scheduleText(sc))}</span></span><span class="chip sch">Scheduled</span>${icon("chev", "chev")}</a></div>`;
+}
+
+// Motion (U7): what is new in the thread rises into place, a task whose
+// status changed shows its new status gently, and finished work gets a quiet
+// moment. A repaint draws every node afresh, so only what changed is marked;
+// the stylesheet decides, by the motion setting, how each mark moves, if at
+// all.
+function motion(el, ui) {
+  const first = !ui.seen;
+  ui.seen ||= new Set();
+  ui.status ||= {};
+  for (const n of $$(".entry[data-entry]", el)) {
+    const k = n.dataset.entry;
+    if (!first && k && !ui.seen.has(k)) n.classList.add("enter");
+    ui.seen.add(k);
+  }
+  for (const n of $$("[data-chat-task]", el)) {
+    const k = n.dataset.chatTask, st = n.dataset.status, was = ui.status[k];
+    if (was && was !== st) n.classList.add(st === "completed" ? "finished" : "changed");
+    ui.status[k] = st;
+  }
 }
 
 // The clipboard where the page may use it; the old way where it may not.
@@ -965,23 +1062,24 @@ function entry(e, ui = {}) {
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
       : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}</div>${e.status === "running" ? `<div class="pre" data-live="${esc(e.task_id)}">${esc(ui.live?.[e.task_id] || "")}</div>` : ""}</div>${waitingCard(e.waiting_item, ui)}`;
-    case "tasks": return `<div class="card flat chatcard" data-chat-tasks="${esc(e.from_run)}"><div class="kind">${e.tasks.length === 1 ? "Started a task" : `Started ${e.tasks.length} tasks`}</div>
-      <ul class="tlist">${e.tasks.map(t => taskCard(t, ui)).join("")}</ul>
-      <div class="small muted">Results post here.</div></div>`;
+    case "tasks": {
+      const done = e.tasks.filter(t => t.status === "completed").length, need = e.tasks.filter(needsYou).length;
+      return `<div class="reqgroup chatcard" data-chat-tasks="${esc(e.from_run)}"><div class="rg-head"><span>From this request</span><span class="small muted num">${done} of ${e.tasks.length} done${need ? ` · ${need} need${need === 1 ? "s" : ""} you` : ""}</span></div>
+        <ul class="rg-rows">${e.tasks.map(taskCard).join("")}</ul></div>
+        ${e.tasks.map(t => t.waiting_item && waitingCard(t.waiting_item, ui) ? `<div class="decide" data-for-task="${esc(t.task_id)}">${waitingCard(t.waiting_item, ui)}</div>` : "").join("")}`;
+    }
     case "result": return `<div class="result" data-result="${esc(e.task_id)}"><details data-key="result:${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
       <div class="pre">${esc(e.summary || "")}</div>${ENDED.includes(e.status) ? verdictBar(e.task_id, e.verdict) : ""}</details>
-      ${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}<a class="small" href="#/task/${enc(e.task_id)}" data-open="task:${esc(e.task_id)}">See the outcome</a></div>`;
+      ${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}<a class="small see" href="#/task/${enc(e.task_id)}" data-open="task:${esc(e.task_id)}">See the outcome</a></div>`;
     case "schedule_card": {
       const b = e.budget || {};
-      return `<div class="card flat chatcard" data-card="${esc(e.card)}"><div class="kind">Recurring task: confirm to schedule it</div>
-        <p><strong>${esc(e.text)}</strong></p>
-        <div class="what">
-          <div class="field"><span>When</span><span>${esc(rule(e))}</span></div>
-          <div class="field"><span>Scope</span><span>${esc(e.scope || "")}</span></div>
-          <div class="field"><span>Budget per run</span><span>up to $${esc(b.max_usd)}, ${esc(b.max_model_calls)} model calls, ${esc(b.max_actions)} actions</span></div>
-          <div class="field"><span>Acts for</span><span>you (${esc(e.acts_for)}), with your access; what it needs from you shows under Needs you</span></div>
-        </div>${taintNote(e.taint)}
-        ${e.state === "open" ? `<div class="row" style="margin-top:10px"><button class="primary" data-decide="confirm">Confirm</button><button data-decide="decline">Decline</button></div>` : scheduleLine(e)}</div>`;
+      if (e.state !== "open") return `<div data-card="${esc(e.card)}">${scheduleLine(e)}</div>`;
+      return `<div class="confirm chatcard" data-card="${esc(e.card)}"><div class="cc-head"><span class="st sch">${icon("calendar")}</span><strong>Start this schedule?</strong></div>
+        <p class="cc-text">${esc(e.text)}</p>
+        <div class="tiles"><div><span>When</span><strong>${esc(rule(e))}</strong></div><div><span>What</span><strong>${esc(e.scope || "")}</strong></div>
+          <div><span>Budget</span><strong class="num">Up to $${esc(b.max_usd)} a run</strong><span class="small">${esc(b.max_model_calls)} model calls, ${esc(b.max_actions)} actions</span></div></div>
+        <p class="small muted">It acts for you (${esc(e.acts_for)}), with your access; what it needs from you shows under Needs you.</p>${taintNote(e.taint)}
+        <div class="row cc-act"><button class="primary" data-decide="confirm">Start schedule</button><button data-act="change-schedule">Change</button><button class="link" data-decide="decline">Not now</button></div></div>`;
     }
     default: return "";
   }
@@ -1328,6 +1426,8 @@ function openPanel(what) {
   Panel.what = what;
   const el = $("#detail");
   if (!el) return;
+  // The panel glides in when it opens (as the motion setting allows).
+  if (el.hidden) { el.classList.add("opening"); el.addEventListener("animationend", () => el.classList.remove("opening"), { once: true }); }
   el.hidden = false;
   document.body.classList.add("with-detail");
   sidebar();
@@ -1359,15 +1459,17 @@ async function drawPanel() {
   const at = Panel.what.indexOf(":");
   const [kind, id] = at < 0 ? [Panel.what, ""] : [Panel.what.slice(0, at), Panel.what.slice(at + 1)];
   const composed = [];
-  let body, after = null;
+  let body, after = null, head = null;
   try {
-    ({ body, after } = await PANELS[kind](id, composed));
+    ({ body, after, head } = await PANELS[kind](id, composed));
   } catch (e) {
     body = `<div class="banner bad">${esc(e.status === 404 ? "This is gone: it was deleted, or it is not yours." : e.message)}</div>`;
   }
   if (n !== Panel.seq || !Panel.what) return;
   const title = kind === "search" ? `Search: ${id}` : PANEL_TITLES[kind] || kind;
-  const changed = paint(el, `<div class="detail-head"><h2>${esc(title)}</h2><button class="icon close" data-act="close-panel" title="Close" aria-label="Close">×</button></div><div class="detail-body" data-panel="${esc(kind)}">${body}</div>`);
+  // A view names itself in the head (a task: its title and where it
+  // stands); the others are named by what they are.
+  const changed = paint(el, `<div class="detail-head"><div class="dh-main">${head || `<h2>${esc(title)}</h2>`}</div><button class="icon-btn close" data-act="close-panel" title="Close">${icon("close")}<span class="sr">Close</span></button></div><div class="detail-body" data-panel="${esc(kind)}">${body}</div>`);
   if (!changed) return;
   for (const [iid, view, , task] of composed) fill($(`iframe[data-view="${CSS.escape(iid)}"]`, el), view, task);
   if (after) await after(el);
@@ -1407,25 +1509,43 @@ async function taskView(id, composed) {
   const items = App.inbox.filter(i => i.task_id === id && i.status === "open");
   const view = deliverable(t);
   const files = latestOutputs(t);
-  const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="pview"></iframe>` : ""}
+  const cs = t.criteria || [];
+  const checked = cs.filter(c => c.verified === true && !String(c.verified_by || "").startsWith("person:")).length;
+  const cost = `$${(t.usage?.cost_usd ?? 0).toFixed(2)}`;
+  // The result leads with the deliverable, then its files, the person's
+  // verdict, and the evidence; what it cost closes it.
+  const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="pview"></iframe>` : running ? "" : `<p class="empty">No result yet.</p>`}
     ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
-    ${files.length ? `<h3>Files</h3><div class="previews">${files.map(filePreview).join("")}</div>` : ""}
+    ${files.length ? `<div class="frows">${files.map(f => fileRow(f, t.project)).join("")}</div>` : ""}
     ${ENDED.includes(t.status) ? verdictBar(t.task_id, t.verdict) : ""}
     ${t.outcome_view && t.summary ? `<h3>Summary</h3><p data-summary>${esc(t.summary)}</p>` : ""}
-    <h3>Evidence</h3>${doneLine(t)}${criteria(t)}
-    <h3>Cost</h3><p class="small" data-cost>${esc(t.model?.adapter)} · ${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} model calls · ${t.usage?.actions ?? 0} actions · $${(t.usage?.cost_usd ?? 0).toFixed(2)}</p>`;
-  const layers = { outcome, contract: `<h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}`, trace: tl ? trace(tl) : "" };
-  const body = `<h2 class="ptitle" data-task="${esc(t.task_id)}">${esc(t.title || t.text)}</h2>
-    <div class="row small">${chip(t.status)}<span class="muted">${esc(WAITING[t.waiting_on] || "")}${t.waiting_on && glance(t) ? " · " : ""}${esc(glance(t))}</span></div>
-    <p class="small muted request">${esc(t.text)}</p>
+    <h3>Checks</h3>${doneLine(t)}${criteria(t)}
+    <p class="small muted foot-note num" data-cost>${esc(t.model?.adapter)} · ${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} steps · ${t.usage?.actions ?? 0} actions · ${cost}</p>`;
+  const contract = `<h3>Request</h3><p class="request">${esc(t.text)}</p>
     ${t.files?.length ? `<p class="small"><span class="muted">Your files:</span> ${t.files.map(fileChip).join(" ")}</p>` : ""}
-    ${items.map(i => card(i, composed)).join("")}
+    <h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}`;
+  const layers = { outcome, contract, trace: tl ? trace(tl) : "" };
+  const [, pill] = standing({ ...t, waiting_item: items.find(i => i.can_respond)?.id });
+  const head = `<h2 class="ptitle" data-task="${esc(t.task_id)}">${esc(t.title || t.text)}</h2>
+    <div class="row small dh-sub">${pill}${cs.length ? `<span class="checks">${icon("shield")}<span class="num">${checked} of ${cs.length} checks verified by the appliance</span></span>` : ""}${t.waiting_on ? `<span class="muted">${esc(WAITING[t.waiting_on] || "")}</span>` : ""}</div>`;
+  const body = `${items.map(i => card(i, composed)).join("")}
     ${running ? `<div class="live" id="plive" aria-live="polite">${esc(Panel.liveText) || `<span class="faint">Working…</span>`}</div>` : ""}
-    <div class="layers" role="tablist">${[["outcome", "Outcome"], ["contract", "Contract and plan"], ["trace", "Trace"]].map(([k, l]) => `<button role="tab" aria-selected="${Panel.layer === k}" class="${Panel.layer === k ? "on" : ""}" data-layer="${k}">${l}</button>`).join("")}</div>
-    <section>${layers[Panel.layer]}</section>
-    <div class="row">${moveControl(t.task_id, t.project, App.projects)}${!ENDED.includes(t.status) ? `<button data-act="cancel" data-id="${esc(id)}">Cancel task</button>` : trashButton(t.task_id, "Delete task")}${t.status === "suspended" && !t.waiting_item ? `<button data-act="resume" data-id="${esc(id)}">Resume</button>` : ""}</div>`;
+    <div class="seg layers" role="tablist" aria-label="What to show">${[["outcome", "Result"], ["contract", "Plan"], ["trace", "Steps"]].map(([k, l]) => `<button role="tab" aria-selected="${Panel.layer === k}" class="${Panel.layer === k ? "on" : ""}" data-layer="${k}">${l}</button>`).join("")}</div>
+    <section class="layer">${layers[Panel.layer]}</section>
+    <div class="row pactions">${moveControl(t.task_id, t.project, App.projects)}${!ENDED.includes(t.status) ? `<button data-act="cancel" data-id="${esc(id)}">Cancel task</button>` : trashButton(t.task_id, "Delete task")}${t.status === "suspended" && !t.waiting_item ? `<button data-act="resume" data-id="${esc(id)}">Resume</button>` : ""}</div>`;
   Panel.task = t;
-  return { body, after: el => Panel.layer === "outcome" && view.length && fill($("#pview", el), view, id, t) };
+  return { head, body, after: el => Panel.layer === "outcome" && view.length && fill($("#pview", el), view, id, t) };
+}
+
+// A delivered file as a row: its type, its name (opens it), where it is
+// kept, and Download.
+const FILE_TYPES = { "application/pdf": "PDF", "text/csv": "CSV", "text/markdown": "MD", "text/plain": "TXT", "text/html": "HTML", "application/json": "JSON" };
+function fileRow(f, project) {
+  const type = FILE_TYPES[f.media_type] || (f.media_type || "").split("/").pop().slice(0, 4).toUpperCase() || "FILE";
+  const p = project && (typeof project === "object" ? project : App.projects.find(x => x.id === project));
+  return `<div class="frow" data-file-row="${esc(f.id)}"><span class="ftype ${type === "PDF" ? "pdf" : ""}">${esc(type)}</span>
+    <div class="rg-main"><a class="ttl" href="#/file/${enc(f.id)}" data-open="file:${esc(f.id)}">${esc(f.name)}</a><span class="sub">Saved to Library${p ? ` · ${esc(p.name)}` : ""} · ${esc(kb(f.size))}</span></div>
+    <button class="icon-btn" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}" title="Download ${esc(f.name)}">${icon("download")}<span class="sr">Download</span></button></div>`;
 }
 
 // One file, drawn the way an outcome draws it, with where it came from and
@@ -1761,7 +1881,7 @@ async function connectorsSection(main) {
 // own group. Sections that need the owner role are shown only to owners.
 const SETTINGS = [
   ["models", "Models", modelsSection, true], ["connectors", "Connectors", connectorsSection, true], ["account", "Account", accountSection],
-  ["notifications", "Notifications", notificationsSection], ["updates", "Updates", updatesSection], ["data", "Data and privacy", dataSection],
+  ["appearance", "Appearance", appearanceSection], ["notifications", "Notifications", notificationsSection], ["updates", "Updates", updatesSection], ["data", "Data and privacy", dataSection],
   ["safety", "Kill switch", killSwitchSection, true],
 ];
 route(/^#\/settings(?:\/([a-z]+))?$/, async (main, which) => {
@@ -1774,6 +1894,36 @@ route(/^#\/settings(?:\/([a-z]+))?$/, async (main, which) => {
 // Where these lived before Settings.
 route(/^#\/models$/, () => { location.hash = "#/settings/models"; });
 route(/^#\/apps$/, () => { location.hash = "#/settings/connectors"; });
+
+// How Magnus looks on this device (U7, amended): light, dark or the
+// computer's; solid or glass; an accent; and how much it moves. The choice
+// takes effect at once; the computer's own settings for less motion and less
+// transparency still apply on top.
+function appearanceSection(el) {
+  const radio = (look, value, label, inner = label, cls = "") => {
+    const on = Theme.prefs()[look] === value;
+    return `<button class="${cls}${on ? " on" : ""}" role="radio" aria-checked="${on}" data-look="${look}" data-value="${value}" title="${esc(label)}">${inner}</button>`;
+  };
+  const draw = () => {
+    const p = Theme.prefs(), os = Theme.os(), look = Theme.look;
+    paint(el, `<h2>Appearance</h2><div class="appearance">
+      <h3 id="mode-h">Mode</h3><div class="seg" role="radiogroup" aria-labelledby="mode-h">${Theme.MODES.map(([k, l]) => radio("mode", k, l)).join("")}</div>
+      <h3 id="mat-h">Material</h3><div class="materials" role="radiogroup" aria-labelledby="mat-h">${Theme.MATERIALS.map(([k, l, hint]) => radio("material", k, l,
+        `<span class="mprev ${k}" aria-hidden="true"><span class="ms"></span><span class="mm"></span></span><span class="ml">${esc(l)}</span><span class="small muted">${esc(hint)}</span>`, "material")).join("")}</div>
+      ${p.material === "glass" && os.reduceTransparency ? `<p class="small muted" data-look-note>Your computer asks for less transparency, so Magnus stays solid.</p>` : ""}
+      <h3 id="acc-h">Accent</h3><div class="swatches" role="radiogroup" aria-labelledby="acc-h">${Theme.ACCENTS.map(a => radio("accent", a.id, a.label, `<span class="sw" style="background:${a.swatch}"></span><span class="sr">${esc(a.label)}</span>`, "swatch")).join("")}</div>
+      <h3 id="mot-h">Motion</h3><div class="seg" role="radiogroup" aria-labelledby="mot-h">${Theme.MOTIONS.map(([k, l]) => radio("motion", k, l)).join("")}</div>
+      <p class="small muted" data-motion-hint>${esc(Theme.MOTION_HINTS[p.motion])}${look.motion !== p.motion ? " Your computer asks for reduced motion, so Magnus uses quick fades." : ""}</p>
+      <p class="small faint">Magnus also follows your computer's settings for reduced motion and reduced transparency.</p></div>`);
+  };
+  el.onclick = e => {
+    const b = e.target.closest("[data-look]");
+    if (!b) return;
+    Theme.set({ [b.dataset.look]: b.dataset.value });
+    draw();
+  };
+  draw();
+}
 
 // The owner's kill switch, and what it revoked.
 async function killSwitchSection(el) {
