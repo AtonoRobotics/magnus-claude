@@ -136,6 +136,11 @@ pub struct Oidc {
     /// Where it carries their roles (Keycloak realm roles: `/realm_access/roles`).
     #[serde(default)]
     pub roles_claim: Option<String>,
+    /// How long a sign-in in the person's browser may take: finding a
+    /// password or passkey, two-factor. The app waits as long, from what the
+    /// appliance tells it.
+    #[serde(default = "sign_in_minutes")]
+    pub sign_in_minutes: u32,
 }
 
 fn person_claim() -> String {
@@ -146,6 +151,9 @@ fn oidc_scope() -> String {
 }
 fn max_pending() -> usize {
     100
+}
+fn sign_in_minutes() -> u32 {
+    10
 }
 
 fn session_days() -> u32 {

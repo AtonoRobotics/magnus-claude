@@ -440,6 +440,23 @@ async function signInScreen(note) {
       $("#pwd").onclick = () => ask("password", data);
       $("#go").onclick = async () => {
         $("#go").disabled = true;
+        // The app signs in in the person's own browser, where their passkey
+        // and two-factor work, and the browser comes back to the app.
+        if (Magnus.providerSignIn) {
+          paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p>
+            <p>Sign in on the ${esc(data.label)} page that just opened in your browser, then come back here.</p>
+            <p class="small muted" id="wait" role="status">Waiting for you to sign in…</p>
+            <div class="row" style="margin-top:14px"><button class="link" id="cancel">Cancel</button></div>`);
+          // A cancelled sign-in may still finish in the browser; its answer is ignored.
+          let cancelled = false;
+          $("#cancel").onclick = () => { cancelled = true; ask("provider", data); };
+          try {
+            const r = await Magnus.providerSignIn();
+            if (cancelled) return;
+            App.me = r.person; App.appliance = data.url || location.origin;
+            return boot();
+          } catch (err) { if (!cancelled) ask("provider", { ...data, error: err.message || String(err) }); return; }
+        }
         let s;
         try { s = await Magnus.deviceStart(); } catch (err) { return ask("provider", { ...data, error: err.message || String(err) }); }
         const link = s.verification_uri_complete || s.verification_uri;

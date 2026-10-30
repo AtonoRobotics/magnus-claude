@@ -1,7 +1,8 @@
 # Accounts: Keycloak through one identity interface
 
 Status: building (owner's spec, 2026-10-30, which replaces the built-in-first
-plan of the same day). Keycloak changes the owner makes are listed at the end.
+plan of the same day). Step 1 is built. Device certificates (same day) have
+open decisions D1–D5. Keycloak changes the owner makes are listed at the end.
 
 ## The owner's spec
 
@@ -73,15 +74,68 @@ gets a page saying it can be closed.
 
 This replaces the device-code flow.
 
-### Paired devices
+### Device certificates (owner's spec, 2026-10-30: required)
 
-Sign-in still runs only over the app's pinned connection to the appliance. A
-Keycloak sign-in never replaces pairing: an app that hasn't pinned the
-appliance's certificate can't start one.
+> Build device certificates now; they're required, not optional (the passkey
+> and Keycloak decisions both rely on them as the second factor).
+> - At pairing, the app generates a key pair on the device (in the OS
+>   keystore: Windows CNG/TPM where available, Linux Secret Service) and the
+>   appliance issues it a client certificate.
+> - The appliance requires mutual TLS: every connection presents a valid,
+>   unrevoked device certificate, and only then is the sign-in token
+>   accepted. A valid token from an unpaired device is refused.
+> - Devices are listed per user with name, last seen and revoke; revocation
+>   takes effect immediately, including over the relay.
+> - Deactivating a user (local or via Keycloak) revokes all their devices.
+>
+> Tests: an unpaired device holding a valid token is refused; a revoked device
+> is refused directly and through the relay; a device key copied to another
+> machine fails where the key is hardware-bound.
 
-(The app has no client certificate today. If "paired device certificates"
-means one per device, a mutual-TLS certificate issued when the app pairs and
-revocable per device, that is a separate step to add.)
+**Today.** The app pins the appliance's certificate. The appliance never
+checks which device is calling: any holder of a session token gets in.
+
+**Pairing is the first sign-in on a device.**
+1. **The app makes a key pair in the computer's keystore.** It's ECDSA P-256,
+   which every TPM 2.0 and Windows' platform provider support. The private
+   key can't be exported:
+   - Windows: CNG, with the Microsoft Platform Crypto Provider (the TPM)
+     where there is one, otherwise the software provider, non-exportable;
+   - Linux: see decision D2.
+2. **It sends a certificate request with its sign-in.** The request is signed
+   by the device key, which proves the app holds it.
+3. **The appliance issues the certificate when the sign-in finishes.** It
+   comes from a device certificate authority of the appliance's own, whose
+   key is in the vault. The certificate names the person and the device. The
+   session is bound to that device.
+
+**Mutual TLS on the HTTPS listener.**
+- The handshake asks every client for a certificate.
+- Only pairing works without one: the sign-in method, starting and finishing
+  a sign-in with a certificate request, and health.
+- Every other request needs a valid, unrevoked device certificate. Its token
+  must be for that device's person and that device. So a token from another
+  device, or from no device, is refused.
+- Revocation is checked on every request, not only at the handshake, so it
+  takes effect at once on a connection that is already open. Live streams on
+  a revoked device are closed.
+
+**Devices.**
+- Each person sees their devices: name (the computer's), system, where the
+  key is kept (hardware or software), paired, last seen. They can revoke any
+  of them.
+- The owner sees and revokes anyone's.
+- Revoking ends the device's sessions. The device must pair again.
+- Deactivation (step 3) revokes all of a person's devices.
+
+**Tests.**
+- A real TLS client without a certificate, presenting a valid token from a
+  paired device, is refused.
+- A revoked device is refused at once, on an open connection too.
+- The installed app pairs on its first sign-in.
+- A device key copied to another machine fails where the key is
+  hardware-bound. The key's TPM blob only loads in the TPM that made it, so
+  this needs a second real TPM (D2).
 
 ### Groups to roles (E2, E7, K46)
 
@@ -146,13 +200,40 @@ for an appliance that has no identity provider.
   browser" fills in Keycloak's login form.
 - **Windows:** the owner's test.
 
+## Open decisions on device certificates
+
+- **D1. The appliance's own page in a browser.** Spec: every connection
+  presents a device certificate, so browsers can't use the appliance's page
+  any more. Then only the app signs in, and the device-code sign-in goes.
+  - Recommended: app only, as the spec says.
+  - The alternative: a browser imports a device certificate by hand.
+- **D2. Where Linux keeps the device key.** The spec names the Secret
+  Service. It stores software keys that can be copied, so they aren't
+  hardware-bound.
+  - Recommended: the TPM 2.0 where there is one, hardware-bound as on
+    Windows; this machine has one, `/dev/tpmrm0`. The Secret Service
+    otherwise.
+  - Using the TPM needs the app's user in the `tss` group, a packaging step.
+- **D3. The relay.** This build has no relay. "Through the relay" needs one
+  to exist: which relay is meant, and should I build it?
+- **D4. The appliance's loopback listener** (127.0.0.1, HTTP), which the
+  `magnus` command, local scripts and the tests use on the appliance's own
+  machine.
+  - Recommended: no device certificate there. Only someone already on the
+    appliance machine can reach it.
+- **D5. Script tokens** (`[[people]] token`). Recommended: over the network
+  they need a device certificate too, issued on the appliance with
+  `magnus device issue`.
+
 ## Build order
 
 1. The identity interface and sign-in by code and PKCE in the appliance and
-   the app; tests against a real Keycloak.
-2. Groups to roles, read at sign-in and refresh.
-3. Short-lived sessions with refresh, the status check, deactivation with
-   suspended schedules and inbox notices.
+   the app; tests against a real Keycloak. **Built.**
+2. Device certificates: keys in the keystore, pairing at first sign-in,
+   mutual TLS, devices and revoke (after D1–D5).
+3. Groups to roles, read at sign-in and refresh.
+4. Short-lived sessions with refresh, the status check, and deactivation:
+   suspended schedules and inbox notices, every device revoked.
 
 ## Keycloak changes for strix-alpha (the owner, or me with a realm admin account)
 

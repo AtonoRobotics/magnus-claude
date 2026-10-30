@@ -81,16 +81,17 @@ export async function pinAndSignIn(d, { url, fingerprint, provider, person }) {
 }
 
 // Sign in through the identity provider on an app already pinned to its
-// appliance; the test is the person's browser and approves the code the app
-// shows, as `person`.
+// appliance, as `person` (or `as`): the app opens the provider's page in the
+// computer's default browser, which signs in there as whoever the file
+// MAGNUS_SIGN_IN_AS names (the test's browser; MAGNUS_PASSWORDS has each
+// person's password), and comes back to the app.
 export async function signIn(d, { provider, person, as }) {
-  await d.step(`sign in with ${provider} as ${as || person}`, async () => {
+  const who = as || person;
+  await d.step(`sign in with ${provider} as ${who}`, async () => {
+    const passwords = JSON.parse(env("MAGNUS_PASSWORDS"));
+    if (!passwords[who]) throw new Error(`no password for ${who}`);
+    writeFileSync(env("MAGNUS_SIGN_IN_AS"), `${who}\n${passwords[who]}\n`);
     await d.click(d.button(`Sign in with ${provider}`));
-    const code = (await d.text(d.css("#code"))).trim();
-    const link = await d.attr(d.css("#open"), "data-url");
-    if (!link.includes(code)) throw new Error(`the provider's page ${link} is not for code ${code}`);
-    const approved = await (await fetch(as ? `${link}&as=${encodeURIComponent(as)}` : link)).text();
-    if (!approved.includes(`Signed in as ${as || person}`)) throw new Error(`the provider did not approve: ${approved}`);
     await d.xpath("//h1[normalize-space()='Home']");
     const page = await d.run("return JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie");
     if (page.includes("mgs_")) throw new Error("the session token reached the page");

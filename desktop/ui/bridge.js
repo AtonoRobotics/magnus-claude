@@ -25,8 +25,9 @@ const appBridge = tauri && {
   async trust(url, fingerprint) { return this.invoke("trust", { url, fingerprint }); },
   async signInMethod() { return this.invoke("sign_in_method"); },
   async signIn(person, password) { return this.invoke("sign_in", { person, password }); },
-  async deviceStart() { return this.invoke("device_start"); },
-  async devicePoll(flow) { return this.invoke("device_poll", { flow }); },
+  // Sign in through the identity provider in the person's own browser,
+  // which comes back to this computer; resolves with who signed in.
+  async providerSignIn() { return this.invoke("provider_sign_in"); },
   async signOut() { return this.invoke("sign_out"); },
   async api(method, path, body) {
     const r = await this.invoke("api", { method, path, body: body === undefined ? null : body });

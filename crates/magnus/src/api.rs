@@ -104,6 +104,8 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/fonts/{file}", get(ui_font))
         .route("/v1/health", get(health))
         .route("/v1/sign-in", get(sign_in_method).post(sign_in))
+        .route("/v1/sign-in/browser", post(browser_begin))
+        .route("/v1/sign-in/browser/finish", post(browser_finish))
         .route("/v1/sign-in/device", post(device_start))
         .route("/v1/sign-in/device/{flow}", post(device_poll))
         .route("/v1/sign-out", post(sign_out))
@@ -262,10 +264,20 @@ async fn device_poll(State(k): K, Extension(t): Extension<Transport>, ConnectInf
     }
     let Some(o) = &k.oidc else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
     match o.poll(&flow).await {
-        Ok(crate::oidc::Polled::Pending) => (StatusCode::ACCEPTED, Json(json!({ "pending": true }))).into_response(),
-        Ok(crate::oidc::Polled::Done { person, app, rights }) => {
+        Ok(polled) => provider_answered(&k, t, o.label(), polled).await,
+        Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+/// What the identity provider answered about a sign-in: wait, a session for
+/// a person of this appliance with the rights the provider gives, or no.
+async fn provider_answered(k: &Kernel, t: Transport, label: String, polled: crate::identity::Polled) -> Response {
+    use crate::identity::Polled;
+    match polled {
+        Polled::Pending => (StatusCode::ACCEPTED, Json(json!({ "pending": true }))).into_response(),
+        Polled::Done { person, app, rights } => {
             if k.cfg.person(&person).is_none() {
-                tracing::warn!("oidc: {person} signed in at {} but is not a person on this appliance", o.label());
+                tracing::warn!("identity: {person} signed in at {label} but is not a person on this appliance");
                 return err(StatusCode::FORBIDDEN, format!("You signed in as {person}, who is not a person on this appliance. Ask the owner to add you."));
             }
             // What the provider says the person may do now counts from here
@@ -276,9 +288,39 @@ async fn device_poll(State(k): K, Extension(t): Extension<Transport>, ConnectInf
                     return internal(e);
                 }
             }
-            issue(&k, t, &person, app).await
+            issue(k, t, &person, app).await
         }
-        Ok(crate::oidc::Polled::Failed(m)) => err(StatusCode::GONE, m),
+        Polled::Failed(m) => err(StatusCode::GONE, m),
+    }
+}
+
+/// Begin a sign-in in the person's own browser (the app's way): it comes
+/// back to `redirect_uri`, a loopback address on their computer, and the app
+/// finishes it at `/v1/sign-in/browser/finish`.
+async fn browser_begin(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let Some(id) = k.identity() else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
+    let Some(redirect_uri) = b["redirect_uri"].as_str() else { return err(StatusCode::BAD_REQUEST, "name the redirect address") };
+    if let Err(e) = crate::connectors::loopback(redirect_uri) {
+        return err(StatusCode::BAD_REQUEST, format!("{e:#}"));
+    }
+    match id.begin(redirect_uri, b["client"].as_str() == Some("app")).await {
+        Ok(s) => Json(json!({ "state": s.state, "authorize_url": s.authorize_url, "expires_in": s.expires_in, "label": id.label() })).into_response(),
+        Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+/// Finish a browser sign-in with what came back to the loopback address.
+async fn browser_finish(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let Some(id) = k.identity() else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
+    let (Some(state), Some(code)) = (b["state"].as_str(), b["code"].as_str()) else { return err(StatusCode::BAD_REQUEST, "send the state and code that came back") };
+    match id.finish(state, code, b["iss"].as_str()).await {
+        Ok(polled) => provider_answered(&k, t, id.label(), polled).await,
         Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }

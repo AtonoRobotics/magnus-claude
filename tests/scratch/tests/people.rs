@@ -82,7 +82,7 @@ async fn approval_rights_follow_the_risk_tier_and_policy_rights_the_layer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn groups_and_roles_come_from_the_identity_provider_at_each_sign_in() {
+async fn groups_and_roles_come_from_keycloak_at_each_sign_in() {
     let (mail, finance) = (mcp::mail().start().await, mcp::finance().start().await);
     let m = FakeModel::start(worker()).await;
     let spec = Spec::default()
@@ -90,25 +90,34 @@ async fn groups_and_roles_come_from_the_identity_provider_at_each_sign_in() {
         .app("finance", &finance, "internal", "private", &[("get_report", "read")])
         .access("finance", &["finance"]);
     let mut app = Appliance::start(spec, &m).await;
-    let idp = FakeIdp::start("carol").await;
-    idp.configure_with(&mut app, &[("groups_claim", "/groups"), ("roles_claim", "/realm_access/roles")]).await;
+    let kc = Keycloak::start().await;
+    kc.add_person("carol").await;
+    kc.configure_with(&mut app, &[("groups_claim", "/groups"), ("roles_claim", "/realm_access/roles")]).await;
     let alice = app.api("alice");
     // The organization lets the agent read the report; sending still asks.
     assert!(alice.put_policy("org", &org_policy(&permit_execute("finance__get_report"))).await.is_success());
-    let as_carol = |token: &str| {
+    let sign_in = || async {
+        let (st, v) = kc.app_sign_in(&app, "carol").await;
+        assert_eq!(st, 200, "{v}");
         let mut a = app.api("carol");
-        a.token = token.to_string();
+        a.token = v["token"].as_str().unwrap().to_string();
         a
     };
+    let groups = |me: &Value| {
+        let mut g: Vec<String> = me["groups"].as_array().unwrap().iter().map(|g| g.as_str().unwrap().to_string()).collect();
+        g.sort();
+        g
+    };
+    let has_role = |me: &Value, r: &str| me["roles"].as_array().unwrap().iter().any(|x| x == r);
 
-    // In the config carol is staff with no roles. The provider says she is
-    // in finance and approves irreversible actions (Keycloak's shapes: group
-    // paths, realm roles).
-    idp.set_claims(json!({ "groups": ["/staff", "/finance"], "realm_access": { "roles": ["approver:irreversible", "offline_access"] } }));
-    let carol = as_carol(&idp.sign_in(&app).await);
+    // In the config carol is staff with no roles. In Keycloak she is in
+    // finance and approves irreversible actions (group paths, realm roles).
+    kc.set_groups("carol", &["staff", "finance"]).await;
+    kc.set_roles("carol", &["approver:irreversible"]).await;
+    let carol = sign_in().await;
     let me = carol.get("/v1/me").await.1;
-    assert_eq!(me["groups"], json!(["staff", "finance"]), "{me}");
-    assert_eq!(me["roles"], json!(["approver:irreversible", "offline_access"]), "{me}");
+    assert_eq!(groups(&me), ["finance", "staff"], "{me}");
+    assert!(has_role(&me, "approver:irreversible"), "{me}");
 
     // Her task reaches what finance may, by her rights from the provider.
     let r = carol.submit("Get me the Q3 finance report.").await;
@@ -120,11 +129,13 @@ async fn groups_and_roles_come_from_the_identity_provider_at_each_sign_in() {
     assert!(carol.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success(), "the provider's role did not count");
     eventually("carol's approval took effect", PATIENCE, || async { (mail.effects("send") == 1).then_some(()) }).await;
 
-    // The provider takes finance and the role away; at her next sign-in both are gone.
-    idp.set_claims(json!({ "groups": ["/staff"], "realm_access": { "roles": [] } }));
-    let carol = as_carol(&idp.sign_in(&app).await);
+    // Keycloak takes finance and the role away; at her next sign-in both are gone.
+    kc.set_groups("carol", &["staff"]).await;
+    kc.set_roles("carol", &[]).await;
+    let carol = sign_in().await;
     let me: Value = carol.get("/v1/me").await.1;
-    assert_eq!((me["groups"].clone(), me["roles"].clone()), (json!(["staff"]), json!([])), "{me}");
+    assert_eq!(groups(&me), ["staff"], "{me}");
+    assert!(!has_role(&me, "approver:irreversible"), "{me}");
     let r = carol.submit("Get me the Q3 finance report.").await;
     carol.wait_settled(&r).await;
     assert_eq!(finance.calls_to("get_report").len(), 1, "a task used a group the provider took away");
@@ -136,5 +147,6 @@ async fn groups_and_roles_come_from_the_identity_provider_at_each_sign_in() {
     // It holds across a restart: it is in the log.
     app.restart().await;
     let me = app.api("carol").get("/v1/me").await.1;
-    assert_eq!((me["groups"].clone(), me["roles"].clone()), (json!(["staff"]), json!([])), "{me}");
+    assert_eq!(groups(&me), ["staff"], "{me}");
+    assert!(!has_role(&me, "approver:irreversible"), "{me}");
 }

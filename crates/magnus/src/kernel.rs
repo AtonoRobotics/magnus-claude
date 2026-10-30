@@ -204,6 +204,11 @@ impl Kernel {
     /// in place of the config's (E2).
     /// A person's rights: the identity provider's where it names them, else
     /// the roles the owner set in Settings, else the config's.
+    /// The identity provider people sign in through, if the appliance has one.
+    pub fn identity(&self) -> Option<&dyn crate::identity::Identity> {
+        self.oidc.as_ref().map(|o| o as &dyn crate::identity::Identity)
+    }
+
     pub fn person(&self, id: &str) -> Option<Person> {
         let mut p = self.cfg.person(id)?.clone();
         if let Some(r) = self.read(|s| s.roles_set.get(id).cloned()) {
