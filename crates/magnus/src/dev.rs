@@ -265,7 +265,9 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
         let bytes = serde_json::to_vec(&t).unwrap_or_default();
         (hex::encode(&sha2::Sha256::digest(&bytes)[..16]), bytes.len())
     };
-    let instructions_now = crate::run::instructions_version();
+    // A chat turn runs on the chat instructions, as the kernel chose them.
+    let chat_turn = k.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.as_ref()).is_some_and(|c| c.turn));
+    let instructions_now = if chat_turn { crate::run::chat_instructions_version() } else { crate::run::instructions_version() };
     let playbook_chars: usize = k.read(|s| s.playbook_at(&run.person, run.config.playbook).iter().map(|i| i.text.len() + 20).sum());
 
     let mut seen = Sources::default();

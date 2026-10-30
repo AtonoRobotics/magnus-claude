@@ -88,7 +88,8 @@ pub fn validate(view: &Value, files: &[String]) -> Result<(), String> {
                 strings(&c["items"], &format!("{at}.items"), MAX_ITEMS)?;
             }
             "table" => {
-                let cols = strings(&c["columns"], &format!("{at}.columns"), MAX_COLUMNS)?;
+                // A header may be empty, as over a column of row labels.
+                let cols = c["columns"].as_array().filter(|a| !a.is_empty() && a.len() <= MAX_COLUMNS && a.iter().all(|x| x.as_str().is_some_and(|s| s.chars().count() <= MAX_TEXT))).map(Vec::len).ok_or(format!("{at}.columns needs 1 to {MAX_COLUMNS} strings"))?;
                 let rows = c["rows"].as_array().ok_or(format!("{at}.rows must be a list of rows"))?;
                 if rows.len() > MAX_ROWS {
                     return Err(format!("{at} has more than {MAX_ROWS} rows; deliver a file instead"));
@@ -144,7 +145,9 @@ pub fn validate(view: &Value, files: &[String]) -> Result<(), String> {
                     if vals.is_none() {
                         return Err(format!("{at}.aspects[{i}].values must hold {n} strings or numbers, one per option"));
                     }
-                    if !a["best"].is_null() && !a["best"].as_u64().is_some_and(|b| (b as usize) < n) {
+                    // No best is null, or a negative index from a model that fills every field.
+                    let none = a["best"].is_null() || a["best"].as_i64().is_some_and(|b| b < 0);
+                    if !none && !a["best"].as_u64().is_some_and(|b| (b as usize) < n) {
                         return Err(format!("{at}.aspects[{i}].best must be the index of an option, 0 to {}", n - 1));
                     }
                 }
@@ -160,8 +163,10 @@ pub fn validate(view: &Value, files: &[String]) -> Result<(), String> {
             }
             other => return Err(format!("{at} has unknown type {other:?}; use one of {}", KINDS.join(", "))),
         }
+        // Optional, and an empty one is not given: some models fill every
+        // field of the schema, leaving the ones they do not use empty.
         for t in ["title", "unit", "caption", "language"] {
-            if !c[t].is_null() {
+            if !c[t].is_null() && !c[t].as_str().is_some_and(|s| s.trim().is_empty()) {
                 text(&c[t], &format!("{at}.{t}"))?;
             }
         }
@@ -212,5 +217,19 @@ mod tests {
         assert!(validate_shown(&json!([{ "type": "image", "file": "x.png" }])).unwrap_err().contains("show only"));
         assert!(validate_shown(&json!([{ "type": "stat", "label": "Revenue", "value": 41.7 }])).is_ok());
         assert!(validate_shown(&json!([{ "type": "script", "text": "<script>" }])).unwrap_err().contains("unknown type"));
+    }
+
+    /// Codex fills every field, sending the optional ones it does not use as
+    /// "" (seen on strix-alpha, 2026-10-29): each was refused, one per retry.
+    #[test]
+    fn an_empty_optional_field_is_not_given() {
+        let blank = json!({ "type": "bar_chart", "labels": ["Q1", "Q2"], "values": [1, 2], "title": "", "unit": " ", "caption": "", "language": "" });
+        assert_eq!(why(blank), "");
+        assert!(why(json!({ "type": "bar_chart", "labels": ["Q1"], "values": [1], "title": 5 })).contains("title must be a string"));
+        assert!(why(json!({ "type": "code", "code": "  " })).contains("code is empty"), "a required field may still not be empty");
+        let cmp = json!({ "type": "comparison", "options": ["a", "b"], "aspects": [{ "name": "Price", "values": [1, 2], "best": -1 }] });
+        assert_eq!(why(cmp), "", "best -1 means no best");
+        assert_eq!(why(json!({ "type": "table", "columns": ["", "Q1"], "rows": [["Revenue", 1]] })), "", "a header over row labels may be empty");
+        assert!(why(json!({ "type": "table", "columns": [], "rows": [] })).contains("columns needs 1 to"));
     }
 }
