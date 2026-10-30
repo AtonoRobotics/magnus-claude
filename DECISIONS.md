@@ -242,6 +242,7 @@ One line per choice the brief left open, with its reason. The brief and the owne
 - Chat "Delete" on a message or answer moves it to the trash; on a task's card or result it still hides the entry (the task stays in Tasks). `DELETE /v1/memory/{id}` moves the memory to the trash. A person reaches only their own trash; a knowledge entry may be trashed by its author (or the person whose task filed it) and by the owner.
 - The kernel role gains DELETE on `content` (only); `magnus migrate` must run once after this release is installed.
 - App: Delete on a task (once ended), a conversation, a file and a project; a Trash screen with Restore, Delete now and Empty trash now. Memories and knowledge have no screens yet, so they are trashed through the API only.
+- Chat message actions are icons, not text links (owner, 2026-10-30): Lucide outline icons (lucide-static 0.563.0, ISC, licence kept beside them in app.js), 16px in a 28px button. Reason: the row of eleven text links was too long; 28px clears WCAG 2.2's 24px minimum target, and each keeps its name as a tooltip and hidden text for screen readers and the app tests.
 
 ## Review of master fixes (2026-10-29, `master-fixes`)
 
