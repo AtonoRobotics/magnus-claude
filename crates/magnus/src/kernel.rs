@@ -87,6 +87,10 @@ impl Kernel {
             true => Log::open_waiting(&cfg.database.url, Duration::from_secs(15)).await?,
             false => Log::open(&cfg.database.url).await?,
         };
+        // A removal stopped after its record: its content goes now.
+        if let Err(e) = log.finish_removals().await {
+            tracing::warn!("could not finish removals (has `magnus migrate` run since this release was installed?): {e:#}");
+        }
         let mut state = State::default();
         for e in log.load().await? {
             state.apply(&e);

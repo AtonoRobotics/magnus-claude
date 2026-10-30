@@ -149,6 +149,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .merge(crate::settings::router())
         .merge(crate::knowledge::router())
         .merge(crate::chat_actions::router())
+        .merge(crate::trash::router())
         .layer(axum::middleware::from_fn(cookie_guard))
         .layer(axum::middleware::from_fn(crate::update::app_version))
         .layer(Extension(transport))
@@ -1097,10 +1098,7 @@ async fn forget(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
     if !k.read(|s| s.memory.iter().any(|m| m.id == id && m.person == p.id)) {
         return err(StatusCode::NOT_FOUND, "no such memory");
     }
-    match k.emit(&format!("person:{}", p.id), Ev::MemoryForgotten { id }).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => internal(e),
-    }
+    crate::trash::trashed(k.trash(&p.id, p.is_owner(), &id).await)
 }
 
 async fn health(State(k): K) -> Response {

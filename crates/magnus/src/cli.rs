@@ -106,6 +106,7 @@ async fn run(cfg: Config) -> Result<()> {
     // Serving: an update that brought this release here is done.
     k.after_start().await?;
     crate::backup::schedule(k.clone());
+    crate::trash::schedule(k.clone());
     crate::update::schedule(k.clone());
     tokio::spawn(k.clone().sweep());
     tracing::info!("magnus {} listening on http://{bound}", crate::update::version());

@@ -80,7 +80,7 @@ pub async fn migrate(admin_url: &str, kernel_url: &str) -> Result<()> {
              );
              REVOKE ALL ON public.content FROM PUBLIC;
              REVOKE ALL ON public.content FROM {role};
-             GRANT SELECT, INSERT ON public.content TO {role};"
+             GRANT SELECT, INSERT, DELETE ON public.content TO {role};"
         ))
         .await?;
     // The knowledge base's index, filtered for each reader by row security.
@@ -142,6 +142,18 @@ pub fn join(mut body: Value, content: Option<Value>) -> Value {
         }
     }
     body
+}
+
+/// Which events hold one item's own content: those of `runs` except the
+/// kinds in `except` (what the runs made that is an item of its own), and
+/// those of `kinds` whose `field` is `id`.
+#[derive(Debug, Default)]
+pub struct Holding {
+    pub runs: Vec<String>,
+    pub except: Vec<&'static str>,
+    pub kinds: Vec<&'static str>,
+    pub field: &'static str,
+    pub id: String,
 }
 
 /// The event log. A lost connection (Postgres restarting) is opened again
@@ -324,6 +336,44 @@ impl Log {
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD.decode(b["data_b64"].as_str().unwrap_or_default())?;
         Ok(Some((b["name"].as_str().unwrap_or("file").into(), b["media_type"].as_str().unwrap_or("application/octet-stream").into(), bytes)))
+    }
+
+    /// The events whose content an item holds, that still have it.
+    pub async fn content_seqs(&self, h: &Holding) -> Result<Vec<i64>> {
+        if !self.store {
+            return Ok(vec![]);
+        }
+        let except: Vec<&str> = h.except.clone();
+        let kinds: Vec<&str> = h.kinds.clone();
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT e.seq FROM public.events e JOIN public.content c USING (seq)
+                 WHERE (e.run_id = ANY($1) AND e.kind <> ALL($2)) OR (e.kind = ANY($3) AND e.body->>$4 = $5)
+                 ORDER BY e.seq",
+                &[&h.runs, &except, &kinds, &h.field, &h.id],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
+    /// Delete the content of these events.
+    pub async fn delete_content(&self, seqs: &[i64]) -> Result<u64> {
+        if !self.store {
+            return Ok(0);
+        }
+        Ok(self.client().await?.execute("DELETE FROM public.content WHERE seq = ANY($1)", &[&seqs]).await.context("delete content")?)
+    }
+
+    /// Finish removals that stopped after their record: delete the content
+    /// of every event a `removed` event names. Run at start.
+    pub async fn finish_removals(&self) -> Result<u64> {
+        if !self.store {
+            return Ok(0);
+        }
+        let sql = "DELETE FROM public.content WHERE seq IN (SELECT jsonb_array_elements_text(body->'seqs')::bigint FROM public.events WHERE kind = 'removed')";
+        Ok(self.client().await?.execute(sql, &[]).await.context("finish removals")?)
     }
 
     /// One run's events in order: the developer view's full trace (V4).

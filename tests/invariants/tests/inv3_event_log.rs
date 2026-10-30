@@ -81,6 +81,69 @@ async fn content_is_kept_beside_the_log_not_in_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_removed_items_content_is_gone_and_its_record_stays() {
+    let model = FakeModel::start(steps(vec![contract_unchecked("nothing", "nothing"), fail("done")])).await;
+    let mut app = Appliance::start(Spec::default(), &model).await;
+    let alice = app.api("alice");
+    let id = alice.submit("Plan the walrus migration for the third quarter.").await;
+    alice.wait_settled(&id).await;
+
+    assert_eq!(alice.post("/v1/trash", json!({ "item": id })).await.0, 204);
+    assert_eq!(alice.send(reqwest::Method::DELETE, &format!("/v1/trash/{id}"), None).await.0, 204);
+
+    let admin = app.db.admin().await;
+    let all = |table: &'static str| {
+        let admin = &admin;
+        async move {
+            let rows = admin.query(&format!("SELECT row_to_json(t)::text FROM public.{table} t"), &[]).await.unwrap();
+            rows.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>().join("\n")
+        }
+    };
+    assert!(!all("content").await.contains("walrus"), "the removed task's text is still in the store");
+    let created: Value = admin
+        .query_one("SELECT body FROM public.events WHERE kind = 'task_created' AND body->>'task' = $1", &[&id])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(created["content"]["sha256"].is_string(), "the record lost its content's hash: {created}");
+    let removed: i64 = admin.query_one("SELECT count(*) FROM public.events WHERE kind = 'removed' AND body->>'item' = $1", &[&id]).await.unwrap().get(0);
+    assert_eq!(removed, 1, "the removal is not recorded");
+
+    // State rebuilds without the content, and the task stays gone.
+    app.restart().await;
+    let (st, _) = alice.get(&format!("/v1/tasks/{id}")).await;
+    assert_eq!(st, 404, "the removed task came back");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_task_cannot_be_deleted() {
+    let mail = mcp::mail().start().await;
+    let model = FakeModel::start(steps(vec![
+        contract_checked("send the report", "mail__list_sent", json!({}), "/count", json!(1)),
+        send(),
+        complete("sent"),
+    ]))
+    .await;
+    let app = Appliance::start(
+        Spec::default().app("mail", &mail, "public", "private", &[("send", "irreversible"), ("list_sent", "read")]),
+        &model,
+    )
+    .await;
+    let alice = app.api("alice");
+    // No permit for send: the run waits for approval, not ended.
+    let id = alice.submit("Email bob the report.").await;
+    alice.wait_item(&id, "approval").await;
+
+    assert_eq!(alice.post("/v1/trash", json!({ "item": id })).await.0, 409, "a waiting task went to the trash");
+    assert_eq!(alice.task(&id).await["task_id"], json!(id), "the task left the view");
+
+    assert!(alice.post(&format!("/v1/tasks/{id}/cancel"), json!({})).await.0.is_success());
+    alice.wait_settled(&id).await;
+    assert_eq!(alice.post("/v1/trash", json!({ "item": id })).await.0, 204, "a cancelled task could not be deleted");
+    assert_eq!(mail.effects("send"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn crash_after_a_side_effect_does_not_repeat_it() {
     let mail = mcp::mail().start().await;
     let model = FakeModel::start(steps(vec![
