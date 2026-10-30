@@ -93,12 +93,21 @@ impl Kernel {
     /// drop backups older than `keep_days`.
     pub async fn back_up(&self, actor: &str) -> Result<Value> {
         let _one = backing_up().lock().await;
-        let rows = self.log.dump().await?;
+        let mut rows = self.log.dump().await?;
         let through = rows.last().map(|r| r["seq"].as_i64().unwrap_or(0)).unwrap_or(0);
+        // Every removal in the dump applies to it: content whose deletion
+        // was recorded but had not happened yet is left out, and the backup
+        // says it has had them all (`scrub_backups`).
+        let removed: std::collections::HashSet<i64> = rows.iter().filter(|r| r["kind"] == "removed").flat_map(|r| r["body"]["seqs"].as_array().cloned().unwrap_or_default()).filter_map(|q| q.as_i64()).collect();
+        let scrubbed = rows.iter().filter(|r| r["kind"] == "removed").filter_map(|r| r["seq"].as_i64()).max().unwrap_or(0);
+        for r in rows.iter_mut().filter(|r| r["seq"].as_i64().is_some_and(|q| removed.contains(&q))) {
+            r["content"] = Value::Null;
+            r["salt"] = Value::Null;
+        }
         let (vault_key, secrets) = self.vault.raw()?;
         let made = chrono::Utc::now();
         let doc = json!({
-            "format": FORMAT, "made_at": made, "through_seq": through, "events": rows,
+            "format": FORMAT, "made_at": made, "through_seq": through, "scrubbed_through": scrubbed, "events": rows,
             "vault": { "key": B64.encode(vault_key), "secrets": secrets },
         });
         let plain = serde_json::to_vec(&doc)?;
@@ -119,6 +128,49 @@ impl Kernel {
         self.emit("kernel", Ev::BackupChecked { file: file.clone(), ok, detail: detail.clone() }).await?;
         let removed = prune(&dir, self.cfg.backup.keep_days)?;
         Ok(json!({ "file": file, "through_seq": through, "events": rows.len(), "bytes": bytes.len(), "restored": ok, "detail": detail, "removed": removed }))
+    }
+}
+
+impl Kernel {
+    /// Take removed content out of every backup kept, so a removed item is
+    /// gone from the backups when it is gone from the appliance, not a
+    /// month later. Each backup records the last removal it has had applied
+    /// (`scrubbed_through`); one made before that removal is rewritten, its
+    /// removed events' content and salt dropped, and encrypted again. Run
+    /// after each removal and at start (for a removal cut short).
+    pub async fn scrub_backups(&self) -> Result<usize> {
+        let removals = self.log.removals().await?;
+        let Some(&(latest, _)) = removals.last() else { return Ok(0) };
+        let dir = self.cfg.backup_dir();
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let _one = backing_up().lock().await;
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || -> Result<usize> {
+            let cipher = key(&cfg, false)?;
+            let mut rewritten = 0;
+            for (name, _) in list(&dir) {
+                let path = dir.join(&name);
+                let mut v = open(&cipher, &std::fs::read(&path)?)?;
+                let done = v["scrubbed_through"].as_i64().unwrap_or(0);
+                if done >= latest {
+                    continue;
+                }
+                let gone: std::collections::HashSet<i64> = removals.iter().filter(|(at, _)| *at > done).flat_map(|(_, seqs)| seqs.iter().copied()).collect();
+                for e in v["events"].as_array_mut().into_iter().flatten() {
+                    if e["seq"].as_i64().is_some_and(|q| gone.contains(&q)) {
+                        e["content"] = Value::Null;
+                        e["salt"] = Value::Null;
+                    }
+                }
+                v["scrubbed_through"] = json!(latest);
+                crate::vault::write_private(&path, &seal(&cipher, &serde_json::to_vec(&v)?)?)?;
+                rewritten += 1;
+            }
+            Ok(rewritten)
+        })
+        .await?
     }
 }
 

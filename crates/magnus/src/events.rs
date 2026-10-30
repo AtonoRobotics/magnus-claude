@@ -653,6 +653,8 @@ pub enum Ev {
         text: String,
         readers: Vec<Vec<String>>,
         integrity: String,
+        /// What it came from, with its citations' quotes: content.
+        #[serde(default)]
         source: Value,
         author: String,
         run: Option<String>,
@@ -737,7 +739,7 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("verdict", &["note"]),
     ("graded", &["details"]),
     ("memory", &["fact", "topic"]),
-    ("knowledge_added", &["title", "text", "verification", "value"]),
+    ("knowledge_added", &["title", "text", "source", "verification", "value"]),
     ("knowledge_extraction", &["reply"]),
     ("spoken_written", &["script"]),
 ];

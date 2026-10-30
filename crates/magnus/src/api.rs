@@ -1210,9 +1210,16 @@ async fn speak(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
     }
     let Some(cfg) = &k.cfg.read_aloud else { return err(StatusCode::SERVICE_UNAVAILABLE, "no read-aloud voice is installed on this appliance") };
     let Some(text) = b["text"].as_str().filter(|t| !t.trim().is_empty()) else { return err(StatusCode::BAD_REQUEST, "no text") };
-    match crate::speech::speak(cfg, text).await {
+    use crate::speech::SpeakError;
+    match crate::speech::speak_limited(cfg, text).await {
         Ok(mp3) => Json(json!({ "media_type": "audio/mpeg", "audio_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, mp3) })).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(SpeakError::TooLong) => err(StatusCode::PAYLOAD_TOO_LARGE, format!("read aloud takes at most {} characters at a time", crate::speech::MAX_SPEAK)),
+        Err(SpeakError::Busy) => err(StatusCode::TOO_MANY_REQUESTS, "the voice is busy; try again in a moment"),
+        Err(SpeakError::TimedOut) => err(StatusCode::GATEWAY_TIMEOUT, "reading this aloud took too long"),
+        Err(SpeakError::Failed(e)) => {
+            tracing::warn!("read aloud: {e:#}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "read aloud failed")
+        }
     }
 }
 

@@ -636,7 +636,12 @@ impl State {
             _ => match () {
                 _ if self.files.get(item).is_some_and(|f| f.person == person) => true,
                 _ if self.projects.get(item).is_some_and(|p| p.person == person) => true,
-                _ if self.memory.iter().any(|m| m.id == item && m.person == person) => true,
+                _ if self.memory.iter().any(|m| m.id == item && m.person == person) => {
+                    // Deleting a memory deletes where it was written in its
+                    // run, so the run must have ended (invariant 3).
+                    let run = self.memory.iter().find(|m| m.id == item).map(|m| m.run.clone()).unwrap_or_default();
+                    return if ended(&run) { Ok(()) } else { Err(Running) };
+                }
                 _ => self.knowledge.get(item).is_some_and(|k| {
                     owner || k.author == format!("person:{person}") || k.author.strip_prefix("agent:").and_then(|r| self.runs.get(r)).is_some_and(|r| r.person == person)
                 }),
@@ -697,16 +702,40 @@ impl State {
         use crate::log::Holding;
         const OWN: [&str; 3] = ["output", "memory", "playbook"];
         let named = |kinds: Vec<&'static str>, field: &'static str, id: &str| Holding { kinds, field, id: id.into(), ..Default::default() };
+        // What belongs to a task but carries no run: its verdict's note and
+        // the person's answers to its cards.
+        let theirs = |task: &str, items: &mut dyn Iterator<Item = &Item>| -> Vec<(&'static str, &'static str, String)> {
+            let mut m = vec![("verdict", "task", task.to_string())];
+            m.extend(items.map(|i| ("item_resolved", "id", i.id.clone())));
+            m
+        };
+        let items_of = |task: &str| self.items.values().filter(|i| i.task.as_deref() == Some(task)).cloned().collect::<Vec<_>>();
         Some(match &self.trash.get(item)?.held {
-            Held::Task(t, ..) => Holding { runs: vec![t.run_id.clone()], except: OWN.to_vec(), ..Default::default() },
-            Held::Thread { id, turns, .. } => Holding { runs: turns.iter().map(|(t, _)| t.run_id.clone()).collect(), except: OWN.to_vec(), ..named(vec!["thread_branched"], "thread", id) },
+            Held::Task(t, _, items) => Holding { runs: vec![t.run_id.clone()], except: OWN.to_vec(), matches: theirs(&t.task_id, &mut items.iter()), ..Default::default() },
+            Held::Thread { id, turns, .. } => {
+                let matches = turns.iter().flat_map(|(t, _)| theirs(&t.task_id, &mut items_of(&t.task_id).iter())).collect();
+                Holding { runs: turns.iter().map(|(t, _)| t.run_id.clone()).collect(), except: OWN.to_vec(), matches, ..named(vec!["thread_branched"], "thread", id) }
+            }
             Held::Entry { .. } => match item.split_once(':')? {
                 ("m", task) => named(vec!["task_created"], "task", task),
-                (_, task) => Holding { runs: vec![self.tasks.get(task)?.run_id.clone()], except: [&OWN[..], &["task_created"]].concat(), ..Default::default() },
+                (_, task) => Holding {
+                    runs: vec![self.tasks.get(task)?.run_id.clone()],
+                    except: [&OWN[..], &["task_created"]].concat(),
+                    matches: theirs(task, &mut items_of(task).iter()),
+                    ..Default::default()
+                },
             },
             Held::File(_) => named(vec!["file_uploaded", "output"], "id", item),
             Held::Project(_) => named(vec!["project_set"], "id", item),
-            Held::Memory(_) => named(vec!["memory"], "id", item),
+            // A memory and where it was written: the call that wrote it, and
+            // the reply that made the call (the run's model, or the memory
+            // pass), found by the fact's text in that run.
+            Held::Memory(m) => {
+                let text = serde_json::to_string(&m.fact).unwrap_or_default();
+                let text = text.trim_matches('"').to_string();
+                let containing = ["intent", "tool_result", "model_reply", "memory_pass"].into_iter().map(|k| (k, m.run.clone(), text.clone())).filter(|_| !m.fact.trim().is_empty()).collect();
+                Holding { containing, ..named(vec!["memory"], "id", item) }
+            }
             Held::Knowledge(_) => named(vec!["knowledge_added"], "id", item),
         })
     }

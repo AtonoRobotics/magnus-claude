@@ -21,8 +21,19 @@ function hush() {
 }
 async function readAloud(text) {
   await hush();
-  const run = voice.run, parts = text.split(/(?<=[.!?])\s+/).filter(s => s.trim());
-  const make = s => { const p = api("POST", "/v1/speak", { text: s }); p.catch(() => {}); return p; };
+  // A sentence at a time; a very long one in pieces, as the appliance reads
+  // at most 2000 characters at once.
+  const pieces = s => { const out = []; let cur = ""; for (const w of s.split(/\s+/)) { if (cur && (cur + " " + w).length > 1500) { out.push(cur); cur = w; } else cur = cur ? `${cur} ${w}` : w; } if (cur) out.push(cur); return out; };
+  const run = voice.run, parts = text.split(/(?<=[.!?])\s+/).filter(s => s.trim()).flatMap(pieces);
+  // The voice makes a few pieces at a time for everyone: busy, wait and ask again.
+  const ask = async (s, tries = 8) => {
+    try { return await api("POST", "/v1/speak", { text: s }); } catch (e) {
+      if (e.status !== 429 || tries <= 1 || run !== voice.run) throw e;
+      await new Promise(r => setTimeout(r, 400));
+      return ask(s, tries - 1);
+    }
+  };
+  const make = s => { const p = ask(s); p.catch(() => {}); return p; };
   let next = parts.length ? make(parts[0]) : null;
   for (let i = 0; i < parts.length; i++) {
     let r;

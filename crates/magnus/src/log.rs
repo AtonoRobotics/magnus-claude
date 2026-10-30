@@ -145,8 +145,12 @@ pub fn join(mut body: Value, content: Option<Value>) -> Value {
 }
 
 /// Which events hold one item's own content: those of `runs` except the
-/// kinds in `except` (what the runs made that is an item of its own), and
-/// those of `kinds` whose `field` is `id`.
+/// kinds in `except` (what the runs made that is an item of its own); those
+/// of `kinds` whose `field` is `id`; each `(kind, field, value)` of
+/// `matches` (what belongs to the item but carries no run: its verdict, the
+/// answers to its cards); and each `(kind, run, text)` of `containing`, the
+/// events of that kind in that run whose content holds the text (where a
+/// memory was written).
 #[derive(Debug, Default)]
 pub struct Holding {
     pub runs: Vec<String>,
@@ -154,6 +158,8 @@ pub struct Holding {
     pub kinds: Vec<&'static str>,
     pub field: &'static str,
     pub id: String,
+    pub matches: Vec<(&'static str, &'static str, String)>,
+    pub containing: Vec<(&'static str, String, String)>,
 }
 
 /// The event log. A lost connection (Postgres restarting) is opened again
@@ -369,14 +375,28 @@ impl Log {
         }
         let except: Vec<&str> = h.except.clone();
         let kinds: Vec<&str> = h.kinds.clone();
+        let (mk, mf, mv): (Vec<&str>, Vec<&str>, Vec<&str>) = h.matches.iter().map(|(k, f, v)| (*k, *f, v.as_str())).fold((vec![], vec![], vec![]), |mut a, (k, f, v)| {
+            a.0.push(k);
+            a.1.push(f);
+            a.2.push(v);
+            a
+        });
+        let (ck, cr, ct): (Vec<&str>, Vec<&str>, Vec<&str>) = h.containing.iter().fold((vec![], vec![], vec![]), |mut a, (k, r, t)| {
+            a.0.push(k);
+            a.1.push(r.as_str());
+            a.2.push(t.as_str());
+            a
+        });
         let rows = self
             .client()
             .await?
             .query(
                 "SELECT e.seq FROM public.events e JOIN public.content c USING (seq)
                  WHERE (e.run_id = ANY($1) AND e.kind <> ALL($2)) OR (e.kind = ANY($3) AND e.body->>$4 = $5)
+                    OR EXISTS (SELECT 1 FROM unnest($6::text[], $7::text[], $8::text[]) AS m(k, f, v) WHERE e.kind = m.k AND e.body->>m.f = m.v)
+                    OR EXISTS (SELECT 1 FROM unnest($9::text[], $10::text[], $11::text[]) AS x(k, r, t) WHERE e.kind = x.k AND e.run_id = x.r AND strpos(c.body::text, x.t) > 0)
                  ORDER BY e.seq",
-                &[&h.runs, &except, &kinds, &h.field, &h.id],
+                &[&h.runs, &except, &kinds, &h.field, &h.id, &mk, &mf, &mv, &ck, &cr, &ct],
             )
             .await?;
         Ok(rows.iter().map(|r| r.get(0)).collect())
@@ -388,6 +408,13 @@ impl Log {
             return Ok(0);
         }
         Ok(self.client().await?.execute("DELETE FROM public.content WHERE seq = ANY($1)", &[&seqs]).await.context("delete content")?)
+    }
+
+    /// Every removal so far: the seq of its `removed` event and the events
+    /// whose content it deleted, oldest first.
+    pub async fn removals(&self) -> Result<Vec<(i64, Vec<i64>)>> {
+        let rows = self.client().await?.query("SELECT seq, body->'seqs' FROM public.events WHERE kind = 'removed' ORDER BY seq", &[]).await?;
+        Ok(rows.iter().map(|r| (r.get::<_, i64>(0), serde_json::from_value(r.get::<_, Value>(1)).unwrap_or_default())).collect())
     }
 
     /// Finish removals that stopped after their record: delete the content
@@ -502,6 +529,11 @@ mod tests {
         let (record, content) = split(nested.clone());
         assert_eq!(record["chat"], serde_json::json!({ "thread": "t1", "turn": false }));
         assert_eq!(join(record, content.map(|c| c.body)), nested);
+
+        // Research keeps its sources' quotes: content, deleted with the entry.
+        let kb = serde_json::json!({ "kind": "knowledge_added", "id": "kb1", "title": "Headcount", "text": "120 staff.", "source": { "kind": "research", "citations": [{ "source": "https://a.example/", "quote": "QUOTE-120-staff" }] } });
+        let (record, _) = split(kb);
+        assert!(!record.to_string().contains("QUOTE-120-staff"), "a citation's quote stayed in the log: {record}");
 
         let plain = serde_json::json!({ "kind": "resumed", "run": "r1" });
         assert!(matches!(split(plain.clone()), (r, None) if r == plain), "an event without content is stored whole");

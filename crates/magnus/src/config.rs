@@ -415,6 +415,13 @@ pub struct ReadAloud {
     pub voices: PathBuf,
     /// One of Kokoro's voices, such as `af_heart`.
     pub voice: String,
+    /// Seconds one piece may take before it is stopped.
+    #[serde(default = "speak_timeout")]
+    pub timeout_s: u64,
+}
+
+fn speak_timeout() -> u64 {
+    60
 }
 
 #[derive(Deserialize, Clone, Debug)]
