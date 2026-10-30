@@ -36,6 +36,7 @@ pub mod speech;
 pub mod state;
 pub mod tls;
 pub mod tools;
+pub mod trash;
 pub mod update;
 pub mod vault;
 pub mod web;

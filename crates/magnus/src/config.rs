@@ -18,6 +18,8 @@ pub struct Config {
     #[serde(default)]
     pub backup: Backup,
     #[serde(default)]
+    pub trash: Trash,
+    #[serde(default)]
     pub updates: Updates,
     /// The file this was read from: a new release is checked against it.
     #[serde(skip)]
@@ -239,6 +241,21 @@ fn keep_days() -> u32 {
 impl Default for Backup {
     fn default() -> Self {
         Backup { dir: None, key_file: None, every_hours: every_hours(), keep_days: keep_days() }
+    }
+}
+
+/// Deleted items wait in the trash, restorable, for `keep_days`, then their
+/// content is removed. A month, as backups are kept: the same date answers
+/// "when is it gone?", within the GDPR's month to act on erasure.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Trash {
+    #[serde(default = "keep_days")]
+    pub keep_days: u32,
+}
+
+impl Default for Trash {
+    fn default() -> Self {
+        Trash { keep_days: keep_days() }
     }
 }
 
