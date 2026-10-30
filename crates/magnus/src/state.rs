@@ -801,7 +801,17 @@ impl State {
                         // content from elsewhere: data, not instructions.
                         untrusted: uploads || pb.untrusted,
                         private: uploads || pb.private,
-                        private_from: if uploads { ["library".to_string()].into() } else { Default::default() },
+                        // Privacy carried in from where the run started (a
+                        // thread, a schedule's source) has no app to name:
+                        // the unnamed source, as for a result without one,
+                        // so readers and the audience rule still see it.
+                        private_from: if uploads {
+                            ["library".to_string()].into()
+                        } else if pb.private {
+                            [String::new()].into()
+                        } else {
+                            Default::default()
+                        },
                         model_calls: 0,
                         actions: 0,
                         usd: 0.0,

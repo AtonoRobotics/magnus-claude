@@ -120,7 +120,8 @@ impl Index {
             "INSERT INTO public.knowledge (id, readers, integrity, entry, version, model, embedding, words)
              VALUES ($1, $2, $3, $4, $5, $6, $7::text::vector, to_tsvector('simple', $8))
              ON CONFLICT (id) DO UPDATE SET readers = EXCLUDED.readers, integrity = EXCLUDED.integrity, entry = EXCLUDED.entry,
-                 version = EXCLUDED.version, model = EXCLUDED.model, embedding = EXCLUDED.embedding, words = EXCLUDED.words",
+                 version = EXCLUDED.version, model = EXCLUDED.model, embedding = EXCLUDED.embedding, words = EXCLUDED.words
+             WHERE knowledge.version <= EXCLUDED.version",
             &[&e.id, &json!(e.readers), &e.integrity, &shown(e), &e.version, &model, &vector, &format!("{} {}", e.title, e.text)],
         )
         .await
@@ -182,7 +183,8 @@ fn source_of(tool: &str, input: &Value) -> String {
     if let Some(url) = input["url"].as_str().filter(|_| tool == "web_fetch" || tool == "browser_open") {
         return url::Url::parse(url)
             .ok()
-            .and_then(|u| u.host_str().map(|h| format!("web:{h}{}", u.port().map(|p| format!(":{p}")).unwrap_or_default())))
+            // The host alone: two ports of one host are one source.
+            .and_then(|u| u.host_str().map(|h| format!("web:{}", h.trim_end_matches('.').to_ascii_lowercase())))
             .unwrap_or_else(|| format!("web:{url}"));
     }
     match tool.split_once("__") {
@@ -306,7 +308,10 @@ impl Kernel {
             evidence.push(json!({ "source": source, "from": from, "tool": tool, "quote": quote, "found": found.is_some(), "system_of_record": record }));
         }
         let found: Vec<&Value> = evidence.iter().filter(|e| e["found"] == true).collect();
-        let independent: BTreeSet<&str> = found.iter().filter_map(|e| e["from"].as_str()).collect();
+        // Only what the world returned corroborates: a web page, a search, an
+        // app. The sandbox, memory, the knowledge base and the library hand
+        // back what the agent wrote, so a quote found there proves nothing.
+        let independent: BTreeSet<&str> = found.iter().filter_map(|e| e["from"].as_str()).filter(|f| f.starts_with("web:") || f.starts_with("app:") || *f == "tool:web_search").collect();
         let how = if found.iter().any(|e| e["system_of_record"] == true) {
             Some("system_of_record")
         } else if independent.len() >= 2 {
@@ -358,17 +363,25 @@ impl Kernel {
             },
         )
         .await?;
-        self.index_id(&id).await?;
+        // The entry is in the log from here on: what fails after this is
+        // said with it, never reported as "not filed" (a retry would file
+        // it again).
         let mut said = format!("Filed {id} as {integrity}, readable by {}.", readers_text(&readers));
+        if let Err(e) = self.index_id(&id).await {
+            said.push_str(&format!(" It cannot be searched yet ({e:#}); it is indexed when the appliance next starts. Do not file it again."));
+        }
         if let Some(spec) = spec {
-            said.push_str(&match self.extract_value(&run, &id, &spec).await? {
-                Some((vid, v)) => format!(" Its {} ({v}) was read by a model with no tools and filed as company fact {vid}.", spec["key"].as_str().unwrap_or_default()),
-                None => " No typed value could be read from it, so none was filed.".into(),
+            said.push_str(&match self.extract_value(&run, &id, &spec).await {
+                Ok(Some((vid, v))) => format!(" Its {} ({v}) was read by a model with no tools and filed as company fact {vid}.", spec["key"].as_str().unwrap_or_default()),
+                Ok(None) => " No typed value could be read from it, so none was filed.".into(),
+                Err(e) => format!(" Its value could not be read ({e:#})."),
             });
         }
         if input["propose"] == true {
-            let item = self.ask_endorsement(&id, &run.person).await?;
-            said.push_str(&format!(" Asked for it to be made a company fact ({item})."));
+            said.push_str(&match self.ask_endorsement(&id, &run.person).await {
+                Ok(item) => format!(" Asked for it to be made a company fact ({item})."),
+                Err(e) => format!(" Asking for it to be made a company fact failed ({e:#})."),
+            });
         }
         Ok((said, false, Some(json!({ "id": id, "integrity": integrity, "verification": verification }))))
     }
@@ -491,14 +504,21 @@ impl Kernel {
 }
 
 /// A typed value's description: a key and a type, with options for an enum.
+/// A key or an option: a short name, which cannot carry an instruction
+/// into the company fact it becomes.
+fn short_name(s: &str, max: usize) -> bool {
+    let s = s.trim();
+    !s.is_empty() && s.chars().count() <= max && s.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.' | '%'))
+}
+
 fn value_spec_error(spec: &Value) -> Option<String> {
-    if spec["key"].as_str().map_or(true, |k| k.trim().is_empty()) {
-        return Some("value needs a key".into());
+    if !spec["key"].as_str().is_some_and(|k| short_name(k, 40)) {
+        return Some("value needs a key: a short name of at most 40 letters, digits, spaces, '_', '-', '.' or '%'".into());
     }
     match spec["type"].as_str() {
         Some("number" | "boolean") => None,
-        Some("enum") if spec["options"].as_array().is_some_and(|o| o.len() >= 2 && o.iter().all(|x| x.as_str().is_some_and(|s| !s.trim().is_empty()))) => None,
-        Some("enum") => Some("an enum value needs at least two options".into()),
+        Some("enum") if spec["options"].as_array().is_some_and(|o| (2..=8).contains(&o.len()) && o.iter().all(|x| x.as_str().is_some_and(|s| short_name(s, 24)))) => None,
+        Some("enum") => Some("an enum value needs two to eight options, each a short name of at most 24 letters, digits, spaces, '_', '-', '.' or '%'".into()),
         _ => Some("value.type is number, boolean or enum".into()),
     }
 }
@@ -572,10 +592,13 @@ async fn add(State(k): State<Arc<Kernel>>, h: HeaderMap, Json(b): Json<Value>) -
     if let Err(e) = k.emit(&format!("person:{}", p.id), ev).await {
         return internal(e);
     }
-    if let Err(e) = k.index_id(&id).await {
-        return internal(e);
+    // Filed: an index that cannot be written is said with it, not as a
+    // failure the person would answer by adding the entry again.
+    let indexed = k.index_id(&id).await;
+    let mut e = k.read(|s| s.knowledge.get(&id).map(shown)).unwrap_or_default();
+    if let Err(err) = indexed {
+        e["warning"] = json!(format!("filed, but it cannot be searched yet ({err:#}); it is indexed when the appliance next starts"));
     }
-    let e = k.read(|s| s.knowledge.get(&id).map(shown)).unwrap_or_default();
     (StatusCode::CREATED, Json(e)).into_response()
 }
 
