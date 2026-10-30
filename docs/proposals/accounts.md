@@ -1,250 +1,169 @@
-# User accounts behind one identity interface
+# Accounts: Keycloak through one identity interface
 
-Status: proposal (owner's spec, 2026-10-30). Decisions for the owner are at
-the end; the passkey one blocks step 4 only.
+Status: building (owner's spec, 2026-10-30, which replaces the built-in-first
+plan of the same day). Keycloak changes the owner makes are listed at the end.
 
 ## The owner's spec
 
-User accounts, through one identity interface that enterprise SSO will later
-plug into:
+Use my Keycloak as the identity provider now, through the identity interface
+(this is the enterprise SSO path, built early):
 
-- First-run setup creates the owner account (no default passwords) and shows
-  a one-time recovery code.
-- Admins invite users by one-time link or code and assign roles at invite (E7).
-- Passkeys preferred, password fallback, optional two-factor. Per-user session
-  and device list with revoke.
-- Built-in groups serve as the identity provider's groups, so E2 and K46 apply
-  unchanged.
-- Deactivating a user suspends every schedule and trigger acting for them
-  (K54) and posts an admin inbox notice to reassign or end each; deleting
-  their data uses per-person key destruction (K11).
-- Design the interface for OIDC, SAML and SCIM providers; build them after
-  the alpha gate, before the first enterprise pilot.
+- OIDC authorization code + PKCE through the system browser with a loopback
+  redirect; works on Windows and Linux. Passkeys and two-factor are handled by
+  Keycloak.
+- Map Keycloak groups to Magnus roles (E2, E7, K46). Paired device
+  certificates still required.
+- Deactivation: short-lived access tokens, plus a periodic user-status check
+  via Keycloak's admin API (service account, least privilege); a disabled user
+  loses access and has their schedules and triggers suspended within minutes
+  (K54).
+- Keep built-in local accounts as a fallback for appliances without an
+  identity provider.
 
-Installed-app tests: first-run setup, invite and sign-in with a passkey, role
-limits enforced, and deactivating a user suspends their schedules.
+Tests: sign in through Keycloak on both platforms; a group change alters
+approval rights; disabling a user in Keycloak revokes access and suspends their
+schedules.
 
 ## What exists
 
-- People are listed in `magnus.toml` (`[[people]]`: id, name, groups, roles,
-  an optional API token). Nobody can be added without editing the config.
-- Password sign-in (Argon2id, lockout after `max_failures`) and sessions
-  (`accounts.rs`). Hashes live in the state directory, never in the log.
-- Sign-in through an OpenID Connect provider (device code, `oidc.rs`). The
-  ID token must name a configured person. Groups and roles from the provider
-  replace the config's at each sign-in.
-- Roles set in Settings are events (`RolesSet`). Every decision reads one
-  place, `Kernel::person(id)`: the boundary, policy layers and approvals.
-- Schedules act for the person who set them up (K54). There are no other
-  triggers yet.
-- There are no per-person keys. The vault has one key (XChaCha20-Poly1305).
+- **Sign-in through Keycloak** by device code (`oidc.rs`): the appliance
+  collects the ID token and opens a Magnus session that lasts `session_days`.
+  Groups and roles come from claims the owner names. A disabled user keeps
+  their session, and their schedules keep running.
+- **Password sign-in** for people in `[[people]]`: the local fallback the spec
+  keeps.
+- **Every decision reads `Kernel::person(id)`:** the boundary, policy layers
+  and approvals.
+- **The app pins the appliance's certificate** when it first connects. It has
+  no certificate of its own.
 
 ## Design
 
-### One identity interface
+### The identity interface
 
-Two parts, so a provider can supply either or both:
+- **Directory:** who exists, their groups and roles, and whether they are
+  active.
+- **Authenticator:** how someone proves who they are. It ends in a Magnus
+  session.
 
-- **Directory**: who exists, their name, groups and roles, and whether they
-  are active.
-- **Authenticator**: how someone proves who they are, and what it opens: a
-  Magnus session.
+Keycloak (OIDC) supplies both. Built-in accounts are the fallback. SAML and
+SCIM plug into the same two parts later. Decisions keep reading
+`Kernel::person(id)`.
 
-| Provider | Directory | Authenticator |
-|---|---|---|
-| Built-in (this plan) | people in the log | passkey, password, two-factor |
-| OIDC (exists; moved behind the interface in step 1) | config, or ID token claims | device code |
-| SAML (after the alpha gate) | assertion attributes | browser flow, as for passkeys |
-| SCIM 2.0 (after the alpha gate) | pushed by the provider (RFC 7643/7644) | none: pairs with OIDC or SAML |
+### Sign-in: authorization code + PKCE, loopback redirect (RFC 8252)
 
-Decisions keep reading `Kernel::person(id)`, so the boundary, policy layers,
-approvals (E2, E7) and read rights don't change.
+1. **The app starts it.** It listens on `127.0.0.1` on a free port and asks
+   the appliance to start a sign-in with
+   `redirect_uri = http://127.0.0.1:<port>/callback`.
+2. **The appliance prepares it.** It makes the PKCE verifier (S256), the
+   `state` and the `nonce`, keeps them, and returns Keycloak's authorization
+   address.
+3. **The person signs in in their own browser**, which the app opens. Passkeys
+   and two-factor are Keycloak's, so they work on Linux too: the browser has
+   WebAuthn, and the app's Linux webview does not (measured: WebKitGTK 2.52
+   has no `navigator.credentials`).
+4. **Keycloak sends the browser back** to the loopback with `code` and
+   `state`. The app passes them to the appliance over the pinned connection.
+5. **The appliance finishes it.** It exchanges the code with the verifier,
+   checks the ID token (issuer, audience, expiry, nonce) and opens a Magnus
+   session.
 
-### People in the log
+The code alone is useless: only the appliance holds the verifier. The browser
+gets a page saying it can be closed.
 
-New events:
-- `PersonAdded {id, name, groups, roles, by}`;
-- `GroupsSet {person, groups}`;
-- `PersonDeactivated {person, by}` and `PersonReactivated {person, by}`;
-- `PersonDeleted {person, by}`.
+This replaces the device-code flow.
 
-`[[people]]` in the config keeps working: as seed people, and for API tokens.
+### Paired devices
 
-Credentials stay out of the log (invariant 2), in the state directory as
-passwords are today:
-- passkey public keys;
-- password hashes;
-- two-factor secrets (in the vault);
-- hashes of the recovery code and of invite codes.
+Sign-in still runs only over the app's pinned connection to the appliance. A
+Keycloak sign-in never replaces pairing: an app that hasn't pinned the
+appliance's certificate can't start one.
 
-The log records only what happened: an invite was made, a passkey was added,
-a session was revoked.
+(The app has no client certificate today. If "paired device certificates"
+means one per device, a mutual-TLS certificate issued when the app pairs and
+revocable per device, that is a separate step to add.)
 
-### First-run setup
+### Groups to roles (E2, E7, K46)
 
-Setup runs while no owner exists.
-- **Setup code:** whoever reaches a fresh appliance first could claim it. So
-  `magnus serve` prints a one-time setup code and writes it to a file only
-  the appliance's user can read. The setup page asks for it.
-- **Owner account:** setup creates the owner with a passkey (or a password).
-  There are no default passwords.
-- **Recovery code:** shown once, 128 bits, in groups of characters; stored as
-  an Argon2 hash. It signs the owner in once, and only to set up new
-  credentials. A new recovery code is then shown.
+`[sign_in.oidc.group_roles]` maps a Keycloak group to Magnus roles, for
+example `"approvers-financial" = ["approver:financial"]`.
 
-### Invites
+Groups and the roles they map to are read:
+- at each sign-in;
+- at each refresh (below).
 
-- **Who:** a person with the new `people:admin` role, which the owner has,
-  invites someone.
-- **Roles and groups:** set at invite (E7). They apply from the person's first
-  sign-in.
-- **The invite:** a link, `https://<appliance>/join#<code>`, and the same code
-  to type into the app. One use, 128 bits, stored as a SHA-256 hash.
-- **Expiry:** after `[accounts] invite_days`, default 7 (GitHub's invitations
-  expire after 7 days: long enough for a week away, short enough to limit a
-  leaked link). An admin can withdraw an invite before it is used.
+So a group change in Keycloak changes approval rights within one access-token
+lifetime, without signing in again. A role a group maps to wins over one set
+in Settings, as the provider's roles do today.
 
-### Passkeys
+### Short-lived access and the status check (K54)
 
-Done with WebAuthn, using `webauthn-rs`.
-- **Measured on strix-alpha:** the Linux app's webview (WebKitGTK 2.52) has no
-  WebAuthn. `navigator.credentials` and `PublicKeyCredential` are undefined,
-  and the page's origin is `tauri://localhost`.
-- **Where the ceremony runs:** on the appliance's own page in the person's
-  browser, the same pattern as provider sign-in today. The app opens the page
-  and waits for that one sign-in to finish, then gets its session. Windows'
-  webview has WebAuthn, but one path for both systems keeps the tested path
-  (Linux) the one people use.
-- **What browsers require:** WebAuthn only on a secure origin whose host is a
-  domain name. An IP address is not allowed, and Chrome refuses on a
-  certificate error. The appliance today serves a self-signed certificate
-  that the app pins. **Passkeys need the appliance reachable at a domain name
-  with a certificate browsers trust** (decision 1).
-- **Phones:** Chrome and Edge also offer a phone's passkey by QR code.
+**Short-lived access.** A Magnus session lasts only as long as the person's
+Keycloak session.
+- The appliance keeps the refresh token in the vault and refreshes it when
+  the access token expires. The time comes from Keycloak's `expires_in`
+  (Keycloak's default is 5 minutes).
+- A refused refresh ends the Magnus session: user disabled, session ended in
+  Keycloak, or password reset.
 
-### Password fallback and two-factor
+**The status check.** Every `status_minutes` (default 5, matching the access
+token's default lifetime), a service account asks Keycloak's admin API for
+each person who signed in through it. Schedules act for people who may not be
+signed in at all, which is why the check is needed.
+- The account needs only the `view-users` role.
+- **Disabled or deleted:** the person is deactivated (`PersonDeactivated`):
+  - every Magnus session and API token is refused;
+  - every schedule acting for them is suspended, and so are their running
+    tasks;
+  - the inbox of people with the owner role gets one notice per schedule,
+    with **Reassign** or **End**. Reassigning waits for the new person to
+    confirm it on a card, because the schedule would then act with their
+    rights.
+- **Enabled again:** they can sign in again. Each schedule stays suspended
+  until someone resumes it.
+- **Keycloak unreachable:** the check is retried and nobody is deactivated.
+  The owner sees on Home that the check is failing.
 
-- Passwords stay as they are today: Argon2id, `min_password_length`, lockout.
-- Two-factor is optional per person: TOTP (RFC 6238 defaults: 30 seconds,
-  6 digits, which every authenticator app uses). The secret goes in the vault.
-- An admin can require two-factor for everyone who uses a password.
-- A passkey sign-in doesn't ask for it, because the passkey already checks
-  the device and a PIN or biometric.
+The two together mean a disabled person loses access within about 5 minutes,
+and their schedules are suspended within about 5 minutes.
 
-### Sessions and devices
+### The local fallback
 
-- **What each session records:** the client (app or browser), the device name
-  the app reports, when it was opened, when it was last used, and the
-  address.
-- **Who can revoke:** each person sees their own sessions, with "this device"
-  marked, and can revoke any of them. An admin can revoke all of someone's
-  sessions.
-- **The log:** a revocation is an event (`SessionRevoked`), beside the
-  existing `SignedIn` and `SignedOut`.
-
-### Groups
-
-- Admins set built-in groups (`GroupsSet`). They fill the same field a
-  provider's groups do, so app `access_groups`, group policy layers and read
-  rights work unchanged (E2).
-- The built-in directory is the identity provider (K46). With an external
-  provider, its groups win, as they do today.
-
-### Deactivation
-
-`PersonDeactivated`:
-- revokes every session and refuses the person's API token;
-- suspends every schedule acting for them (K54). Future triggers will use the
-  same "acts for" rule.
-- suspends their running tasks (decision 4).
-
-The admin inbox gets one notice per schedule: **Reassign** or **End**.
-- Reassigning changes whose rights the schedule uses, so the new person
-  confirms it on a card first (decision 3), as a schedule from chat is
-  confirmed today.
-- Reactivating restores sign-in. Schedules stay suspended until each is
-  resumed.
-
-### Deleting a person's data (K11)
-
-Each person gets a 256-bit data key. Their content rows in the content store
-(deletion step 1) are encrypted with it, using the vault's cipher. Content
-with no person uses an appliance key.
-
-Deleting a person:
-1. **Their items are removed** through the trash's removal (deletion step 2),
-   which frees the disk.
-2. **Their key is destroyed.** Any copy left anywhere becomes unreadable:
-   rows that were missed, and backups.
-
-Keys don't go in data backups. They are backed up separately and kept for
-`[trash] keep_days` (decision 5). After that, no copy of a deleted person's
-key exists. The log keeps a record that the person existed and was deleted,
-with no content.
-
-Company knowledge a person wrote and that was endorsed belongs to the
-company. It is re-encrypted under the appliance key when it is endorsed
-(decision 6).
+With no `[sign_in.oidc]`, people in `[[people]]` sign in with passwords, as
+today. The built-in setup, invites and two-factor of the earlier plan wait
+for an appliance that has no identity provider.
 
 ## Tests
 
-Installed app (Linux):
-- **First-run setup:**
-  - setup requires the setup code;
-  - the owner is created;
-  - the recovery code is shown once and works once;
-  - no default credential signs in.
-- **Invite and sign in with a passkey:** the test's Chrome uses a WebDriver
-  virtual authenticator. The admin invites with roles, the invitee joins and
-  registers a passkey, then signs in again with it.
-- **Role limits enforced:**
-  - an invited approver for the irreversible tier can't approve a financial
-    action and isn't offered it;
-  - without `people:admin` there's no People section and invites are refused.
-- **Deactivation suspends schedules:**
-  - a person sets up a schedule and is deactivated;
-  - the schedule doesn't run at its time;
-  - the admin's inbox shows Reassign and End, and each works.
-
-Scratch tests cover each API, including the following:
-- invites expire and work once;
-- a revoked session is refused;
-- two-factor lockout;
-- after a person's key is destroyed, a restored backup can't read their
-  content.
+- **Scratch tests against a real Keycloak** (26.8.1, in a container with a
+  test realm):
+  - sign-in by code and PKCE;
+  - a wrong `state` or a reused code is refused;
+  - a group change alters approval rights after a refresh;
+  - disabling a user ends their session and suspends their schedules within
+    one check, with the inbox notice; Reassign and End work.
+- **Installed app (Linux):** sign in through Keycloak. The test's "system
+  browser" fills in Keycloak's login form.
+- **Windows:** the owner's test.
 
 ## Build order
 
-1. People in the log and the identity interface (OIDC moved behind it), first-run setup and recovery code.
-2. Invites with roles and groups, and a People section in Settings.
-3. Sessions and devices with revoke, and two-factor for passwords.
-4. Passkeys (after decision 1).
-5. Deactivation: schedules and tasks suspended, inbox notices, reassign and end.
-6. Per-person keys and deleting a person.
-7. The SAML and SCIM providers, after the alpha gate and before the first enterprise pilot.
+1. The identity interface and sign-in by code and PKCE in the appliance and
+   the app; tests against a real Keycloak.
+2. Groups to roles, read at sign-in and refresh.
+3. Short-lived sessions with refresh, the status check, deactivation with
+   suspended schedules and inbox notices.
 
-strix-alpha keeps Keycloak sign-in working throughout (decision 7).
+## Keycloak changes for strix-alpha (the owner, or me with a realm admin account)
 
-## Open decisions for the owner
-
-1. **A domain for passkeys.** Recommended: a name under a domain you own
-   (for example `magnus.pyrallon.ai`), with a Let's Encrypt certificate from
-   a DNS challenge. Passkeys then work in every browser and from phones. I
-   need the name and a DNS API token for the challenge. The alternatives:
-   - a local name with your own certificate authority, installed on each
-     computer;
-   - security keys only, over USB, through the app itself: no phone or
-     synced passkeys on Linux.
-2. **A `people:admin` role** for invites, deactivation and groups, apart from
-   the owner. Recommended: yes; the owner has it.
-3. **Reassigning a schedule needs the new person's confirmation.** Recommended:
-   yes.
-4. **A deactivated person's running tasks are suspended too.** Recommended:
-   yes.
-5. **Keys are backed up apart from data and kept for `keep_days` (30).**
-   Recommended: yes, so a deleted person's data is unreadable everywhere
-   after that.
-6. **Endorsed company knowledge stays when its author is deleted.**
-   Recommended: yes.
-7. **strix-alpha.** Recommended: keep Keycloak and add built-in accounts
-   beside it.
+1. **Client `magnus-claude`:**
+   - turn on Standard flow;
+   - set the redirect URI to `http://127.0.0.1/*` (checked today: Keycloak
+     rejects a loopback redirect for this client);
+   - require PKCE method S256.
+2. **A new confidential client, `magnus-claude-status`:**
+   - turn on Service accounts only;
+   - give its service account just `realm-management` → `view-users`;
+   - its secret goes into the appliance's vault.
+3. **A "Group Membership" mapper** on the client's ID token, so the token
+   carries the groups. Then create the groups to map.
