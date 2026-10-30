@@ -45,9 +45,9 @@ async fn a_backup_restores_the_log_and_the_vault_after_both_are_lost() {
     assert!(!text.contains(&words) && !text.contains(&app.app_secrets["mail"]), "the backup is readable");
 
     let before = alice.tasks().await;
-    // The disaster: the log and the vault are gone. The backups and their key are kept.
+    // The disaster: the log, its content and the vault are gone. The backups and their key are kept.
     app.kill().await;
-    app.db.admin().await.batch_execute("DROP TABLE public.events").await.unwrap();
+    app.db.admin().await.batch_execute("DROP TABLE public.content, public.events").await.unwrap();
     std::fs::remove_dir_all(app.state_dir.join("vault")).unwrap();
 
     let (config, admin) = (app.dir.path().join("magnus.toml"), app.db.admin_url());

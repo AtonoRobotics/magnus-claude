@@ -1,8 +1,10 @@
-//! Invariant 3: the append-only event log is the source of truth. A crashed run
-//! resumes without repeating side effects.
+//! Invariant 3: the append-only event log is the source of truth for what
+//! happened; the content it refers to is kept beside it and can be deleted,
+//! and once deleted it is gone. A crashed run resumes without repeating side
+//! effects.
 //!
-//! Prevents: lost sessions on crash, and retries that repeat a side effect
-//! after a lost response.
+//! Prevents: lost sessions on crash, retries that repeat a side effect after a
+//! lost response, and content that can never be deleted.
 
 use magnus_invariants::{mcp, *};
 use serde_json::{json, Value};
@@ -54,6 +56,28 @@ async fn the_kernel_cannot_rewrite_the_log() {
         assert!(k.batch_execute(&sql).await.is_err(), "the kernel role may run: {sql}");
     }
     assert_eq!(count(app.db.admin().await).await, before, "events changed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn content_is_kept_beside_the_log_not_in_it() {
+    let model = FakeModel::start(steps(vec![contract_unchecked("nothing", "nothing"), fail("done")])).await;
+    let app = Appliance::start(Spec::default(), &model).await;
+    let alice = app.api("alice");
+    let id = alice.submit("Plan the walrus migration for the third quarter.").await;
+    alice.wait_settled(&id).await;
+
+    let admin = app.db.admin().await;
+    let all = |table: &'static str| {
+        let admin = &admin;
+        async move {
+            let rows = admin.query(&format!("SELECT row_to_json(t)::text FROM public.{table} t"), &[]).await.unwrap();
+            rows.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>().join("\n")
+        }
+    };
+    assert!(!all("events").await.contains("walrus"), "the task's text is in the event log");
+    assert!(all("content").await.contains("walrus"), "the task's text is not in the content store");
+    let task = alice.task(&id).await;
+    assert!(task.to_string().contains("walrus"), "the task does not read its text: {task}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -150,7 +174,7 @@ fn snapshot_inbox(items: &[Value]) -> Vec<(String, String, String, String)> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn all_state_is_rebuilt_from_the_event_log_alone() {
+async fn all_state_is_rebuilt_from_the_event_log_and_its_content() {
     let mail = mcp::mail().start().await;
     let model = FakeModel::start(steps(vec![
         contract_checked("send the report", "mail__list_sent", json!({}), "/count", json!(1)),
@@ -174,14 +198,14 @@ async fn all_state_is_rebuilt_from_the_event_log_alone() {
     app.kill().await;
     let admin = app.db.admin().await;
     for (s, t) in app.db.tables().await {
-        if !(s == "public" && t == "events") {
+        if !(s == "public" && (t == "events" || t == "content")) {
             admin.batch_execute(&format!("TRUNCATE \"{s}\".\"{t}\" CASCADE")).await.unwrap();
         }
     }
     app.restart().await;
 
-    assert_eq!(snapshot_tasks(&alice.tasks().await), tasks_before, "task state did not survive on the log alone");
-    assert_eq!(snapshot_inbox(&alice.inbox().await), inbox_before, "inbox did not survive on the log alone");
+    assert_eq!(snapshot_tasks(&alice.tasks().await), tasks_before, "task state did not survive on the log and its content");
+    assert_eq!(snapshot_inbox(&alice.inbox().await), inbox_before, "inbox did not survive on the log and its content");
     assert_eq!(mail.effects("send"), 0);
 
     let item = alice.wait_item(&id, "approval").await;

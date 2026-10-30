@@ -664,6 +664,42 @@ pub enum Ev {
     },
 }
 
+/// What each kind of event holds that a person or a source wrote. It is kept
+/// beside the log in the content store, where it can be deleted; the log
+/// keeps the rest. A dotted name is a field of a field.
+pub const CONTENT: &[(&str, &[&str])] = &[
+    ("task_created", &["text", "attachments", "title", "chat.conversation", "project.name", "project.instructions"]),
+    ("file_uploaded", &["name", "data_b64"]),
+    ("project_set", &["name", "instructions"]),
+    ("thread_branched", &["entries", "title"]),
+    ("schedule_set", &["text", "title"]),
+    ("model_reply", &["blocks", "state"]),
+    ("verifier_reply", &["blocks"]),
+    ("memory_pass", &["blocks"]),
+    ("intent", &["input"]),
+    ("tool_result", &["text", "data"]),
+    ("contract", &["contract"]),
+    ("plan", &["plan"]),
+    ("verification", &["criterion", "evidence"]),
+    ("completed", &["summary", "view", "spoken"]),
+    ("failed", &["reason"]),
+    ("item", &["summary", "details"]),
+    ("item_resolved", &["text"]),
+    ("output", &["name", "data_b64"]),
+    ("playbook", &["text", "addresses"]),
+    ("verdict", &["note"]),
+    ("graded", &["details"]),
+    ("memory", &["fact", "topic"]),
+    ("knowledge_added", &["title", "text", "verification", "value"]),
+    ("knowledge_extraction", &["reply"]),
+    ("spoken_written", &["script"]),
+];
+
+/// The content fields of one kind of event; none for most.
+pub fn content_fields(kind: &str) -> &'static [&'static str] {
+    CONTENT.iter().find(|(k, _)| *k == kind).map(|(_, f)| *f).unwrap_or(&[])
+}
+
 impl Ev {
     pub fn run(&self) -> Option<&str> {
         use Ev::*;
@@ -701,6 +737,26 @@ impl Ev {
             | Output { run, .. } => Some(run),
             Item { run, .. } => run.as_deref(),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every kind and field the content list names is one `Ev` has, so a
+    /// misspelling cannot leave content in the log.
+    #[test]
+    fn the_content_list_names_real_kinds_and_fields() {
+        let src = include_str!("events.rs");
+        let src = &src[src.find("pub enum Ev {").unwrap()..src.find("pub const CONTENT").unwrap()];
+        for (kind, fields) in super::CONTENT {
+            let variant: String = kind.split('_').map(|w| w[..1].to_uppercase() + &w[1..]).collect();
+            let start = src.find(&format!("\n    {variant} {{")).unwrap_or_else(|| panic!("no event kind {kind}"));
+            let body = &src[start..start + src[start..].find("\n    },").unwrap()];
+            for f in *fields {
+                let top = f.split('.').next().unwrap();
+                assert!(body.contains(&format!(" {top}: ")), "{kind} has no field {top}");
+            }
         }
     }
 }

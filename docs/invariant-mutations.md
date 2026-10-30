@@ -25,10 +25,11 @@ Baseline (unmutated, `cargo test -p magnus-invariants --no-fail-fast`): 45 of 45
 | 2 | secrets_can_be_written_but_not_read_back | M09 | `GET /v1/secrets` returns values beside names | api.rs:621 | KILLED: "GET /v1/secrets returned a secret value (200 OK)" |
 | 2 | secrets_can_be_written_but_not_read_back | X02 | any signed-in person may write a secret (owner check dropped) | api.rs:627 | KILLED: "a person without the owner role wrote a secret: 204" |
 | 3 | the_kernel_cannot_rewrite_the_log | M10 | `migrate` grants the kernel role UPDATE and DELETE on `events` | log.rs:71 | KILLED: "the kernel role may run: DELETE FROM public.events" |
+| 3 | content_is_kept_beside_the_log_not_in_it | M46 | a task's text is not listed as content (`events::CONTENT`), so it stays in the log | events.rs:671 | KILLED: "the task's text is in the event log" |
 | 3 | crash_after_a_side_effect_does_not_repeat_it | M11 | the idempotency key also hashes the process id, so it changes across a restart | boundary.rs:103 | KILLED: status was `failed`, not `completed` (the resend made a second email, so the contract check failed) |
 | 3 | crash_after_a_side_effect_does_not_repeat_it | M14 | the `Idempotency-Key` header is never sent | boundary.rs:589 | KILLED: same assertion as M11 |
 | 3 | crash_against_an_app_without_idempotency_asks_instead_of_resending | M12 (core) | after a crash, every app call is resent, whether or not the app honours keys | boundary.rs:541 | KILLED: "timed out waiting for: an inbox item asks about the unknown outcome" |
-| 3 | all_state_is_rebuilt_from_the_event_log_alone | M13 | inbox items go into the projection but are never appended to the log | kernel.rs:117 | KILLED: "inbox did not survive on the log alone" |
+| 3 | all_state_is_rebuilt_from_the_event_log_and_its_content | M13 | inbox items go into the projection but are never appended to the log | kernel.rs:117 | KILLED: "inbox did not survive on the log and its content" |
 | 3 | repeated_crashes_never_repeat_an_effect | M14 | the `Idempotency-Key` header is never sent | boundary.rs:589 | **SURVIVED** (3 of 3 runs) |
 | 3 | repeated_crashes_never_repeat_an_effect | M11 | the idempotency key changes across a restart | boundary.rs:103 | **SURVIVED** (3 of 3 runs) |
 | 4 | injected_page_cannot_exfiltrate_private_data | M15 | Rule of Two applies only to built-in tools, not to app actions | boundary.rs:443 | KILLED: "timed out waiting for: open approval item" (the send ran instead) |
