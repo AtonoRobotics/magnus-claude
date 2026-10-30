@@ -8,6 +8,7 @@
 use crate::boundary::Action;
 use crate::events::{ChatOrigin, Ev};
 use crate::kernel::{new_id, Kernel, NewRun};
+use std::collections::HashSet;
 use crate::state::{CardState, Run, Status, Task};
 use crate::tools::Label;
 use anyhow::Result;
@@ -44,7 +45,7 @@ impl Kernel {
         project: Option<String>,
     ) -> Result<Option<(String, String)>> {
         let (thread, project) = match thread {
-            Some(t) if self.thread(person, &t).is_empty() && !self.read(|s| s.branches.get(&t).is_some_and(|b| b.person == person)) => return Ok(None),
+            Some(t) if self.thread_gone(&t) || (self.thread(person, &t).is_empty() && !self.read(|s| s.branches.get(&t).is_some_and(|b| b.person == person))) => return Ok(None),
             Some(t) => {
                 let p = self.read(|s| s.project_of(&t));
                 (t, p)
@@ -88,7 +89,7 @@ impl Kernel {
                 (e.0, e.2) = (b.at, b.title.clone());
             }
         });
-        let mut v: Vec<_> = by.into_iter().collect();
+        let mut v: Vec<_> = by.into_iter().filter(|(id, _)| !self.thread_gone(id)).collect();
         v.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
         v.into_iter()
             .map(|(id, (started, updated, first))| {
@@ -96,6 +97,12 @@ impl Kernel {
                 json!({ "thread": id, "title": first.chars().take(80).collect::<String>(), "started_at": started, "updated_at": updated, "project": project })
             })
             .collect()
+    }
+
+    /// A conversation in the trash or removed from it. The tasks it started
+    /// stay, and name it still.
+    fn thread_gone(&self, thread: &str) -> bool {
+        self.read(|s| s.trash.contains_key(thread) || s.removed_threads.contains(thread))
     }
 
     /// A thread's turns and tasks, in the order they were created.
@@ -113,8 +120,11 @@ impl Kernel {
 
     /// The thread as the person sees it, from the log.
     /// Each entry has an `id`, which the message actions name; entries the
-    /// person deleted are left out (the log keeps them).
+    /// person deleted (in the trash or removed from it) or replaced are left out.
     pub fn thread_entries(&self, person: &str, thread: &str) -> Option<Vec<Value>> {
+        if self.thread_gone(thread) {
+            return None;
+        }
         let runs = self.thread(person, thread);
         let branch = self.read(|s| s.branches.get(thread).filter(|b| b.person == person).cloned());
         if runs.is_empty() && branch.is_none() {
@@ -186,13 +196,13 @@ impl Kernel {
             out.push((at, 1, json!({ "id": format!("t:{from}"), "kind": "tasks", "from_run": from, "tasks": tasks, "at": at })));
         }
         out.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-        let hidden = self.read(|s| s.hidden.get(thread).cloned().unwrap_or_default());
+        let (hidden, trashed) = self.read(|s| (s.hidden.get(thread).cloned().unwrap_or_default(), s.trash.iter().filter(|(_, t)| t.thread() == Some(thread)).map(|(id, _)| id.clone()).collect::<HashSet<String>>()));
         // What a hidden answer started is hidden with it, whenever it shows
         // up (a task's result after the hiding), so its words and taint
         // never come back into the thread.
-        let hidden_turns: std::collections::HashSet<String> = hidden.iter().filter_map(|id| id.strip_prefix("a:").map(String::from)).collect();
+        let hidden_turns: HashSet<String> = hidden.iter().filter_map(|id| id.strip_prefix("a:").map(String::from)).collect();
         let from_hidden = |v: &Value| self.origin_turn(v).is_some_and(|t| hidden_turns.contains(&t));
-        Some(out.into_iter().map(|(.., v)| v).filter(|v| !v["id"].as_str().is_some_and(|id| hidden.contains(id)) && !from_hidden(v)).collect())
+        Some(out.into_iter().map(|(.., v)| v).filter(|v| !v["id"].as_str().is_some_and(|id| hidden.contains(id) || trashed.contains(id)) && !from_hidden(v)).collect())
     }
 
     /// The chat turn (its task id) that started what an entry shows: a

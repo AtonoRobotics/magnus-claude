@@ -14,7 +14,7 @@ The appliance serves the same frontend (`ui/`) to browsers.
 - `src-tauri/`: the Rust side.
   - `pin.rs`: certificate pinning.
   - `store.rs`: settings and the session.
-  - `speech.rs`: read-aloud.
+  - `speech.rs`: read-aloud in the system's voice, used only when the appliance has no voice of its own.
   - `lib.rs`: the commands the page may call.
 - `tests/flow.mjs`: the operator flow in a browser, signing in with a password or through an identity provider.
 - `tests/app.mjs`: the same flow in the built app, through tauri-driver.

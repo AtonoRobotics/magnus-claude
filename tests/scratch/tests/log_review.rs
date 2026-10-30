@@ -66,7 +66,7 @@ async fn a_restore_waits_for_no_kernel_and_a_rolled_back_log_still_backs_up() {
     // The log and the vault are lost; a kernel (here, its lock) is running
     // on the empty log, so the restore is refused.
     app.kill().await;
-    admin.batch_execute("DROP TABLE public.events").await.unwrap();
+    admin.batch_execute("DROP TABLE public.content, public.events").await.unwrap();
     std::fs::remove_dir_all(app.state_dir.join("vault")).unwrap();
     let (config, url) = (app.dir.path().join("magnus.toml"), app.db.admin_url());
     let restore = || {

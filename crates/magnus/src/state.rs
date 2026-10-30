@@ -459,8 +459,65 @@ pub struct Update {
     pub at: DateTime<Utc>,
 }
 
+/// An item in the trash: out of every view until it is restored or removed.
+#[derive(Clone, Debug)]
+pub struct Trashed {
+    pub person: String,
+    pub title: String,
+    pub at: DateTime<Utc>,
+    held: Held,
+}
+
+/// What a trashed item took out of the state, to put back if restored. A
+/// chat message or answer takes nothing: its thread leaves it out.
+#[derive(Clone, Debug)]
+enum Held {
+    Task(Box<Task>, Option<Box<Run>>, Vec<Item>),
+    Thread { id: String, turns: Vec<(Task, Option<Run>)>, branch: Option<Branch> },
+    Entry { thread: String },
+    File(Box<LibFile>),
+    Project(Project),
+    Memory(MemoryEntry),
+    Knowledge(Box<KnowledgeEntry>),
+}
+
+impl Trashed {
+    pub fn kind(&self) -> &'static str {
+        match self.held {
+            Held::Task(..) => "task",
+            Held::Thread { .. } => "conversation",
+            Held::Entry { .. } => "message",
+            Held::File(_) => "file",
+            Held::Project(_) => "project",
+            Held::Memory(_) => "memory",
+            Held::Knowledge(_) => "knowledge",
+        }
+    }
+
+    /// The thread a trashed message or answer was in.
+    pub fn thread(&self) -> Option<&str> {
+        match &self.held {
+            Held::Entry { thread } => Some(thread),
+            _ => None,
+        }
+    }
+}
+
+/// Why an item cannot go to the trash.
+#[derive(Debug, PartialEq)]
+pub enum NotTrashable {
+    /// No such item of the person's.
+    NotFound,
+    /// A task still running: cancel it first, so a crash can resume it (C3).
+    Running,
+}
+
 #[derive(Default)]
 pub struct State {
+    /// Trashed items by id.
+    pub trash: BTreeMap<String, Trashed>,
+    /// Conversations removed from the trash: their tasks stay, the thread is gone.
+    pub removed_threads: HashSet<String>,
     pub tasks: BTreeMap<String, Task>,
     pub runs: HashMap<String, Run>,
     pub items: BTreeMap<String, Item>,
@@ -554,6 +611,144 @@ impl State {
             .filter(|t| t.chat.as_ref().is_some_and(|c| c.thread == item && c.turn))
             .min_by_key(|t| t.created_at)
             .and_then(|t| t.project.as_ref().map(|p| p.id.clone()))
+    }
+
+    /// Whether `person` (`owner` or not) may put `item` in the trash now.
+    pub fn may_trash(&self, person: &str, owner: bool, item: &str) -> Result<(), NotTrashable> {
+        use NotTrashable::*;
+        let ended = |run: &str| self.runs.get(run).is_none_or(|r| r.ended_at.is_some());
+        let mine = match item.split_once(':') {
+            Some(("m" | "a", task)) => {
+                let t = self.tasks.get(task).filter(|t| t.person == person && t.is_chat_turn()).ok_or(NotFound)?;
+                return if ended(&t.run_id) { Ok(()) } else { Err(Running) };
+            }
+            _ if item.starts_with("task_") => {
+                let t = self.tasks.get(item).filter(|t| t.person == person && !t.is_chat_turn()).ok_or(NotFound)?;
+                return if ended(&t.run_id) { Ok(()) } else { Err(Running) };
+            }
+            _ if item.starts_with("thread_") => {
+                let turns: Vec<&Task> = self.tasks.values().filter(|t| t.person == person && t.chat.as_ref().is_some_and(|c| c.turn && c.thread == item)).collect();
+                if turns.is_empty() && !self.branches.get(item).is_some_and(|b| b.person == person) {
+                    return Err(NotFound);
+                }
+                return if turns.iter().all(|t| ended(&t.run_id)) { Ok(()) } else { Err(Running) };
+            }
+            _ => match () {
+                _ if self.files.get(item).is_some_and(|f| f.person == person) => true,
+                _ if self.projects.get(item).is_some_and(|p| p.person == person) => true,
+                _ if self.memory.iter().any(|m| m.id == item && m.person == person) => true,
+                _ => self.knowledge.get(item).is_some_and(|k| {
+                    owner || k.author == format!("person:{person}") || k.author.strip_prefix("agent:").and_then(|r| self.runs.get(r)).is_some_and(|r| r.person == person)
+                }),
+            },
+        };
+        if mine {
+            Ok(())
+        } else {
+            Err(NotFound)
+        }
+    }
+
+    /// Take an item out of every view, into the trash.
+    fn take(&mut self, item: &str) -> Option<(String, Held)> {
+        if let Some((_, task)) = item.split_once(':') {
+            let t = self.tasks.get(task)?;
+            let thread = t.chat.as_ref()?.thread.clone();
+            let title = match item.starts_with("m:") {
+                true => t.text.clone(),
+                false => self.runs.get(&t.run_id).and_then(|r| r.summary.clone()).unwrap_or_default(),
+            };
+            return Some((title, Held::Entry { thread }));
+        }
+        let title_of = |t: &Task| t.title.clone().unwrap_or_else(|| t.text.clone());
+        if item.starts_with("task_") {
+            let t = self.tasks.remove(item)?;
+            let r = self.runs.remove(&t.run_id).map(Box::new);
+            let ids: Vec<String> = self.items.values().filter(|i| i.task.as_deref() == Some(item)).map(|i| i.id.clone()).collect();
+            let items = ids.iter().filter_map(|id| self.items.remove(id)).collect();
+            return Some((title_of(&t), Held::Task(Box::new(t), r, items)));
+        }
+        if item.starts_with("thread_") {
+            let ids: Vec<String> = self.tasks.values().filter(|t| t.chat.as_ref().is_some_and(|c| c.turn && c.thread == item)).map(|t| t.task_id.clone()).collect();
+            let mut turns: Vec<(Task, Option<Run>)> = ids.iter().filter_map(|id| self.tasks.remove(id)).map(|t| { let r = self.runs.remove(&t.run_id); (t, r) }).collect();
+            turns.sort_by_key(|(t, _)| t.created_at);
+            let branch = self.branches.remove(item);
+            let title = turns.first().map(|(t, _)| t.text.clone()).or_else(|| branch.as_ref().map(|b| b.title.clone()))?;
+            return Some((title, Held::Thread { id: item.into(), turns, branch }));
+        }
+        if let Some(f) = self.files.remove(item) {
+            return Some((f.name.clone(), Held::File(Box::new(f))));
+        }
+        if let Some(p) = self.projects.remove(item) {
+            return Some((p.name.clone(), Held::Project(p)));
+        }
+        if let Some(i) = self.memory.iter().position(|m| m.id == item) {
+            let m = self.memory.remove(i);
+            return Some((m.fact.clone(), Held::Memory(m)));
+        }
+        let k = self.knowledge.remove(item)?;
+        Some((k.title.clone(), Held::Knowledge(Box::new(k))))
+    }
+
+    /// Which events hold a trashed item's own content. A task's or a
+    /// conversation's runs keep what they made that is an item of its own:
+    /// files they delivered, memories and playbook items they wrote.
+    pub fn holding(&self, item: &str) -> Option<crate::log::Holding> {
+        use crate::log::Holding;
+        const OWN: [&str; 3] = ["output", "memory", "playbook"];
+        let named = |kinds: Vec<&'static str>, field: &'static str, id: &str| Holding { kinds, field, id: id.into(), ..Default::default() };
+        Some(match &self.trash.get(item)?.held {
+            Held::Task(t, ..) => Holding { runs: vec![t.run_id.clone()], except: OWN.to_vec(), ..Default::default() },
+            Held::Thread { id, turns, .. } => Holding { runs: turns.iter().map(|(t, _)| t.run_id.clone()).collect(), except: OWN.to_vec(), ..named(vec!["thread_branched"], "thread", id) },
+            Held::Entry { .. } => match item.split_once(':')? {
+                ("m", task) => named(vec!["task_created"], "task", task),
+                (_, task) => Holding { runs: vec![self.tasks.get(task)?.run_id.clone()], except: [&OWN[..], &["task_created"]].concat(), ..Default::default() },
+            },
+            Held::File(_) => named(vec!["file_uploaded", "output"], "id", item),
+            Held::Project(_) => named(vec!["project_set"], "id", item),
+            Held::Memory(_) => named(vec!["memory"], "id", item),
+            Held::Knowledge(_) => named(vec!["knowledge_added"], "id", item),
+        })
+    }
+
+    /// A trashed item back where it was.
+    fn put_back(&mut self, held: Held) {
+        match held {
+            Held::Task(t, r, items) => {
+                if let Some(r) = r {
+                    self.runs.insert(r.id.clone(), *r);
+                }
+                for i in items {
+                    self.items.insert(i.id.clone(), i);
+                }
+                self.tasks.insert(t.task_id.clone(), *t);
+            }
+            Held::Thread { id, turns, branch } => {
+                for (t, r) in turns {
+                    if let Some(r) = r {
+                        self.runs.insert(r.id.clone(), r);
+                    }
+                    self.tasks.insert(t.task_id.clone(), t);
+                }
+                if let Some(b) = branch {
+                    self.branches.insert(id, b);
+                }
+            }
+            Held::Entry { .. } => {}
+            Held::File(f) => {
+                self.files.insert(f.id.clone(), *f);
+            }
+            Held::Project(p) => {
+                self.projects.insert(p.id.clone(), p);
+            }
+            Held::Memory(m) => {
+                let at = self.memory.partition_point(|x| x.at <= m.at);
+                self.memory.insert(at, m);
+            }
+            Held::Knowledge(k) => {
+                self.knowledge.insert(k.id.clone(), *k);
+            }
+        }
     }
 
     /// A person's file, or a delivered file of a task they may see.
@@ -691,6 +886,25 @@ impl State {
                 self.cards.insert(card.clone(), CardState::Declined);
             }
             Ev::MemoryForgotten { id } => self.memory.retain(|m| &m.id != id),
+            Ev::Trashed { item, person } => {
+                if let Some((title, held)) = self.take(item) {
+                    self.trash.insert(item.clone(), Trashed { person: person.clone(), title, at: e.at, held });
+                }
+            }
+            Ev::Restored { item } => {
+                if let Some(t) = self.trash.remove(item) {
+                    self.put_back(t.held);
+                }
+            }
+            Ev::Removed { item, .. } => match self.trash.remove(item).map(|t| t.held) {
+                Some(Held::Entry { thread }) => {
+                    self.hidden.entry(thread).or_default().insert(item.clone());
+                }
+                Some(Held::Thread { id, .. }) => {
+                    self.removed_threads.insert(id);
+                }
+                _ => {}
+            },
             Ev::KnowledgeAdded { id, title, text, readers, integrity, source, author, run, verification, value } => {
                 self.knowledge.insert(
                     id.clone(),

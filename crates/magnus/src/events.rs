@@ -27,6 +27,7 @@ pub struct ChatOrigin {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ProjectContext {
     pub id: String,
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub instructions: Option<String>,
@@ -125,6 +126,7 @@ pub enum Ev {
         run: String,
         purpose: String,
         model: String,
+        #[serde(default)]
         blocks: Vec<magnus_adapter_proto::Block>,
         usage: magnus_adapter_proto::Usage,
     },
@@ -234,7 +236,9 @@ pub enum Ev {
         thread: String,
         from: String,
         upto: String,
+        #[serde(default)]
         entries: Vec<Value>,
+        #[serde(default)]
         title: String,
     },
     /// A person signed in from an app. The token itself is never logged.
@@ -251,6 +255,7 @@ pub enum Ev {
     ScheduleSet {
         id: String,
         person: String,
+        #[serde(default)]
         text: String,
         /// Minutes between runs, or None with `daily_at`.
         #[serde(default)]
@@ -315,6 +320,7 @@ pub enum Ev {
         task: String,
         run: String,
         person: String,
+        #[serde(default)]
         text: String,
         #[serde(default)]
         attachments: Vec<Value>,
@@ -343,8 +349,10 @@ pub enum Ev {
     FileUploaded {
         id: String,
         person: String,
+        #[serde(default)]
         name: String,
         media_type: String,
+        #[serde(default)]
         data_b64: String,
         /// Where it was added, when that was a chat thread.
         #[serde(default)]
@@ -356,6 +364,7 @@ pub enum Ev {
     ProjectSet {
         id: String,
         person: String,
+        #[serde(default)]
         name: String,
         #[serde(default)]
         instructions: Option<String>,
@@ -376,6 +385,7 @@ pub enum Ev {
     ModelReply {
         run: String,
         step: u32,
+        #[serde(default)]
         blocks: Vec<Block>,
         #[serde(default)]
         state: Option<Value>,
@@ -404,6 +414,7 @@ pub enum Ev {
         step_id: String,
         key: String,
         tool: String,
+        #[serde(default)]
         input: Value,
         issuer: String,
     },
@@ -425,6 +436,7 @@ pub enum Ev {
         #[serde(default)]
         key: Option<String>,
         status: String,
+        #[serde(default)]
         text: String,
         is_error: bool,
         label: Label,
@@ -441,6 +453,7 @@ pub enum Ev {
     Contract {
         run: String,
         version: u32,
+        #[serde(default)]
         contract: Value,
         /// Set when a person approved this version as a change to a frozen
         /// contract.
@@ -463,12 +476,15 @@ pub enum Ev {
     Plan {
         run: String,
         version: u32,
+        #[serde(default)]
         plan: Value,
     },
     Verification {
         run: String,
+        #[serde(default)]
         criterion: String,
         passed: bool,
+        #[serde(default)]
         evidence: Value,
         by: String,
     },
@@ -483,6 +499,7 @@ pub enum Ev {
     },
     Completed {
         run: String,
+        #[serde(default)]
         summary: String,
         /// Fixed components the agent composed to show the outcome (U8).
         #[serde(default)]
@@ -493,6 +510,7 @@ pub enum Ev {
     },
     Failed {
         run: String,
+        #[serde(default)]
         reason: String,
         by: String,
     },
@@ -506,7 +524,9 @@ pub enum Ev {
         run: Option<String>,
         /// The person the run acts for, or the owner for system items.
         person: String,
+        #[serde(default)]
         summary: String,
+        #[serde(default)]
         details: Value,
     },
     ItemResolved {
@@ -548,8 +568,10 @@ pub enum Ev {
     Output {
         id: String,
         run: String,
+        #[serde(default)]
         name: String,
         media_type: String,
+        #[serde(default)]
         data_b64: String,
     },
     /// A conformance suite run for an adapter version.
@@ -598,6 +620,7 @@ pub enum Ev {
         id: String,
         person: String,
         run: String,
+        #[serde(default)]
         fact: String,
         #[serde(default)]
         topic: Option<String>,
@@ -613,6 +636,7 @@ pub enum Ev {
     MemoryPass {
         run: String,
         model: String,
+        #[serde(default)]
         blocks: Vec<magnus_adapter_proto::Block>,
         usage: magnus_adapter_proto::Usage,
     },
@@ -623,7 +647,9 @@ pub enum Ev {
     /// from (citations, file, app, or the entry a value was extracted from).
     KnowledgeAdded {
         id: String,
+        #[serde(default)]
         title: String,
+        #[serde(default)]
         text: String,
         readers: Vec<Vec<String>>,
         integrity: String,
@@ -631,8 +657,10 @@ pub enum Ev {
         author: String,
         run: Option<String>,
         /// How the kernel checked its citations, with the evidence.
+        #[serde(default)]
         verification: Option<Value>,
         /// A typed value (number, boolean or one of named options).
+        #[serde(default)]
         value: Option<Value>,
     },
     /// A person with the role made an entry a company fact, from an inbox
@@ -647,6 +675,7 @@ pub enum Ev {
     KnowledgeExtraction {
         run: String,
         model: String,
+        #[serde(default)]
         reply: String,
         usage: magnus_adapter_proto::Usage,
     },
@@ -655,6 +684,7 @@ pub enum Ev {
     SpokenWritten {
         run: String,
         model: String,
+        #[serde(default)]
         script: String,
         usage: magnus_adapter_proto::Usage,
     },
@@ -662,6 +692,59 @@ pub enum Ev {
     MemoryForgotten {
         id: String,
     },
+    /// An item moved to the trash by `person`: out of every view, restorable
+    /// until it is removed. A task, a conversation, one message or answer in
+    /// one (`m:<task>`, `a:<task>`), a file, a project, a memory or a
+    /// knowledge entry.
+    Trashed {
+        item: String,
+        person: String,
+    },
+    Restored {
+        item: String,
+    },
+    /// A trashed item removed: the content of the events `seqs` was deleted
+    /// from the store. The events stay, as the record.
+    Removed {
+        item: String,
+        seqs: Vec<i64>,
+    },
+}
+
+/// What each kind of event holds that a person or a source wrote. It is kept
+/// beside the log in the content store, where it can be deleted; the log
+/// keeps the rest. A dotted name is a field of a field.
+pub const CONTENT: &[(&str, &[&str])] = &[
+    ("task_created", &["text", "attachments", "title", "chat.conversation", "project.name", "project.instructions"]),
+    ("file_uploaded", &["name", "data_b64"]),
+    ("project_set", &["name", "instructions"]),
+    ("thread_branched", &["entries", "title"]),
+    ("schedule_set", &["text", "title"]),
+    ("model_reply", &["blocks", "state"]),
+    ("verifier_reply", &["blocks"]),
+    ("memory_pass", &["blocks"]),
+    ("intent", &["input"]),
+    ("tool_result", &["text", "data"]),
+    ("contract", &["contract"]),
+    ("plan", &["plan"]),
+    ("verification", &["criterion", "evidence"]),
+    ("completed", &["summary", "view", "spoken"]),
+    ("failed", &["reason"]),
+    ("item", &["summary", "details"]),
+    ("item_resolved", &["text"]),
+    ("output", &["name", "data_b64"]),
+    ("playbook", &["text", "addresses"]),
+    ("verdict", &["note"]),
+    ("graded", &["details"]),
+    ("memory", &["fact", "topic"]),
+    ("knowledge_added", &["title", "text", "verification", "value"]),
+    ("knowledge_extraction", &["reply"]),
+    ("spoken_written", &["script"]),
+];
+
+/// The content fields of one kind of event; none for most.
+pub fn content_fields(kind: &str) -> &'static [&'static str] {
+    CONTENT.iter().find(|(k, _)| *k == kind).map(|(_, f)| *f).unwrap_or(&[])
 }
 
 impl Ev {
@@ -701,6 +784,30 @@ impl Ev {
             | Output { run, .. } => Some(run),
             Item { run, .. } => run.as_deref(),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every kind and field the content list names is one `Ev` has, so a
+    /// misspelling cannot leave content in the log; and each has a default,
+    /// so an event whose content was deleted still reads.
+    #[test]
+    fn the_content_list_names_real_kinds_and_fields() {
+        let src = include_str!("events.rs");
+        let src = &src[src.find("pub enum Ev {").unwrap()..src.find("pub const CONTENT").unwrap()];
+        for (kind, fields) in super::CONTENT {
+            let variant: String = kind.split('_').map(|w| w[..1].to_uppercase() + &w[1..]).collect();
+            let start = src.find(&format!("\n    {variant} {{")).unwrap_or_else(|| panic!("no event kind {kind}"));
+            let body = &src[start..start + src[start..].find("\n    },").unwrap()];
+            for f in *fields {
+                let top = f.split('.').next().unwrap();
+                assert!(body.contains(&format!(" {top}: ")), "{kind} has no field {top}");
+                if !f.contains('.') {
+                    assert!(body.contains(&format!("#[serde(default)]\n        {top}: ")), "{kind}.{top} has no default");
+                }
+            }
         }
     }
 }

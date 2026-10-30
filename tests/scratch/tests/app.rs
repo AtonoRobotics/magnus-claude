@@ -317,6 +317,36 @@ async fn an_approval_blocks_and_the_outcome_carries_its_view() {
     assert!(mw["decisions"].as_array().unwrap().iter().any(|d| d["outcome"] == "allow"), "{mw}");
 }
 
+/// The inspector compares each run's instructions with the build's own: the
+/// chat instructions for a chat turn, the task instructions for a task. It
+/// said every chat turn ran on instructions other than the build's.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_inspector_matches_chat_and_task_runs_to_their_own_instructions() {
+    let s = script(|c| async move {
+        if c.body["system"].to_string().contains("in a chat") {
+            return Reply::Text("Hello.".into());
+        }
+        match c.turn() {
+            0 => contract_unchecked("x", "x"),
+            _ => fail("nothing to do"),
+        }
+    });
+    let model = FakeModel::start(s).await;
+    let app = Appliance::start(spec(), &model).await;
+    let dana = app.api("dana");
+    let task = dana.submit("Look something up.").await;
+    let task_run = dana.wait_status(&task, &["failed"]).await["run_id"].as_str().unwrap().to_string();
+    let (st, v) = dana.post("/v1/chat", json!({ "text": "Hi" })).await;
+    assert_eq!(st, 201, "{v}");
+    let chat_run = dana.wait_status(v["task_id"].as_str().unwrap(), &["completed"]).await["run_id"].as_str().unwrap().to_string();
+    for (what, run, file) in [("task", task_run, "agent.md@"), ("chat turn", chat_run, "chat.md@")] {
+        let (_, ins) = dana.get(&format!("/v1/dev/runs/{run}")).await;
+        let ctx = &ins["steps"][0]["context"];
+        assert!(ctx["instructions"].as_str().unwrap().starts_with(file), "{what}: {ctx}");
+        assert_eq!(ctx["instructions_match_build"], true, "the {what} is said to run on other instructions: {ctx}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_developer_view_needs_the_role_and_drills_down_to_the_log() {
     let model = FakeModel::start(steps(vec![contract_unchecked("x", "x"), tool("memory_search", json!({ "query": "anything" })), fail("nothing to do")])).await;

@@ -129,6 +129,14 @@ impl Index {
         Ok(())
     }
 
+    /// Take an entry out of the index: trashed or removed, no one finds it.
+    async fn drop_entry(&self, id: &str) -> Result<()> {
+        let mut g = self.client().await?;
+        let c = g.as_mut().context("index connection")?;
+        c.execute("DELETE FROM public.knowledge WHERE id = $1", &[&id]).await.context("take the entry out of the index")?;
+        Ok(())
+    }
+
     /// What each indexed entry's version and embedding model are.
     async fn versions(&self) -> Result<std::collections::HashMap<String, (i64, Option<String>)>> {
         let mut g = self.client().await?;
@@ -217,6 +225,10 @@ impl Kernel {
         let have = self.knowledge.versions().await?;
         let want = self.cfg.knowledge.embeddings.as_ref().map(|e| e.model.clone());
         let entries: Vec<KnowledgeEntry> = self.read(|s| s.knowledge.values().cloned().collect());
+        // Entries in the trash or removed are no longer in the state.
+        for id in have.keys().filter(|id| !entries.iter().any(|e| &e.id == *id)) {
+            self.knowledge.drop_entry(id).await?;
+        }
         for e in entries {
             if have.get(&e.id).is_some_and(|(v, m)| *v == e.version && *m == want) {
                 continue;
@@ -239,7 +251,11 @@ impl Kernel {
         self.knowledge.put(e, embedding).await
     }
 
-    async fn index_id(&self, id: &str) -> Result<()> {
+    /// Index an entry as the state now has it, or take it out if it has none.
+    pub(crate) async fn index_id(&self, id: &str) -> Result<()> {
+        if !self.read(|s| s.knowledge.contains_key(id)) {
+            return self.knowledge.drop_entry(id).await;
+        }
         match self.read(|s| s.knowledge.get(id).cloned()) {
             Some(e) => self.index_entry(&e).await,
             None => Ok(()),

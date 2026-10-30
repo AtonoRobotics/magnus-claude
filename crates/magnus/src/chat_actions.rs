@@ -1,8 +1,9 @@
 //! What a person can do with a message in their thread: delete it, edit and
 //! resend their own, retry Magnus's, branch the thread there, share it with
 //! someone on the appliance, export it as a file, save it to the library, or
-//! make it a task, or hear it read aloud. Copying is the app's alone. Deleting hides an entry from
-//! every view and from what the model reads next; the log stays append-only.
+//! make it a task, or hear it read aloud. Copying is the app's alone. Deleting
+//! takes an entry out of every view and of what the model reads next: a
+//! message or answer goes to the trash (`trash.rs`), other entries are hidden.
 //! Nothing here makes a public link.
 
 use crate::api::{err, internal, who};
@@ -80,10 +81,15 @@ macro_rules! found {
     };
 }
 
-/// Delete one entry from the thread's views.
+/// Delete one entry: a message or an answer goes to the trash; an entry
+/// that shows another item (a task's card or result) is hidden, and the
+/// task stays in Tasks.
 async fn delete(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, String)>) -> Response {
     let p = person!(k, h);
     let _ = found!(k, p, thread, entry);
+    if entry.starts_with("m:") || entry.starts_with("a:") {
+        return crate::trash::trashed(k.trash(&p.id, p.is_owner(), &entry).await);
+    }
     match hide(&k, &p.id, &thread, vec![entry]).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),

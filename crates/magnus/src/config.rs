@@ -18,6 +18,8 @@ pub struct Config {
     #[serde(default)]
     pub backup: Backup,
     #[serde(default)]
+    pub trash: Trash,
+    #[serde(default)]
     pub updates: Updates,
     /// The file this was read from: a new release is checked against it.
     #[serde(skip)]
@@ -34,6 +36,9 @@ pub struct Config {
     /// Local speech to text for voice input (`config/install-whisper.sh`).
     #[serde(default)]
     pub speech: Option<Speech>,
+    /// The read-aloud voice, run on the appliance (`config/install-voice.sh`).
+    #[serde(default)]
+    pub read_aloud: Option<ReadAloud>,
     #[serde(default)]
     pub knowledge: Knowledge,
     #[serde(default)]
@@ -239,6 +244,21 @@ impl Default for Backup {
     }
 }
 
+/// Deleted items wait in the trash, restorable, for `keep_days`, then their
+/// content is removed. A month, as backups are kept: the same date answers
+/// "when is it gone?", within the GDPR's month to act on erasure.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Trash {
+    #[serde(default = "keep_days")]
+    pub keep_days: u32,
+}
+
+impl Default for Trash {
+    fn default() -> Self {
+        Trash { keep_days: keep_days() }
+    }
+}
+
 /// Signed updates of the appliance and of the desktop app (gate item 5).
 #[derive(Deserialize, Clone, Debug)]
 pub struct Updates {
@@ -384,6 +404,17 @@ pub struct Speech {
     pub whisper: PathBuf,
     /// A ggml model file.
     pub model: PathBuf,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct ReadAloud {
+    /// The `speak` program: text on stdin, MP3 on stdout.
+    pub speak: PathBuf,
+    /// Kokoro's model and voices files.
+    pub model: PathBuf,
+    pub voices: PathBuf,
+    /// One of Kokoro's voices, such as `af_heart`.
+    pub voice: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]

@@ -69,8 +69,10 @@ pub fn check(v: &Value) -> Result<(usize, i64)> {
         let seq = e["seq"].as_i64().context("an event without seq")?;
         anyhow::ensure!(seq > last, "events out of order at {seq}");
         last = seq;
-        // As the log loads it: a kind from a later release is skipped.
-        let Some(ev) = crate::log::parse_event(&e["body"]).with_context(|| format!("event {seq} does not parse"))? else { continue };
+        // As the log loads it: its content put back, and a kind from a later
+        // release skipped.
+        let body = crate::log::join(e["body"].clone(), Some(e["content"].clone()).filter(|c| !c.is_null()));
+        let Some(ev) = crate::log::parse_event(&body).with_context(|| format!("event {seq} does not parse"))? else { continue };
         let at = chrono::DateTime::parse_from_rfc3339(e["at"].as_str().unwrap_or_default()).with_context(|| format!("event {seq} has no time"))?.with_timezone(&chrono::Utc);
         state.apply(&crate::log::Event { seq, at, actor: e["actor"].as_str().unwrap_or_default().into(), ev });
     }
@@ -206,9 +208,9 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
     // empty state and its vault key, and write over the restored ones.
     crate::log::hold(&db).await.context("a kernel is running on this event log; stop it before restoring")?;
     let tx = db.transaction().await?;
-    let have: i64 = tx.query_one("SELECT count(*) FROM public.events", &[]).await?.get(0);
+    let have: i64 = tx.query_one("SELECT (SELECT count(*) FROM public.events) + (SELECT count(*) FROM public.content)", &[]).await?.get(0);
     if have > 0 {
-        bail!("the event log already holds {have} events; restore into an empty one");
+        bail!("the event log and its content already hold {have} rows; restore into empty ones");
     }
     for e in v["events"].as_array().into_iter().flatten() {
         let at = chrono::DateTime::parse_from_rfc3339(e["at"].as_str().unwrap_or_default())?.with_timezone(&chrono::Utc);
@@ -217,6 +219,10 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
             &[&e["seq"].as_i64(), &at, &e["kind"].as_str(), &e["actor"].as_str(), &e["run_id"].as_str(), &e["body"]],
         )
         .await?;
+        if !e["content"].is_null() {
+            let salt = hex::decode(e["salt"].as_str().unwrap_or_default()).with_context(|| format!("event {} has no salt", e["seq"]))?;
+            tx.execute("INSERT INTO public.content (seq, salt, body) VALUES ($1, $2, $3)", &[&e["seq"].as_i64(), &salt, &e["content"]]).await?;
+        }
     }
     if last > 0 {
         tx.execute("SELECT setval(pg_get_serial_sequence('public.events', 'seq'), $1)", &[&last]).await?;

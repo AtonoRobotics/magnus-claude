@@ -8,6 +8,40 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": 
 const api = (m, p, b) => Magnus.api(m, p, b);
 const enc = encodeURIComponent;
 
+// Read aloud in the appliance's own voice, a sentence at a time, so the first
+// is heard while the next is made. With no voice on the appliance, the
+// system's own voice reads it.
+const voice = { run: 0, audio: null, done: null };
+function hush() {
+  voice.run++;
+  if (voice.audio) voice.audio.pause();
+  if (voice.done) voice.done();
+  voice.audio = voice.done = null;
+  return Magnus.stopSpeaking();
+}
+async function readAloud(text) {
+  await hush();
+  const run = voice.run, parts = text.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+  const make = s => { const p = api("POST", "/v1/speak", { text: s }); p.catch(() => {}); return p; };
+  let next = parts.length ? make(parts[0]) : null;
+  for (let i = 0; i < parts.length; i++) {
+    let r;
+    try { r = await next; } catch (e) { if (e.status === 503 && i === 0) return run === voice.run && Magnus.speak(text); throw e; }
+    if (run !== voice.run) return;
+    next = i + 1 < parts.length ? make(parts[i + 1]) : null;
+    const src = URL.createObjectURL(new Blob([Uint8Array.from(atob(r.audio_b64), c => c.charCodeAt(0))], { type: r.media_type }));
+    await new Promise((done, fail) => {
+      const a = voice.audio = new Audio(src);
+      voice.done = done;
+      a.onended = done;
+      a.onerror = () => fail(new Error("Could not play the audio."));
+      a.play().catch(fail);
+    }).finally(() => URL.revokeObjectURL(src));
+    if (run !== voice.run) return;
+  }
+  voice.audio = voice.done = null;
+}
+
 const App = {
   me: null,
   appliance: "",
@@ -99,6 +133,7 @@ function nav() {
     ${link("#/schedules", "Schedules")}
     ${link("#/library", "Library")}
     ${link("#/projects", "Projects")}
+    ${link("#/trash", "Trash")}
     ${link("#/settings", "Settings")}
     ${isDev() ? `<div class="group">Developer</div>
       ${link("#/dev/runs", "Runs")}
@@ -150,6 +185,19 @@ function shell() {
       await App.redraw?.();
     } catch (err) { toast(err.message); }
   });
+  // Delete, wherever an item offers it: to the trash, where it can be
+  // restored until it is gone for good.
+  document.addEventListener("click", async e => {
+    const b = e.target.closest("[data-trash]");
+    if (!b) return;
+    if (!confirm(`${b.textContent}? It moves to the trash, where you can restore it until it is gone for good.`)) return;
+    b.disabled = true;
+    try {
+      await api("POST", "/v1/trash", { item: b.dataset.trash });
+      toast("Moved to the trash.");
+      if (b.dataset.then) location.hash = b.dataset.then; else await App.redraw?.();
+    } catch (err) { toast(err.message); b.disabled = false; }
+  });
   document.addEventListener("change", async e => {
     const sel = e.target.closest("select[data-move]");
     if (!sel) return;
@@ -162,6 +210,9 @@ function shell() {
 }
 
 function route(re, view) { App.routes.push([re, view]); }
+
+// A Delete button for an item: to the trash, then to `then` (or redrawn).
+const trashButton = (item, label, then = "") => `<button data-trash="${esc(item)}"${then ? ` data-then="${esc(then)}"` : ""}>${esc(label)}</button>`;
 
 // ---------- Files and projects ----------
 
@@ -250,7 +301,7 @@ route(/^#\/file\/([^/]+)$/, async (main, id) => {
   const path = `/v1/files/${enc(id)}`;
   paint(main, `<p class="small"><a href="#/library">Library</a></p><h1>${esc(f.name)}</h1>
     <p class="small muted">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"} · ${fileFrom(f)} · ${esc(kb(f.size))} · ${esc(when(f.at))}</p>
-    <div class="row"><button class="primary" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}">Download</button> ${moveControl(f.id, f.project, projects)}</div>
+    <div class="row"><button class="primary" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}">Download</button> ${moveControl(f.id, f.project, projects)} ${trashButton(f.id, "Delete file", "#/library")}</div>
     <iframe class="composed" sandbox="allow-same-origin" title="${esc(f.name)}"></iframe>`);
   const files = {};
   try {
@@ -289,7 +340,7 @@ route(/^#\/project\/([^/]+)$/, async (main, id) => {
   const projects = await projectList();
   const draw = async () => {
     const p = await api("GET", `/v1/projects/${enc(id)}`);
-    paint(main, `<p class="small"><a href="#/projects">Projects</a></p><h1>${esc(p.name)}</h1>
+    paint(main, `<p class="small"><a href="#/projects">Projects</a></p><div class="spread"><h1>${esc(p.name)}</h1>${trashButton(id, "Delete project", "#/projects")}</div>
       <section class="card flat"><h3>Instructions</h3><p class="small muted">Applied to every task and chat in this project. Only you change them; Magnus reads them.</p>
         <textarea id="pin" rows="4" data-draft="pin-${esc(id)}">${esc(p.instructions || "")}</textarea><div class="row"><button data-act="save-ins">Save instructions</button></div></section>
       <section><div class="spread"><h3>Files</h3>${attachButton("Upload to this project")}</div>
@@ -813,7 +864,7 @@ async function showThread(main, thread) {
     const [{ entries }, { threads }] = await Promise.all([api("GET", `/v1/chat/${enc(thread)}`), api("GET", "/v1/chat")]);
     shown = entries;
     const here = threads.find(t => t.thread === thread);
-    const head = `<div class="spread thread-head"><span class="small">${here?.project ? `In the project <a href="#/project/${enc(here.project.id)}">${esc(here.project.name)}</a>` : ""}</span>${moveControl(thread, here?.project, projects)}</div>`;
+    const head = `<div class="spread thread-head"><span class="small">${here?.project ? `In the project <a href="#/project/${enc(here.project.id)}">${esc(here.project.name)}</a>` : ""}</span><span class="row">${moveControl(thread, here?.project, projects)}${trashButton(thread, "Delete conversation", "#/chat")}</span></div>`;
     const body = entries.map(e => `<div class="entry ${e.kind === "message" ? "me" : "them"}" data-entry="${esc(e.id || "")}" data-kind="${esc(e.kind)}">${entry(e, ui)}${msgActions(e, ui)}</div>`).join("");
     const grew = paint($("#thread", main), head + body);
     for (const e of entries.filter(e => e.view)) fill($(`iframe[data-shown="${CSS.escape(e.id)}"]`, main), e.view);
@@ -844,16 +895,16 @@ async function showThread(main, thread) {
       }
       case "export": return toast(`Saved ${await Magnus.download(path(id, "export"), safeName(e))}`);
       case "save": await api("POST", path(id, "save"), {}); return toast("Saved to the library.");
-      case "listen": { b.disabled = true; try { await Magnus.speak((await api("POST", path(id, "spoken"), {})).script); } finally { b.disabled = false; } return; }
-      case "hush": return Magnus.stopSpeaking();
+      case "listen": { b.disabled = true; try { await readAloud((await api("POST", path(id, "spoken"), {})).script); } finally { b.disabled = false; } return; }
+      case "hush": return hush();
       case "task": { const r = await api("POST", path(id, "task"), {}); toast("Started a task."); await draw(); return r; }
       case "delete":
-        if (!confirm("Delete this message? It leaves this chat and what Magnus reads next; the record keeps it.")) return;
+        if (!confirm("Delete this message? It leaves this chat and what Magnus reads next, and waits in the trash until it is gone for good.")) return;
         await api("POST", path(id, "delete"), {}); return draw();
     }
   };
   App.redraw = draw;
-  onLeave(() => { App.redraw = null; listen([]); Magnus.stopSpeaking(); });
+  onLeave(() => { App.redraw = null; listen([]); hush(); });
   $("#thread", main).onclick = async e => {
     const m = e.target.closest("[data-msg-act]");
     if (m) { try { await msgAct(m, m.closest("[data-entry]")); } catch (err) { toast(err.message); m.disabled = false; } return; }
@@ -1323,7 +1374,7 @@ route(/^#\/task\/([^/]+)$/, async (main, id) => {
       ${running ? `<div class="live" id="live" aria-live="polite">${esc(liveText) || `<span class="faint">Working…</span>`}</div>` : ""}
       <div class="layers" role="tablist">${[["outcome", "Outcome"], ["plan", "Contract and plan"]].map(([k, l]) => `<button role="tab" aria-selected="${layer === k}" class="${layer === k ? "on" : ""}" data-layer="${k}">${l}</button>`).join("")}</div>
       <section>${layer === "outcome" ? outcome : `<h3>Task</h3><p>${esc(t.text)}</p><h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}`}</section>
-      <div class="row">${!["completed", "failed", "cancelled"].includes(t.status) ? `<button data-act="cancel">Cancel task</button>` : ""}${t.status === "suspended" && !t.waiting_item ? `<button data-act="resume">Resume</button>` : ""}</div>`;
+      <div class="row">${!["completed", "failed", "cancelled"].includes(t.status) ? `<button data-act="cancel">Cancel task</button>` : trashButton(t.task_id, "Delete task", "#/tasks")}${t.status === "suspended" && !t.waiting_item ? `<button data-act="resume">Resume</button>` : ""}</div>`;
     if (paint(main, html) && layer === "outcome" && view.length) fill($("#view", main), view, id, t);
     main._task = t;
   };
@@ -1336,16 +1387,51 @@ route(/^#\/task\/([^/]+)$/, async (main, id) => {
     if (!a) return;
     const t = main._task;
     try {
-      if (a.dataset.act === "speak") await Magnus.speak(t.spoken);
-      if (a.dataset.act === "hush") await Magnus.stopSpeaking();
+      if (a.dataset.act === "speak") await readAloud(t.spoken);
+      if (a.dataset.act === "hush") await hush();
       if (a.dataset.act === "download") { const where = await Magnus.download(`/v1/tasks/${enc(id)}/outputs/${enc(a.dataset.out)}`, a.dataset.name); toast(`Saved ${where}`); }
       if (a.dataset.act === "cancel" && confirm("Cancel this task? What it already did stays done.")) { await api("POST", `/v1/tasks/${enc(id)}/cancel`, {}); draw(); }
       if (a.dataset.act === "resume") { await api("POST", `/v1/tasks/${enc(id)}/resume`, {}); draw(); }
     } catch (err) { toast(err.message); }
   };
-  onLeave(() => { if (stopLive) stopLive(); Magnus.stopSpeaking(); });
+  onLeave(() => { if (stopLive) stopLive(); hush(); });
   await draw();
   every(2500, draw);
+});
+
+// ---------- Trash ----------
+
+const TRASHED = { task: "Task", conversation: "Conversation", message: "Chat message", file: "File", project: "Project", memory: "Memory", knowledge: "Knowledge entry" };
+route(/^#\/trash$/, async main => {
+  const draw = async () => {
+    const { items, keep_days } = await api("GET", "/v1/trash");
+    paint(main, `<h1>Trash</h1><p class="muted">What you delete waits here for ${esc(keep_days)} days, then it is gone for good. Restore puts it back where it was.</p>
+      ${items.length ? `<div class="row"><button data-act="empty">Empty trash now</button></div>
+      <table class="t trash"><thead><tr><th>Deleted</th><th>When</th><th>Gone for good</th><th></th></tr></thead><tbody>${items.map(i => `<tr data-trashed="${esc(i.item)}">
+        <td><div class="small faint">${esc(TRASHED[i.kind] || i.kind)}</div><div data-title>${esc(i.title) || `<span class="faint">Untitled</span>`}</div></td>
+        <td class="small faint n">${esc(when(i.trashed_at))}</td><td class="small faint n">${esc(new Date(i.removed_at).toLocaleDateString())}</td>
+        <td><div class="row"><button data-act="restore">Restore</button><button class="link" data-act="remove">Delete now</button></div></td></tr>`).join("")}</tbody></table>`
+      : `<p class="empty">The trash is empty.</p>`}`);
+  };
+  main.onclick = async e => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    const item = b.closest("[data-trashed]")?.dataset.trashed;
+    try {
+      if (b.dataset.act === "restore") { b.disabled = true; await api("POST", `/v1/trash/${enc(item)}/restore`, {}); toast("Restored."); }
+      if (b.dataset.act === "remove") {
+        if (!confirm("Delete this for good? It cannot be restored.")) return;
+        b.disabled = true; await api("DELETE", `/v1/trash/${enc(item)}`); toast("Deleted for good.");
+      }
+      if (b.dataset.act === "empty") {
+        if (!confirm("Delete everything in the trash for good? None of it can be restored.")) return;
+        b.disabled = true; const r = await api("POST", "/v1/trash/empty", {}); toast(`${r.removed} deleted for good.`);
+      }
+      await draw();
+    } catch (err) { toast(err.message); b.disabled = false; }
+  };
+  App.redraw = draw;
+  onLeave(() => { App.redraw = null; });
+  await draw();
 });
 
 // ---------- Models ----------
