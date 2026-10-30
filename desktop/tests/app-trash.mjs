@@ -53,6 +53,8 @@ await d.step("delete it again and empty the trash", async () => {
   await d.click(d.button("Delete conversation"));
   await accept("moves to the trash");
   await d.seen("Moved to the trash.");
+  // The sidebar is redrawn without it; Trash is clicked after that.
+  await gone("the deleted conversation in the sidebar", `//nav//a[@title='${QUESTION}']`);
   await nav("Trash");
   await d.xpath(row);
   await d.click(d.button("Empty trash now"));
