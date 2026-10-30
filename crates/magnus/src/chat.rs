@@ -187,7 +187,26 @@ impl Kernel {
         }
         out.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
         let hidden = self.read(|s| s.hidden.get(thread).cloned().unwrap_or_default());
-        Some(out.into_iter().map(|(.., v)| v).filter(|v| !v["id"].as_str().is_some_and(|id| hidden.contains(id))).collect())
+        // What a hidden answer started is hidden with it, whenever it shows
+        // up (a task's result after the hiding), so its words and taint
+        // never come back into the thread.
+        let hidden_turns: std::collections::HashSet<String> = hidden.iter().filter_map(|id| id.strip_prefix("a:").map(String::from)).collect();
+        let from_hidden = |v: &Value| self.origin_turn(v).is_some_and(|t| hidden_turns.contains(&t));
+        Some(out.into_iter().map(|(.., v)| v).filter(|v| !v["id"].as_str().is_some_and(|id| hidden.contains(id)) && !from_hidden(v)).collect())
+    }
+
+    /// The chat turn (its task id) that started what an entry shows: a
+    /// task's result or a "started tasks" card. None for the turn's own
+    /// entries, and for anything not started from a turn.
+    pub(crate) fn origin_turn(&self, e: &Value) -> Option<String> {
+        self.read(|s| {
+            let from_run = match e["kind"].as_str()? {
+                "result" => s.tasks.get(e["task_id"].as_str()?)?.chat.as_ref()?.from_run.clone()?,
+                "tasks" => e["from_run"].as_str()?.to_string(),
+                _ => return None,
+            };
+            s.runs.get(&from_run).map(|r| r.task.clone())
+        })
     }
 
     /// The taint of what the thread shows, up to and including entry `upto`

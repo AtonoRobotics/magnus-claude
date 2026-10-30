@@ -37,6 +37,8 @@ pub fn may_respond(p: &Person, i: &Item) -> bool {
         "approval" => p.is_owner() || p.has_role(&format!("approver:{}", i.details["risk"].as_str().unwrap_or_default())),
         "policy_proposal" => may_set_policy(p, i.details["layer"].as_str().unwrap_or_default()),
         "tool_change" | "tool_review" | "deletion_request" => p.is_owner(),
+        // A message shared with someone is theirs alone, the owner's too.
+        "shared" => i.person == p.id,
         // Only someone with the role who may read the entry makes it a company fact.
         "endorsement" => crate::knowledge::may_endorse(p) && crate::knowledge::can_read(p, &serde_json::from_value::<Vec<Vec<String>>>(i.details["readers"].clone()).unwrap_or_else(|_| vec![vec![]])),
         _ => i.person == p.id || p.is_owner(),

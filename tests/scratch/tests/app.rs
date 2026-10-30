@@ -242,6 +242,11 @@ async fn a_client_that_prefers_http2_is_answered_over_https() {
     let browser = reqwest::Client::builder().danger_accept_invalid_certs(true).build().unwrap();
     let r = browser.get(format!("{url}/v1/health")).send().await.expect("an answer over HTTPS");
     assert_eq!(r.status(), 200);
+    // The appliance offers only HTTP/1.1. A build of the whole workspace
+    // can serve h2 (the scratch client's features unify into the server's
+    // hyper), so an answer alone would not catch h2 offered again; the
+    // protocol it agreed to does.
+    assert_eq!(r.version(), reqwest::Version::HTTP_11, "the appliance agreed to HTTP/2");
 }
 
 /// The whole operator flow: plan, an approval that blocks, a review card,
