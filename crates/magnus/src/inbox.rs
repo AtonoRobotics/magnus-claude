@@ -77,10 +77,14 @@ pub fn render(s: &State, p: &Person, i: &Item) -> Value {
         "approval" => i.details["risk"].as_str().unwrap_or("unknown").to_string(),
         k => k.to_string(),
     };
+    // The conversation its task came from, for the person whose it is: the
+    // same card shows there as in the inbox.
+    let thread = i.task.as_ref().and_then(|t| s.tasks.get(t)).filter(|t| t.person == p.id).and_then(|t| t.chat.as_ref()).map(|c| c.thread.clone());
     json!({
         "id": i.id,
         "kind": i.kind,
         "task_id": i.task,
+        "thread": thread,
         "run_id": i.run,
         "summary": i.summary,
         "details": i.details,

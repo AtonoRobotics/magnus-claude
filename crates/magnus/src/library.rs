@@ -86,28 +86,31 @@ async fn list(State(k): K, h: HeaderMap, Query(q): Query<HashMap<String, String>
         Ok(p) => p,
         Err(r) => return r,
     };
-    let terms: Vec<String> = q.get("q").map(|t| t.to_lowercase().split_whitespace().map(String::from).collect()).unwrap_or_default();
-    let want = q.get("project").cloned();
-    let files: Vec<Value> = k.read(|s| {
-        let mut v: Vec<(&LibFile, Value)> = s
-            .files
-            .values()
-            .filter(|f| f.person == p.id)
-            .map(|f| (f, file_json(s, f)))
-            .filter(|(_, j)| match want.as_deref() {
-                None => true,
-                Some("none") => j["project"].is_null(),
-                Some(id) => j["project"]["id"] == id,
-            })
-            .filter(|(f, j)| {
-                let hay = format!("{} {} {} {}", f.name.to_lowercase(), j["origin"]["title"].as_str().unwrap_or_default().to_lowercase(), j["project"]["name"].as_str().unwrap_or_default().to_lowercase(), f.text);
-                terms.iter().all(|t| hay.contains(t.as_str()))
-            })
-            .collect();
-        v.sort_by(|a, b| b.0.at.cmp(&a.0.at));
-        v.into_iter().map(|(_, j)| j).collect()
-    });
+    let terms = crate::api::terms(q.get("q").map(String::as_str).unwrap_or_default());
+    let files = k.read(|s| files_matching(s, &p, &terms, q.get("project").map(String::as_str)));
     Json(json!({ "files": files })).into_response()
+}
+
+/// The person's files with every term in their name, origin, project or
+/// text, newest first; `want` keeps one project's (`none`: in no project).
+pub(crate) fn files_matching(s: &St, p: &Person, terms: &[String], want: Option<&str>) -> Vec<Value> {
+    let mut v: Vec<(&LibFile, Value)> = s
+        .files
+        .values()
+        .filter(|f| f.person == p.id)
+        .map(|f| (f, file_json(s, f)))
+        .filter(|(_, j)| match want {
+            None => true,
+            Some("none") => j["project"].is_null(),
+            Some(id) => j["project"]["id"] == id,
+        })
+        .filter(|(f, j)| {
+            let hay = format!("{} {} {} {}", f.name.to_lowercase(), j["origin"]["title"].as_str().unwrap_or_default().to_lowercase(), j["project"]["name"].as_str().unwrap_or_default().to_lowercase(), f.text);
+            terms.iter().all(|t| hay.contains(t.as_str()))
+        })
+        .collect();
+    v.sort_by(|a, b| b.0.at.cmp(&a.0.at));
+    v.into_iter().map(|(_, j)| j).collect()
 }
 
 /// Add a file: to the library, into a project of the person's, or in a

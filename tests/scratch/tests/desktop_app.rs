@@ -543,3 +543,53 @@ async fn the_installed_app_updates_itself_from_the_appliance_while_a_task_waits(
         .collect();
     assert_eq!(stops, ["approval", "review"], "the task was stopped other than for the person's approval and review");
 }
+
+/// One workspace (owner, 2026-10-30): research started in a conversation,
+/// approved there, its result read and its file downloaded there, and a
+/// schedule created and its status checked there, with no navigation. The
+/// decisions are the same cards under Needs you. Checked again on the
+/// appliance afterwards.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn research_approval_result_file_and_schedule_happen_in_one_conversation_in_the_installed_app() {
+    use magnus_invariants::{script, steps, tool, FakeWeb, Reply};
+    const RESEARCH: &str = "Look into Q3 revenue and send me a one-line summary file.";
+    const SCHEDULE: &str = "Check the finance page every morning at nine.";
+    let web = FakeWeb::start(&[("/finance/q3", "<p>Q3 revenue: 41.7M. Q2 revenue: 38.2M.</p>")]).await;
+    let task = steps(replies(web.url("/finance/q3")));
+    let s = script(move |c| {
+        let task = task.clone();
+        async move {
+            if !c.body["system"].to_string().contains("in a chat") {
+                return task(c).await;
+            }
+            let first = c.messages().first().cloned().unwrap_or_default();
+            let said = first["content"].as_array().and_then(|b| b.last()).and_then(|b| b["text"].as_str()).unwrap_or_default().to_string();
+            match (said.as_str(), c.turn()) {
+                (RESEARCH, 0) => tool("create_task", json!({ "title": "Q3 revenue summary", "text": TASK })),
+                (SCHEDULE, 0) => tool("create_schedule", json!({ "title": "Morning finance check", "text": "Read the finance page and note Q3 revenue.", "daily_at": "09:00", "scope": "Reads one web page; sends nothing." })),
+                _ => Reply::Text("Started; it shows here as it goes.".into()),
+            }
+        }
+    });
+    let mut f = Flow::start_with(web, s).await;
+    let idp = FakeIdp::start(PERSON).await;
+    idp.configure(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let d = Driver::start().await;
+    let (ok, log) = d.script("app-workspace.mjs", &url, &fingerprint, &[("MAGNUS_RESEARCH", RESEARCH), ("MAGNUS_SCHEDULE", SCHEDULE)]).await;
+    assert!(ok, "the workspace flow failed:\n{log}\n{}", f.report().await);
+
+    let alice = f.app.api(PERSON);
+    let tasks = alice.tasks().await;
+    let t = &tasks["tasks"][0];
+    assert_eq!(t["status"], "completed", "{tasks}");
+    assert!(t["thread"].is_string(), "the task did not come from the conversation: {t}");
+    let decided: Vec<_> = alice.inbox().await.into_iter().filter(|i| i["kind"] == "approval" || i["kind"] == "review").collect();
+    assert_eq!(decided.len(), 2, "{decided:?}");
+    assert!(decided.iter().all(|i| i["resolution"]["by"] == format!("person:{PERSON}") && i["thread"] == t["thread"]), "{decided:?}");
+    let (_, sc) = alice.get("/v1/schedules").await;
+    assert_eq!(sc["schedules"][0]["daily_at"], "09:00", "{sc}");
+    let saved = std::fs::read_to_string(d.downloads().join("summary.txt")).expect("the file was not downloaded");
+    assert!(saved.contains("41.7M"), "{saved}");
+}

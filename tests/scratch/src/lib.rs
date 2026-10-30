@@ -125,7 +125,7 @@ pub async fn provider_with(model: &FakeModel, ids: &[&str]) -> String {
 /// What a model does for the flow's task: a contract with one criterion
 /// checked against the world and one only a person can judge, a plan, a
 /// file, its delivery (which asks), and a composed outcome.
-fn replies(page: String) -> Vec<Reply> {
+pub fn replies(page: String) -> Vec<Reply> {
     let check = json!({ "tool": "web_fetch", "input": { "url": page }, "expect": [{ "pointer": "/text", "contains": "41.7M" }] });
     vec![
         tool("task_contract", json!({ "goal": "a one-line revenue summary", "assumptions": [], "irreversible_actions": [],

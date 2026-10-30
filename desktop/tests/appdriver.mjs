@@ -91,7 +91,8 @@ export async function signIn(d, { provider, person, as }) {
     if (!link.includes(code)) throw new Error(`the provider's page ${link} is not for code ${code}`);
     const approved = await (await fetch(as ? `${link}&as=${encodeURIComponent(as)}` : link)).text();
     if (!approved.includes(`Signed in as ${as || person}`)) throw new Error(`the provider did not approve: ${approved}`);
-    await d.xpath("//h1[normalize-space()='Home']");
+    // The conversation is home: the workspace shows, with Needs you.
+    await d.xpath("//nav//button[starts-with(normalize-space(),'Needs you')]");
     const page = await d.run("return JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie");
     if (page.includes("mgs_")) throw new Error("the session token reached the page");
   });

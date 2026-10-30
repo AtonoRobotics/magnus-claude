@@ -10,7 +10,7 @@ use crate::inbox::{self, Answer};
 use crate::kernel::{new_id, Kernel, HARNESS_VERSION};
 use crate::state::{Run, Status};
 use axum::{
-    extract::{ConnectInfo, Path, Request, State},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -122,6 +122,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/tasks/{id}/resume", post(resume))
         .route("/v1/tasks/{id}/cancel", post(cancel))
         .route("/v1/tasks/{id}/verdict", post(verdict))
+        .route("/v1/search", get(search))
         .route("/v1/inbox", get(inbox_list))
         .route("/v1/inbox/{id}", post(respond))
         .route("/v1/policies", get(policies))
@@ -552,6 +553,49 @@ async fn list_tasks(State(k): K, h: HeaderMap) -> Response {
             .collect()
     });
     Json(json!({ "tasks": tasks })).into_response()
+}
+
+/// A search's words, lowercased; a match has every one.
+pub(crate) fn terms(q: &str) -> Vec<String> {
+    q.to_lowercase().split_whitespace().map(String::from).collect()
+}
+
+/// One search across the person's conversations (their titles and what was
+/// said in them), tasks (title, request, summary) and files (as the library
+/// matches them). A conversation comes with the first thing said in it that
+/// matches.
+async fn search(State(k): K, h: HeaderMap, Query(q): Query<std::collections::HashMap<String, String>>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let terms = terms(q.get("q").map(String::as_str).unwrap_or_default());
+    if terms.is_empty() {
+        return Json(json!({ "conversations": [], "tasks": [], "files": [] })).into_response();
+    }
+    let all = |hay: &str| terms.iter().all(|t| hay.contains(t.as_str()));
+    let mut conversations = vec![];
+    for t in k.threads(&p.id) {
+        let id = t["thread"].as_str().unwrap_or_default();
+        let said: Vec<String> = k.thread_entries(&p.id, id).unwrap_or_default().iter().filter_map(|e| e["text"].as_str().or(e["summary"].as_str()).map(String::from)).collect();
+        let title = t["title"].as_str().unwrap_or_default().to_lowercase();
+        if !all(&format!("{title} {}", said.join(" ").to_lowercase())) {
+            continue;
+        }
+        let snippet = said.iter().find(|s| terms.iter().any(|w| s.to_lowercase().contains(w.as_str()))).map(|s| s.chars().take(160).collect::<String>());
+        conversations.push(json!({ "thread": id, "title": t["title"], "updated_at": t["updated_at"], "project": t["project"], "snippet": snippet }));
+    }
+    let (tasks, files) = k.read(|s| {
+        let tasks: Vec<Value> = s
+            .tasks
+            .values()
+            .filter(|t| visible_task(&p, t) && !t.is_chat_turn())
+            .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(&k, s, &p, t, r)))
+            .filter(|v| all(&format!("{} {} {}", v["title"].as_str().unwrap_or_default(), v["text"].as_str().unwrap_or_default(), v["summary"].as_str().unwrap_or_default()).to_lowercase()))
+            .collect();
+        (tasks, crate::library::files_matching(s, &p, &terms, None))
+    });
+    Json(json!({ "conversations": conversations, "tasks": tasks, "files": files })).into_response()
 }
 
 /// The person writes in chat: a new thread, or one of theirs.
