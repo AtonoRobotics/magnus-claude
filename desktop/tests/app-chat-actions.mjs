@@ -53,7 +53,7 @@ await d.step("copy an answer", async () => {
 
 await d.step("delete an answer", async () => {
   await act("answer", "Answer to: First question", "Delete");
-  await accept("the record keeps it");
+  await accept("waits in the trash");
   await gone("the deleted answer", entry("answer", "Answer to: First question"));
 });
 

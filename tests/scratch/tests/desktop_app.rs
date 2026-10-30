@@ -248,6 +248,39 @@ async fn every_message_action_works_in_the_installed_app() {
     assert!(alice.tasks().await["tasks"].as_array().unwrap().iter().any(|t| t["text"] == "Second, edited"), "no task from the message");
 }
 
+/// The trash in the installed app (deletion plan, step 2): a conversation
+/// deleted, restored, deleted again and the trash emptied; then its words
+/// are in no view and not in the content store.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn a_conversation_goes_to_the_trash_comes_back_and_is_removed_in_the_installed_app() {
+    use magnus_invariants::{complete, contract_unchecked, script, FakeWeb, Reply};
+    let s = script(|c| async move {
+        if c.body["system"].to_string().contains("in a chat") {
+            let first = c.messages().first().cloned().unwrap_or_default();
+            let said = first["content"].as_array().and_then(|b| b.last()).and_then(|b| b["text"].as_str()).unwrap_or_default().to_string();
+            return Reply::Text(format!("Answer to: {said}"));
+        }
+        match c.turn() {
+            0 => contract_unchecked("do the work", "the work is done"),
+            _ => complete("done"),
+        }
+    });
+    let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
+    let idp = FakeIdp::start(PERSON).await;
+    idp.configure(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let d = Driver::start().await;
+    let (ok, log) = d.script("app-trash.mjs", &url, &fingerprint, &[]).await;
+    assert!(ok, "the trash failed in the app:\n{log}");
+
+    let alice = f.app.api(PERSON);
+    assert!(!alice.get("/v1/chat").await.1.to_string().contains("walruses"), "the conversation is still listed");
+    assert!(alice.get("/v1/trash").await.1["items"].as_array().unwrap().is_empty());
+    let rows = f.app.db.admin().await.query("SELECT body::text FROM public.content", &[]).await.unwrap();
+    assert!(!rows.iter().any(|r| r.get::<_, String>(0).contains("walruses")), "the conversation's words are still in the content store");
+}
+
 /// Requested by the owner (2026-10-29, U8): a data question gets its text
 /// streamed and then a chart and a table; a plain question gets text only;
 /// and composed content makes no network request, even markup forced into
