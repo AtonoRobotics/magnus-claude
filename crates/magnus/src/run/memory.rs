@@ -66,7 +66,12 @@ impl Kernel {
         self.read(|s| {
             let t = s.tasks.get(&run.task)?;
             let said: Vec<String> = t.chat.as_ref().map(|c| c.conversation.iter().map(|m| format!("{}: {}", m["role"].as_str().unwrap_or("?"), m["text"].as_str().unwrap_or_default())).collect()).unwrap_or_default();
-            let answer = run.summary.clone().unwrap_or_default();
+            // A run waiting for review has no summary yet: its report is on
+            // the review card.
+            let answer = run.summary.clone().or_else(|| {
+                s.items.values().filter(|i| i.run.as_deref() == Some(run.id.as_str()) && i.kind == "review").max_by_key(|i| i.created_at).and_then(|i| i.details["summary"].as_str().map(String::from))
+            });
+            let answer = answer.unwrap_or_default();
             let earlier = if said.is_empty() { String::new() } else { format!("Earlier in the conversation:\n{}\n\n", said.join("\n")) };
             Some(format!("{earlier}The person said:\n{}\n\nMagnus answered (or the task ended with):\n{answer}", t.text))
         })

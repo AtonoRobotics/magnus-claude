@@ -266,3 +266,4 @@ One line per choice the brief left open, with its reason. The brief and the owne
 - "Make a task" on a message carries that message's files. Reading aloud an answer reuses its run's script (a branch's copy included), one write at a time. Reason: the task could not read the attached file; every read-aloud of a branch's copy paid for a new model call.
 - The HTTPS test checks that the protocol agreed is HTTP/1.1, not only that an answer came. Reason: the scratch client's `http2` feature unifies into the workspace build of the server, so h2 offered again would still be answered and the test would pass.
 - Not changed: deleting a "started tasks" card hides later tasks from the same origin (minor).
+- The memory pass of a run waiting for review reads the report on its latest review card. Reason: the run has no summary until it completes, so the pass was shown an empty answer.
