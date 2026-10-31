@@ -5,9 +5,10 @@
 #   release/to-appliance.sh CONFIG VERSION NOTES_FILE
 #
 # CONFIG is that appliance's magnus.toml. Its programs (target/release, built
-# already) go in as a signed appliance release, which the appliance installs
-# by itself, with rollback (crates/magnus/src/update.rs); this waits until it
-# runs VERSION. Then the sandbox image those programs were tested with
+# already) and the browser sidecar (`browser/`, which the config's `[browser]
+# command` runs from the install directory) go in as a signed appliance
+# release, which the appliance installs by itself, with rollback
+# (crates/magnus/src/update.rs); this waits until it runs VERSION. Then the sandbox image those programs were tested with
 # (sandbox/image.sh) replaces the one the config names, as a link, so a
 # running guest keeps the image it started with. The log's tables are
 # brought up to date first when an `admin-url` file (the Postgres admin
@@ -33,8 +34,9 @@ else
   echo "::warning::no $admin: the log's tables were not migrated"
 fi
 
+npm ci --prefix browser --omit=dev
 release/publish.sh appliance "$version" "$updates" "$notes" \
-  target/release/magnus target/release/magnus-adapter-anthropic target/release/magnus-adapter-openai
+  target/release/magnus target/release/magnus-adapter-anthropic target/release/magnus-adapter-openai browser
 published=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$updates/appliance/latest.json")
 [ "$published" = "$version" ] || exit 0
 if [ "$automatic" != true ] || [ "$minutes" = 0 ]; then

@@ -4,7 +4,7 @@
 # (DECISIONS.md, "Appliance updates"). Run by CI on the build box after the
 # release's tests pass; the signing key never leaves that machine.
 #
-#   release/publish.sh appliance VERSION UPDATES_DIR NOTES_FILE PROGRAM...
+#   release/publish.sh appliance VERSION UPDATES_DIR NOTES_FILE PROGRAM_OR_DIR...
 #   release/publish.sh desktop   VERSION UPDATES_DIR NOTES_FILE DIST_DIR [CHANNEL]
 #
 # The desktop app's CHANNEL (DECISIONS.md, "Release channels") is
@@ -97,7 +97,7 @@ appliance)
   mkdir -p "$dir"
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
-  for p in "$@"; do cp "$p" "$stage/"; done
+  for p in "$@"; do cp -rL "$p" "$stage/"; done
   echo "$version" > "$stage/VERSION"
   file=magnus-appliance-$version.tar.gz
   tar -C "$stage" -czf "$dir/$file" .
