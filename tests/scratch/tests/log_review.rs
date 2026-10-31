@@ -87,3 +87,27 @@ async fn a_restore_waits_for_no_kernel_and_a_rolled_back_log_still_backs_up() {
     app.restart().await;
     assert_eq!(alice.task(&t).await["status"], "failed");
 }
+
+/// Review of master (2026-10-31): a kernel started in place of one just
+/// killed (a crash, a restart) found the killed one's lock still held, as
+/// Postgres ends its session a moment later, and exited; under load the
+/// invariant 3 crash test failed so in CI. It waits for the lock a while.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kernel_started_in_place_of_one_just_killed_waits_for_its_lock() {
+    let m = FakeModel::start(steps(vec![fail("nothing to do")])).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    app.kill().await;
+    // The killed kernel's session, as Postgres keeps it a moment longer.
+    let lock = app.db.admin().await;
+    assert!(lock.query_one("SELECT pg_try_advisory_lock(7239001)", &[]).await.unwrap().get::<_, bool>(0));
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        drop(lock);
+    });
+    // The harness fails if the appliance exits instead of coming up.
+    app.restart().await;
+    release.await.unwrap();
+    let alice = app.api("alice");
+    let t = alice.submit("Say hello.").await;
+    alice.wait_settled(&t).await;
+}
