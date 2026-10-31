@@ -26,6 +26,7 @@ pub mod kernel;
 pub mod knowledge;
 pub mod library;
 pub mod log;
+pub mod identity;
 pub mod oidc;
 pub mod policy;
 pub mod run;

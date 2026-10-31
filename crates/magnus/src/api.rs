@@ -104,6 +104,8 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/fonts/{file}", get(ui_font))
         .route("/v1/health", get(health))
         .route("/v1/sign-in", get(sign_in_method).post(sign_in))
+        .route("/v1/sign-in/browser", post(browser_begin))
+        .route("/v1/sign-in/browser/finish", post(browser_finish))
         .route("/v1/sign-in/device", post(device_start))
         .route("/v1/sign-in/device/{flow}", post(device_poll))
         .route("/v1/sign-out", post(sign_out))
@@ -208,15 +210,76 @@ async fn sign_in_method(State(k): K) -> Response {
     }
 }
 
-/// Password sign-in: the only way without an identity provider, and the
-/// backup with one.
-async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+/// A request made on the appliance's own machine: from a loopback address,
+/// and not passed on by a proxy or tunnel there, which connects from
+/// loopback for callers anywhere and says so in one of these headers.
+fn on_this_machine(peer: SocketAddr, h: &HeaderMap) -> bool {
+    peer.ip().to_canonical().is_loopback() && !["forwarded", "x-forwarded-for", "x-real-ip", "cf-connecting-ip"].iter().any(|n| h.contains_key(*n))
+}
+
+/// Username and password, typed in the app. With an identity provider the
+/// provider checks them (and the code from an authenticator app, when the
+/// person uses one); the owner's password set on the appliance is their
+/// backup when the provider is down or refuses, on the appliance's own
+/// machine only, since it asks for no second factor; nobody else's counts.
+/// Without one, only the appliance's own passwords.
+async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Json(b): Json<Value>) -> Response {
     if let Err(r) = over_tls(&k, t, peer) {
         return r;
     }
     let person = b["person"].as_str().unwrap_or_default().trim().to_lowercase();
     let password = b["password"].as_str().unwrap_or_default();
+    let code = b["code"].as_str().map(str::trim).filter(|c| !c.is_empty());
     let app = b["client"].as_str() == Some("app");
+    let locked = |until: chrono::DateTime<chrono::Utc>| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": format!("Too many wrong passwords. Try again after {}.", until.format("%H:%M UTC")), "retry_at": until })),
+        )
+            .into_response()
+    };
+    if let Some(id) = k.identity() {
+        if let Some(until) = k.accounts.locked(&person) {
+            return locked(until);
+        }
+        let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h);
+        // The first time, the provider's own page signs them in: it can walk
+        // them through what a new account needs. The owner's backup password
+        // needs nothing from the provider.
+        if !k.read(|s| s.signed_in_before.contains(&person)) && !backup {
+            return provider_answered(&k, t, id.label(), crate::identity::Polled::UseBrowser(format!("The first time, sign in on the {} page that just opened in your browser.", id.label()))).await;
+        }
+        let answer = match id.password(&person, password, code, app).await {
+            Ok(polled @ crate::identity::Polled::Done { .. }) => {
+                k.accounts.succeeded(&person);
+                return provider_answered(&k, t, id.label(), polled).await;
+            }
+            Ok(polled) => Some(polled),
+            Err(e) => {
+                tracing::warn!("identity: {} could not check a password: {e:#}", id.label());
+                None
+            }
+        };
+        if !backup {
+            if matches!(answer, Some(crate::identity::Polled::Refused(_))) && k.cfg.person(&person).is_some() {
+                k.accounts.failed(&person);
+            }
+            return match answer {
+                Some(polled) => provider_answered(&k, t, id.label(), polled).await,
+                None => err(StatusCode::BAD_GATEWAY, format!("{} is not answering. Try again in a few minutes.", id.label())),
+            };
+        }
+        // The owner's backup, before whatever else the provider said.
+        return match k.accounts.sign_in(&person, password) {
+            Ok(Ok(_)) => issue(&k, t, &person, app).await,
+            Ok(Err(crate::accounts::SignInError::Rejected)) => match answer {
+                Some(polled) => provider_answered(&k, t, id.label(), polled).await,
+                None => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
+            },
+            Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
+            Err(e) => internal(e),
+        };
+    }
     if k.cfg.person(&person).is_none() {
         // Same answer and the same work as a wrong password.
         let _ = k.accounts.sign_in(&person, password);
@@ -225,11 +288,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
     match k.accounts.sign_in(&person, password) {
         Ok(Ok(_)) => issue(&k, t, &person, app).await,
         Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
-        Ok(Err(crate::accounts::SignInError::Locked(until))) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({ "error": format!("Too many wrong passwords. Try again after {}.", until.format("%H:%M UTC")), "retry_at": until })),
-        )
-            .into_response(),
+        Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
         Err(e) => internal(e),
     }
 }
@@ -262,10 +321,20 @@ async fn device_poll(State(k): K, Extension(t): Extension<Transport>, ConnectInf
     }
     let Some(o) = &k.oidc else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
     match o.poll(&flow).await {
-        Ok(crate::oidc::Polled::Pending) => (StatusCode::ACCEPTED, Json(json!({ "pending": true }))).into_response(),
-        Ok(crate::oidc::Polled::Done { person, app, rights }) => {
+        Ok(polled) => provider_answered(&k, t, o.label(), polled).await,
+        Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+/// What the identity provider answered about a sign-in: wait, a session for
+/// a person of this appliance with the rights the provider gives, or no.
+async fn provider_answered(k: &Kernel, t: Transport, label: String, polled: crate::identity::Polled) -> Response {
+    use crate::identity::Polled;
+    match polled {
+        Polled::Pending => (StatusCode::ACCEPTED, Json(json!({ "pending": true }))).into_response(),
+        Polled::Done { person, app, rights } => {
             if k.cfg.person(&person).is_none() {
-                tracing::warn!("oidc: {person} signed in at {} but is not a person on this appliance", o.label());
+                tracing::warn!("identity: {person} signed in at {label} but is not a person on this appliance");
                 return err(StatusCode::FORBIDDEN, format!("You signed in as {person}, who is not a person on this appliance. Ask the owner to add you."));
             }
             // What the provider says the person may do now counts from here
@@ -276,9 +345,45 @@ async fn device_poll(State(k): K, Extension(t): Extension<Transport>, ConnectInf
                     return internal(e);
                 }
             }
-            issue(&k, t, &person, app).await
+            issue(k, t, &person, app).await
         }
-        Ok(crate::oidc::Polled::Failed(m)) => err(StatusCode::GONE, m),
+        Polled::Failed(m) => err(StatusCode::GONE, m),
+        Polled::NeedsCode => {
+            (StatusCode::UNAUTHORIZED, Json(json!({ "code_needed": true, "error": "Enter the 6-digit code from your authenticator app." }))).into_response()
+        }
+        Polled::Refused(m) => err(StatusCode::UNAUTHORIZED, m),
+        Polled::UseBrowser(m) => (StatusCode::UNAUTHORIZED, Json(json!({ "browser": true, "error": m }))).into_response(),
+    }
+}
+
+/// Begin a sign-in in the person's own browser (the app's way): it comes
+/// back to `redirect_uri`, a loopback address on their computer, and the app
+/// finishes it at `/v1/sign-in/browser/finish`.
+async fn browser_begin(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let Some(id) = k.identity() else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
+    let Some(redirect_uri) = b["redirect_uri"].as_str() else { return err(StatusCode::BAD_REQUEST, "name the redirect address") };
+    if let Err(e) = crate::connectors::loopback(redirect_uri) {
+        return err(StatusCode::BAD_REQUEST, format!("{e:#}"));
+    }
+    let hint = b["login_hint"].as_str().map(str::trim).filter(|h| !h.is_empty());
+    match id.begin(redirect_uri, hint, b["client"].as_str() == Some("app")).await {
+        Ok(s) => Json(json!({ "state": s.state, "authorize_url": s.authorize_url, "expires_in": s.expires_in, "label": id.label() })).into_response(),
+        Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+/// Finish a browser sign-in with what came back to the loopback address.
+async fn browser_finish(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let Some(id) = k.identity() else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
+    let (Some(state), Some(code)) = (b["state"].as_str(), b["code"].as_str()) else { return err(StatusCode::BAD_REQUEST, "send the state and code that came back") };
+    match id.finish(state, code, b["iss"].as_str()).await {
+        Ok(polled) => provider_answered(&k, t, id.label(), polled).await,
         Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }
