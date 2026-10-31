@@ -321,15 +321,12 @@ impl Provider {
             // The password grant checks the password and an authenticator
             // code, nothing more: a person with a security key, or a step
             // still to do, signs in on the provider's page. Not knowing, the
-            // page too, unless the provider has just checked a code with the
-            // password: that is two factors already.
+            // page too: the provider ignores a code from a person without an
+            // authenticator app, so a code proves nothing until it knows.
             let to_page = || Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label()));
             match self.account(d, username).await {
                 Ok(Some(a)) if a.enabled && !a.browser_only => {}
                 Ok(_) => return Ok(to_page()),
-                Err(e) if code.is_some() => {
-                    tracing::warn!("oidc: cannot tell whether {username} has a security key; their password and authenticator code were checked: {e:#}");
-                }
                 Err(e) => {
                     tracing::warn!("oidc: cannot tell whether {username} needs the provider's page (a security key, a step to do), so sending them there: {e:#}");
                     return Ok(to_page());

@@ -278,8 +278,11 @@ async fn a_password_keycloak_cannot_check_in_the_app_goes_to_the_browser() {
         assert_eq!((st, v["browser"].as_bool()), (401, Some(true)), "not sent to the browser: {v}");
         assert!(!v["error"].as_str().unwrap_or_default().contains("wrong"), "a right password was called wrong: {v}");
     }
+    // With her code too: the appliance still cannot tell whether her
+    // account needs a security key (the provider ignores a code from
+    // someone without an authenticator app), so the browser.
     let (st, v) = kc.app_password(&app, "carol", &pw, Some(&code_for(&secret))).await;
-    assert_eq!((st, v["person"]["id"].as_str()), (200, Some("carol")), "locked out after being sent to the browser: {v}");
+    assert_eq!((st, v["browser"].as_bool()), (401, Some(true)), "signed in without knowing whether a security key is needed: {v}");
 
     // Keycloak's admin API on an address of its own (`hostname-admin`), as
     // strix-alpha's is: the status client asks there.
@@ -289,6 +292,12 @@ async fn a_password_keycloak_cannot_check_in_the_app_goes_to_the_browser() {
     kc.configure_with(&mut app, &[("status_admin_url", &server_url())]).await;
     let (st, v) = kc.app_password(&app, "carol", &pw, None).await;
     assert_eq!((st, v["code_needed"].as_bool()), (401, Some(true)), "no code asked for through the admin address: {v}");
+    // None of the times she was sent to the browser counted against her
+    // (with the next code: Keycloak took the one above).
+    let wait = 30 - std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() % 30;
+    tokio::time::sleep(std::time::Duration::from_secs(wait) + std::time::Duration::from_millis(500)).await;
+    let (st, v) = kc.app_password(&app, "carol", &pw, Some(&code_for(&secret))).await;
+    assert_eq!((st, v["person"]["id"].as_str()), (200, Some("carol")), "locked out after being sent to the browser: {v}");
 }
 
 /// Option 1 of docs/proposals/accounts.md: the username and password typed
