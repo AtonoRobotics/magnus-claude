@@ -150,6 +150,15 @@ pub struct Oidc {
     /// The vault secret holding that client's secret.
     #[serde(default)]
     pub status_credential: Option<String>,
+    /// Where Keycloak's admin API answers, when not at the issuer's host: a
+    /// server can keep it on an address of its own (`hostname-admin`), such
+    /// as `https://127.0.0.1:19446`. Unset: the issuer's host.
+    #[serde(default)]
+    pub status_admin_url: Option<String>,
+    /// A PEM certificate authority to trust for that address, when a
+    /// private one issued its certificate.
+    #[serde(default)]
+    pub status_admin_ca: Option<std::path::PathBuf>,
 }
 
 fn person_claim() -> String {

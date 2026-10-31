@@ -5,7 +5,7 @@
 
 use magnus_invariants::appliance::{bin, Person};
 use magnus_invariants::{mcp, *};
-use magnus_scratch::{code_for, loopback_once, password_of, Keycloak, IDP_LABEL};
+use magnus_scratch::{code_for, loopback_once, password_of, server_url, Keycloak, IDP_LABEL};
 use serde_json::{json, Value};
 use std::io::Write;
 
@@ -266,6 +266,14 @@ async fn a_password_keycloak_cannot_check_in_the_app_goes_to_the_browser() {
     let (st, v) = kc.app_password(&app, "carol", &pw, Some(&code_for(&secret))).await;
     assert_eq!((st, v["person"]["id"].as_str()), (200, Some("carol")), "locked out after being sent to the browser: {v}");
 
+    // Keycloak's admin API on an address of its own (`hostname-admin`), as
+    // strix-alpha's is: the status client asks there.
+    kc.configure_with(&mut app, &[("status_admin_url", "http://127.0.0.1:1")]).await;
+    let (st, v) = kc.app_password(&app, "carol", &pw, None).await;
+    assert_eq!((st, v["browser"].as_bool()), (401, Some(true)), "the admin address set was not the one asked: {v}");
+    kc.configure_with(&mut app, &[("status_admin_url", &server_url())]).await;
+    let (st, v) = kc.app_password(&app, "carol", &pw, None).await;
+    assert_eq!((st, v["code_needed"].as_bool()), (401, Some(true)), "no code asked for through the admin address: {v}");
 }
 
 /// Option 1 of docs/proposals/accounts.md: the username and password typed
