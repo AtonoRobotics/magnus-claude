@@ -97,7 +97,6 @@ jobs:
         run: cargo build --workspace --bins
       # The sandbox guest built from this commit (sandbox/image.sh).
       - name: Sandbox image
-        if: env.MAGNUS_TESTED != '1'
         run: |
           d=$(sandbox/image.sh)
           echo "MAGNUS_GUEST_KERNEL=$d/vmlinux" >> "$GITHUB_ENV"
