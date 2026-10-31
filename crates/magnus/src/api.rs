@@ -1412,7 +1412,7 @@ async fn resume_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
         Err(r) => return r,
     };
     let Some((person, paused, on)) = k.read(|s| s.schedules.get(&id).map(|x| (x.person.clone(), x.paused.is_some(), x.paused_on.clone()))) else { return err(StatusCode::NOT_FOUND, "no such schedule") };
-    if person != p.id && !p.is_owner() {
+    if person != p.id {
         return err(StatusCode::NOT_FOUND, "no such schedule");
     }
     if !paused {
