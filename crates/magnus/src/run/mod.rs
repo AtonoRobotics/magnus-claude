@@ -178,10 +178,16 @@ impl Kernel {
     }
 
     /// A task from chat keeps the conversation it came from with its
-    /// contract, for the person to see beside it.
+    /// contract, for the person to see beside it. The kernel writes that
+    /// field: whatever the model sent there is dropped, so a contract can
+    /// never show the person words they did not say.
     fn with_conversation(&self, run: &Run, mut contract: Value) -> Value {
-        if let Some(c) = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.clone())).filter(|c| !c.turn) {
-            contract["conversation"] = json!(c.conversation);
+        let chat = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.clone())).filter(|c| !c.turn);
+        if let Some(m) = contract.as_object_mut() {
+            m.remove("conversation");
+            if let Some(c) = chat {
+                m.insert("conversation".into(), json!(c.conversation));
+            }
         }
         contract
     }
