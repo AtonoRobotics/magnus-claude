@@ -5,7 +5,7 @@
 
 use magnus_invariants::appliance::{bin, Person};
 use magnus_invariants::{mcp, *};
-use magnus_scratch::{code_for, loopback_once, password_of, Keycloak, IDP_LABEL};
+use magnus_scratch::{code_for, loopback_once, password_of, server_url, Keycloak, IDP_LABEL};
 use serde_json::{json, Value};
 use std::io::Write;
 
@@ -230,6 +230,50 @@ async fn sign_in_through_keycloak_keeps_no_provider_token_and_only_the_owner_kee
     assert_eq!(st, 200, "the owner's backup did not work on this machine over HTTPS: {v}");
     let (st, v) = over(format!("{lan}:{port}")).await;
     assert_eq!(st, 401, "the owner's backup worked from another address ({lan}): {v}");
+}
+
+/// When Keycloak cannot check a password typed in the app (Direct access
+/// grants off, or the status client cannot ask whether the person uses a
+/// code), the person is sent to Keycloak's page in the browser: never told
+/// a right password is wrong, and never locked out for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_password_keycloak_cannot_check_in_the_app_goes_to_the_browser() {
+    let model = FakeModel::start(steps(vec![])).await;
+    let mut app = Appliance::start(spec(), &model).await;
+    let kc = Keycloak::start().await;
+    kc.add_person("carol").await;
+    // The status client's secret is not in the vault under this name.
+    kc.configure_with(&mut app, &[("status_credential", "no_such_secret")]).await;
+    let pw = password_of("carol");
+    let (st, v) = kc.app_sign_in(&app, "carol").await;
+    assert_eq!(st, 200, "{v}");
+
+    // Keycloak refuses passwords typed in the app altogether: its page.
+    kc.set_direct_grants(false).await;
+    let (st, v) = kc.app_password(&app, "carol", &pw, None).await;
+    assert_eq!((st, v["browser"].as_bool()), (401, Some(true)), "not sent to the browser: {v}");
+    let (st, v) = kc.app_sign_in(&app, "carol").await;
+    assert_eq!(st, 200, "the browser did not sign her in: {v}");
+    kc.set_direct_grants(true).await;
+
+    // She uses a code, and the appliance cannot ask Keycloak whether she does.
+    let secret = kc.add_code("carol").await;
+    for _ in 0..8 {
+        let (st, v) = kc.app_password(&app, "carol", &pw, None).await;
+        assert_eq!((st, v["browser"].as_bool()), (401, Some(true)), "not sent to the browser: {v}");
+        assert!(!v["error"].as_str().unwrap_or_default().contains("wrong"), "a right password was called wrong: {v}");
+    }
+    let (st, v) = kc.app_password(&app, "carol", &pw, Some(&code_for(&secret))).await;
+    assert_eq!((st, v["person"]["id"].as_str()), (200, Some("carol")), "locked out after being sent to the browser: {v}");
+
+    // Keycloak's admin API on an address of its own (`hostname-admin`), as
+    // strix-alpha's is: the status client asks there.
+    kc.configure_with(&mut app, &[("status_admin_url", "http://127.0.0.1:1")]).await;
+    let (st, v) = kc.app_password(&app, "carol", &pw, None).await;
+    assert_eq!((st, v["browser"].as_bool()), (401, Some(true)), "the admin address set was not the one asked: {v}");
+    kc.configure_with(&mut app, &[("status_admin_url", &server_url())]).await;
+    let (st, v) = kc.app_password(&app, "carol", &pw, None).await;
+    assert_eq!((st, v["code_needed"].as_bool()), (401, Some(true)), "no code asked for through the admin address: {v}");
 }
 
 /// Option 1 of docs/proposals/accounts.md: the username and password typed

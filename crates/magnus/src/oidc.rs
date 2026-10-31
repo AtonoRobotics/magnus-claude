@@ -86,6 +86,8 @@ pub struct Provider {
     /// Holds the status client's secret.
     vault: Arc<crate::vault::Vault>,
     http: reqwest::Client,
+    /// For Keycloak's admin API, trusting `status_admin_ca` too.
+    admin_http: reqwest::Client,
     discovery: tokio::sync::OnceCell<Discovery>,
     pending: Mutex<BTreeMap<String, Pending>>,
     code_flows: Mutex<BTreeMap<String, CodeFlow>>,
@@ -133,7 +135,16 @@ impl Provider {
     pub fn new(cfg: Cfg, vault: Arc<crate::vault::Vault>) -> Result<Provider> {
         checked(&cfg.issuer)?;
         let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
-        Ok(Provider { cfg, vault, http, discovery: tokio::sync::OnceCell::new(), pending: Mutex::new(BTreeMap::new()), code_flows: Mutex::new(BTreeMap::new()) })
+        if let Some(u) = &cfg.status_admin_url {
+            checked(u)?;
+        }
+        let mut admin = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+        if let Some(ca) = &cfg.status_admin_ca {
+            let pem = std::fs::read(ca).with_context(|| format!("reading status_admin_ca {}", ca.display()))?;
+            admin = admin.add_root_certificate(reqwest::Certificate::from_pem(&pem).with_context(|| format!("{} is not a PEM certificate", ca.display()))?);
+        }
+        let admin_http = admin.build()?;
+        Ok(Provider { cfg, vault, http, admin_http, discovery: tokio::sync::OnceCell::new(), pending: Mutex::new(BTreeMap::new()), code_flows: Mutex::new(BTreeMap::new()) })
     }
 
     /// What the sign-in button names.
@@ -294,13 +305,19 @@ impl Provider {
                 Ok(Some(true)) => Ok(Polled::NeedsCode),
                 Ok(Some(false)) => Ok(Polled::Refused("The name or password is wrong.".into())),
                 Ok(None) => Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label()))),
+                // Not knowing, the password may be right and only the code
+                // missing: Keycloak's own page asks for whatever it needs.
                 Err(e) => {
-                    tracing::warn!("oidc: cannot tell whether {username} uses a code: {e:#}");
-                    Ok(Polled::Refused("The name or password is wrong.".into()))
+                    tracing::warn!("oidc: cannot tell whether {username} uses a code, so sending them to the browser: {e:#}");
+                    Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label())))
                 }
             },
             "invalid_grant" => Ok(Polled::Refused("The name, password or code is wrong.".into())),
-            "unauthorized_client" => bail!("{} does not let client {} sign in with a password: turn on Direct access grants for it", self.label(), self.cfg.client_id),
+            // Its page still signs the person in; the owner is told what to change.
+            "unauthorized_client" => {
+                tracing::warn!("oidc: {} does not let client {} sign in with a password typed in the app; turn on Direct access grants for it", self.label(), self.cfg.client_id);
+                Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label())))
+            }
             other => bail!("{} refused the sign-in: {}", self.label(), if why.is_empty() { if other.is_empty() { status.as_str() } else { other } } else { why }),
         }
     }
@@ -315,7 +332,7 @@ impl Provider {
         };
         let secret = self.vault.get(credential)?.ok_or_else(|| anyhow!("the vault holds no secret named {credential}"))?;
         let admin = match d.issuer.split_once("/realms/") {
-            Some((base, realm)) => format!("{base}/admin/realms/{realm}"),
+            Some((base, realm)) => format!("{}/admin/realms/{realm}", self.cfg.status_admin_url.as_deref().map(|u| u.trim_end_matches('/')).unwrap_or(base)),
             None => bail!("{} is not a Keycloak realm, whose admin API says who uses a code", d.issuer),
         };
         let r = self.http.post(&d.token_endpoint).form(&[("grant_type", "client_credentials"), ("client_id", client.as_str()), ("client_secret", secret.expose())]).send().await?;
@@ -327,9 +344,9 @@ impl Provider {
         };
         let mut u = url::Url::parse(&format!("{admin}/users"))?;
         u.query_pairs_mut().append_pair("username", username).append_pair("exact", "true");
-        let users: Vec<Value> = self.http.get(u).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
+        let users: Vec<Value> = self.admin_http.get(u).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
         let Some(id) = users.first().and_then(|x| x["id"].as_str()) else { return Ok(None) };
-        let creds: Vec<Value> = self.http.get(format!("{admin}/users/{id}/credentials")).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
+        let creds: Vec<Value> = self.admin_http.get(format!("{admin}/users/{id}/credentials")).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
         Ok(Some(creds.iter().any(|c| c["type"] == "otp")))
     }
 
