@@ -455,6 +455,52 @@ async fn a_task_from_chat_needs_a_title() {
     assert!(alice.tasks().await["tasks"].as_array().unwrap().is_empty(), "a task started without a title");
 }
 
+/// Confirms that race in decide a card once: one schedule, one success
+/// (from the closed PR #1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_card_confirmed_twice_at_once_makes_one_schedule() {
+    let m = FakeModel::start(model(
+        |_, turn| match turn {
+            0 => tool("create_schedule", json!({ "text": "Summarise the news.", "daily_at": "07:30", "scope": "Searches the web; sends nothing." })),
+            _ => say("Confirm the card."),
+        },
+        vec![],
+    ))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (thread, turn) = chat(&alice, "Every morning, summarise the news.", None).await;
+    alice.wait_settled(&turn).await;
+    let card = wait_entry(&alice, &thread, |e| e["kind"] == "schedule_card").await;
+    let path = format!("/v1/chat/cards/{}", card["card"].as_str().unwrap());
+    let answers = futures::future::join_all((0..8).map(|_| alice.post(&path, json!({ "decision": "confirm" })))).await;
+    assert_eq!(answers.iter().filter(|(st, _)| st.is_success()).count(), 1, "{answers:?}");
+    let (_, s) = alice.get("/v1/schedules").await;
+    assert_eq!(s["schedules"].as_array().unwrap().len(), 1, "{s}");
+}
+
+/// Answers that race on one inbox item decide it once (from the closed
+/// PR #1, where this was part of the thread-taint test).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_answered_twice_at_once_is_decided_once() {
+    let mail = mcp::mail().start().await;
+    let m = FakeModel::start(model(
+        |_, turn| if turn == 0 { tool("create_task", json!({ "title": "Email Bob the agenda", "text": "Email Bob the agenda." })) } else { say("Started.") },
+        vec![simple_contract(), tool("mail__send", json!({ "to": "bob@corp.example", "subject": "Agenda", "body": "1. Budget" }))],
+    ))
+    .await;
+    let app = Appliance::start(Spec::default().app("mail", &mail, "public", "private", &[("send", "irreversible"), ("list_sent", "read")]), &m).await;
+    let alice = app.api("alice");
+    let (thread, turn) = chat(&alice, "Email Bob the agenda.", None).await;
+    alice.wait_settled(&turn).await;
+    let id = wait_entry(&alice, &thread, |e| e["kind"] == "tasks").await["tasks"][0]["task_id"].as_str().unwrap().to_string();
+    let item = alice.wait_item(&id, "approval").await;
+    let path = format!("/v1/inbox/{}", item["id"].as_str().unwrap());
+    let answers = futures::future::join_all((0..8).map(|_| alice.post(&path, json!({ "decision": "reject" })))).await;
+    assert_eq!(answers.iter().filter(|(st, _)| st.is_success()).count(), 1, "the item was decided more than once: {answers:?}");
+    assert_eq!(mail.effects("send"), 0);
+}
+
 use chrono::Timelike;
 
 /// A person picks the model for a task and for each chat message from what

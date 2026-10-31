@@ -357,6 +357,7 @@ impl Kernel {
     /// card. A confirmed schedule acts for them (K54), within the card's
     /// budget, and its runs start with the taint the turn had.
     pub async fn decide_card(&self, person: &str, card: &str, decision: &str) -> Result<std::result::Result<Value, CardRefusal>> {
+        let _decide = self.decide.lock().await;
         let found = self.read(|s| {
             s.runs.values().find_map(|r| {
                 let t = s.tasks.get(&r.task).filter(|t| t.is_chat_turn() && t.person == person)?;

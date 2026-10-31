@@ -23,6 +23,9 @@ pub struct Kernel {
     pub(crate) log: Log,
     state: Mutex<State>,
     write: tokio::sync::Mutex<()>,
+    /// Held while a person's decision is checked and recorded, so an inbox
+    /// item or a chat card is decided once however many answers race in.
+    pub(crate) decide: tokio::sync::Mutex<()>,
     pub vault: Arc<Vault>,
     pub accounts: crate::accounts::Accounts,
     /// Sign-in through an identity provider, when one is configured.
@@ -115,6 +118,7 @@ impl Kernel {
             log,
             state: Mutex::new(state),
             write: tokio::sync::Mutex::new(()),
+            decide: tokio::sync::Mutex::new(()),
             drivers: Mutex::new(HashSet::new()),
             leases: Mutex::new(HashMap::new()),
             live_tools: tokio::sync::Mutex::new(HashMap::new()),
