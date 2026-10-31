@@ -201,6 +201,35 @@ async fn sign_in_through_keycloak_keeps_no_provider_token_and_only_the_owner_kee
     assert!(set_password(&app, "alice", PASSWORD).status.success());
     let (st, v) = sign_in(&app, "alice", PASSWORD).await;
     assert_eq!((st.as_u16(), v["person"]["id"].as_str()), (200, Some("alice")), "the owner's backup did not sign her in: {v}");
+
+    // Only on the appliance's own machine (owner, 2026-10-30: "Make it
+    // available only from the appliances own machine"): not through a
+    // proxy in front of it, and not from another address.
+    for (name, value) in [("x-forwarded-for", "203.0.113.7"), ("forwarded", "for=203.0.113.7"), ("x-real-ip", "203.0.113.7")] {
+        let r = reqwest::Client::new().post(format!("{}/v1/sign-in", app.base)).header(name, value).json(&json!({ "person": "alice", "password": PASSWORD, "client": "app" })).send().await.unwrap();
+        assert_eq!(r.status(), 401, "the owner's backup worked through a proxy ({name})");
+    }
+    // The machine's own network address, which is not loopback.
+    let lan = {
+        let s = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        s.connect("192.0.2.1:9").unwrap();
+        s.local_addr().unwrap().ip()
+    };
+    assert!(!lan.is_loopback(), "no network address to sign in from");
+    let port = std::net::TcpListener::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port();
+    magnus_scratch::reconfigure(&mut app, |c| {
+        c["appliance"].as_table_mut().unwrap().insert("tls_listen".into(), format!("0.0.0.0:{port}").into());
+    })
+    .await;
+    let over = |host: String| async move {
+        let r = reqwest::Client::builder().danger_accept_invalid_certs(true).build().unwrap().post(format!("https://{host}/v1/sign-in")).json(&json!({ "person": "alice", "password": PASSWORD, "client": "app" })).send().await.unwrap();
+        let st = r.status();
+        (st, r.json::<Value>().await.unwrap_or(Value::Null))
+    };
+    let (st, v) = over(format!("127.0.0.1:{port}")).await;
+    assert_eq!(st, 200, "the owner's backup did not work on this machine over HTTPS: {v}");
+    let (st, v) = over(format!("{lan}:{port}")).await;
+    assert_eq!(st, 401, "the owner's backup worked from another address ({lan}): {v}");
 }
 
 /// Option 1 of docs/proposals/accounts.md: the username and password typed

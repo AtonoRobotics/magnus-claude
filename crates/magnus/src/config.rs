@@ -567,8 +567,9 @@ impl Config {
     /// Whether a password set on the appliance signs this person in. With an
     /// identity provider it is the owner's backup alone, so turning someone
     /// off at the provider shuts them out (owner, 2026-10-30: "The back up
-    /// password is only for me"); the owner is read from this file, never
-    /// from the provider. Without one, it is everyone's way in.
+    /// password is only for me"), and only on the appliance's own machine
+    /// (the API checks where); the owner is read from this file, never from
+    /// the provider. Without one, it is everyone's way in.
     pub fn may_use_password(&self, id: &str) -> bool {
         self.person(id).is_some_and(|p| self.sign_in.oidc.is_none() || p.is_owner())
     }

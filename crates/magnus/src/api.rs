@@ -210,12 +210,20 @@ async fn sign_in_method(State(k): K) -> Response {
     }
 }
 
+/// A request made on the appliance's own machine: from a loopback address,
+/// and not passed on by a proxy or tunnel there, which connects from
+/// loopback for callers anywhere and says so in one of these headers.
+fn on_this_machine(peer: SocketAddr, h: &HeaderMap) -> bool {
+    peer.ip().to_canonical().is_loopback() && !["forwarded", "x-forwarded-for", "x-real-ip", "cf-connecting-ip"].iter().any(|n| h.contains_key(*n))
+}
+
 /// Username and password, typed in the app. With an identity provider the
 /// provider checks them (and the code from an authenticator app, when the
 /// person uses one); the owner's password set on the appliance is their
-/// backup when the provider is down or refuses, and nobody else's counts.
+/// backup when the provider is down or refuses, on the appliance's own
+/// machine only, since it asks for no second factor; nobody else's counts.
 /// Without one, only the appliance's own passwords.
-async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Json(b): Json<Value>) -> Response {
     if let Err(r) = over_tls(&k, t, peer) {
         return r;
     }
@@ -234,7 +242,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         if let Some(until) = k.accounts.locked(&person) {
             return locked(until);
         }
-        let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person);
+        let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h);
         // The first time, the provider's own page signs them in: it can walk
         // them through what a new account needs. The owner's backup password
         // needs nothing from the provider.

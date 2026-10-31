@@ -19,6 +19,7 @@ decisions of 2026-10-30, newest last:
 5. "Open browser the first time or if user is not found."
 6. "The back up password is only for me. It should not be allowed for anyone
    else."
+7. "Make it available only from the appliances own machine."
 
 ## Sign-in (built)
 
@@ -58,7 +59,10 @@ issuer (RFC 9207 `iss` too), audience, expiry and nonce. The appliance's own
 page in a browser uses the device grant for the same cases.
 
 **The owner's backup.** A password set on the appliance (`magnus password`)
-signs in only the owner, when Keycloak is down or refuses. It is tried
+signs in only the owner, only on the appliance's own machine (a loopback
+connection with no proxy headers), when Keycloak is down or refuses. From
+anywhere else, Keycloak's answer stands, so the backup cannot skip
+Keycloak's two-factor. It is tried
 before Keycloak's "use the browser" or "enter your code" answers, so the
 owner never needs the browser. `magnus password` refuses anyone else, and a
 password someone had before Keycloak was set up stops counting, so turning
