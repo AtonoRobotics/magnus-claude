@@ -17,8 +17,14 @@
 //! cannot start, it swaps back and runs the old release, which resumes them.
 //! The owner can go back one release the same way.
 //!
-//! The desktop app's packages are served from `desktop/` to the apps
-//! (`/v1/updates/desktop/...`), which check their own signatures.
+//! The desktop app's packages are served to the apps, which check their own
+//! signatures, from three release channels (DECISIONS.md, "Release
+//! channels"): development (pull requests' builds, not merged;
+//! `desktop/development/`), test (master, merged; `desktop/test/`) and
+//! production (tagged releases; `desktop/`). The appliance decides which an
+//! app gets: the owner's apps development, testers' test, everyone else's
+//! production, and production's build to any app whose channel's is older.
+//! An app only ever moves forward.
 
 use crate::config::Config;
 use crate::events::Ev;
@@ -389,18 +395,61 @@ pub fn schedule(k: Arc<Kernel>) {
     });
 }
 
-/// The desktop app's release manifest for the apps, with each package's
-/// address on this appliance (`origin` is the address the app used).
-pub fn desktop_manifest(cfg: &Config, origin: &str) -> Option<Value> {
-    let mut m: Value = serde_json::from_slice(&std::fs::read(cfg.updates_dir().join("desktop/latest.json")).ok()?).ok()?;
+/// The desktop app's release channels.
+pub const CHANNELS: [&str; 3] = ["development", "test", "production"];
+
+fn channel_dir(cfg: &Config, c: &str) -> PathBuf {
+    let desktop = cfg.updates_dir().join("desktop");
+    if c == "production" {
+        desktop
+    } else {
+        desktop.join(c)
+    }
+}
+
+fn channel_release(cfg: &Config, c: &str) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(channel_dir(cfg, c).join("latest.json")).ok()?).ok()
+}
+
+/// The desktop app's release manifest for an app on `channel`: the
+/// channel's build, or production's while the channel has none, with each
+/// package's address on this appliance (`origin` is the address the app
+/// used).
+pub fn desktop_manifest(cfg: &Config, origin: &str, channel: &str) -> Option<Value> {
+    // Not production's when it is newer: it need not hold the channel's work
+    // (a pull request not yet merged), and an app never loses what it has.
+    let channel = if channel_release(cfg, channel).is_some() { channel } else { "production" };
+    let mut m = channel_release(cfg, channel)?;
+    let files = if channel == "production" { "files".to_string() } else { format!("{channel}/files") };
     if let Some(platforms) = m["platforms"].as_object_mut() {
         for p in platforms.values_mut() {
             if let Some(f) = p["file"].as_str().map(String::from) {
-                p["url"] = json!(format!("{origin}/v1/updates/desktop/files/{f}"));
+                p["url"] = json!(format!("{origin}/v1/updates/desktop/{files}/{f}"));
             }
         }
     }
     Some(m)
+}
+
+/// The channel the app asking gets: development for the owner's apps, test
+/// for testers' (the `tester` role), production for everyone else's. Apps
+/// from before channels ask without a session and get the channel their
+/// version was built for: a pull request's (`.pr.<n>`) development, any
+/// other pre-release test; once updated, they ask with their session.
+pub fn assigned_channel(k: &Kernel, h: &HeaderMap) -> &'static str {
+    if crate::api::credential(h).is_none() {
+        let app = h.get("x-magnus-app").and_then(|v| v.to_str().ok()).and_then(|v| semver::Version::parse(v).ok());
+        return match app {
+            Some(v) if v.pre.split('.').any(|i| i == "pr") => "development",
+            Some(v) if !v.pre.is_empty() => "test",
+            _ => "production",
+        };
+    }
+    match crate::api::who(k, h) {
+        Ok(p) if p.is_owner() => "development",
+        Ok(p) if p.has_role("tester") => "test",
+        _ => "production",
+    }
 }
 
 use crate::api::{err, internal, owner, Transport};
@@ -422,7 +471,8 @@ pub fn router() -> Router<Arc<Kernel>> {
         .route("/v1/updates/check", post(check_now))
         .route("/v1/updates/rollback", post(roll_back))
         .route("/v1/updates/desktop/latest.json", get(desktop_latest))
-        .route("/v1/updates/desktop/files/{name}", get(desktop_file))
+        .route("/v1/updates/desktop/files/{name}", get(production_file))
+        .route("/v1/updates/desktop/{channel}/files/{name}", get(desktop_file))
 }
 
 /// Versions both ways: every answer names this release, and an app older
@@ -520,23 +570,30 @@ async fn roll_back(AxState(k): K, h: HeaderMap) -> Response {
     (StatusCode::ACCEPTED, Json(json!({ "status": "rolling_back", "version": version(), "to": to.trim() }))).into_response()
 }
 
-/// The apps ask without a session: an app too old to sign in can still update.
+/// The apps ask with their session if they have one; without, an app too old
+/// to sign in can still update. The appliance decides the channel.
 async fn desktop_latest(AxState(k): K, Extension(t): Extension<Transport>, h: HeaderMap) -> Response {
+    let channel = assigned_channel(&k, &h);
     let Some(host) = h.get("host").and_then(|v| v.to_str().ok()) else {
         return err(StatusCode::BAD_REQUEST, "no host");
     };
     let scheme = if t == Transport::Tls { "https" } else { "http" };
-    match desktop_manifest(&k.cfg, &format!("{scheme}://{host}")) {
+    match desktop_manifest(&k.cfg, &format!("{scheme}://{host}"), channel) {
         Some(m) => Json(m).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     }
 }
 
-async fn desktop_file(AxState(k): K, UrlPath(name): UrlPath<String>) -> Response {
-    if name.contains('/') || name.contains("..") || name == "latest.json" {
+/// Production's packages, at the address apps before channels were given.
+async fn production_file(k: K, UrlPath(name): UrlPath<String>) -> Response {
+    desktop_file(k, UrlPath(("production".into(), name))).await
+}
+
+async fn desktop_file(AxState(k): K, UrlPath((channel, name)): UrlPath<(String, String)>) -> Response {
+    if !CHANNELS.contains(&channel.as_str()) || name.contains('/') || name.contains("..") || name == "latest.json" {
         return err(StatusCode::NOT_FOUND, "no such file");
     }
-    match tokio::fs::read(k.cfg.updates_dir().join("desktop").join(&name)).await {
+    match tokio::fs::read(channel_dir(&k.cfg, &channel).join(&name)).await {
         Ok(b) => ([("content-type", "application/octet-stream")], b).into_response(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => err(StatusCode::NOT_FOUND, "no such file"),
         Err(e) => internal(e.into()),
