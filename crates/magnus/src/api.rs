@@ -210,28 +210,65 @@ async fn sign_in_method(State(k): K) -> Response {
     }
 }
 
-/// Password sign-in: the only way without an identity provider, and the
-/// backup with one.
+/// Username and password, typed in the app. With an identity provider the
+/// provider checks them (and the code from an authenticator app, when the
+/// person uses one); a password set on the appliance is the way in when the
+/// provider is down or refuses. Without one, only the appliance's own.
 async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
     if let Err(r) = over_tls(&k, t, peer) {
         return r;
     }
     let person = b["person"].as_str().unwrap_or_default().trim().to_lowercase();
     let password = b["password"].as_str().unwrap_or_default();
+    let code = b["code"].as_str().map(str::trim).filter(|c| !c.is_empty());
     let app = b["client"].as_str() == Some("app");
-    if k.cfg.person(&person).is_none() {
-        // Same answer and the same work as a wrong password.
-        let _ = k.accounts.sign_in(&person, password);
-        return err(StatusCode::UNAUTHORIZED, "The name or password is wrong.");
-    }
-    match k.accounts.sign_in(&person, password) {
-        Ok(Ok(_)) => issue(&k, t, &person, app).await,
-        Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
-        Ok(Err(crate::accounts::SignInError::Locked(until))) => (
+    let locked = |until: chrono::DateTime<chrono::Utc>| {
+        (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({ "error": format!("Too many wrong passwords. Try again after {}.", until.format("%H:%M UTC")), "retry_at": until })),
         )
-            .into_response(),
+            .into_response()
+    };
+    let mut refused = None;
+    if let Some(id) = k.identity() {
+        if let Some(until) = k.accounts.locked(&person) {
+            return locked(until);
+        }
+        // The first time, the provider's own page signs them in: it can walk
+        // them through what a new account needs. A password set on the
+        // appliance is its own account, and needs nothing from the provider.
+        if !k.read(|s| s.signed_in_before.contains(&person)) && !k.accounts.has_password(&person) {
+            return provider_answered(&k, t, id.label(), crate::identity::Polled::UseBrowser(format!("The first time, sign in on the {} page that just opened in your browser.", id.label()))).await;
+        }
+        match id.password(&person, password, code, app).await {
+            Ok(crate::identity::Polled::Refused(m)) => refused = Some(m),
+            Ok(polled @ crate::identity::Polled::Done { .. }) => {
+                k.accounts.succeeded(&person);
+                return provider_answered(&k, t, id.label(), polled).await;
+            }
+            Ok(polled) => return provider_answered(&k, t, id.label(), polled).await,
+            Err(e) => tracing::warn!("identity: {} could not check a password: {e:#}", id.label()),
+        }
+        if !k.accounts.has_password(&person) {
+            if k.cfg.person(&person).is_some() {
+                k.accounts.failed(&person);
+            }
+            return match refused {
+                Some(m) => err(StatusCode::UNAUTHORIZED, m),
+                None => err(StatusCode::BAD_GATEWAY, format!("{} is not answering. Try again in a few minutes.", id.label())),
+            };
+        }
+    }
+    let wrong = refused.unwrap_or_else(|| "The name or password is wrong.".into());
+    if k.cfg.person(&person).is_none() {
+        // Same answer and the same work as a wrong password.
+        let _ = k.accounts.sign_in(&person, password);
+        return err(StatusCode::UNAUTHORIZED, wrong);
+    }
+    match k.accounts.sign_in(&person, password) {
+        Ok(Ok(_)) => issue(&k, t, &person, app).await,
+        Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, wrong),
+        Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
         Err(e) => internal(e),
     }
 }
@@ -291,6 +328,11 @@ async fn provider_answered(k: &Kernel, t: Transport, label: String, polled: crat
             issue(k, t, &person, app).await
         }
         Polled::Failed(m) => err(StatusCode::GONE, m),
+        Polled::NeedsCode => {
+            (StatusCode::UNAUTHORIZED, Json(json!({ "code_needed": true, "error": "Enter the 6-digit code from your authenticator app." }))).into_response()
+        }
+        Polled::Refused(m) => err(StatusCode::UNAUTHORIZED, m),
+        Polled::UseBrowser(m) => (StatusCode::UNAUTHORIZED, Json(json!({ "browser": true, "error": m }))).into_response(),
     }
 }
 
@@ -306,7 +348,8 @@ async fn browser_begin(State(k): K, Extension(t): Extension<Transport>, ConnectI
     if let Err(e) = crate::connectors::loopback(redirect_uri) {
         return err(StatusCode::BAD_REQUEST, format!("{e:#}"));
     }
-    match id.begin(redirect_uri, b["client"].as_str() == Some("app")).await {
+    let hint = b["login_hint"].as_str().map(str::trim).filter(|h| !h.is_empty());
+    match id.begin(redirect_uri, hint, b["client"].as_str() == Some("app")).await {
         Ok(s) => Json(json!({ "state": s.state, "authorize_url": s.authorize_url, "expires_in": s.expires_in, "label": id.label() })).into_response(),
         Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }

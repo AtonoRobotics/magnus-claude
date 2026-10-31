@@ -1,250 +1,175 @@
 # Accounts: Keycloak through one identity interface
 
-Status: building (owner's spec, 2026-10-30, which replaces the built-in-first
-plan of the same day). Step 1 is built. Device certificates (same day) have
-open decisions D1–D5. Keycloak changes the owner makes are listed at the end.
+Status: building. Step 1 (sign-in) is built. This plan follows the owner's
+decisions of 2026-10-30, newest last:
 
-## The owner's spec
+1. Use the owner's Keycloak as the identity provider now, through the
+   identity interface. Map Keycloak groups to Magnus roles. A disabled user
+   loses access and has their schedules suspended within minutes (K54).
+   Keep local accounts as a fallback.
+2. "There should never be a fake." Every test runs against a real Keycloak
+   and a real browser.
+3. "The point of this is that a non technical user can just connect the app.
+   If they need to worry about certificate installs and TPM and relays it's
+   easier to give them a vpn." Sign-in "needs to be username and password
+   just like logging into muse or grok bot."
+4. Option 1: the app comes set up for its appliance, downloaded from a link
+   the owner sends or from the appliance, and opens straight to username and
+   password. Passkeys stay as an option, in the browser.
+5. "Open browser the first time or if user is not found."
 
-Use my Keycloak as the identity provider now, through the identity interface
-(this is the enterprise SSO path, built early):
+## Sign-in (built)
 
-- OIDC authorization code + PKCE through the system browser with a loopback
-  redirect; works on Windows and Linux. Passkeys and two-factor are handled by
-  Keycloak.
-- Map Keycloak groups to Magnus roles (E2, E7, K46). Paired device
-  certificates still required.
-- Deactivation: short-lived access tokens, plus a periodic user-status check
-  via Keycloak's admin API (service account, least privilege); a disabled user
-  loses access and has their schedules and triggers suspended within minutes
-  (K54).
-- Keep built-in local accounts as a fallback for appliances without an
-  identity provider.
+**What the person does.** They type their username and password in the app.
+If they use an authenticator app, a second screen asks for the 6-digit code.
+That's all, except in the cases under "The browser" below.
 
-Tests: sign in through Keycloak on both platforms; a group change alters
-approval rights; disabling a user in Keycloak revokes access and suspends their
-schedules.
+**What happens.**
+- The app sends the username and password to the appliance over its pinned
+  HTTPS connection.
+- The appliance checks them with Keycloak's password grant ("Direct access
+  grants"). The password is never stored or logged.
+- Keycloak gives the same answer to a wrong password and to a missing code.
+  So the appliance asks Keycloak, as a service account that may only view
+  users (`view-users`), whether this person uses a code. If they do, the app
+  asks for it. It asks whether or not the password was right, so the
+  question tells nobody the password was right.
+- Wrong username, password or code: the person is told so. Too many wrong
+  tries lock the name for `lockout_minutes`, as local passwords do.
 
-## What exists
+**The browser.** The app opens Keycloak's own page in the person's browser,
+with their username filled in:
+- the first time they sign in to this appliance, where Keycloak can walk a
+  new account through what it needs (a new password, setting up two-factor,
+  updating account details);
+- when Keycloak says the account isn't fully set up (it never runs those
+  steps for a password typed elsewhere);
+- when Keycloak knows no such username;
+- when the person picks **Use a passkey instead**. Passkeys need the
+  browser: the Linux app's webview has no WebAuthn (measured: WebKitGTK 2.52
+  has no `navigator.credentials`).
 
-- **Sign-in through Keycloak** by device code (`oidc.rs`): the appliance
-  collects the ID token and opens a Magnus session that lasts `session_days`.
-  Groups and roles come from claims the owner names. A disabled user keeps
-  their session, and their schedules keep running.
-- **Password sign-in** for people in `[[people]]`: the local fallback the spec
-  keeps.
-- **Every decision reads `Kernel::person(id)`:** the boundary, policy layers
-  and approvals.
-- **The app pins the appliance's certificate** when it first connects. It has
-  no certificate of its own.
+The browser sign-in is the authorization code with PKCE (S256), coming back
+to a loopback address on the person's computer (RFC 8252). The appliance
+makes and keeps the verifier, state and nonce, and checks the ID token's
+issuer (RFC 9207 `iss` too), audience, expiry and nonce. The appliance's own
+page in a browser uses the device grant for the same cases.
 
-## Design
+**The local fallback.** A password set on the appliance (`magnus password`)
+still signs in when Keycloak is down or refuses. Such a person never needs
+the browser. With no `[sign_in.oidc]`, these passwords are the only way in.
 
-### The identity interface
+**Trade-offs the owner accepted.** The password passes through the
+appliance (encrypted, never kept). Passkeys don't work in the app's form.
+Keycloak needs Direct access grants turned on for the client.
 
-- **Directory:** who exists, their groups and roles, and whether they are
-  active.
-- **Authenticator:** how someone proves who they are. It ends in a Magnus
-  session.
+## The app comes set up for its appliance (next)
 
-Keycloak (OIDC) supplies both. Built-in accounts are the fallback. SAML and
-SCIM plug into the same two parts later. Decisions keep reading
-`Kernel::person(id)`.
+Today the person types the appliance's address and compares a certificate
+fingerprint. Option 1 removes both.
 
-### Sign-in: authorization code + PKCE, loopback redirect (RFC 8252)
+- The owner sends a link. It opens a page that offers the app's download
+  for the person's system, and then an **Open Magnus** button.
+- The button is a `magnus://connect` link carrying the appliance's address
+  and its certificate fingerprint. The installed app registers the
+  `magnus://` scheme, pins the fingerprint from the link, and opens straight
+  to username and password.
+- The link the owner sends is what the person trusts, as they trust the
+  owner's message. The person never sees a fingerprint.
+- The appliance also serves the same page to anyone on the office network.
+  The fingerprint on that page is only as good as that network, so the owner
+  sends the link when the network isn't trusted.
 
-1. **The app starts it.** It listens on `127.0.0.1` on a free port and asks
-   the appliance to start a sign-in with
-   `redirect_uri = http://127.0.0.1:<port>/callback`.
-2. **The appliance prepares it.** It makes the PKCE verifier (S256), the
-   `state` and the `nonce`, keeps them, and returns Keycloak's authorization
-   address.
-3. **The person signs in in their own browser**, which the app opens. Passkeys
-   and two-factor are Keycloak's, so they work on Linux too: the browser has
-   WebAuthn, and the app's Linux webview does not (measured: WebKitGTK 2.52
-   has no `navigator.credentials`).
-4. **Keycloak sends the browser back** to the loopback with `code` and
-   `state`. The app passes them to the appliance over the pinned connection.
-5. **The appliance finishes it.** It exchanges the code with the verifier,
-   checks the ID token (issuer, audience, expiry, nonce) and opens a Magnus
-   session.
+## Device certificates (after that)
 
-The code alone is useless: only the appliance holds the verifier. The browser
-gets a page saying it can be closed.
+Simplified to what a non-technical person never sees:
+- At the first sign-in on a computer, the app makes a key in the operating
+  system's keychain (Windows: a non-exportable CNG key; Linux: the Secret
+  Service). No TPM setup, no certificate install.
+- The appliance issues the app a client certificate for that key, naming
+  the person and the computer. The session is bound to it.
+- Every request over the network must come with a valid certificate whose
+  person matches the session. A token copied off the computer is useless
+  elsewhere.
+- **Your devices** in Settings lists each computer (name, last used) with
+  **Remove**. The owner can remove anyone's. Deactivation removes all of a
+  person's.
+- A key in the keychain can be copied by someone who controls the computer.
+  The owner accepted this.
 
-This replaces the device-code flow.
-
-### Device certificates (owner's spec, 2026-10-30: required)
-
-> Build device certificates now; they're required, not optional (the passkey
-> and Keycloak decisions both rely on them as the second factor).
-> - At pairing, the app generates a key pair on the device (in the OS
->   keystore: Windows CNG/TPM where available, Linux Secret Service) and the
->   appliance issues it a client certificate.
-> - The appliance requires mutual TLS: every connection presents a valid,
->   unrevoked device certificate, and only then is the sign-in token
->   accepted. A valid token from an unpaired device is refused.
-> - Devices are listed per user with name, last seen and revoke; revocation
->   takes effect immediately, including over the relay.
-> - Deactivating a user (local or via Keycloak) revokes all their devices.
->
-> Tests: an unpaired device holding a valid token is refused; a revoked device
-> is refused directly and through the relay; a device key copied to another
-> machine fails where the key is hardware-bound.
-
-**Today.** The app pins the appliance's certificate. The appliance never
-checks which device is calling: any holder of a session token gets in.
-
-**Pairing is the first sign-in on a device.**
-1. **The app makes a key pair in the computer's keystore.** It's ECDSA P-256,
-   which every TPM 2.0 and Windows' platform provider support. The private
-   key can't be exported:
-   - Windows: CNG, with the Microsoft Platform Crypto Provider (the TPM)
-     where there is one, otherwise the software provider, non-exportable;
-   - Linux: see decision D2.
-2. **It sends a certificate request with its sign-in.** The request is signed
-   by the device key, which proves the app holds it.
-3. **The appliance issues the certificate when the sign-in finishes.** It
-   comes from a device certificate authority of the appliance's own, whose
-   key is in the vault. The certificate names the person and the device. The
-   session is bound to that device.
-
-**Mutual TLS on the HTTPS listener.**
-- The handshake asks every client for a certificate.
-- Only pairing works without one: the sign-in method, starting and finishing
-  a sign-in with a certificate request, and health.
-- Every other request needs a valid, unrevoked device certificate. Its token
-  must be for that device's person and that device. So a token from another
-  device, or from no device, is refused.
-- Revocation is checked on every request, not only at the handshake, so it
-  takes effect at once on a connection that is already open. Live streams on
-  a revoked device are closed.
-
-**Devices.**
-- Each person sees their devices: name (the computer's), system, where the
-  key is kept (hardware or software), paired, last seen. They can revoke any
-  of them.
-- The owner sees and revokes anyone's.
-- Revoking ends the device's sessions. The device must pair again.
-- Deactivation (step 3) revokes all of a person's devices.
-
-**Tests.**
-- A real TLS client without a certificate, presenting a valid token from a
-  paired device, is refused.
-- A revoked device is refused at once, on an open connection too.
-- The installed app pairs on its first sign-in.
-- A device key copied to another machine fails where the key is
-  hardware-bound. The key's TPM blob only loads in the TPM that made it, so
-  this needs a second real TPM (D2).
-
-### Groups to roles (E2, E7, K46)
+## Groups to roles
 
 `[sign_in.oidc.group_roles]` maps a Keycloak group to Magnus roles, for
-example `"approvers-financial" = ["approver:financial"]`.
+example `"approvers-financial" = ["approver:financial"]`. Groups are read at
+each sign-in and each refresh, so a group change alters approval rights
+within one access-token lifetime.
 
-Groups and the roles they map to are read:
-- at each sign-in;
-- at each refresh (below).
+## Short sessions and the status check (K54)
 
-So a group change in Keycloak changes approval rights within one access-token
-lifetime, without signing in again. A role a group maps to wins over one set
-in Settings, as the provider's roles do today.
+- A Magnus session lasts as long as the person's Keycloak session. The
+  appliance refreshes it when Keycloak's access token expires (`expires_in`;
+  Keycloak's default is 5 minutes). A refused refresh ends the session.
+- Every `status_minutes` (default 5, matching that lifetime), the status
+  client asks Keycloak about each person who signed in through it.
+  Schedules act for people who may not be signed in, which is why this is
+  needed.
+- **Disabled or deleted:** every session and device of theirs is refused.
+  Their schedules and running tasks are suspended. People with the owner
+  role get one inbox notice per schedule, with **Reassign** or **End**.
+- **Keycloak unreachable:** retried; nobody is deactivated; Home says the
+  check is failing.
 
-### Short-lived access and the status check (K54)
+## The relay (waits for a public host)
 
-**Short-lived access.** A Magnus session lasts only as long as the person's
-Keycloak session.
-- The appliance keeps the refresh token in the vault and refreshes it when
-  the access token expires. The time comes from Keycloak's `expires_in`
-  (Keycloak's default is 5 minutes).
-- A refused refresh ends the Magnus session: user disabled, session ended in
-  Keycloak, or password reset.
+The relay is a forwarding point on the public internet. It lets the app
+reach the appliance from outside the office without changing the office
+router. It needs a public name with HTTPS on port 443, a certificate, and a
+small program that passes bytes between the app and the appliance.
 
-**The status check.** Every `status_minutes` (default 5, matching the access
-token's default lifetime), a service account asks Keycloak's admin API for
-each person who signed in through it. Schedules act for people who may not be
-signed in at all, which is why the check is needed.
-- The account needs only the `view-users` role.
-- **Disabled or deleted:** the person is deactivated (`PersonDeactivated`):
-  - every Magnus session and API token is refused;
-  - every schedule acting for them is suspended, and so are their running
-    tasks;
-  - the inbox of people with the owner role gets one notice per schedule,
-    with **Reassign** or **End**. Reassigning waits for the new person to
-    confirm it on a card, because the schedule would then act with their
-    rights.
-- **Enabled again:** they can sign in again. Each schedule stays suspended
-  until someone resumes it.
-- **Keycloak unreachable:** the check is retried and nobody is deactivated.
-  The owner sees on Home that the check is failing.
-
-The two together mean a disabled person loses access within about 5 minutes,
-and their schedules are suspended within about 5 minutes.
-
-### The local fallback
-
-With no `[sign_in.oidc]`, people in `[[people]]` sign in with passwords, as
-today. The built-in setup, invites and two-factor of the earlier plan wait
-for an appliance that has no identity provider.
+- **A. A Cloudflare Tunnel hostname.** This machine already runs one for
+  production. It needs no new server, but Cloudflare decrypts the traffic.
+- **B. Our own relay on a small cloud server.** It routes by name without
+  decrypting, so only the app and the appliance see the content.
+  Recommended for the product.
 
 ## Tests
 
-- **Scratch tests against a real Keycloak** (26.8.1, in a container with a
-  test realm):
-  - sign-in by code and PKCE;
-  - a wrong `state` or a reused code is refused;
-  - a group change alters approval rights after a refresh;
-  - disabling a user ends their session and suspends their schedules within
-    one check, with the inbox notice; Reassign and End work.
-- **Installed app (Linux):** sign in through Keycloak. The test's "system
-  browser" fills in Keycloak's login form.
-- **Windows:** the owner's test.
-
-## Open decisions on device certificates
-
-- **D1. The appliance's own page in a browser.** Spec: every connection
-  presents a device certificate, so browsers can't use the appliance's page
-  any more. Then only the app signs in, and the device-code sign-in goes.
-  - Recommended: app only, as the spec says.
-  - The alternative: a browser imports a device certificate by hand.
-- **D2. Where Linux keeps the device key.** The spec names the Secret
-  Service. It stores software keys that can be copied, so they aren't
-  hardware-bound.
-  - Recommended: the TPM 2.0 where there is one, hardware-bound as on
-    Windows; this machine has one, `/dev/tpmrm0`. The Secret Service
-    otherwise.
-  - Using the TPM needs the app's user in the `tss` group, a packaging step.
-- **D3. The relay.** This build has no relay. "Through the relay" needs one
-  to exist: which relay is meant, and should I build it?
-- **D4. The appliance's loopback listener** (127.0.0.1, HTTP), which the
-  `magnus` command, local scripts and the tests use on the appliance's own
-  machine.
-  - Recommended: no device certificate there. Only someone already on the
-    appliance machine can reach it.
-- **D5. Script tokens** (`[[people]] token`). Recommended: over the network
-  they need a device certificate too, issued on the appliance with
-  `magnus device issue`.
+Every test uses a real Keycloak (26.8.1 by digest, `dev/keycloak.sh`), with
+a fresh realm per test set up as below, and a real Chromium on Keycloak's
+own pages.
+- Scratch: password and code sign-in; the code asked for whether or not the
+  password is right; first sign-in, an account needing a new password, and
+  an unknown username go to the browser; code + PKCE refuses strangers,
+  forged states, reused codes, other clients and declines; groups and roles
+  come from Keycloak.
+- Installed app (Linux): the first sign-in goes through the browser; a later
+  sign-in uses the app alone, with the browser made unable to sign anyone
+  in.
+- Windows: the owner's test.
 
 ## Build order
 
-1. The identity interface and sign-in by code and PKCE in the appliance and
-   the app; tests against a real Keycloak. **Built.**
-2. Device certificates: keys in the keystore, pairing at first sign-in,
-   mutual TLS, devices and revoke (after D1–D5).
-3. Groups to roles, read at sign-in and refresh.
-4. Short-lived sessions with refresh, the status check, and deactivation:
-   suspended schedules and inbox notices, every device revoked.
+1. Sign-in: username and password in the app, the code, the browser for
+   first sign-in, setup, unknown names and passkeys. **Built.**
+2. The app set up for its appliance: the `magnus://connect` link and the
+   download page.
+3. Device certificates and Your devices.
+4. Groups to roles.
+5. Short sessions, the status check and deactivation.
 
 ## Keycloak changes for strix-alpha (the owner, or me with a realm admin account)
 
 1. **Client `magnus-claude`:**
-   - turn on Standard flow;
-   - set the redirect URI to `http://127.0.0.1/*` (checked today: Keycloak
-     rejects a loopback redirect for this client);
+   - turn on **Direct access grants** (the password typed in the app);
+   - turn on Standard flow, with redirect URI `http://127.0.0.1/*` (the
+     browser cases; checked: Keycloak rejects a loopback redirect for this
+     client today);
    - require PKCE method S256.
-2. **A new confidential client, `magnus-claude-status`:**
-   - turn on Service accounts only;
-   - give its service account just `realm-management` → `view-users`;
-   - its secret goes into the appliance's vault.
-3. **A "Group Membership" mapper** on the client's ID token, so the token
-   carries the groups. Then create the groups to map.
+2. **A new confidential client, `magnus-claude-status`:** Service accounts
+   only; its service account gets just `realm-management` → `view-users`.
+   Its secret goes into the appliance's vault, and `[sign_in.oidc]` names it:
+   `status_client = "magnus-claude-status"`,
+   `status_credential = "<vault secret name>"`.
+3. **Brute-force detection** on in the realm (Realm settings → Security
+   defenses). Keycloak leaves it off. The appliance has its own lockout too.
+4. **A "Group Membership" mapper** on the client's ID token, for step 4.

@@ -136,15 +136,19 @@ async fn trust(app: State<'_, App>, url: String, fingerprint: String) -> Res<()>
 }
 
 #[tauri::command]
-async fn sign_in(app: State<'_, App>, person: String, password: String) -> Res<Value> {
+async fn sign_in(app: State<'_, App>, person: String, password: String, code: Option<String>) -> Res<Value> {
     let (url, c) = app.conn()?;
     let r = c
         .post(format!("{url}/v1/sign-in"))
-        .json(&json!({ "person": person, "password": password, "client": "app" }))
+        .json(&json!({ "person": person, "password": password, "code": code, "client": "app" }))
         .send()
         .await
         .map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
     let (status, body) = body_of(r).await;
+    // Not refusals: the page asks for the code, or opens the browser.
+    if body["code_needed"] == true || body["browser"] == true {
+        return Ok(body);
+    }
     if status >= 400 {
         return Err(message(&body, status));
     }
@@ -402,12 +406,12 @@ async fn redirected(l: tokio::net::TcpListener, wait: std::time::Duration) -> Re
 /// verifier). Everything goes over the pinned connection to the appliance;
 /// the session goes to the keyring and the page gets only who signed in.
 #[tauri::command]
-async fn provider_sign_in(handle: AppHandle, app: State<'_, App>) -> Res<Value> {
+async fn provider_sign_in(handle: AppHandle, app: State<'_, App>, login_hint: Option<String>) -> Res<Value> {
     let (url, c) = app.conn()?;
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| format!("cannot listen on this computer: {e}"))?;
     let port = l.local_addr().map_err(|e| e.to_string())?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    let r = c.post(format!("{url}/v1/sign-in/browser")).json(&json!({ "redirect_uri": redirect_uri, "client": "app" })).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
+    let r = c.post(format!("{url}/v1/sign-in/browser")).json(&json!({ "redirect_uri": redirect_uri, "login_hint": login_hint, "client": "app" })).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
     let (status, begun) = body_of(r).await;
     if status >= 400 {
         return Err(message(&begun, status));

@@ -5,9 +5,10 @@
 // MAGNUS_URL       the appliance (its own page, or a page that loads ../ui)
 // MAGNUS_PERSON    the person signing in, with either
 //   MAGNUS_PASSWORD  their password, or
-//   MAGNUS_PROVIDER  the identity provider's name on the sign-in button, and
-//   MAGNUS_PROVIDER_PASSWORD  their password at the provider (Keycloak), where
-//                    they sign in and grant access on the provider's own page
+//   MAGNUS_PROVIDER  the identity provider's name, and
+//   MAGNUS_PROVIDER_PASSWORD  their password at the provider (Keycloak): typed
+//                    in the page, then, the first time, on the provider's own
+//                    page, where they also grant access
 // MAGNUS_API_KEY   the key to paste when connecting Claude
 // MAGNUS_TASK      the task to type
 // MAGNUS_CHAT_QUESTION, MAGNUS_CHAT_ANSWER  optionally, a question to ask in
@@ -43,9 +44,11 @@ const T = 60_000;
 if (provider) await step(`sign in with ${provider}`, async () => {
   await page.goto(base);
   const popup = page.waitForEvent("popup", { timeout: T });
-  await page.getByRole("button", { name: `Sign in with ${provider}` }).click();
-  // The provider's page opens with the code; the person signs in there and
-  // grants access.
+  await page.getByLabel("Username").fill(person);
+  await page.getByLabel("Password").fill(providerPassword);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  // The first time, the provider's page opens with the code; the person
+  // signs in there and grants access.
   const idp = await popup;
   await idp.waitForLoadState();
   // Magnus opened the provider's page for the code it shows (Keycloak then
@@ -64,7 +67,7 @@ if (provider) await step(`sign in with ${provider}`, async () => {
 
 if (!provider) await step("sign in", async () => {
   await page.goto(base);
-  await page.getByLabel("Your name on the appliance").fill(person);
+  await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill("not the password");
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.getByRole("alert").filter({ hasText: "wrong" }).waitFor({ timeout: T });

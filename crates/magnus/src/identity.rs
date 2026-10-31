@@ -1,8 +1,10 @@
 //! The identity interface: how people prove who they are, through whichever
 //! identity provider the appliance uses. An OpenID Connect provider
-//! (`oidc.rs`; Keycloak for one) is the one built; SAML is to sign in the
-//! same way, in the person's browser, and SCIM to feed the same people and
-//! groups (docs/proposals/accounts.md). Every decision about a person still
+//! (`oidc.rs`; Keycloak for one) is the one built. People type their
+//! username and password in the app, and the appliance checks them with the
+//! provider; a passkey signs in in the person's browser instead. SAML is to
+//! sign in the browser way, and SCIM to feed the same people and groups
+//! (docs/proposals/accounts.md). Every decision about a person still
 //! reads `Kernel::person`, whichever provider signed them in.
 
 use anyhow::Result;
@@ -29,6 +31,16 @@ pub enum Polled {
     Done { person: String, app: bool, rights: Rights },
     /// Over: declined, expired or refused, with a message for the person.
     Failed(String),
+    /// The password may be right, and the person also uses a code from an
+    /// authenticator app: ask for it and try again.
+    NeedsCode,
+    /// The username, password or code is wrong, with a message for the person.
+    Refused(String),
+    /// Only the provider's own page can sign this person in: their account
+    /// still needs setting up, or the provider knows no such username (it
+    /// may be one the page takes, such as an email address). The app opens
+    /// it in their browser, with this message.
+    UseBrowser(String),
 }
 
 #[async_trait::async_trait]
@@ -36,9 +48,13 @@ pub trait Identity: Send + Sync {
     /// What the sign-in button names.
     fn label(&self) -> String;
     /// Begin a sign-in in the person's own browser, which comes back to
-    /// `redirect_uri`, a loopback address on their computer.
-    async fn begin(&self, redirect_uri: &str, app: bool) -> Result<Begun>;
+    /// `redirect_uri`, a loopback address on their computer. `login_hint`
+    /// fills in the username they already typed.
+    async fn begin(&self, redirect_uri: &str, login_hint: Option<&str>, app: bool) -> Result<Begun>;
     /// Finish it with what came back: the code, the state it answers, and
     /// who sent it back, if the provider says.
     async fn finish(&self, state: &str, code: &str, iss: Option<&str>) -> Result<Polled>;
+    /// Check a username and password the person typed in the app, with the
+    /// code from their authenticator app when they use one. Never kept.
+    async fn password(&self, username: &str, password: &str, code: Option<&str>, app: bool) -> Result<Polled>;
 }

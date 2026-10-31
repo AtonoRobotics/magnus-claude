@@ -141,6 +141,15 @@ pub struct Oidc {
     /// appliance tells it.
     #[serde(default = "sign_in_minutes")]
     pub sign_in_minutes: u32,
+    /// A confidential client whose service account may only view users
+    /// (Keycloak: `realm-management` → `view-users`). The appliance asks it
+    /// who uses a code from an authenticator app, since the password grant
+    /// answers the same to a wrong password and a missing code.
+    #[serde(default)]
+    pub status_client: Option<String>,
+    /// The vault secret holding that client's secret.
+    #[serde(default)]
+    pub status_credential: Option<String>,
 }
 
 fn person_claim() -> String {

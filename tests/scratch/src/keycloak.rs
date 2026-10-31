@@ -3,10 +3,12 @@
 //! test ends, as each test gets its own database on the test Postgres.
 //!
 //! The realm is set up the way docs/proposals/accounts.md asks the owner to
-//! set up theirs: a public client with the authorization code flow, PKCE
-//! (S256) and loopback redirects, the device grant for browsers, and the
-//! person's groups and realm roles in the ID token. People sign in on
-//! Keycloak's own pages in a real Chromium (`tests/scratch/sign-in-browser.mjs`).
+//! set up theirs: a public client with Direct access grants (the password
+//! typed in the app), the authorization code flow with PKCE (S256) and
+//! loopback redirects, the device grant for browsers, and the person's
+//! groups and realm roles in the ID token; and a status client whose service
+//! account may only view users. People sign in on Keycloak's own pages in a
+//! real Chromium (`tests/scratch/sign-in-browser.mjs`).
 
 use magnus_invariants::appliance::{workspace_root, Appliance};
 use serde_json::{json, Value};
@@ -15,6 +17,9 @@ use std::collections::HashMap;
 /// The client the appliance signs in as, and what its button says.
 pub const IDP_CLIENT: &str = "magnus-test";
 pub const IDP_LABEL: &str = "Test identity";
+/// The status client, and the vault secret the appliance keeps its secret in.
+pub const STATUS_CLIENT: &str = "magnus-test-status";
+pub const STATUS_CREDENTIAL: &str = "keycloak_status";
 
 pub fn server_url() -> String {
     std::env::var("MAGNUS_TEST_KEYCLOAK").unwrap_or_else(|_| "http://127.0.0.1:54380".into())
@@ -36,7 +41,21 @@ pub fn password_of(username: &str) -> String {
 pub struct Keycloak {
     pub realm: String,
     pub issuer: String,
+    status_secret: String,
     http: reqwest::Client,
+}
+
+/// The code an authenticator app shows now for this secret (RFC 6238: SHA-1,
+/// 6 digits, 30 seconds, as Keycloak's default OTP policy).
+pub fn code_for(secret: &str) -> String {
+    use hmac::Mac;
+    let step = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 30).to_be_bytes();
+    let mut m = hmac::Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes()).unwrap();
+    m.update(&step);
+    let h = m.finalize().into_bytes();
+    let o = (h[19] & 15) as usize;
+    let n = u32::from_be_bytes([h[o] & 0x7f, h[o + 1], h[o + 2], h[o + 3]]) % 1_000_000;
+    format!("{n:06}")
 }
 
 async fn admin_token(http: &reqwest::Client) -> String {
@@ -56,6 +75,7 @@ impl Keycloak {
     pub async fn start() -> Keycloak {
         let http = reqwest::Client::new();
         let realm = format!("t{}", uuid::Uuid::new_v4().simple());
+        let status_secret = uuid::Uuid::new_v4().simple().to_string();
         let mapper = |name: &str, kind: &str, config: Value| json!({ "name": name, "protocol": "openid-connect", "protocolMapper": kind, "config": config });
         let claims = json!({ "id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true" });
         let with = |extra: Value| {
@@ -71,17 +91,30 @@ impl Keycloak {
                 "name": "Magnus",
                 "publicClient": true,
                 "standardFlowEnabled": true,
-                "directAccessGrantsEnabled": false,
+                "directAccessGrantsEnabled": true,
                 "redirectUris": ["http://127.0.0.1/*"],
                 "attributes": { "pkce.code.challenge.method": "S256", "oauth2.device.authorization.grant.enabled": "true" },
                 "protocolMappers": [
                     mapper("groups", "oidc-group-membership-mapper", with(json!({ "claim.name": "groups", "full.path": "true" }))),
                     mapper("realm roles", "oidc-usermodel-realm-role-mapper", with(json!({ "claim.name": "realm_access.roles", "multivalued": "true" }))),
                 ],
+            }, {
+                "clientId": STATUS_CLIENT,
+                "publicClient": false,
+                "secret": status_secret,
+                "serviceAccountsEnabled": true,
+                "standardFlowEnabled": false,
+                "directAccessGrantsEnabled": false,
             }],
         });
-        let k = Keycloak { issuer: format!("{}/realms/{realm}", server_url()), realm, http };
+        let k = Keycloak { issuer: format!("{}/realms/{realm}", server_url()), realm, status_secret, http };
         k.admin(reqwest::Method::POST, "", Some(body)).await;
+        // The status client's service account may view users, and no more.
+        let client = k.admin(reqwest::Method::GET, &format!("/clients?clientId={STATUS_CLIENT}"), None).await[0]["id"].as_str().unwrap().to_string();
+        let account = k.admin(reqwest::Method::GET, &format!("/clients/{client}/service-account-user"), None).await["id"].as_str().unwrap().to_string();
+        let rm = k.admin(reqwest::Method::GET, "/clients?clientId=realm-management", None).await[0]["id"].as_str().unwrap().to_string();
+        let view = k.admin(reqwest::Method::GET, &format!("/clients/{rm}/roles/view-users"), None).await;
+        k.admin(reqwest::Method::POST, &format!("/users/{account}/role-mappings/clients/{rm}"), Some(json!([view]))).await;
         k
     }
 
@@ -121,6 +154,31 @@ impl Keycloak {
             })),
         )
         .await;
+    }
+
+    /// Turn on two-factor for the person: an authenticator app with this
+    /// secret, whose current code `code_for` gives.
+    pub async fn add_code(&self, username: &str) -> String {
+        let id = self.user_id(username).await;
+        let secret = uuid::Uuid::new_v4().simple().to_string();
+        // Keycloak takes a credential with its secret only in a whole user,
+        // so the person is rewritten with their password and the app.
+        let mut user = self.admin(reqwest::Method::GET, &format!("/users/{id}"), None).await;
+        user["credentials"] = json!([
+            { "type": "password", "value": password_of(username), "temporary": false },
+            { "type": "otp", "userLabel": "phone", "secretData": json!({ "value": secret }).to_string(),
+              "credentialData": json!({ "subType": "totp", "digits": 6, "period": 30, "algorithm": "HmacSHA1", "counter": 0 }).to_string() },
+        ]);
+        self.admin(reqwest::Method::DELETE, &format!("/users/{id}"), None).await;
+        self.admin(reqwest::Method::POST, "/users", Some(user)).await;
+        secret
+    }
+
+    /// Make the person change their password on Keycloak's page before
+    /// they can sign in, as a new account with a temporary password must.
+    pub async fn require_new_password(&self, username: &str) {
+        let id = self.user_id(username).await;
+        self.admin(reqwest::Method::PUT, &format!("/users/{id}"), Some(json!({ "requiredActions": ["UPDATE_PASSWORD"] }))).await;
     }
 
     /// Put the person in exactly these groups, making any that are missing.
@@ -170,6 +228,12 @@ impl Keycloak {
     pub async fn add_client(&self, client_id: &str) {
         let body = json!({ "clientId": client_id, "publicClient": true, "standardFlowEnabled": true, "redirectUris": ["http://127.0.0.1/*"], "attributes": { "pkce.code.challenge.method": "S256" } });
         self.admin(reqwest::Method::POST, "/clients", Some(body)).await;
+    }
+
+    /// Remove the person from Keycloak altogether.
+    pub async fn delete(&self, username: &str) {
+        let id = self.user_id(username).await;
+        self.admin(reqwest::Method::DELETE, &format!("/users/{id}"), None).await;
     }
 
     /// Turn the person's account off in Keycloak.
@@ -228,10 +292,29 @@ impl Keycloak {
         (r.status().as_u16(), r.json().await.unwrap_or(Value::Null))
     }
 
+    /// A username and password typed in the app, and the code if given. The
+    /// appliance's answer.
+    pub async fn app_password(&self, app: &Appliance, username: &str, password: &str, code: Option<&str>) -> (u16, Value) {
+        let r = reqwest::Client::new()
+            .post(format!("{}/v1/sign-in", app.base))
+            .json(&json!({ "person": username, "password": password, "code": code, "client": "app" }))
+            .send()
+            .await
+            .unwrap();
+        (r.status().as_u16(), r.json().await.unwrap_or(Value::Null))
+    }
+
     /// Point the appliance at this realm, with more `[sign_in.oidc]`
-    /// settings, and restart it.
+    /// settings, and restart it. The status client's secret goes into the
+    /// appliance's vault, as the owner puts it there.
     pub async fn configure_with(&self, app: &mut Appliance, more: &[(&str, &str)]) {
-        let (issuer, more) = (self.issuer.clone(), more.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>());
+        let mut more: Vec<(String, String)> = more.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        for (k, v) in [("status_client", STATUS_CLIENT), ("status_credential", STATUS_CREDENTIAL)] {
+            if !more.iter().any(|(m, _)| m == k) {
+                more.push((k.into(), v.into()));
+            }
+        }
+        let issuer = self.issuer.clone();
         crate::reconfigure(app, move |cfg| {
             let sign_in = cfg.entry("sign_in").or_insert(toml::Value::Table(Default::default())).as_table_mut().unwrap();
             let mut oidc = toml::Table::new();
@@ -244,6 +327,7 @@ impl Keycloak {
             sign_in.insert("oidc".into(), toml::Value::Table(oidc));
         })
         .await;
+        assert_eq!(app.api("alice").put_secret(STATUS_CREDENTIAL, &self.status_secret).await, reqwest::StatusCode::NO_CONTENT);
     }
 
     /// Point the appliance at this realm and restart it.

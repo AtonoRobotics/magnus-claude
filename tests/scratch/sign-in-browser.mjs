@@ -36,6 +36,13 @@ try {
   await page.fill("#username", username);
   await page.fill("#password", password);
   await Promise.all([page.waitForLoadState("load"), page.click("#kc-login")]);
+  // A new account may have to choose its password first (Keycloak's
+  // "Update password" required action); the person keeps the same one.
+  if (await page.locator("#password-new").count()) {
+    await page.fill("#password-new", password);
+    await page.fill("#password-confirm", password);
+    await Promise.all([page.waitForLoadState("load"), page.locator("input[type=submit], button[type=submit]").first().click()]);
+  }
   // The device grant asks the person to grant access to the client.
   const grant = page.locator(answer === "deny" ? "input[name=cancel], button[name=cancel]" : "input[name=accept], button[name=accept]");
   if (await grant.count()) await Promise.all([page.waitForLoadState("load"), grant.first().click()]);

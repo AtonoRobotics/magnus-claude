@@ -5,7 +5,7 @@
 
 use magnus_invariants::appliance::{bin, Person};
 use magnus_invariants::{mcp, *};
-use magnus_scratch::{loopback_once, Keycloak, IDP_LABEL};
+use magnus_scratch::{code_for, loopback_once, password_of, Keycloak, IDP_LABEL};
 use serde_json::{json, Value};
 use std::io::Write;
 
@@ -191,6 +191,91 @@ async fn sign_in_through_keycloak_keeps_no_provider_token_and_passwords_stay_as_
     assert!(set_password(&app, "carol", PASSWORD).status.success());
     let (st, v) = sign_in(&app, "carol", PASSWORD).await;
     assert_eq!(st, 200, "{v}");
+}
+
+/// Option 1 of docs/proposals/accounts.md: the username and password typed
+/// in the app, checked with Keycloak, then the code from an authenticator
+/// app if the person uses one. Keycloak's own page in the browser the first
+/// time, when the account needs finishing there, and when Keycloak knows no
+/// such username.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_password_typed_in_the_app_signs_in_through_keycloak_with_a_code_if_used_and_new_people_start_in_the_browser() {
+    let model = FakeModel::start(steps(vec![])).await;
+    let mut app = Appliance::start(spec(), &model).await;
+    let kc = Keycloak::start().await;
+    for who in ["carol", "bob"] {
+        kc.add_person(who).await;
+    }
+    kc.configure(&mut app).await;
+    let pw = password_of("carol");
+
+    // The first time: Keycloak's own page, with the username filled in.
+    let (st, v) = kc.app_password(&app, "carol", &pw, None).await;
+    assert_eq!((st, v["browser"].as_bool()), (401, Some(true)), "a first sign-in did not go to the browser: {v}");
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let redirect = format!("http://127.0.0.1:{}/callback", l.local_addr().unwrap().port());
+    drop(l);
+    let begun: Value = reqwest::Client::new()
+        .post(format!("{}/v1/sign-in/browser", app.base))
+        .json(&json!({ "redirect_uri": redirect, "login_hint": "carol", "client": "app" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let page = url::Url::parse(begun["authorize_url"].as_str().unwrap()).unwrap();
+    assert_eq!(page.query_pairs().find(|(k, _)| k == "login_hint").map(|(_, v)| v.into_owned()).as_deref(), Some("carol"), "the username typed was not passed on");
+    let (st, v) = kc.app_sign_in(&app, "carol").await;
+    assert_eq!(st, 200, "{v}");
+
+    // From then on, the password typed in the app.
+    let (st, v) = kc.app_password(&app, "carol", &pw, None).await;
+    assert_eq!(st, 200, "{v}");
+    let token = v["token"].as_str().expect("an app sign-in returns a token").to_string();
+    let (st, me) = with_token(&app, &token).get("/v1/me").await;
+    assert_eq!((st.as_u16(), me["id"].as_str()), (200, Some("carol")));
+    let (st, v) = kc.app_password(&app, "carol", "not-her-password", None).await;
+    assert_eq!((st, v["error"].as_str(), v.get("code_needed"), v.get("browser")), (401, Some("The name or password is wrong."), None, None), "{v}");
+
+    // Two-factor on: the code is asked for, whether or not the password is
+    // right, so asking tells nobody the password was.
+    let secret = kc.add_code("carol").await;
+    for tried in [pw.as_str(), "not-her-password"] {
+        let (st, v) = kc.app_password(&app, "carol", tried, None).await;
+        assert_eq!((st, v["code_needed"].as_bool()), (401, Some(true)), "no code asked for: {v}");
+    }
+    let right = code_for(&secret);
+    let wrong = format!("{:06}", (right.parse::<u32>().unwrap() + 1) % 1_000_000);
+    let (st, v) = kc.app_password(&app, "carol", &pw, Some(&wrong)).await;
+    assert_eq!((st, v["error"].as_str(), v.get("code_needed")), (401, Some("The name, password or code is wrong."), None), "{v}");
+    let (st, v) = kc.app_password(&app, "carol", "not-her-password", Some(&right)).await;
+    assert_eq!(st, 401, "a wrong password with the right code signed in: {v}");
+    let (st, v) = kc.app_password(&app, "carol", &pw, Some(&code_for(&secret))).await;
+    assert_eq!((st, v["person"]["id"].as_str()), (200, Some("carol")), "{v}");
+
+    // An account that must be finished on Keycloak's page: the browser,
+    // where the person sets their password, then the app's form again.
+    let (st, _) = kc.app_sign_in(&app, "bob").await;
+    assert_eq!(st, 200);
+    kc.require_new_password("bob").await;
+    let (st, v) = kc.app_password(&app, "bob", &password_of("bob"), None).await;
+    assert_eq!((st, v["browser"].as_bool()), (401, Some(true)), "an account needing setup was not sent to the browser: {v}");
+    let (st, v) = kc.app_sign_in(&app, "bob").await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = kc.app_password(&app, "bob", &password_of("bob"), None).await;
+    assert_eq!(st, 200, "{v}");
+
+    // Someone Keycloak no longer knows: its own page, which says so.
+    kc.delete("bob").await;
+    let (st, v) = kc.app_password(&app, "bob", &password_of("bob"), None).await;
+    assert_eq!((st, v["browser"].as_bool()), (401, Some(true)), "{v}");
+
+    // No password reached the event log or the accounts folder.
+    let dump = app.db.dump().await;
+    assert!(!dump.contains(&pw), "a password reached the database");
+    let kept = std::fs::read_dir(app.state_dir.join("accounts")).unwrap().map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap_or_default()).collect::<String>();
+    assert!(!kept.contains(&pw), "a password was kept");
 }
 
 #[tokio::test(flavor = "multi_thread")]

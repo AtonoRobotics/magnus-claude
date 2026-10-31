@@ -100,7 +100,7 @@ impl Kernel {
             vault.seal();
         }
         let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
-        let oidc = cfg.sign_in.oidc.clone().map(crate::oidc::Provider::new).transpose()?;
+        let oidc = cfg.sign_in.oidc.clone().map(|o| crate::oidc::Provider::new(o, vault.clone())).transpose()?;
         let adapters = Adapters::new(&cfg.appliance.state_dir, vault.clone(), &cfg.adapters);
         let live_text = Arc::new(Live { tx: tokio::sync::broadcast::channel(1024).0, so_far: Mutex::new(HashMap::new()) });
         let k = Arc::new(Kernel {
