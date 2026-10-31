@@ -452,7 +452,7 @@ pub fn run() {
             Ok(())
         })
         .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default(), loopback: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, provider_sign_in, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait, app_info, update::update_state, update::update_look, update::update_install, update::whats_new])
+        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, provider_sign_in, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait, app_info, update::update_state, update::update_look, update::update_install, update::update_look_again, update::whats_new])
         .run(tauri::generate_context!())
         .expect("start the Magnus app");
 }

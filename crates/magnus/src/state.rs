@@ -587,6 +587,8 @@ pub struct State {
     /// Schedule cards from chat the person answered, by card id.
     pub cards: HashMap<String, CardState>,
     pub model: Option<(String, String)>,
+    /// The release channel the owner's apps update from (none chosen yet).
+    pub update_channel: Option<String>,
     pub pins: HashMap<String, Pin>,
     /// Tools whose live definition differs from the pin, with the open item.
     pub changed: HashMap<String, (String, Pin)>,
@@ -1066,6 +1068,9 @@ impl State {
                 self.model = Some((adapter.clone(), model.clone()));
                 self.version_changes.push((e.seq, e.at, "model".into(), format!("{adapter}/{model}")));
             }
+            Ev::UpdateChannelSet { channel } => self.update_channel = Some(channel.clone()),
+            // The release is in the updates directory; the log keeps who approved it.
+            Ev::TestReleaseApproved { .. } => {}
             Ev::ToolPinned { tool, hash, description, input_schema, approved } => {
                 self.pins.insert(
                     tool.clone(),

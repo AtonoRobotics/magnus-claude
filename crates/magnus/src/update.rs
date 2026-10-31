@@ -17,8 +17,15 @@
 //! cannot start, it swaps back and runs the old release, which resumes them.
 //! The owner can go back one release the same way.
 //!
-//! The desktop app's packages are served from `desktop/` to the apps
-//! (`/v1/updates/desktop/...`), which check their own signatures.
+//! The desktop app's packages are served to the apps, which check their own
+//! signatures, by release channel: `stable` from `desktop/` (tagged
+//! releases), `test` from `desktop/test/` (a build the owner released to
+//! testers), `preview` from `desktop/preview/` (master, after each merge)
+//! and `pr-<n>` from `desktop/pr-<n>/` (pull request n, under review). The
+//! appliance decides which channel an app gets, never the app: the owner's
+//! apps get the channel the owner chose, testers' get test, everyone else's
+//! get stable. A channel that has no release (a closed pull request's)
+//! hands its apps to the next steadier one: preview, then stable.
 
 use crate::config::Config;
 use crate::events::Ev;
@@ -360,18 +367,94 @@ pub fn schedule(k: Arc<Kernel>) {
     });
 }
 
-/// The desktop app's release manifest for the apps, with each package's
-/// address on this appliance (`origin` is the address the app used).
-pub fn desktop_manifest(cfg: &Config, origin: &str) -> Option<Value> {
-    let mut m: Value = serde_json::from_slice(&std::fs::read(cfg.updates_dir().join("desktop/latest.json")).ok()?).ok()?;
+/// Whether `c` names a release channel of the desktop app.
+pub fn valid_channel(c: &str) -> bool {
+    c == "stable" || c == "test" || c == "preview" || c.strip_prefix("pr-").is_some_and(|n| (1..=9).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The channel a version of the app was built for, by the pre-release CI
+/// gives it: `<v>-review.<run>.pr.<n>` (and the earlier `<v>-pr.<n>.<run>`)
+/// is pull request n's, `<v>-preview.<run>` master's, anything else stable.
+pub fn channel_of(version: &str) -> String {
+    let pre = version.split('+').next().and_then(|v| v.split_once('-')).map(|(_, p)| p).unwrap_or("");
+    let ids: Vec<&str> = pre.split('.').collect();
+    if let Some(n) = ids.iter().position(|i| *i == "pr").and_then(|i| ids.get(i + 1)) {
+        if valid_channel(&format!("pr-{n}")) {
+            return format!("pr-{n}");
+        }
+    }
+    if ids[0] == "preview" { "preview" } else { "stable" }.to_string()
+}
+
+fn channel_dir(cfg: &Config, c: &str) -> PathBuf {
+    let desktop = cfg.updates_dir().join("desktop");
+    if c == "stable" {
+        desktop
+    } else {
+        desktop.join(c)
+    }
+}
+
+fn channel_release(cfg: &Config, c: &str) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(channel_dir(cfg, c).join("latest.json")).ok()?).ok()
+}
+
+/// The channel an app on `c` gets its release from: `c` while it has one,
+/// else the next steadier channel that does.
+pub fn resolve_channel(cfg: &Config, c: &str) -> Option<String> {
+    let steadier: &[&str] = if c.starts_with("pr-") { &["preview", "stable"] } else if c == "preview" || c == "test" { &["stable"] } else { &[] };
+    std::iter::once(c).chain(steadier.iter().copied()).find(|c| channel_release(cfg, c).is_some()).map(String::from)
+}
+
+/// The desktop app's release manifest for an app on `channel`, from the
+/// channel `resolve_channel` gives, with each package's address on this
+/// appliance (`origin` is the address the app used).
+pub fn desktop_manifest(cfg: &Config, origin: &str, channel: &str) -> Option<Value> {
+    let from = resolve_channel(cfg, channel)?;
+    let mut m = channel_release(cfg, &from)?;
     if let Some(platforms) = m["platforms"].as_object_mut() {
         for p in platforms.values_mut() {
             if let Some(f) = p["file"].as_str().map(String::from) {
-                p["url"] = json!(format!("{origin}/v1/updates/desktop/files/{f}"));
+                p["url"] = json!(format!("{origin}/v1/updates/desktop/{from}/files/{f}"));
             }
         }
     }
     Some(m)
+}
+
+/// The channel the app asking gets: the owner's choice for the owner's apps
+/// (until they choose, the channel their app's version was built for), test
+/// for testers' (the `tester` role), and stable for everyone else's. An app that asks without a session gets the
+/// channel its version was built for: the apps from before channels ask so,
+/// and once updated they ask with their session.
+pub fn assigned_channel(k: &Kernel, h: &HeaderMap) -> String {
+    let built_for = channel_of(h.get("x-magnus-app").and_then(|v| v.to_str().ok()).unwrap_or(""));
+    if crate::api::credential(h).is_none() {
+        return built_for;
+    }
+    match crate::api::who(k, h) {
+        Ok(p) if p.is_owner() => k.read(|s| s.update_channel.clone()).unwrap_or(built_for),
+        Ok(p) if p.has_role("tester") => "test".into(),
+        _ => "stable".into(),
+    }
+}
+
+/// The channels that have a release, steadiest first: stable, test,
+/// preview, then each pull request's by number.
+pub fn desktop_channels(cfg: &Config) -> Vec<Value> {
+    let mut prs: Vec<u64> = std::fs::read_dir(cfg.updates_dir().join("desktop"))
+        .map(|d| d.filter_map(|e| e.ok()?.file_name().to_str()?.strip_prefix("pr-")?.parse().ok()).collect())
+        .unwrap_or_default();
+    prs.sort_unstable();
+    ["stable".to_string(), "test".to_string(), "preview".to_string()]
+        .into_iter()
+        .chain(prs.into_iter().map(|n| format!("pr-{n}")))
+        .filter(|c| valid_channel(c))
+        .filter_map(|c| {
+            let m = channel_release(cfg, &c)?;
+            Some(json!({ "channel": c, "version": m["version"], "notes": m["notes"], "pub_date": m["pub_date"] }))
+        })
+        .collect()
 }
 
 use crate::api::{err, internal, owner, Transport};
@@ -380,7 +463,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Extension, Json, Router,
 };
 
@@ -392,8 +475,12 @@ pub fn router() -> Router<Arc<Kernel>> {
         .route("/v1/updates", get(status))
         .route("/v1/updates/check", post(check_now))
         .route("/v1/updates/rollback", post(roll_back))
+        .route("/v1/updates/channels", get(channels))
+        .route("/v1/updates/channel", put(choose_channel))
+        .route("/v1/updates/test", post(release_to_testers))
         .route("/v1/updates/desktop/latest.json", get(desktop_latest))
-        .route("/v1/updates/desktop/files/{name}", get(desktop_file))
+        .route("/v1/updates/desktop/files/{name}", get(stable_file))
+        .route("/v1/updates/desktop/{channel}/files/{name}", get(desktop_file))
 }
 
 /// Versions both ways: every answer names this release, and an app older
@@ -475,25 +562,131 @@ async fn roll_back(AxState(k): K, h: HeaderMap) -> Response {
     (StatusCode::ACCEPTED, Json(json!({ "status": "rolling_back", "version": version(), "to": to.trim() }))).into_response()
 }
 
-/// The apps ask without a session: an app too old to sign in can still update.
+/// The channels with a release, and the one the owner's apps follow (asked
+/// from one of them: `follows` is what it gets), for the owner to choose.
+async fn channels(AxState(k): K, h: HeaderMap) -> Response {
+    if let Err(r) = owner(&k, &h) {
+        return r;
+    }
+    let follows = assigned_channel(&k, &h);
+    let served = resolve_channel(&k.cfg, &follows);
+    Json(json!({ "channels": desktop_channels(&k.cfg), "chosen": k.read(|s| s.update_channel.clone()), "follows": follows, "served": served })).into_response()
+}
+
+/// The owner chooses the channel their own apps update from.
+async fn choose_channel(AxState(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some(channel) = b["channel"].as_str().filter(|c| valid_channel(c)) else {
+        return err(StatusCode::BAD_REQUEST, "channel: stable, preview or pr-<n>");
+    };
+    match k.emit(&format!("person:{}", p.id), Ev::UpdateChannelSet { channel: channel.into() }).await {
+        Ok(_) => Json(json!({ "chosen": channel })).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// The owner releases a build to testers: `from` channel's release, the same
+/// signed packages, becomes the test channel's (the one before it goes).
+async fn release_to_testers(AxState(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some(from) = b["from"].as_str().filter(|c| valid_channel(c) && *c != "test") else {
+        return err(StatusCode::BAD_REQUEST, "from: stable, preview or pr-<n>");
+    };
+    let Some(release) = channel_release(&k.cfg, from) else {
+        return err(StatusCode::NOT_FOUND, "that channel has no build");
+    };
+    let version = release["version"].as_str().unwrap_or_default().to_string();
+    let copy = || -> Result<()> {
+        let (src, dst) = (channel_dir(&k.cfg, from), channel_dir(&k.cfg, "test"));
+        std::fs::create_dir_all(&dst)?;
+        let mut files = vec![];
+        for p in release["platforms"].as_object().into_iter().flat_map(|m| m.values()) {
+            let f = p["file"].as_str().context("a package without a file")?;
+            if f.contains('/') || f.contains("..") {
+                bail!("a package outside its channel: {f}");
+            }
+            std::fs::copy(src.join(f), dst.join(f))?;
+            files.push(f.to_string());
+        }
+        let mut m = release.clone();
+        m["pub_date"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        std::fs::write(dst.join("latest.json.tmp"), serde_json::to_vec_pretty(&m)?)?;
+        std::fs::rename(dst.join("latest.json.tmp"), dst.join("latest.json"))?;
+        for e in std::fs::read_dir(&dst)? {
+            let name = e?.file_name().to_string_lossy().to_string();
+            if name.starts_with("Magnus_") && !files.contains(&name) {
+                std::fs::remove_file(dst.join(&name))?;
+            }
+        }
+        Ok(())
+    };
+    if let Err(e) = copy() {
+        return internal(e);
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::TestReleaseApproved { version: version.clone(), from: from.into() }).await {
+        Ok(_) => Json(json!({ "test": version, "from": from })).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// The apps ask with their session if they have one; without, an app too old
+/// to sign in can still update. The appliance decides the channel.
 async fn desktop_latest(AxState(k): K, Extension(t): Extension<Transport>, h: HeaderMap) -> Response {
+    let channel = assigned_channel(&k, &h);
     let Some(host) = h.get("host").and_then(|v| v.to_str().ok()) else {
         return err(StatusCode::BAD_REQUEST, "no host");
     };
     let scheme = if t == Transport::Tls { "https" } else { "http" };
-    match desktop_manifest(&k.cfg, &format!("{scheme}://{host}")) {
+    match desktop_manifest(&k.cfg, &format!("{scheme}://{host}"), &channel) {
         Some(m) => Json(m).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     }
 }
 
-async fn desktop_file(AxState(k): K, UrlPath(name): UrlPath<String>) -> Response {
-    if name.contains('/') || name.contains("..") || name == "latest.json" {
+/// Stable's packages at the address apps before channels were given.
+async fn stable_file(k: K, UrlPath(name): UrlPath<String>) -> Response {
+    desktop_file(k, UrlPath(("stable".into(), name))).await
+}
+
+async fn desktop_file(AxState(k): K, UrlPath((channel, name)): UrlPath<(String, String)>) -> Response {
+    if !valid_channel(&channel) || name.contains('/') || name.contains("..") || name == "latest.json" {
         return err(StatusCode::NOT_FOUND, "no such file");
     }
-    match tokio::fs::read(k.cfg.updates_dir().join("desktop").join(&name)).await {
+    match tokio::fs::read(channel_dir(&k.cfg, &channel).join(&name)).await {
         Ok(b) => ([("content-type", "application/octet-stream")], b).into_response(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => err(StatusCode::NOT_FOUND, "no such file"),
         Err(e) => internal(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_names_the_channel_it_was_built_for() {
+        for (v, c) in [
+            ("0.7.0", "stable"),
+            ("0.7.1-preview.120", "preview"),
+            ("0.7.1-review.121.pr.31", "pr-31"),
+            ("0.7.1-pr.31.88", "pr-31"),
+            ("0.7.1-review.121.pr.x", "stable"),
+            ("0.7.1-rc.1", "stable"),
+            ("", "stable"),
+        ] {
+            assert_eq!(channel_of(v), c, "{v}");
+        }
+        for c in ["stable", "preview", "pr-1", "pr-123456789"] {
+            assert!(valid_channel(c), "{c}");
+        }
+        for c in ["", "files", "pr-", "pr-1234567890", "pr-1/..", "../desktop", "Stable"] {
+            assert!(!valid_channel(c), "{c}");
+        }
     }
 }
