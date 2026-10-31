@@ -320,7 +320,14 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
             }
         };
         return match answer {
-            Some(polled) => provider_answered(&k, t, id.label(), polled).await,
+            Some(polled) => {
+                // Only a refusal says the password was wrong: one that needs
+                // the code or the browser was right, and stays uncounted.
+                if ours && !matches!(polled, crate::identity::Polled::Refused(_)) {
+                    k.accounts.forgive(&person);
+                }
+                provider_answered(&k, t, id.label(), polled).await
+            }
             None => {
                 // Down: the attempt said nothing about the password.
                 if ours {

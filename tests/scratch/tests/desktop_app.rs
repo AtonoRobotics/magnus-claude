@@ -214,8 +214,9 @@ async fn the_installed_app_downloads_a_file_from_the_library() {
 #[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
 async fn settings_holds_every_section_and_each_works_in_the_installed_app() {
     let (f, _idp, url, fingerprint) = appliance().await;
-    // The owner is signed in elsewhere too: a second device to sign out.
-    let r = reqwest::Client::new().post(format!("{}/v1/sign-in", f.app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "person": PERSON, "password": PASSWORD, "client": "app" })).send().await.unwrap();
+    // The owner is signed in elsewhere too (their backup, with a code from
+    // the appliance's machine): a second device to sign out.
+    let r = reqwest::Client::new().post(format!("{}/v1/sign-in", f.app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "person": PERSON, "password": PASSWORD, "machine_code": magnus_scratch::sign_in_code(&f.app), "client": "app" })).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let elsewhere = r.json::<serde_json::Value>().await.unwrap()["token"].as_str().unwrap().to_string();
     let d = Driver::start().await;
