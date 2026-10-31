@@ -22,9 +22,9 @@
 //! channels"): development (pull requests' builds, not merged;
 //! `desktop/development/`), test (master, merged; `desktop/test/`) and
 //! production (tagged releases; `desktop/`). The appliance decides which an
-//! app gets: the owner's apps development, testers' test, everyone else's
-//! production, and production's build to any app whose channel's is older.
-//! An app only ever moves forward.
+//! app gets, by its session: the owner's apps development, testers' test,
+//! everyone else's production, and production's build only while the
+//! app's channel has none. An app only ever moves forward.
 
 use crate::config::Config;
 use crate::events::Ev;
@@ -432,23 +432,28 @@ pub fn desktop_manifest(cfg: &Config, origin: &str, channel: &str) -> Option<Val
 }
 
 /// The channel the app asking gets: development for the owner's apps, test
-/// for testers' (the `tester` role), production for everyone else's. Apps
-/// from before channels ask without a session and get the channel their
-/// version was built for: a pull request's (`.pr.<n>`) development, any
-/// other pre-release test; once updated, they ask with their session.
-pub fn assigned_channel(k: &Kernel, h: &HeaderMap) -> &'static str {
-    if crate::api::credential(h).is_none() {
-        let app = h.get("x-magnus-app").and_then(|v| v.to_str().ok()).and_then(|v| semver::Version::parse(v).ok());
-        return match app {
-            Some(v) if v.pre.split('.').any(|i| i == "pr") => "development",
-            Some(v) if !v.pre.is_empty() => "test",
-            _ => "production",
-        };
+/// for testers' (the `tester` role), production for everyone else's. Only a
+/// session says who asks. Without one that still holds (signed out, ended,
+/// or an app from before channels), an app on a release gets production, and
+/// one on a pre-release gets nothing until it asks signed in: its version is
+/// only what the request says, so it chooses no channel (owner: "No one but
+/// me should have a choice"), and production need not hold its build's work.
+/// A pre-release older than `MIN_APP` cannot sign in at all, so it gets
+/// production: everyone's builds, and its only way forward.
+pub fn assigned_channel(k: &Kernel, h: &HeaderMap) -> Option<&'static str> {
+    if let Ok(p) = crate::api::who(k, h) {
+        return Some(if p.is_owner() {
+            "development"
+        } else if p.has_role("tester") {
+            "test"
+        } else {
+            "production"
+        });
     }
-    match crate::api::who(k, h) {
-        Ok(p) if p.is_owner() => "development",
-        Ok(p) if p.has_role("tester") => "test",
-        _ => "production",
+    let app = h.get("x-magnus-app").and_then(|v| v.to_str().ok()).and_then(|v| semver::Version::parse(v.trim()).ok());
+    match app {
+        Some(v) if !v.pre.is_empty() && !newer(MIN_APP, &v.to_string()) => None,
+        _ => Some("production"),
     }
 }
 
@@ -573,7 +578,9 @@ async fn roll_back(AxState(k): K, h: HeaderMap) -> Response {
 /// The apps ask with their session if they have one; without, an app too old
 /// to sign in can still update. The appliance decides the channel.
 async fn desktop_latest(AxState(k): K, Extension(t): Extension<Transport>, h: HeaderMap) -> Response {
-    let channel = assigned_channel(&k, &h);
+    let Some(channel) = assigned_channel(&k, &h) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
     let Some(host) = h.get("host").and_then(|v| v.to_str().ok()) else {
         return err(StatusCode::BAD_REQUEST, "no host");
     };
@@ -585,12 +592,18 @@ async fn desktop_latest(AxState(k): K, Extension(t): Extension<Transport>, h: He
 }
 
 /// Production's packages, at the address apps before channels were given.
-async fn production_file(k: K, UrlPath(name): UrlPath<String>) -> Response {
-    desktop_file(k, UrlPath(("production".into(), name))).await
+async fn production_file(k: K, h: HeaderMap, UrlPath(name): UrlPath<String>) -> Response {
+    desktop_file(k, h, UrlPath(("production".into(), name))).await
 }
 
-async fn desktop_file(AxState(k): K, UrlPath((channel, name)): UrlPath<(String, String)>) -> Response {
+/// A channel's package. Production's are anyone's; development's and test's
+/// only the apps given that channel (the updater asks for the package with
+/// the session it asked for the manifest with).
+async fn desktop_file(AxState(k): K, h: HeaderMap, UrlPath((channel, name)): UrlPath<(String, String)>) -> Response {
     if !CHANNELS.contains(&channel.as_str()) || name.contains('/') || name.contains("..") || name == "latest.json" {
+        return err(StatusCode::NOT_FOUND, "no such file");
+    }
+    if channel != "production" && assigned_channel(&k, &h) != Some(channel.as_str()) {
         return err(StatusCode::NOT_FOUND, "no such file");
     }
     match tokio::fs::read(channel_dir(&k.cfg, &channel).join(&name)).await {

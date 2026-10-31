@@ -23,6 +23,8 @@ concurrency:
 
 permissions:
   contents: write
+  # Whether the pull request whose build is in development was closed.
+  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: never
@@ -141,14 +143,24 @@ jobs:
           release/publish.sh desktop "$v" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist
       # A pull request's tested build goes to development, the owner's apps;
       # once merged, master's goes to test, the testers'.
+      # The build there may be a pull request's that was closed without
+      # merging: its work was given up, so this one need only hold master's
+      # (release/publish.sh, MAGNUS_GIVEN_UP).
       - name: Development build for the installed apps
         if: github.event_name == 'pull_request'
         env:
           TITLE: ${{ github.event.pull_request.title }}
           PR: ${{ github.event.pull_request.number }}
+          MAGNUS_PR: ${{ github.event.pull_request.number }}
           MAGNUS_COMMIT: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           printf '%s\n\nDevelopment build of pull request #%s.\n' "$TITLE" "$PR" > "$RUNNER_TEMP/notes"
+          there="${{ vars.MAGNUS_UPDATES_DIR }}/desktop/development/latest.json"
+          prev=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("pr", ""))' "$there" 2>/dev/null || true)
+          if [ -n "$prev" ] && [ "$prev" != "$PR" ] && [ "$(gh pr view "$prev" --json state -q .state)" = CLOSED ]; then
+            export MAGNUS_GIVEN_UP=$prev
+          fi
           release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist development
       - name: Test build for the installed apps
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
