@@ -20,6 +20,8 @@ pub struct Config {
     #[serde(default)]
     pub trash: Trash,
     #[serde(default)]
+    pub schedules: Schedules,
+    #[serde(default)]
     pub updates: Updates,
     /// The file this was read from: a new release is checked against it.
     #[serde(skip)]
@@ -257,6 +259,33 @@ impl Default for Trash {
     fn default() -> Self {
         Trash { keep_days: keep_days() }
     }
+}
+
+/// Recurring tasks.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Schedules {
+    /// A schedule pauses itself, and tells its person, after this many of
+    /// its runs fail in a row (or cannot start), so a broken one stops
+    /// spending until someone looks.
+    #[serde(default = "pause_after_failures")]
+    pub pause_after_failures: u32,
+    /// The shortest interval a schedule may repeat at.
+    #[serde(default = "min_every_minutes")]
+    pub min_every_minutes: u32,
+}
+
+impl Default for Schedules {
+    fn default() -> Self {
+        Schedules { pause_after_failures: pause_after_failures(), min_every_minutes: min_every_minutes() }
+    }
+}
+
+fn pause_after_failures() -> u32 {
+    3
+}
+
+fn min_every_minutes() -> u32 {
+    5
 }
 
 /// Signed updates of the appliance and of the desktop app (gate item 5).

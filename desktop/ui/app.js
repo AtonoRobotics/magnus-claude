@@ -707,13 +707,30 @@ route(/^#\/schedules$/, async main => {
     paint(main, `<h1>Schedules</h1>${schedules.length ? schedules.map(sc => {
       const waiting = sc.runs.filter(r => r.needs_you), last = sc.last;
       return `<div class="card sched" data-schedule="${esc(sc.id)}">
-        <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))} ${moveControl(sc.id, sc.project, projects)}</span></div>
-        <div class="small muted" data-last>Next run ${esc(until(sc.next))} · ${sc.last_failed ? `Last firing <span class="chip bad">could not start</span> ${esc(sc.last_failed.error)} <span class="faint">${esc(when(sc.last_failed.at))}</span>`
+        <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))} ${moveControl(sc.id, sc.project, projects)} ${sc.paused ? `<button data-resume="${esc(sc.id)}">Resume</button>` : ""}<button data-stop="${esc(sc.id)}">Stop schedule</button></span></div>
+        <div class="small muted" data-ends>${sc.until || sc.max_runs ? `Ends: ${esc(ends(sc))}` : "Runs until you stop it"}${sc.max_runs ? ` · ${esc(sc.started)} of ${esc(sc.max_runs)} runs so far` : ""}${sc.budget ? ` · up to $${esc(sc.budget.max_usd)} a run` : ""}</div>
+        ${sc.paused ? `<div class="small" data-paused><span class="chip bad">Paused</span> ${esc(sc.paused)}. Nothing runs until you resume it.</div>` : ""}
+        ${sc.skipped ? `<div class="small muted" data-skipped>Skipped a run ${esc(when(sc.skipped.at))}: ${esc(sc.skipped.why)} (<a href="#/task/${enc(sc.skipped.task)}">open it</a>)</div>` : ""}
+        <div class="small muted" data-last>${sc.paused ? "" : `Next run ${esc(until(sc.next))} · `}${sc.last_failed ? `Last firing <span class="chip bad">could not start</span> ${esc(sc.last_failed.error)} <span class="faint">${esc(when(sc.last_failed.at))}</span>`
           : last ? `Last result: ${chip(last.status)} <a href="#/task/${enc(last.task_id)}">${esc(firstLine(last.summary) || last.title)}</a> <span class="faint">${esc(when(last.ended_at || last.created_at))}</span>` : "No results yet"}</div>
         ${waiting.length ? `<ul class="tlist">${waiting.map(taskRow).join("")}</ul>` : ""}
         ${sc.runs.length ? `<details data-key="sched:${esc(sc.id)}"><summary class="small muted">${sc.runs.length} run${sc.runs.length === 1 ? "" : "s"}</summary><ul class="tlist">${sc.runs.map(taskRow).join("")}</ul></details>` : ""}
       </div>`;
     }).join("") : `<p class="empty">No schedules yet. Ask in Chat for something done every day or every week.</p>`}`);
+  };
+  main.onclick = async e => {
+    const stop = e.target.closest("[data-stop]"), resume = e.target.closest("[data-resume]");
+    try {
+      if (stop) {
+        if (!confirm("Stop this schedule? No more of its runs start. Runs already started go on, and stay in Tasks.")) return;
+        await api("DELETE", `/v1/schedules/${enc(stop.dataset.stop)}`);
+        toast("Schedule stopped.");
+      } else if (resume) {
+        await api("POST", `/v1/schedules/${enc(resume.dataset.resume)}/resume`, {});
+        toast("Schedule resumed.");
+      } else return;
+      await draw();
+    } catch (err) { toast(err.message); }
   };
   await draw();
   every(5000, draw);
@@ -945,6 +962,13 @@ function rule(e) {
   if (e.daily_at) return `Every day at ${e.daily_at}`;
   return "";
 }
+// When a schedule stops: a time, a number of runs, both, or never.
+function ends(e) {
+  const parts = [];
+  if (e.until) parts.push(`no run after ${new Date(e.until).toLocaleString()}`);
+  if (e.max_runs) parts.push(`at most ${e.max_runs} run${e.max_runs === 1 ? "" : "s"}`);
+  return parts.length ? parts.join(", ") : "until you stop it";
+}
 function waitingLink(e) {
   if (!e.waiting_item) return "";
   return ` · <a href="#/inbox" data-waiting="${esc(e.waiting_item)}">${esc(WAITING[e.waiting_on] || "waiting for you")}: open the inbox</a>`;
@@ -1055,6 +1079,7 @@ function entry(e, ui = {}) {
         <p><strong>${esc(e.text)}</strong></p>
         <div class="what">
           <div class="field"><span>When</span><span>${esc(rule(e))}</span></div>
+          <div class="field"><span>Ends</span><span>${esc(ends(e))}</span></div>
           <div class="field"><span>Scope</span><span>${esc(e.scope || "")}</span></div>
           <div class="field"><span>Budget per run</span><span>up to $${esc(b.max_usd)}, ${esc(b.max_model_calls)} model calls, ${esc(b.max_actions)} actions</span></div>
           <div class="field"><span>Acts for</span><span>you (${esc(e.acts_for)}), with your access; approvals come to your inbox</span></div>
@@ -1202,7 +1227,8 @@ function card(i, composed) {
       break;
     case "schedule_proposal":
       body = `<div class="what"><div class="field"><span>Task</span><span>${esc(d.text)}</span></div>
-        <div class="field"><span>When</span><span>${d.every_minutes ? `every ${esc(d.every_minutes)} minutes` : `daily at ${esc(d.daily_at)}`}</span></div></div>${taintNote(d.taint)}
+        <div class="field"><span>When</span><span>${d.every_minutes ? `every ${esc(d.every_minutes)} minutes` : `daily at ${esc(d.daily_at)}`}</span></div>
+        <div class="field"><span>Ends</span><span>${esc(ends(d))}</span></div></div>${taintNote(d.taint)}
         ${buttons(i, [["accept", "Schedule it", "primary"], ["reject", "Reject"]])}`;
       break;
     case "message":

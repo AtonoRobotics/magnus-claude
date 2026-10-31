@@ -105,7 +105,7 @@ impl Audience {
 }
 
 /// Run records the loop writes to the log itself, outside execute() (K21).
-pub const RECORDS: &[&str] = &["show", "task_contract", "task_plan", "task_complete", "task_fail", "ask_principal", "propose_policy", "propose_schedule", "wait_until", "notify"];
+pub const RECORDS: &[&str] = &["show", "task_contract", "task_plan", "task_complete", "task_fail", "ask_principal", "propose_policy", "propose_schedule", "end_schedule", "wait_until", "notify"];
 
 /// Built-in actions that pass the boundary like app tools.
 pub struct Builtin {
@@ -234,7 +234,7 @@ pub fn chat_specs() -> Vec<ToolSpec> {
             name: "create_schedule".into(),
             description: d("create_schedule"),
             input_schema: obj(
-                json!({ "title": { "type": "string" }, "text": { "type": "string" }, "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" }, "scope": { "type": "string" }, "budget": budget }),
+                json!({ "title": { "type": "string" }, "text": { "type": "string" }, "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" }, "until": { "type": "string" }, "max_runs": { "type": "integer" }, "scope": { "type": "string" }, "budget": budget }),
                 &["title", "text", "scope"],
             ),
         },
@@ -330,10 +330,11 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             name: "propose_schedule".into(),
             description: d("propose_schedule"),
             input_schema: obj(
-                json!({ "text": { "type": "string" }, "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" } }),
+                json!({ "text": { "type": "string" }, "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" }, "until": { "type": "string" }, "max_runs": { "type": "integer" } }),
                 &["text"],
             ),
         },
+        ToolSpec { name: "end_schedule".into(), description: d("end_schedule"), input_schema: obj(json!({ "reason": { "type": "string" } }), &["reason"]) },
         ToolSpec {
             name: "wait_until".into(),
             description: d("wait_until"),

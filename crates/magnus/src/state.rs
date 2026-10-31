@@ -406,6 +406,17 @@ pub struct Schedule {
     pub title: Option<String>,
     /// Firings that could not start a task: when, and why.
     pub failures: Vec<(DateTime<Utc>, String)>,
+    pub until: Option<DateTime<Utc>>,
+    pub max_runs: Option<u32>,
+    /// Runs it has started.
+    pub started: u32,
+    /// The latest firing that started nothing, because the last run was
+    /// still open: when, which task, why.
+    pub skipped: Option<(DateTime<Utc>, String, String)>,
+    /// Why it stopped starting runs, until its person resumes it.
+    pub paused: Option<String>,
+    /// From when failures count toward pausing it again.
+    pub resumed: Option<DateTime<Utc>>,
 }
 
 /// A thread branched from another at one of its entries.
@@ -428,8 +439,25 @@ pub enum CardState {
 }
 
 impl Schedule {
-    /// The next time this schedule is due after its last run (or creation).
+    /// Whether it may start no more runs: past its end, or out of runs.
+    pub fn finished(&self, now: DateTime<Utc>) -> Option<String> {
+        if let Some(m) = self.max_runs.filter(|m| self.started >= *m) {
+            return Some(format!("it ran {m} time{}, as set", if m == 1 { "" } else { "s" }));
+        }
+        self.until.filter(|u| *u <= now).map(|u| format!("it reached its end, {}", u.to_rfc3339()))
+    }
+
+    /// The next time this schedule is due after its last run (or creation),
+    /// unless it is paused or over.
     pub fn next_due(&self) -> Option<DateTime<Utc>> {
+        if self.paused.is_some() || self.max_runs.is_some_and(|m| self.started >= m) {
+            return None;
+        }
+        let next = self.next_time()?;
+        self.until.is_none_or(|u| next < u).then_some(next)
+    }
+
+    fn next_time(&self) -> Option<DateTime<Utc>> {
         let after = self.last_fired.unwrap_or(self.created);
         if let Some(m) = self.every_minutes {
             return Some(after + chrono::Duration::minutes(m.max(1) as i64));
@@ -611,6 +639,37 @@ impl State {
             .filter(|t| t.chat.as_ref().is_some_and(|c| c.thread == item && c.turn))
             .min_by_key(|t| t.created_at)
             .and_then(|t| t.project.as_ref().map(|p| p.id.clone()))
+    }
+
+    /// A schedule's run that has not ended, and why it is still open.
+    pub fn open_run_of(&self, schedule: &str) -> Option<(String, String)> {
+        self.tasks.values().filter(|t| t.schedule.as_deref() == Some(schedule)).find_map(|t| {
+            let r = self.runs.get(&t.run_id).filter(|r| r.ended_at.is_none())?;
+            let why = match (r.status == Status::Suspended, r.reason.as_deref()) {
+                (true, Some("timer")) => "its last run is waiting for a time it set".to_string(),
+                (true, Some(reason)) => format!("its last run is waiting on someone ({reason})"),
+                _ => "its last run is still running".to_string(),
+            };
+            Some((t.task_id.clone(), why))
+        })
+    }
+
+    /// How many of a schedule's latest firings in a row failed (since it was
+    /// last resumed): runs that ended failed, and firings that started none.
+    pub fn failures_in_a_row(&self, schedule: &str) -> u32 {
+        let Some(sc) = self.schedules.get(schedule) else { return 0 };
+        let since = sc.resumed.unwrap_or(sc.created);
+        let mut ends: Vec<(DateTime<Utc>, bool)> = sc.failures.iter().filter(|(at, _)| *at >= since).map(|(at, _)| (*at, true)).collect();
+        ends.extend(
+            self.tasks
+                .values()
+                .filter(|t| t.schedule.as_deref() == Some(schedule) && t.created_at >= since)
+                .filter_map(|t| self.runs.get(&t.run_id))
+                .filter(|r| r.ended_at.is_some())
+                .map(|r| (r.ended_at.unwrap_or_default(), r.status == Status::Failed)),
+        );
+        ends.sort_by(|a, b| b.0.cmp(&a.0));
+        ends.iter().take_while(|(_, failed)| *failed).count() as u32
     }
 
     /// Whether `person` (`owner` or not) may put `item` in the trash now.
@@ -860,7 +919,7 @@ impl State {
                 self.branches.insert(thread.clone(), Branch { person: person.clone(), from: from.clone(), upto: upto.clone(), entries: entries.clone(), title: title.clone(), at: e.at });
             }
             Ev::SignedIn { .. } | Ev::SignedOut { .. } => {}
-            Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title } => {
+            Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title, until, max_runs } => {
                 self.schedules.insert(
                     id.clone(),
                     Schedule {
@@ -876,6 +935,12 @@ impl State {
                         label: label.unwrap_or_default(),
                         title: title.clone(),
                         failures: vec![],
+                        until: *until,
+                        max_runs: *max_runs,
+                        started: 0,
+                        skipped: None,
+                        paused: None,
+                        resumed: None,
                     },
                 );
                 if let Some(c) = card {
@@ -932,8 +997,27 @@ impl State {
                     k.version = e.seq;
                 }
             }
-            Ev::ScheduleRemoved { id } => {
+            Ev::ScheduleRemoved { id } | Ev::ScheduleEnded { id, .. } => {
                 self.schedules.remove(id);
+            }
+            Ev::ScheduleSkipped { id, task, reason } => {
+                if let Some(s) = self.schedules.get_mut(id) {
+                    s.last_fired = Some(e.at);
+                    s.skipped = Some((e.at, task.clone(), reason.clone()));
+                }
+            }
+            Ev::SchedulePaused { id, reason } => {
+                if let Some(s) = self.schedules.get_mut(id) {
+                    s.paused = Some(reason.clone());
+                }
+            }
+            Ev::ScheduleResumed { id } => {
+                if let Some(s) = self.schedules.get_mut(id) {
+                    s.paused = None;
+                    s.resumed = Some(e.at);
+                    // The next run is due from now, not from long ago.
+                    s.last_fired = Some(e.at);
+                }
             }
             // A firing that failed still counts as fired: the next one is due as usual.
             Ev::ScheduleFailed { id, reason } => {
@@ -945,6 +1029,8 @@ impl State {
             Ev::ScheduleFired { id, task } => {
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.last_fired = Some(e.at);
+                    s.started += 1;
+                    s.skipped = None;
                 }
                 if let Some(t) = self.tasks.get_mut(task) {
                     t.schedule = Some(id.clone());
@@ -986,7 +1072,8 @@ impl State {
                         created_at: e.at,
                         chat: chat.clone(),
                         title: title.clone(),
-                        schedule: None,
+                        // Known from the start, so its first step knows it is scheduled.
+                        schedule: e.actor.strip_prefix("schedule:").map(String::from),
                         files: files.clone(),
                         project: project.clone(),
                         verdict: None,

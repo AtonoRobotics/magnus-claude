@@ -275,6 +275,34 @@ pub enum Ev {
         /// A short title the model wrote for it.
         #[serde(default)]
         title: Option<String>,
+        /// No run starts at or after this time.
+        #[serde(default)]
+        until: Option<chrono::DateTime<chrono::Utc>>,
+        /// No run starts after this many.
+        #[serde(default)]
+        max_runs: Option<u32>,
+    },
+    /// A due schedule started no run because its last one is still open:
+    /// running, or waiting on someone. The next is due as usual.
+    ScheduleSkipped {
+        id: String,
+        task: String,
+        reason: String,
+    },
+    /// A schedule is over: it reached its end or its run count, or one of
+    /// its own runs ended it.
+    ScheduleEnded {
+        id: String,
+        reason: String,
+    },
+    /// A schedule stopped starting runs after too many failed in a row,
+    /// until its person resumes it.
+    SchedulePaused {
+        id: String,
+        reason: String,
+    },
+    ScheduleResumed {
+        id: String,
     },
     /// The person declined a schedule proposed in chat.
     CardDeclined {

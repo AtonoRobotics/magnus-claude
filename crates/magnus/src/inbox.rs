@@ -243,7 +243,11 @@ impl Kernel {
                 self.emit(&actor, resolve(None)).await?;
                 self.emit(&actor, Ev::PolicySet { layer, cedar: next }).await?;
             }
+            // A schedule a worker proposed runs within the proposing run's
+            // limits and starts with its taint, as a chat card's does: it
+            // cannot get more than the run that asked for it had.
             ("schedule_proposal", "accept") => {
+                let from = self.read(|s| item.run.as_ref().and_then(|r| s.runs.get(r)).map(|r| (r.config.budget.clone(), Label { untrusted: r.untrusted, private: r.private })));
                 self.emit(&actor, resolve(None)).await?;
                 self.emit(
                     &actor,
@@ -253,10 +257,12 @@ impl Kernel {
                         text: item.details["text"].as_str().unwrap_or_default().into(),
                         every_minutes: item.details["every_minutes"].as_u64().map(|m| m as u32),
                         daily_at: item.details["daily_at"].as_str().map(String::from),
-                        budget: None,
+                        budget: from.as_ref().map(|f| f.0.clone()),
                         card: None,
-                        label: None,
+                        label: from.map(|f| f.1),
                         title: None,
+                        until: serde_json::from_value(item.details["until"].clone()).ok().flatten(),
+                        max_runs: item.details["max_runs"].as_u64().map(|m| m as u32),
                     },
                 )
                 .await?;
