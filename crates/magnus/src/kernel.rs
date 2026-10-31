@@ -23,6 +23,9 @@ pub struct Kernel {
     pub(crate) log: Log,
     state: Mutex<State>,
     write: tokio::sync::Mutex<()>,
+    /// Held while a person's decision is checked and recorded, so an inbox
+    /// item or a chat card is decided once however many answers race in.
+    pub(crate) decide: tokio::sync::Mutex<()>,
     pub vault: Arc<Vault>,
     pub accounts: crate::accounts::Accounts,
     /// Sign-in through an identity provider, when one is configured.
@@ -77,6 +80,8 @@ pub struct NewRun {
     /// Removable modules switched on or off for this run alone, over the
     /// model's settings (an ablation trial).
     pub modules: std::collections::BTreeMap<String, bool>,
+    /// The scope the person confirmed for the schedule starting it.
+    pub scope: Option<String>,
 }
 
 impl Kernel {
@@ -115,6 +120,7 @@ impl Kernel {
             log,
             state: Mutex::new(state),
             write: tokio::sync::Mutex::new(()),
+            decide: tokio::sync::Mutex::new(()),
             drivers: Mutex::new(HashSet::new()),
             leases: Mutex::new(HashMap::new()),
             live_tools: tokio::sync::Mutex::new(HashMap::new()),
@@ -417,6 +423,7 @@ impl Kernel {
                 title: o.title,
                 files: o.files,
                 project,
+                scope: o.scope,
             },
         )
         .await?;
@@ -491,6 +498,7 @@ impl Kernel {
                     budget: sc.budget.as_ref().map(|b| b.within(&self.cfg.budget)),
                     label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label),
                     project: self.read(|s| s.project_of(&sc.id)),
+                    scope: sc.scope.clone(),
                     ..Default::default()
                 };
                 match self.create_run(&format!("schedule:{}", sc.id), &sc.person, sc.text.clone(), vec![], o).await {

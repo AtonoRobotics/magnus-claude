@@ -104,6 +104,7 @@ pub fn render(s: &State, p: &Person, i: &Item) -> Value {
 
 impl Kernel {
     pub async fn respond(self: &Arc<Self>, p: &Person, item_id: &str, body: &Value) -> Result<Answer> {
+        let _decide = self.decide.lock().await;
         let Some(item) = self.read(|s| s.items.get(item_id).cloned()) else { return Ok(Answer::NotFound) };
         if !visible(p, &item) {
             return Ok(Answer::NotFound);
@@ -273,6 +274,7 @@ impl Kernel {
                         title: None,
                         until: serde_json::from_value(item.details["until"].clone()).ok().flatten(),
                         max_runs: item.details["max_runs"].as_u64().map(|m| m as u32),
+                        scope: None,
                     },
                 )
                 .await?;

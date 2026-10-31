@@ -1563,7 +1563,7 @@ async fn add_schedule(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respon
     };
     let id = new_id("sched");
     let actor = format!("person:{}", p.id);
-    if let Err(e) = k.emit(&actor, Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at, budget: None, card: None, label: None, title: None, until, max_runs }).await {
+    if let Err(e) = k.emit(&actor, Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at, budget: None, card: None, label: None, title: None, until, max_runs, scope: None }).await {
         return internal(e);
     }
     if project.is_some() {

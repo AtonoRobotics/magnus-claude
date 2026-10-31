@@ -31,6 +31,30 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+/// Whether the process listening on loopback `port` descends from `root`;
+/// None while nothing listens there.
+fn held_by(port: u16, root: u32) -> Option<bool> {
+    let out = std::process::Command::new("ss").args(["-Hltnp", &format!("sport = :{port}")]).output().expect("ss");
+    let text = String::from_utf8_lossy(&out.stdout);
+    if text.trim().is_empty() {
+        return None;
+    }
+    let pids: Vec<u32> = text.split("pid=").skip(1).filter_map(|s| s.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).collect();
+    // A listener whose owner `ss` cannot name is not ours.
+    Some(pids.iter().any(|&p| {
+        let mut p = p;
+        while p > 1 {
+            if p == root {
+                return true;
+            }
+            // The parent pid is the second field after the parenthesised name.
+            let stat = std::fs::read_to_string(format!("/proc/{p}/stat")).unwrap_or_default();
+            p = stat.rsplit(')').next().and_then(|r| r.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).unwrap_or(0);
+        }
+        false
+    }))
+}
+
 fn which(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(name)).find(|f| f.is_file()))
 }
@@ -81,35 +105,60 @@ impl Driver {
         let browser = workspace_root().join("tests/scratch/sign-in-browser.mjs");
         std::fs::write(apps.join("magnus-test-browser.desktop"), format!("[Desktop Entry]\nType=Application\nName=Test browser\nExec={} {} %u\nMimeType=x-scheme-handler/http;x-scheme-handler/https;\n", node.display(), browser.display())).unwrap();
         std::fs::write(config.join("mimeapps.list"), "[Default Applications]\nx-scheme-handler/http=magnus-test-browser.desktop\nx-scheme-handler/https=magnus-test-browser.desktop\n").unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let native_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let child = tokio::process::Command::new("xvfb-run")
-            .args(["-a", "-s", "-screen 0 1280x900x24"])
-            .arg(&driver)
-            .args(["--port", &port.to_string(), "--native-port", &native_port.to_string(), "--native-driver"])
-            .arg(&native)
-            .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", &config)
-            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
-            .env("MAGNUS_SIGN_IN_AS", home.path().join("sign-in-as"))
-            .env("MAGNUS_CHROMIUM", chromium())
-            .env("NO_AT_BRIDGE", "1")
-            .envs(envs.iter().copied())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            // Its own process group, so the driver, the app and whatever
-            // the app opens (the sign-in page in a browser) end with it.
-            .process_group(0)
-            .kill_on_drop(true)
-            .spawn()
-            .expect("start tauri-driver");
-        let wd = format!("http://127.0.0.1:{port}");
-        eventually("tauri-driver", PATIENCE, || {
-            let wd = wd.clone();
-            async move { reqwest::get(format!("{wd}/status")).await.ok().map(|_| ()) }
-        })
-        .await;
-        Driver { wd, home, _driver: child }
+        // tauri-driver cannot take port 0 (it must tell WebKitWebDriver its
+        // port, and reports neither), so a start counts only when both ports
+        // are held by this driver's own processes; otherwise pick again.
+        for _ in 0..3 {
+            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let native_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let mut child = tokio::process::Command::new("xvfb-run")
+                .args(["-a", "-s", "-screen 0 1280x900x24"])
+                .arg(&driver)
+                .args(["--port", &port.to_string(), "--native-port", &native_port.to_string(), "--native-driver"])
+                .arg(&native)
+                .env("HOME", home.path())
+                .env("XDG_CONFIG_HOME", &config)
+                .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+                .env("MAGNUS_SIGN_IN_AS", home.path().join("sign-in-as"))
+                .env("MAGNUS_CHROMIUM", chromium())
+                .env("NO_AT_BRIDGE", "1")
+                .envs(envs.iter().copied())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                // Its own process group, so the driver, the app and whatever
+                // the app opens (the sign-in page in a browser) end with it.
+                .process_group(0)
+                .kill_on_drop(true)
+                .spawn()
+                .expect("start tauri-driver");
+            let root = child.id().expect("tauri-driver's pid");
+            let start = std::time::Instant::now();
+            let ours = loop {
+                if let Ok(Some(_)) = child.try_wait() {
+                    break false;
+                }
+                match (held_by(port, root), held_by(native_port, root)) {
+                    (Some(true), Some(true)) => break true,
+                    (Some(false), _) | (_, Some(false)) => break false,
+                    _ => {}
+                }
+                assert!(start.elapsed() < PATIENCE, "tauri-driver did not listen on {port} and {native_port}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            };
+            if !ours {
+                // End its process group, as Drop does, and pick again.
+                let _ = std::process::Command::new("kill").args(["--", &format!("-{root}")]).status();
+                continue;
+            }
+            let wd = format!("http://127.0.0.1:{port}");
+            eventually("tauri-driver", PATIENCE, || {
+                let wd = wd.clone();
+                async move { reqwest::get(format!("{wd}/status")).await.ok().map(|_| ()) }
+            })
+            .await;
+            return Driver { wd, home, _driver: child };
+        }
+        panic!("tauri-driver lost its ports to other processes three times");
     }
 
     fn config(&self) -> PathBuf {

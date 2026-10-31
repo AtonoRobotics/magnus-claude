@@ -357,6 +357,7 @@ impl Kernel {
     /// card. A confirmed schedule acts for them (K54), within the card's
     /// budget, and its runs start with the taint the turn had.
     pub async fn decide_card(&self, person: &str, card: &str, decision: &str) -> Result<std::result::Result<Value, CardRefusal>> {
+        let _decide = self.decide.lock().await;
         let found = self.read(|s| {
             s.runs.values().find_map(|r| {
                 let t = s.tasks.get(&r.task).filter(|t| t.is_chat_turn() && t.person == person)?;
@@ -387,6 +388,8 @@ impl Kernel {
                         title: d["title"].as_str().map(String::from),
                         until: serde_json::from_value(d["until"].clone()).ok().flatten(),
                         max_runs: d["max_runs"].as_u64().map(|m| m as u32),
+                        // The person agreed to the card's scope, so each run is told it.
+                        scope: d["scope"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from),
                     },
                 )
                 .await?;

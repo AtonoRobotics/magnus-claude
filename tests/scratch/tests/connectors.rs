@@ -43,7 +43,9 @@ async fn the_owner_adds_an_app_signs_in_classifies_its_tools_and_the_kill_switch
     assert!(!st.is_success(), "a sign-in redirected off the person's computer");
 
     // The desktop app listens on a loopback address and opens the browser there.
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    // Held for the whole test, as the app holds its own, so no other test gets the port.
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = callback.local_addr().unwrap().port();
     let (st, v) = alice.post("/v1/connectors/calendar/sign-in", json!({ "redirect_uri": format!("http://127.0.0.1:{port}/callback") })).await;
     assert!(st.is_success(), "{v}");
     let (code, state) = FakeOAuthApp::browse(v["authorize_url"].as_str().unwrap()).await;
@@ -107,7 +109,9 @@ async fn a_changed_tool_definition_waits_for_the_owner() {
     let app = Appliance::start(Spec::default(), &m).await;
     let alice = app.api("alice");
     assert_eq!(alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await.0, 201);
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    // Held for the whole test, as the app holds its own, so no other test gets the port.
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = callback.local_addr().unwrap().port();
     let (_, v) = alice.post("/v1/connectors/calendar/sign-in", json!({ "redirect_uri": format!("http://127.0.0.1:{port}/callback") })).await;
     let (code, state) = FakeOAuthApp::browse(v["authorize_url"].as_str().unwrap()).await;
     assert_eq!(alice.post("/v1/connectors/calendar/sign-in/complete", json!({ "state": state, "code": code })).await.0, 204);

@@ -88,7 +88,12 @@ impl Kernel {
             }
             _ => {}
         }
+        let scope = task.as_ref().and_then(|t| t.scope.clone());
         first.push(Block::Text { text: task.map(|t| t.text).unwrap_or_default() });
+        // A schedule's run keeps to the scope the person confirmed for it.
+        if let Some(scope) = scope {
+            first.push(Block::Text { text: format!("The person confirmed this schedule for this scope; keep to it: {scope}") });
+        }
         // The project's instructions are the person's own words, for
         // everything in it; its files are data, read when needed (M2).
         if let Some(p) = &project {
@@ -178,10 +183,16 @@ impl Kernel {
     }
 
     /// A task from chat keeps the conversation it came from with its
-    /// contract, for the person to see beside it.
+    /// contract, for the person to see beside it. The kernel writes that
+    /// field: whatever the model sent there is dropped, so a contract can
+    /// never show the person words they did not say.
     fn with_conversation(&self, run: &Run, mut contract: Value) -> Value {
-        if let Some(c) = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.clone())).filter(|c| !c.turn) {
-            contract["conversation"] = json!(c.conversation);
+        let chat = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.clone())).filter(|c| !c.turn);
+        if let Some(m) = contract.as_object_mut() {
+            m.remove("conversation");
+            if let Some(c) = chat {
+                m.insert("conversation".into(), json!(c.conversation));
+            }
         }
         contract
     }
