@@ -33,8 +33,10 @@ async fn an_append_the_kernel_never_applied_is_caught_at_the_next_write() {
     let api = app.api("alice");
     let _ = tokio::spawn(async move { api.post("/v1/tasks", json!({ "text": "Say goodbye." })).await }).await;
     let state = eventually("the kernel applies what is in its log", PATIENCE, || async {
-        let (st, v) = alice.get("/v1/kill-switch").await;
-        (st.is_success() && v["engaged"] == true).then_some(v)
+        // Until the process listens again, the request is refused: not yet.
+        let r = reqwest::Client::new().get(format!("{}/v1/kill-switch", alice.base)).bearer_auth(&alice.token).send().await.ok()?;
+        let v: serde_json::Value = r.error_for_status().ok()?.json().await.ok()?;
+        (v["engaged"] == true).then_some(v)
     })
     .await;
     assert_eq!(state["engaged"], true);
