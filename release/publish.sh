@@ -9,7 +9,9 @@
 #
 # Every package is signed with `tauri signer sign --app-version`, so the
 # signature binds the version it was published as. latest.json is written
-# last, by rename, so an appliance never reads a release half-written.
+# last, by rename, so an appliance never reads a release half-written, and
+# never replaced by an older version (a slower run finishing after a newer
+# one): the apps and appliances only ever move forward.
 set -eu
 
 what=$1 version=$2 updates=$3 notes=$4
@@ -20,6 +22,20 @@ key=${MAGNUS_RELEASE_KEY:-$HOME/.magnus-release/update.key}
 sign() {
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" cargo tauri signer sign -f "$key" -p "" --app-version "$version" "$1" >/dev/null
   cat "$1.sig"
+}
+
+# Whether VERSION is older than the one latest.json in $1 names, by semantic
+# version precedence (semver.org, item 11).
+older() {
+  [ -f "$1/latest.json" ] || return 1
+  python3 -I - "$1/latest.json" "$version" <<'EOF'
+import json, sys
+def key(v):
+    core, _, pre = v.split("+")[0].partition("-")
+    ids = [(0, int(i), "") if i.isdigit() else (1, 0, i) for i in pre.split(".")] if pre else []
+    return [int(n) for n in core.split(".")], not pre, ids
+sys.exit(0 if key(sys.argv[2]) < key(json.load(open(sys.argv[1]))["version"]) else 1)
+EOF
 }
 
 # latest.json from its fields, by python so the notes are quoted correctly.
@@ -36,6 +52,12 @@ else:
 open(out + ".tmp", "w").write(json.dumps(m, indent=2))
 EOF
 }
+
+case $what in appliance|desktop) ;; *) echo "publish appliance or desktop" >&2; exit 2 ;; esac
+if older "$updates/$what"; then
+  echo "not publishing $what $version: $updates/$what/latest.json names a newer version" >&2
+  exit 0
+fi
 
 case $what in
 appliance)
