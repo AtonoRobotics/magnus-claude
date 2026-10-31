@@ -32,22 +32,19 @@ gate (owner, 2026-10-31: "The character is integral. It is not a switch or
 something to be turned off by the models. All the testing of the models
 with the personality is over engineering.").
 
-1. **Identity and the character module.**
+1. **Identity and the character.**
    - The functional personality (the spec's eight traits) is written into
      both prompts (`instructions/chat.md`, `agent.md`) as a description of
      who Magnus is, not as a list of commands, the same for every provider.
-   - A character is a versioned package, `characters/<id>/`: `bible.md` (the
-     spec's eight sections) and `character.toml` (id, version, voice). The
-     default is the spec's appendix, the chief of staff.
-   - Each person picks a character in Settings > Appearance (a new section).
-     The policy can take a character away (Cedar).
-   - The bible goes into the system prompt after the identity. Every model
-     call records the character's id and version in the log.
-   - Read-aloud uses the character's voice when it names one; the chief of
-     staff reads in the appliance's installed voice.
+   - Magnus has one character, the spec's appendix (the chief of staff):
+     `instructions/character.md`, appended to both prompts. Nothing to choose
+     and nothing to switch it off (owner, 2026-10-31: "if there is one
+     character there is no reason to have a switch to turn the character
+     off.").
+   - Its text is part of the instructions version every run pins and every
+     model call logs. It reads aloud in the appliance's installed voice.
    - Tests: the identity and the character are on every call where Magnus
-     speaks and their version on every logged call; a person's choice is
-     theirs and survives a restart; the policy takes a character away.
+     speaks; the logged instructions version is the hash of what was sent.
 2. **Relationship memory and reactions.**
    - The person's tone instructions ("fewer jokes"), what they delegated and
      standing decisions are kept as relationship memory, always in context
@@ -90,11 +87,9 @@ needs step 3's cards.
 
 ## Open
 
-- The default character. The spec recommends the chief-of-staff draft in its
+- The character. The spec recommends the chief-of-staff draft in its
   appendix and leaves the choice to the owner. Step 1 ships that draft; alpha
   feedback will show whether it lands.
-- The org-wide character lock needs an org admin. PR #34 (the admin console
-  plan) proposes the `admin` role. Until then, the owner sets the lock.
 - Cost: the review loop makes about 10 model calls per person per working
   day, plus one per event that wakes it.
 - Review (2026-10-31): card evidence may be a connected-app item Magnus
