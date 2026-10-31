@@ -2089,6 +2089,9 @@ async function updatesSection(el) {
         ${appl ? `<div class="small muted">${appl.automatic ? "Updates install on their own." : "Updates install when you choose."}${appl.previous ? ` Rolls back to ${esc(appl.previous)} if one fails.` : ""}</div>
           ${appl.latest ? `<h3>What's new in ${esc(appl.latest.version)}</h3><div class="notes">${para(appl.latest.notes)}</div>` : ""}` : ""}</div>`);
   };
+  // A look that ends while this is showing (a download finishing) shows here
+  // too, not only in the sidebar.
+  App.redrawUpdates = () => el.isConnected ? draw() : (App.redrawUpdates = null);
   el.onclick = async e => {
     const b = e.target.closest("button[data-act]"); if (!b) return;
     try {
@@ -2147,6 +2150,7 @@ let background = [];
 async function refreshUpdate(look = false) {
   try { App.update = await (look ? Magnus.updateLook() : Magnus.updateState()); } catch { App.update = await Magnus.updateState().catch(() => null); }
   if ($("#side")) sidebar();
+  await App.redrawUpdates?.();
 }
 
 async function restartToUpdate() {
