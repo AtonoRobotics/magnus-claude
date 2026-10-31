@@ -4,8 +4,9 @@
 //! no way to stop them in the app. Each guard on a real appliance, with
 //! schedules allowed every minute (`[schedules] min_every_minutes`) so
 //! they fire within a test:
-//! - a scheduled run cannot propose another schedule, and a schedule starts
-//!   no run while its last one is still open;
+//! - a scheduled run cannot propose another schedule; a schedule whose run
+//!   waits on a person pauses until they answer, and one whose run is still
+//!   open otherwise starts no other;
 //! - a schedule ends after its runs, at its time, or when its own run ends it;
 //! - one that keeps failing pauses itself until its person resumes it, and
 //!   the app can resume it and stop it;
@@ -99,16 +100,25 @@ async fn a_scheduled_run_cannot_set_up_a_schedule_and_its_schedule_waits_for_it(
     assert!(refused[0].is_error && refused[0].text.contains("cannot set up another schedule"), "a scheduled run proposed a schedule: {}", refused[0].text);
     assert!(!alice.inbox().await.iter().any(|i| i["kind"] == "schedule_proposal"), "a proposal reached the inbox");
 
-    // Due again while its run waits: skipped, and said so.
-    let s = eventually("a skipped firing", MINUTE, || async { schedule(&alice, &id).await.filter(|s| s["skipped"].is_object()) }).await;
-    assert_eq!(s["skipped"]["task"], first.as_str(), "{s}");
-    assert!(s["skipped"]["why"].as_str().unwrap().contains("waiting on someone"), "{s}");
-    assert_eq!(tasks_with(&alice, "Sweep the mailbox.").await.len(), 1, "a second run started while the first waited");
+    // Its run waits on alice, so the schedule pauses until she answers
+    // (owner, 2026-10-30), says why, and cannot be resumed past it.
+    let s = eventually("the schedule pauses on its waiting run", PATIENCE, || async { schedule(&alice, &id).await.filter(|s| s["paused_on"] == first.as_str()) }).await;
+    assert!(s["paused"].as_str().unwrap().contains("waiting on you (approval)"), "{s}");
+    assert!(s["next"].is_null(), "a paused schedule has a next run: {s}");
     assert!(s["budget"]["max_usd"].is_number(), "no budget shown: {s}");
+    let n = notice(&alice, "A schedule paused until you answer its run", &id).await;
+    assert_eq!(n["details"]["evidence"]["task"], first.as_str(), "{n}");
+    assert_eq!(alice.post(&format!("/v1/schedules/{id}/resume"), json!({})).await.0.as_u16(), 409, "resumed past the run waiting on her");
+    // Past when it would have fired: nothing started, nothing skipped.
+    tokio::time::sleep(MINUTE).await;
+    let s = schedule(&alice, &id).await.unwrap();
+    assert_eq!(tasks_with(&alice, "Sweep the mailbox.").await.len(), 1, "a second run started while the first waited");
+    assert!(s["skipped"].is_null() && s["paused_on"] == first.as_str(), "{s}");
 
-    // Once its run ends, it runs again.
+    // Once she answers, it goes on by itself.
     assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
     assert_eq!(alice.wait_settled(&first).await["status"], "completed");
+    eventually("the schedule goes on", PATIENCE, || async { schedule(&alice, &id).await.filter(|s| s["paused"].is_null()) }).await;
     eventually("a second run after the first ended", MINUTE, || async { (tasks_with(&alice, "Sweep the mailbox.").await.len() == 2).then_some(()) }).await;
     assert_eq!(app.api("carol").send(reqwest::Method::DELETE, &format!("/v1/schedules/{id}"), None).await.0.as_u16(), 404, "someone else stopped it");
     assert!(alice.send(reqwest::Method::DELETE, &format!("/v1/schedules/{id}"), None).await.0.is_success());
@@ -124,6 +134,7 @@ async fn a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run() {
         match c.turn() {
             0 => simple_contract(),
             1 if b.contains("Ring the bell.") || b.contains("Ring the gong.") => tool("end_schedule", json!({ "reason": "the bell has rung" })),
+            1 if b.contains("Wait for the kettle.") => tool("wait_until", json!({ "at": (chrono::Utc::now() + chrono::Duration::seconds(150)).to_rfc3339() })),
             _ => done("Done."),
         }
     }))
@@ -144,6 +155,7 @@ async fn a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run() {
     let twice = add(&alice, json!({ "text": "Count the stars.", "every_minutes": 1, "max_runs": 2 })).await;
     let dated = add(&alice, json!({ "text": "Water the plants.", "every_minutes": 1, "until": soon(90) })).await;
     let own = add(&alice, json!({ "text": "Ring the bell.", "every_minutes": 1 })).await;
+    let kettle = add(&alice, json!({ "text": "Wait for the kettle.", "every_minutes": 1 })).await;
 
     // Its own run ends it, and the run goes on to finish.
     let n = notice(&alice, "A schedule ended itself", &own).await;
@@ -157,6 +169,12 @@ async fn a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run() {
     alice.wait_settled(&t).await;
     let r = m.requests().into_iter().find(|c| c.body.to_string().contains("Ring the gong.") && c.turn() == 2).unwrap().last_results();
     assert!(r[0].is_error && r[0].text.contains("not started by a schedule"), "{}", r[0].text);
+
+    // A run waiting for a time it set holds its schedule without pausing it.
+    let s = eventually("a firing skipped for a run that waits for a time", MINUTE * 2, || async { schedule(&alice, &kettle).await.filter(|s| s["skipped"].is_object()) }).await;
+    assert!(s["skipped"]["why"].as_str().unwrap().contains("waiting for a time"), "{s}");
+    assert!(s["paused"].is_null(), "a run waiting for a time paused its schedule: {s}");
+    assert!(alice.send(reqwest::Method::DELETE, &format!("/v1/schedules/{kettle}"), None).await.0.is_success());
 
     let n = notice(&alice, "A schedule ended", &dated).await;
     assert!(n["details"]["evidence"]["why"].as_str().unwrap().contains("reached its end"), "{n}");

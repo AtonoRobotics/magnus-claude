@@ -707,9 +707,9 @@ route(/^#\/schedules$/, async main => {
     paint(main, `<h1>Schedules</h1>${schedules.length ? schedules.map(sc => {
       const waiting = sc.runs.filter(r => r.needs_you), last = sc.last;
       return `<div class="card sched" data-schedule="${esc(sc.id)}">
-        <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))} ${moveControl(sc.id, sc.project, projects)} ${sc.paused ? `<button data-resume="${esc(sc.id)}">Resume</button>` : ""}<button data-stop="${esc(sc.id)}">Stop schedule</button></span></div>
+        <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))} ${moveControl(sc.id, sc.project, projects)} ${sc.paused && !sc.paused_on ? `<button data-resume="${esc(sc.id)}">Resume</button>` : ""}<button data-stop="${esc(sc.id)}">Stop schedule</button></span></div>
         <div class="small muted" data-ends>${sc.until || sc.max_runs ? `Ends: ${esc(ends(sc))}` : "Runs until you stop it"}${sc.max_runs ? ` · ${esc(sc.started)} of ${esc(sc.max_runs)} runs so far` : ""}${sc.budget ? ` · up to $${esc(sc.budget.max_usd)} a run` : ""}</div>
-        ${sc.paused ? `<div class="small" data-paused><span class="chip bad">Paused</span> ${esc(sc.paused)}. Nothing runs until you resume it.</div>` : ""}
+        ${sc.paused ? `<div class="small" data-paused><span class="chip bad">Paused</span> ${esc(sc.paused)}. ${sc.paused_on ? `It goes on once you answer that run (<a href="#/task/${enc(sc.paused_on)}">open it</a>).` : "Nothing runs until you resume it."}</div>` : ""}
         ${sc.skipped ? `<div class="small muted" data-skipped>Skipped a run ${esc(when(sc.skipped.at))}: ${esc(sc.skipped.why)} (<a href="#/task/${enc(sc.skipped.task)}">open it</a>)</div>` : ""}
         <div class="small muted" data-last>${sc.paused ? "" : `Next run ${esc(until(sc.next))} · `}${sc.last_failed ? `Last firing <span class="chip bad">could not start</span> ${esc(sc.last_failed.error)} <span class="faint">${esc(when(sc.last_failed.at))}</span>`
           : last ? `Last result: ${chip(last.status)} <a href="#/task/${enc(last.task_id)}">${esc(firstLine(last.summary) || last.title)}</a> <span class="faint">${esc(when(last.ended_at || last.created_at))}</span>` : "No results yet"}</div>

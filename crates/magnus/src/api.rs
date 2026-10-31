@@ -1237,7 +1237,7 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
                 json!({
                     "id": x.id, "person": x.person, "text": x.text, "title": x.title.clone().unwrap_or_else(|| x.text.clone()),
                     "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due(), "last_fired": x.last_fired,
-                    "until": x.until, "max_runs": x.max_runs, "started": x.started, "paused": x.paused,
+                    "until": x.until, "max_runs": x.max_runs, "started": x.started, "paused": x.paused, "paused_on": x.paused_on,
                     // Each run's limit: its own, or the appliance's when it has none.
                     "budget": x.budget.clone().unwrap_or_else(|| k.cfg.budget.clone()),
                     "skipped": x.skipped.as_ref().map(|(at, task, why)| json!({ "at": at, "task": task, "why": why })),
@@ -1303,12 +1303,15 @@ async fn resume_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
         Ok(p) => p,
         Err(r) => return r,
     };
-    let Some((person, paused)) = k.read(|s| s.schedules.get(&id).map(|x| (x.person.clone(), x.paused.is_some()))) else { return err(StatusCode::NOT_FOUND, "no such schedule") };
+    let Some((person, paused, on)) = k.read(|s| s.schedules.get(&id).map(|x| (x.person.clone(), x.paused.is_some(), x.paused_on.clone()))) else { return err(StatusCode::NOT_FOUND, "no such schedule") };
     if person != p.id && !p.is_owner() {
         return err(StatusCode::NOT_FOUND, "no such schedule");
     }
     if !paused {
         return err(StatusCode::CONFLICT, "the schedule is not paused");
+    }
+    if on.is_some() {
+        return err(StatusCode::CONFLICT, "its run is waiting on you; it goes on once you answer that run");
     }
     match k.emit(&format!("person:{}", p.id), Ev::ScheduleResumed { id }).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),

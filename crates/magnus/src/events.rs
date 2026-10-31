@@ -300,6 +300,11 @@ pub enum Ev {
     SchedulePaused {
         id: String,
         reason: String,
+        /// The task whose run waits on a person: the schedule resumes by
+        /// itself once it no longer does. None: paused for failures,
+        /// until its person resumes it.
+        #[serde(default)]
+        task: Option<String>,
     },
     ScheduleResumed {
         id: String,

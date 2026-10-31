@@ -415,6 +415,8 @@ pub struct Schedule {
     pub skipped: Option<(DateTime<Utc>, String, String)>,
     /// Why it stopped starting runs, until its person resumes it.
     pub paused: Option<String>,
+    /// The task whose run it is paused on, waiting on a person.
+    pub paused_on: Option<String>,
     /// From when failures count toward pausing it again.
     pub resumed: Option<DateTime<Utc>>,
 }
@@ -639,6 +641,17 @@ impl State {
             .filter(|t| t.chat.as_ref().is_some_and(|c| c.thread == item && c.turn))
             .min_by_key(|t| t.created_at)
             .and_then(|t| t.project.as_ref().map(|p| p.id.clone()))
+    }
+
+    /// A schedule's run that is waiting on a person (an approval, a
+    /// question, a review, a stop for its budget or an error): the task and
+    /// why. Waiting for a time, an update or the kill switch is not.
+    pub fn held_by_person(&self, schedule: &str) -> Option<(String, String)> {
+        self.tasks.values().filter(|t| t.schedule.as_deref() == Some(schedule)).find_map(|t| {
+            let r = self.runs.get(&t.run_id).filter(|r| r.ended_at.is_none() && r.status == Status::Suspended)?;
+            let reason = r.reason.as_deref().unwrap_or("someone");
+            (!["timer", "update", "kill_switch"].contains(&reason)).then(|| (t.task_id.clone(), format!("its last run is waiting on you ({reason})")))
+        })
     }
 
     /// A schedule's run that has not ended, and why it is still open.
@@ -940,6 +953,7 @@ impl State {
                         started: 0,
                         skipped: None,
                         paused: None,
+                        paused_on: None,
                         resumed: None,
                     },
                 );
@@ -1006,15 +1020,20 @@ impl State {
                     s.skipped = Some((e.at, task.clone(), reason.clone()));
                 }
             }
-            Ev::SchedulePaused { id, reason } => {
+            Ev::SchedulePaused { id, reason, task } => {
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.paused = Some(reason.clone());
+                    s.paused_on = task.clone();
                 }
             }
             Ev::ScheduleResumed { id } => {
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.paused = None;
-                    s.resumed = Some(e.at);
+                    // Failures count afresh only after a person resumes a
+                    // schedule paused for them.
+                    if s.paused_on.take().is_none() {
+                        s.resumed = Some(e.at);
+                    }
                     // The next run is due from now, not from long ago.
                     s.last_fired = Some(e.at);
                 }
