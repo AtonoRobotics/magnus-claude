@@ -1167,8 +1167,13 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
         Ok(t) => t,
         Err(e) => return internal(e),
     };
+    // Revoked at once; each result is recorded only after the vault's
+    // sealing below (or its failure), which starts the list it goes in: a
+    // result recorded first was wiped, and the owner told it was not done.
+    let (sealed_tx, sealed_rx) = tokio::sync::oneshot::channel::<()>();
     let kk = k.clone();
     tokio::spawn(async move {
+        let mut done = vec![];
         for (name, secret) in taken {
             let adapter = revoking.iter().find(|(n, _)| *n == name).map(|(_, a)| a.clone()).unwrap_or_default();
             let (at_provider, detail) = if adapter.starts_with("connector:") {
@@ -1176,7 +1181,11 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
             } else {
                 kk.adapters.revoke(&adapter, secret.expose().to_string()).await
             };
-            if let Err(e) = kk.emit("kernel", Ev::SecretRevoked { name, adapter, at_provider, detail }).await {
+            done.push(Ev::SecretRevoked { name, adapter, at_provider, detail });
+        }
+        let _ = sealed_rx.await;
+        for ev in done {
+            if let Err(e) = kk.emit("kernel", ev).await {
                 tracing::error!("could not record a revocation: {e:#}");
             }
         }
@@ -1193,7 +1202,9 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
         k.emit(&actor, Ev::VaultSealed { revoking: take.clone(), kept: kept.clone() }).await?;
         anyhow::Ok(())
     };
-    if let Err(e) = recorded.await {
+    let recorded = recorded.await;
+    let _ = sealed_tx.send(());
+    if let Err(e) = recorded {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("The vault is sealed and the sign-ins are being revoked, but recording the kill switch failed: {e:#}. Engage it again once the appliance can write."), "sealed": true })),
