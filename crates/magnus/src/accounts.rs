@@ -101,19 +101,36 @@ impl Accounts {
         read_json::<BTreeMap<String, String>>(&self.dir.join("passwords.json")).map(|m| m.contains_key(person)).unwrap_or(false)
     }
 
-    /// Check a password. The caller opens the session.
-    pub fn sign_in(&self, person: &str, password: &str) -> Result<std::result::Result<(), SignInError>> {
+    /// Until when a person may not try another password, after too many
+    /// wrong ones: the appliance's own and the identity provider's alike.
+    pub fn locked(&self, person: &str) -> Option<DateTime<Utc>> {
         let now = Utc::now();
         let window = Duration::minutes(self.cfg.lockout_minutes as i64);
-        {
-            let mut f = self.failures.lock().unwrap();
-            if let Some((n, first)) = f.get(person).copied() {
-                if now - first > window {
-                    f.remove(person);
-                } else if n >= self.cfg.max_failures {
-                    return Ok(Err(SignInError::Locked(first + window)));
-                }
-            }
+        let mut f = self.failures.lock().unwrap();
+        let (n, first) = f.get(person).copied()?;
+        if now - first > window {
+            f.remove(person);
+            return None;
+        }
+        (n >= self.cfg.max_failures).then_some(first + window)
+    }
+
+    /// Count a wrong password. Only for people of this appliance, so
+    /// guessing names cannot grow the table.
+    pub fn failed(&self, person: &str) {
+        let mut f = self.failures.lock().unwrap();
+        let e = f.entry(person.to_string()).or_insert((0, Utc::now()));
+        e.0 += 1;
+    }
+
+    pub fn succeeded(&self, person: &str) {
+        self.failures.lock().unwrap().remove(person);
+    }
+
+    /// Check a password. The caller opens the session.
+    pub fn sign_in(&self, person: &str, password: &str) -> Result<std::result::Result<(), SignInError>> {
+        if let Some(until) = self.locked(person) {
+            return Ok(Err(SignInError::Locked(until)));
         }
         let all: BTreeMap<String, String> = read_json(&self.dir.join("passwords.json"))?;
         // Verify against a throwaway hash when the person is unknown, so
@@ -126,15 +143,12 @@ impl Accounts {
         let phc = all.get(person).unwrap_or(dummy);
         let ok = PasswordHash::new(phc).map(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok()).unwrap_or(false) && all.contains_key(person);
         if !ok {
-            // Count failures only for real names, so guessing names cannot grow the table.
             if all.contains_key(person) {
-                let mut f = self.failures.lock().unwrap();
-                let e = f.entry(person.to_string()).or_insert((0, now));
-                e.0 += 1;
+                self.failed(person);
             }
             return Ok(Err(SignInError::Rejected));
         }
-        self.failures.lock().unwrap().remove(person);
+        self.succeeded(person);
         Ok(Ok(()))
     }
 

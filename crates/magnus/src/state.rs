@@ -554,6 +554,10 @@ pub struct State {
     pub approvals: Vec<Approval>,
     pub policies: BTreeMap<String, String>,
     pub kill_switch: bool,
+    /// Everyone who has ever signed in here. Someone not in it signs in the
+    /// first time on the identity provider's own page, which can walk them
+    /// through what their account still needs (a new password, two-factor).
+    pub signed_in_before: HashSet<String>,
     /// The latest backup's restore check: file, whether it restored, detail, when.
     pub last_backup: Option<(String, bool, String, DateTime<Utc>)>,
     /// An appliance update in progress: from, to, and whether it is a rollback.
@@ -931,7 +935,10 @@ impl State {
             Ev::ThreadBranched { person, thread, from, upto, entries, title } => {
                 self.branches.insert(thread.clone(), Branch { person: person.clone(), from: from.clone(), upto: upto.clone(), entries: entries.clone(), title: title.clone(), at: e.at });
             }
-            Ev::SignedIn { .. } | Ev::SignedOut { .. } => {}
+            Ev::SignedIn { person, .. } => {
+                self.signed_in_before.insert(person.clone());
+            }
+            Ev::SignedOut { .. } => {}
             Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title, until, max_runs } => {
                 self.schedules.insert(
                     id.clone(),

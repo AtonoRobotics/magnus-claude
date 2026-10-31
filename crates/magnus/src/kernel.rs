@@ -100,7 +100,7 @@ impl Kernel {
             vault.seal();
         }
         let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
-        let oidc = cfg.sign_in.oidc.clone().map(crate::oidc::Provider::new).transpose()?;
+        let oidc = cfg.sign_in.oidc.clone().map(|o| crate::oidc::Provider::new(o, vault.clone())).transpose()?;
         let adapters = Adapters::new(&cfg.appliance.state_dir, vault.clone(), &cfg.adapters);
         let live_text = Arc::new(Live { tx: tokio::sync::broadcast::channel(1024).0, so_far: Mutex::new(HashMap::new()) });
         let k = Arc::new(Kernel {
@@ -204,6 +204,11 @@ impl Kernel {
     /// in place of the config's (E2).
     /// A person's rights: the identity provider's where it names them, else
     /// the roles the owner set in Settings, else the config's.
+    /// The identity provider people sign in through, if the appliance has one.
+    pub fn identity(&self) -> Option<&dyn crate::identity::Identity> {
+        self.oidc.as_ref().map(|o| o as &dyn crate::identity::Identity)
+    }
+
     pub fn person(&self, id: &str) -> Option<Person> {
         let mut p = self.cfg.person(id)?.clone();
         if let Some(r) = self.read(|s| s.roles_set.get(id).cloned()) {
