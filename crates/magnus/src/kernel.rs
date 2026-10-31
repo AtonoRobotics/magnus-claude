@@ -87,11 +87,10 @@ pub struct NewRun {
 impl Kernel {
     pub async fn boot(cfg: Config) -> Result<Arc<Kernel>> {
         std::fs::create_dir_all(&cfg.appliance.state_dir)?;
-        // Just switched releases: the one before may still be letting go of the log.
-        let log = match crate::update::switching(&cfg) {
-            true => Log::open_waiting(&cfg.database.url, Duration::from_secs(15)).await?,
-            false => Log::open(&cfg.database.url).await?,
-        };
+        // The kernel before this one (a switch of releases, a restart, a
+        // crash) may still be letting go of the log: Postgres frees its lock
+        // only once it sees that connection closed.
+        let log = Log::open_waiting(&cfg.database.url, Duration::from_secs(15)).await?;
         // A removal stopped after its record: its content goes now.
         if let Err(e) = log.finish_removals().await {
             tracing::warn!("could not finish removals (has `magnus migrate` run since this release was installed?): {e:#}");
