@@ -32,8 +32,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: never
-  MAGNUS_GUEST_KERNEL: ${{ vars.MAGNUS_SANDBOX_OUT }}/vmlinux
-  MAGNUS_GUEST_ROOTFS: ${{ vars.MAGNUS_SANDBOX_OUT }}/rootfs.ext4
 
 jobs:
   injection:
@@ -42,6 +40,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { clean: false }
+      # The sandbox guest built from this commit (sandbox/image.sh).
+      - name: Sandbox image
+        run: |
+          d=$(sandbox/image.sh)
+          echo "MAGNUS_GUEST_KERNEL=$d/vmlinux" >> "$GITHUB_ENV"
+          echo "MAGNUS_GUEST_ROOTFS=$d/rootfs.ext4" >> "$GITHUB_ENV"
       - name: Programs the suite launches
         run: cargo build --workspace --bins
       - name: Injection suite

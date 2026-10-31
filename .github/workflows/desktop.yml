@@ -26,9 +26,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: never
-  # Machine paths on the build box, kept in repository variables.
-  MAGNUS_GUEST_KERNEL: ${{ vars.MAGNUS_SANDBOX_OUT }}/vmlinux
-  MAGNUS_GUEST_ROOTFS: ${{ vars.MAGNUS_SANDBOX_OUT }}/rootfs.ext4
 
 jobs:
   release-checks:
@@ -98,6 +95,13 @@ jobs:
       # `cargo test` builds only the test package's own.
       - name: Programs the tests launch
         run: cargo build --workspace --bins
+      # The sandbox guest built from this commit (sandbox/image.sh).
+      - name: Sandbox image
+        if: env.MAGNUS_TESTED != '1'
+        run: |
+          d=$(sandbox/image.sh)
+          echo "MAGNUS_GUEST_KERNEL=$d/vmlinux" >> "$GITHUB_ENV"
+          echo "MAGNUS_GUEST_ROOTFS=$d/rootfs.ext4" >> "$GITHUB_ENV"
       # Every suite, on every pull request and master build, before its
       # build can reach an app (DECISIONS.md, "One pull request at a time").
       - name: Browser sidecar
