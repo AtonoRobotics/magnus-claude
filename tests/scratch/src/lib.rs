@@ -1,18 +1,19 @@
 //! Shared setup for the desktop app's flow tests: an appliance with a fake
 //! Anthropic API, a policy that asks before a file leaves a task, a person
-//! with a password, and a fake identity provider for sign-in through one.
+//! with a password, and a real Keycloak for sign-in through one (`keycloak.rs`).
 
-use axum::{body::Body, extract::State, http::HeaderMap, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
+use axum::{body::Body, extract::State, http::HeaderMap, response::Response, routing::{get, post}, Json, Router};
 use magnus_invariants::appliance::bin;
 
+mod keycloak;
+pub use keycloak::*;
 mod oauth_app;
 pub use oauth_app::FakeOAuthApp;
 use magnus_invariants::*;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+
 
 pub const PERSON: &str = "alice";
 pub const PASSWORD: &str = "correct horse battery";
@@ -233,168 +234,9 @@ impl Flow {
     pub async fn report(&self) -> String {
         let alice = self.app.api(PERSON);
         let tasks = alice.tasks().await;
-        let id = tasks["tasks"][0]["task_id"].as_str().unwrap_or_default().to_string();
+        let Some(id) = tasks["tasks"][0]["task_id"].as_str().map(String::from) else { return "--- no task was made ---".into() };
         let (_, tl) = alice.get(&format!("/v1/tasks/{id}/timeline")).await;
         format!("--- task ---\n{}\n--- trace ---\n{}", alice.task(&id).await, serde_json::to_string_pretty(&tl).unwrap())
-    }
-}
-
-/// The client id the fake identity provider knows.
-pub const IDP_CLIENT: &str = "magnus-test";
-/// What the sign-in button names when the appliance uses the fake provider.
-pub const IDP_LABEL: &str = "Test identity";
-
-#[derive(Default)]
-struct IdpState {
-    /// device_code -> (user_code, "pending" | "approved" | "denied")
-    codes: HashMap<String, (String, String)>,
-    /// Who approves, and the audience the ID token names.
-    username: String,
-    audience: String,
-    /// More claims for the ID token (groups, roles).
-    extra: Value,
-}
-
-/// An OpenID Connect provider with the device-code grant, as Keycloak
-/// offers it: discovery, device authorization, token, and an approval page
-/// (the person's browser visits it). Its ID tokens are unsigned; the
-/// appliance relies on TLS to its token endpoint, not the signature.
-pub struct FakeIdp {
-    pub issuer: String,
-    state: Arc<Mutex<IdpState>>,
-}
-
-impl FakeIdp {
-    pub async fn start(username: &str) -> FakeIdp {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let issuer = format!("http://{}/realms/test", l.local_addr().unwrap());
-        let state = Arc::new(Mutex::new(IdpState { username: username.into(), audience: IDP_CLIENT.into(), ..Default::default() }));
-        type S = State<(String, Arc<Mutex<IdpState>>)>;
-        fn oauth_error(code: &str) -> Response {
-            Response::builder().status(if code == "invalid_client" { 401 } else { 400 }).header("content-type", "application/json").body(Body::from(json!({ "error": code }).to_string())).unwrap()
-        }
-        async fn discovery(State((iss, _)): S) -> Json<Value> {
-            Json(json!({ "issuer": iss, "token_endpoint": format!("{iss}/token"), "device_authorization_endpoint": format!("{iss}/device/auth"), "authorization_endpoint": format!("{iss}/auth") }))
-        }
-        async fn device(State((iss, st)): S, axum::Form(f): axum::Form<HashMap<String, String>>) -> Response {
-            if f.get("client_id").map(String::as_str) != Some(IDP_CLIENT) {
-                return oauth_error("invalid_client");
-            }
-            let n = st.lock().unwrap().codes.len();
-            let (dc, uc) = (format!("dc-{n}-{}", canary("d")), format!("WXYZ-{:04}", n));
-            st.lock().unwrap().codes.insert(dc.clone(), (uc.clone(), "pending".into()));
-            Json(json!({ "device_code": dc, "user_code": uc, "verification_uri": format!("{iss}/device"), "verification_uri_complete": format!("{iss}/device?user_code={uc}"), "expires_in": 600, "interval": 1 })).into_response()
-        }
-        async fn approve(State((_, st)): S, axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>) -> Response {
-            let uc = q.get("user_code").cloned().unwrap_or_default();
-            let verdict = if q.contains_key("deny") { "denied" } else { "approved" };
-            let mut s = st.lock().unwrap();
-            // `as`: the person signs in on this page as someone else.
-            if let Some(other) = q.get("as") {
-                s.username = other.clone();
-            }
-            let who = s.username.clone();
-            let found = s.codes.values_mut().find(|(c, _)| *c == uc).map(|e| e.1 = verdict.into()).is_some();
-            let msg = if found { format!("<p>Signed in as {who}. You can close this page.</p>") } else { "<p>Unknown code.</p>".into() };
-            Response::builder().header("content-type", "text/html").body(Body::from(msg)).unwrap()
-        }
-        async fn token(State((iss, st)): S, axum::Form(f): axum::Form<HashMap<String, String>>) -> Response {
-            if f.get("grant_type").map(String::as_str) != Some("urn:ietf:params:oauth:grant-type:device_code") {
-                return oauth_error("unsupported_grant_type");
-            }
-            let s = st.lock().unwrap();
-            let Some((_, status)) = f.get("device_code").and_then(|d| s.codes.get(d)) else { return oauth_error("invalid_grant") };
-            match status.as_str() {
-                "pending" => oauth_error("authorization_pending"),
-                "denied" => oauth_error("access_denied"),
-                _ => {
-                    use base64_url as b64;
-                    let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 300;
-                    let mut claims = json!({ "iss": iss, "aud": s.audience, "azp": s.audience, "exp": exp, "sub": format!("sub-{}", s.username), "preferred_username": s.username });
-                    if let (Some(c), Some(x)) = (claims.as_object_mut(), s.extra.as_object()) {
-                        c.extend(x.clone());
-                    }
-                    let id_token = format!("{}.{}.unsigned", b64::encode(&json!({ "alg": "RS256", "typ": "JWT" }).to_string()), b64::encode(&claims.to_string()));
-                    Json(json!({ "access_token": "at-not-kept", "refresh_token": "rt-not-kept", "id_token": id_token, "token_type": "Bearer", "expires_in": 300 })).into_response()
-                }
-            }
-        }
-        let app = Router::new()
-            .route("/realms/test/.well-known/openid-configuration", get(discovery))
-            .route("/realms/test/device/auth", post(device))
-            .route("/realms/test/device", get(approve))
-            .route("/realms/test/token", post(token))
-            .with_state((issuer.clone(), state.clone()));
-        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-        FakeIdp { issuer, state }
-    }
-
-    /// Approve (or decline) a code, as the person does on the provider's page.
-    pub async fn visit(&self, user_code: &str, deny: bool) {
-        let url = format!("{}/device?user_code={user_code}{}", self.issuer, if deny { "&deny=1" } else { "" });
-        assert!(reqwest::get(url).await.unwrap().status().is_success());
-    }
-
-    /// Approve as someone else from now on.
-    pub fn set_username(&self, who: &str) {
-        self.state.lock().unwrap().username = who.into();
-    }
-
-    /// Put these claims in ID tokens from now on (groups, roles).
-    pub fn set_claims(&self, extra: Value) {
-        self.state.lock().unwrap().extra = extra;
-    }
-
-    /// Sign in as an app does: start, approve on the provider's page, poll
-    /// until done. Returns the session token.
-    pub async fn sign_in(&self, app: &Appliance) -> String {
-        let http = reqwest::Client::new();
-        let s: Value = http.post(format!("{}/v1/sign-in/device", app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "client": "app" })).send().await.unwrap().json().await.unwrap();
-        self.visit(s["user_code"].as_str().unwrap(), false).await;
-        let flow = s["flow"].as_str().unwrap();
-        let end = std::time::Instant::now() + magnus_invariants::PATIENCE;
-        loop {
-            let r = http.post(format!("{}/v1/sign-in/device/{flow}", app.base)).send().await.unwrap();
-            let st = r.status().as_u16();
-            let v: Value = r.json().await.unwrap_or(Value::Null);
-            if st == 200 {
-                return v["token"].as_str().expect("an app sign-in returns a token").to_string();
-            }
-            assert!(st == 202 && std::time::Instant::now() < end, "sign-in failed: {st} {v}");
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        }
-    }
-
-    /// Point the appliance at this provider, with more `[sign_in.oidc]`
-    /// settings, and restart it.
-    pub async fn configure_with(&self, app: &mut Appliance, more: &[(&str, &str)]) {
-        self.configure_inner(app, more).await
-    }
-
-    /// Mint ID tokens for another client from now on.
-    pub fn set_audience(&self, aud: &str) {
-        self.state.lock().unwrap().audience = aud.into();
-    }
-
-    /// Point the appliance at this provider and restart it.
-    pub async fn configure(&self, app: &mut Appliance) {
-        self.configure_inner(app, &[]).await
-    }
-
-    async fn configure_inner(&self, app: &mut Appliance, more: &[(&str, &str)]) {
-        let path = app.dir.path().join("magnus.toml");
-        let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
-        let sign_in = cfg.entry("sign_in").or_insert(toml::Value::Table(Default::default())).as_table_mut().unwrap();
-        let mut oidc = toml::Table::new();
-        oidc.insert("issuer".into(), toml::Value::String(self.issuer.clone()));
-        oidc.insert("client_id".into(), toml::Value::String(IDP_CLIENT.into()));
-        oidc.insert("label".into(), toml::Value::String(IDP_LABEL.into()));
-        for (k, v) in more {
-            oidc.insert(k.to_string(), toml::Value::String(v.to_string()));
-        }
-        sign_in.insert("oidc".into(), toml::Value::Table(oidc));
-        std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
-        app.restart().await;
     }
 }
 
@@ -405,22 +247,6 @@ pub async fn reconfigure(app: &mut Appliance, f: impl FnOnce(&mut toml::Table)) 
     f(&mut cfg);
     std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
     app.restart().await;
-}
-
-/// Base64url without padding, for the fake provider's tokens.
-mod base64_url {
-    pub fn encode(s: &str) -> String {
-        const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let b = s.as_bytes();
-        let mut out = String::new();
-        for c in b.chunks(3) {
-            let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-            for i in 0..=c.len() {
-                out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
-            }
-        }
-        out
-    }
 }
 
 pub fn chromium() -> PathBuf {

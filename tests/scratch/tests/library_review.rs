@@ -59,23 +59,24 @@ async fn the_owner_judges_trials_and_sees_others_tasks_but_not_their_chats() {
     dana.wait_settled(&trial).await;
     let (st, v) = alice.post(&format!("/v1/tasks/{trial}/verdict"), json!({ "verdict": "wrong" })).await;
     assert!(st.is_success(), "the owner could not judge a trial: {v}");
-    assert_eq!(alice.task(&trial).await["verdict"]["verdict"], "wrong");
-    // Another person's own task stays theirs to judge.
+    let (_, judged) = dana.get(&format!("/v1/tasks/{trial}")).await;
+    assert_eq!(judged["verdict"]["verdict"], "wrong");
+    // Another person's own task stays theirs to judge (and theirs alone to see).
     let own = carol.submit("Say hello.").await;
     carol.wait_settled(&own).await;
-    assert_eq!(alice.post(&format!("/v1/tasks/{own}/verdict"), json!({ "verdict": "wrong" })).await.0, 403);
+    assert_eq!(alice.post(&format!("/v1/tasks/{own}/verdict"), json!({ "verdict": "wrong" })).await.0, 404);
 
-    // Carol's chat starts a task; the owner's task list shows the task, not
-    // the sentence she wrote.
+    // Carol's chat starts a task; nothing of it, the sentence she wrote
+    // least of all, reaches the owner's task list.
     let said = "I need a divorce lawyer, quietly please.";
     let (_, v) = carol.post("/v1/chat", json!({ "text": said })).await;
     carol.wait_settled(v["task_id"].as_str().unwrap()).await;
-    let tasks: Value = eventually("the task from chat", PATIENCE, || async {
-        let t = alice.tasks().await;
+    let mine: Value = eventually("the task from chat", PATIENCE, || async {
+        let t = carol.tasks().await;
         t["tasks"].as_array().unwrap().iter().any(|t| t["title"] == "Find a lawyer").then_some(t)
     })
     .await;
-    assert!(!tasks.to_string().contains("quietly please"), "the owner reads another person's chat: {tasks}");
-    let mine = carol.tasks().await;
     assert!(mine.to_string().contains("quietly please"), "the person no longer sees their own conversation: {mine}");
+    let tasks = alice.tasks().await;
+    assert!(!tasks.to_string().contains("quietly please"), "the owner reads another person's chat: {tasks}");
 }

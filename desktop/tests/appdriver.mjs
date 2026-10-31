@@ -1,7 +1,7 @@
 // Drives the installed desktop app through tauri-driver (W3C WebDriver), for
 // the installed-app scripts: open a session on the app, act on its page,
 // and the steps every script begins with (pin the appliance's certificate,
-// sign in through the identity provider).
+// sign in with a username and password).
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -41,6 +41,7 @@ export async function open(wd, app, shots, prefix) {
   d.button = (label, within = "") => d.xpath(`${within}//button[normalize-space()='${label}']`);
   d.click = async el => call("POST", s(`/element/${await el}/click`), {});
   d.type = async (el, text) => call("POST", s(`/element/${await el}/value`), { text });
+  d.clear = async el => call("POST", s(`/element/${await el}/clear`), {});
   d.text = async el => call("GET", s(`/element/${await el}/text`));
   d.attr = async (el, name) => call("GET", s(`/element/${await el}/attribute/${name}`));
   d.seen = t => d.until(`"${t}"`, () => d.run("return document.body.innerText.includes(arguments[0])", t));
@@ -67,8 +68,7 @@ export async function savedPath(d, act) {
 }
 
 // Connect to the appliance over HTTPS, pinning the certificate it printed,
-// and sign in through the identity provider; the test is the person's
-// browser and approves the code the app shows.
+// and sign in.
 export async function pinAndSignIn(d, { url, fingerprint, provider, person }) {
   await d.step("pin the appliance's certificate", async () => {
     await d.type(d.css("#addr"), url);
@@ -80,19 +80,26 @@ export async function pinAndSignIn(d, { url, fingerprint, provider, person }) {
   await signIn(d, { provider, person });
 }
 
-// Sign in through the identity provider on an app already pinned to its
-// appliance; the test is the person's browser and approves the code the app
-// shows, as `person`.
-export async function signIn(d, { provider, person, as }) {
-  await d.step(`sign in with ${provider} as ${as || person}`, async () => {
-    await d.click(d.button(`Sign in with ${provider}`));
-    const code = (await d.text(d.css("#code"))).trim();
-    const link = await d.attr(d.css("#open"), "data-url");
-    if (!link.includes(code)) throw new Error(`the provider's page ${link} is not for code ${code}`);
-    const approved = await (await fetch(as ? `${link}&as=${encodeURIComponent(as)}` : link)).text();
-    if (!approved.includes(`Signed in as ${as || person}`)) throw new Error(`the provider did not approve: ${approved}`);
+// Sign in as `person` (or `as`) on an app already pinned to its appliance:
+// type the username and password (MAGNUS_PASSWORDS has each person's) and
+// press Sign in. The first time, the app opens the provider's page in the
+// computer's default browser, which signs in there as whoever the file
+// MAGNUS_SIGN_IN_AS names (the test's browser), and comes back to the app.
+// `browser: false`: this sign-in must not need the browser, which is made
+// unable to sign anyone in.
+export async function signIn(d, { provider, person, as, browser = true }) {
+  const who = as || person;
+  await d.step(`sign in as ${who}${browser ? "" : " in the app alone"}`, async () => {
+    const passwords = JSON.parse(env("MAGNUS_PASSWORDS"));
+    if (!passwords[who]) throw new Error(`no password for ${who}`);
+    writeFileSync(env("MAGNUS_SIGN_IN_AS"), browser ? `${who}\n${passwords[who]}\n` : "\n\n");
+    await d.clear(d.css("#who"));
+    await d.type(d.css("#who"), who);
+    await d.type(d.css("#pw"), passwords[who]);
+    await d.click(d.button("Sign in"));
     await d.xpath("//h1[normalize-space()='Home']");
     const page = await d.run("return JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie");
     if (page.includes("mgs_")) throw new Error("the session token reached the page");
+    if (page.includes(passwords[who])) throw new Error("the password stayed in the page's storage");
   });
 }

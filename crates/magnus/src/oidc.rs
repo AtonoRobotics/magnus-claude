@@ -1,31 +1,61 @@
-//! Sign-in through an OpenID Connect provider, with the device-code grant
-//! (RFC 8628): the appliance asks the provider for a code, the person
-//! approves it on the provider's own page, and the appliance collects the
-//! ID token itself. No password reaches Magnus, and no provider token is
-//! kept: the ID token names the person, then a Magnus session takes over.
+//! Sign-in through an OpenID Connect provider (Keycloak, for one).
+//!
+//! People type their username and password in the app, as they do for any
+//! other app. The appliance checks them with the provider's password grant
+//! (Keycloak calls it Direct access grants) over TLS, with the code from an
+//! authenticator app when the person uses one, and keeps neither. The
+//! password grant answers a wrong password and a missing code alike, so a
+//! service account that may only view users tells the appliance who uses a
+//! code.
+//!
+//! A passkey can't be used in the app's form, so it signs in in the
+//! person's own browser with the authorization code and PKCE (RFC 7636),
+//! coming back to a loopback address on their computer (RFC 8252): the
+//! appliance makes the verifier, state and nonce and keeps them, the app
+//! passes back the code, and the appliance exchanges it.
+//!
+//! A browser on the appliance's own page can sign in with the device-code
+//! grant (RFC 8628): the person approves a code on the provider's page, and
+//! the appliance collects the ID token itself.
 //!
 //! The ID token comes straight from the provider's token endpoint over TLS,
 //! so TLS stands in for checking its signature (OpenID Connect Core 1.0,
-//! 3.1.3.7, step 6); the issuer, audience and expiry are still checked.
+//! 3.1.3.7, step 6); the issuer, audience, expiry and nonce are still
+//! checked.
 
 use crate::config::Oidc as Cfg;
+pub use crate::identity::{Begun, Polled, Rights};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Deserialize, Clone, Debug)]
 struct Discovery {
     issuer: String,
     token_endpoint: String,
+    authorization_endpoint: Option<String>,
     device_authorization_endpoint: Option<String>,
 }
 
+/// A sign-in in the person's browser, by its `state`.
+struct CodeFlow {
+    verifier: String,
+    nonce: String,
+    redirect_uri: String,
+    expires: DateTime<Utc>,
+    app: bool,
+}
+
+
 struct Pending {
     device_code: String,
+    /// PKCE for the device grant too: a provider that requires it for the
+    /// client (Keycloak does, once S256 is set) requires it here.
+    verifier: String,
     interval: Duration,
     next_poll: DateTime<Utc>,
     expires: DateTime<Utc>,
@@ -42,23 +72,6 @@ pub struct Started {
     pub interval: i64,
 }
 
-pub enum Polled {
-    /// Not approved yet; ask again later.
-    Pending,
-    /// Approved: the person claim from the ID token, and whether the
-    /// sign-in began in the app.
-    Done { person: String, app: bool, rights: Rights },
-    /// Over: declined, expired or refused, with a message for the person.
-    Failed(String),
-}
-
-/// Groups and roles the provider gave in the ID token, where the owner
-/// named their claims; None where not.
-#[derive(Debug, Default, Clone)]
-pub struct Rights {
-    pub groups: Option<Vec<String>>,
-    pub roles: Option<Vec<String>>,
-}
 
 /// A list of names at a JSON pointer. Keycloak writes groups as paths
 /// (`/finance`); the leading slash is not part of the name.
@@ -70,9 +83,14 @@ fn names_at(c: &Value, pointer: &Option<String>) -> Option<Vec<String>> {
 
 pub struct Provider {
     cfg: Cfg,
+    /// Holds the status client's secret.
+    vault: Arc<crate::vault::Vault>,
     http: reqwest::Client,
+    /// For Keycloak's admin API, trusting `status_admin_ca` too.
+    admin_http: reqwest::Client,
     discovery: tokio::sync::OnceCell<Discovery>,
     pending: Mutex<BTreeMap<String, Pending>>,
+    code_flows: Mutex<BTreeMap<String, CodeFlow>>,
 }
 
 /// Only https, except on this machine (for tests and a local provider).
@@ -114,10 +132,19 @@ fn person(c: &Value, issuer: &str, client_id: &str, claim: &str, now: DateTime<U
 }
 
 impl Provider {
-    pub fn new(cfg: Cfg) -> Result<Provider> {
+    pub fn new(cfg: Cfg, vault: Arc<crate::vault::Vault>) -> Result<Provider> {
         checked(&cfg.issuer)?;
         let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
-        Ok(Provider { cfg, http, discovery: tokio::sync::OnceCell::new(), pending: Mutex::new(BTreeMap::new()) })
+        if let Some(u) = &cfg.status_admin_url {
+            checked(u)?;
+        }
+        let mut admin = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+        if let Some(ca) = &cfg.status_admin_ca {
+            let pem = std::fs::read(ca).with_context(|| format!("reading status_admin_ca {}", ca.display()))?;
+            admin = admin.add_root_certificate(reqwest::Certificate::from_pem(&pem).with_context(|| format!("{} is not a PEM certificate", ca.display()))?);
+        }
+        let admin_http = admin.build()?;
+        Ok(Provider { cfg, vault, http, admin_http, discovery: tokio::sync::OnceCell::new(), pending: Mutex::new(BTreeMap::new()), code_flows: Mutex::new(BTreeMap::new()) })
     }
 
     /// What the sign-in button names.
@@ -134,27 +161,208 @@ impl Provider {
                     bail!("{url} names issuer {}, not {}", d.issuer, self.cfg.issuer);
                 }
                 checked(&d.token_endpoint)?;
-                match &d.device_authorization_endpoint {
-                    Some(e) => checked(e)?,
-                    None => bail!("{} does not offer the device-code grant", self.cfg.issuer),
-                };
+                for e in [&d.authorization_endpoint, &d.device_authorization_endpoint].into_iter().flatten() {
+                    checked(e)?;
+                }
                 Ok(d)
             })
             .await
     }
 
-    pub async fn start(&self, app: bool) -> Result<Started> {
-        let now = Utc::now();
-        {
-            let mut p = self.pending.lock().unwrap();
-            p.retain(|_, f| f.expires > now);
-            if p.len() >= self.cfg.max_pending {
-                bail!("too many sign-ins are waiting; try again in a few minutes");
+    /// Room for one more waiting sign-in, after forgetting the expired.
+    fn room(&self, now: DateTime<Utc>) -> Result<()> {
+        let mut p = self.pending.lock().unwrap();
+        let mut c = self.code_flows.lock().unwrap();
+        p.retain(|_, f| f.expires > now);
+        c.retain(|_, f| f.expires > now);
+        if p.len() + c.len() >= self.cfg.max_pending {
+            bail!("too many sign-ins are waiting; try again in a few minutes");
+        }
+        Ok(())
+    }
+
+    /// The person and their rights from a token response, after checking
+    /// the ID token is for us, current, and (in a browser sign-in) answers
+    /// the nonce we sent.
+    fn signed_in(&self, d: &Discovery, b: &Value, nonce: Option<&str>, now: DateTime<Utc>) -> Result<(String, Rights)> {
+        let id_token = b["id_token"].as_str().ok_or_else(|| anyhow!("{} sent no ID token (is \"openid\" in the scope?)", self.label()))?;
+        let c = claims(id_token)?;
+        let person = person(&c, &d.issuer, &self.cfg.client_id, &self.cfg.person_claim, now)?;
+        if let Some(n) = nonce {
+            if c["nonce"].as_str() != Some(n) {
+                bail!("the ID token does not answer this sign-in's nonce");
             }
         }
+        Ok((person, Rights { groups: names_at(&c, &self.cfg.groups_claim), roles: names_at(&c, &self.cfg.roles_claim) }))
+    }
+
+    /// Begin a sign-in in the person's browser that comes back to
+    /// `redirect_uri`, a loopback address on their computer.
+    pub async fn begin(&self, redirect_uri: &str, login_hint: Option<&str>, app: bool) -> Result<Begun> {
+        crate::connectors::loopback(redirect_uri)?;
+        let now = Utc::now();
+        self.room(now)?;
         let d = self.discovery().await?;
-        let endpoint = d.device_authorization_endpoint.as_deref().expect("checked in discovery");
-        let r = self.http.post(endpoint).form(&[("client_id", self.cfg.client_id.as_str()), ("scope", self.cfg.scope.as_str())]).send().await?;
+        let endpoint = d.authorization_endpoint.as_deref().ok_or_else(|| anyhow!("{} does not offer the authorization code grant", self.label()))?;
+        let (verifier, state, nonce) = (crate::connectors::random(), crate::connectors::random(), crate::connectors::random());
+        let mut u = url::Url::parse(endpoint)?;
+        u.query_pairs_mut()
+            .append_pair("client_id", &self.cfg.client_id)
+            .append_pair("response_type", "code")
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("scope", &self.cfg.scope)
+            .append_pair("state", &state)
+            .append_pair("nonce", &nonce)
+            .append_pair("code_challenge", &crate::connectors::challenge(&verifier))
+            .append_pair("code_challenge_method", "S256");
+        if let Some(h) = login_hint {
+            u.query_pairs_mut().append_pair("login_hint", h);
+        }
+        let expires_in = i64::from(self.cfg.sign_in_minutes) * 60;
+        self.code_flows
+            .lock()
+            .unwrap()
+            .insert(state.clone(), CodeFlow { verifier, nonce, redirect_uri: redirect_uri.into(), expires: now + Duration::seconds(expires_in), app });
+        Ok(Begun { state, authorize_url: u.into(), expires_in })
+    }
+
+    /// Finish a browser sign-in with what came back to the loopback: the
+    /// code, the state it answers, and the issuer if the provider names it
+    /// (RFC 9207). Each state finishes once.
+    pub async fn finish(&self, state: &str, code: &str, iss: Option<&str>) -> Result<Polled> {
+        let now = Utc::now();
+        let Some(f) = self.code_flows.lock().unwrap().remove(state) else { return Ok(Polled::Failed("This sign-in is over. Start again.".into())) };
+        if f.expires <= now {
+            return Ok(Polled::Failed("The sign-in took too long. Start again.".into()));
+        }
+        let d = self.discovery().await?;
+        if iss.is_some_and(|i| i != d.issuer) {
+            tracing::warn!("oidc: a sign-in came back from {}, not {}", iss.unwrap_or_default(), d.issuer);
+            return Ok(Polled::Failed(format!("The sign-in came back from somewhere other than {}. Start again.", self.label())));
+        }
+        let r = self
+            .http
+            .post(&d.token_endpoint)
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", f.redirect_uri.as_str()),
+                ("client_id", self.cfg.client_id.as_str()),
+                ("code_verifier", f.verifier.as_str()),
+            ])
+            .send()
+            .await?;
+        let status = r.status();
+        let b: Value = r.json().await.unwrap_or_default();
+        if !status.is_success() {
+            let why = b["error_description"].as_str().or(b["error"].as_str()).unwrap_or(status.as_str()).to_string();
+            return Ok(Polled::Failed(format!("{} refused the sign-in: {why}", self.label())));
+        }
+        match self.signed_in(d, &b, Some(&f.nonce), now) {
+            Ok((person, rights)) => Ok(Polled::Done { person, app: f.app, rights }),
+            Err(e) => {
+                tracing::warn!("oidc: refused an ID token: {e:#}");
+                Ok(Polled::Failed(format!("{} answered, but not with a sign-in for this appliance.", self.label())))
+            }
+        }
+    }
+
+    /// Check a username and password with the provider's password grant,
+    /// with the code from the person's authenticator app if they gave one.
+    pub async fn password(&self, username: &str, password: &str, code: Option<&str>, app: bool) -> Result<Polled> {
+        let now = Utc::now();
+        let d = self.discovery().await?;
+        let mut form = vec![
+            ("grant_type", "password"),
+            ("client_id", self.cfg.client_id.as_str()),
+            ("scope", self.cfg.scope.as_str()),
+            ("username", username),
+            ("password", password),
+        ];
+        if let Some(c) = code {
+            form.push(("otp", c));
+        }
+        let r = self.http.post(&d.token_endpoint).form(&form).send().await?;
+        let status = r.status();
+        let b: Value = r.json().await.unwrap_or_default();
+        if status.is_success() {
+            return match self.signed_in(d, &b, None, now) {
+                Ok((person, rights)) => Ok(Polled::Done { person, app, rights }),
+                Err(e) => {
+                    tracing::warn!("oidc: refused an ID token: {e:#}");
+                    Ok(Polled::Failed(format!("{} answered, but not with a sign-in for this appliance.", self.label())))
+                }
+            };
+        }
+        let why = b["error_description"].as_str().unwrap_or_default();
+        match b["error"].as_str().unwrap_or_default() {
+            // Keycloak: required actions are waiting, such as a new password
+            // or setting up the authenticator app, which only its own page does.
+            "invalid_grant" if why == "Account is not fully set up" => {
+                Ok(Polled::UseBrowser(format!("Your {} account needs finishing. Do that on the page that just opened in your browser.", self.label())))
+            }
+            "invalid_grant" if code.is_none() => match self.uses_code(d, username).await {
+                Ok(Some(true)) => Ok(Polled::NeedsCode),
+                Ok(Some(false)) => Ok(Polled::Refused("The name or password is wrong.".into())),
+                Ok(None) => Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label()))),
+                // Not knowing, the password may be right and only the code
+                // missing: Keycloak's own page asks for whatever it needs.
+                Err(e) => {
+                    tracing::warn!("oidc: cannot tell whether {username} uses a code, so sending them to the browser: {e:#}");
+                    Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label())))
+                }
+            },
+            "invalid_grant" => Ok(Polled::Refused("The name, password or code is wrong.".into())),
+            // Its page still signs the person in; the owner is told what to change.
+            "unauthorized_client" => {
+                tracing::warn!("oidc: {} does not let client {} sign in with a password typed in the app; turn on Direct access grants for it", self.label(), self.cfg.client_id);
+                Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label())))
+            }
+            other => bail!("{} refused the sign-in: {}", self.label(), if why.is_empty() { if other.is_empty() { status.as_str() } else { other } } else { why }),
+        }
+    }
+
+    /// Whether the person with this username uses a code from an
+    /// authenticator app, asked as the status client; None when the
+    /// provider has no such username. Keycloak's admin API is at the issuer
+    /// with `/admin` before `/realms/`.
+    async fn uses_code(&self, d: &Discovery, username: &str) -> Result<Option<bool>> {
+        let (Some(client), Some(credential)) = (&self.cfg.status_client, &self.cfg.status_credential) else {
+            bail!("no status_client is set, so people who use a code can only sign in in the browser")
+        };
+        let secret = self.vault.get(credential)?.ok_or_else(|| anyhow!("the vault holds no secret named {credential}"))?;
+        let admin = match d.issuer.split_once("/realms/") {
+            Some((base, realm)) => format!("{}/admin/realms/{realm}", self.cfg.status_admin_url.as_deref().map(|u| u.trim_end_matches('/')).unwrap_or(base)),
+            None => bail!("{} is not a Keycloak realm, whose admin API says who uses a code", d.issuer),
+        };
+        let r = self.http.post(&d.token_endpoint).form(&[("grant_type", "client_credentials"), ("client_id", client.as_str()), ("client_secret", secret.expose())]).send().await?;
+        let status = r.status();
+        let b: Value = r.json().await.unwrap_or_default();
+        let token = match b["access_token"].as_str() {
+            Some(t) if status.is_success() => t.to_string(),
+            _ => bail!("the status client could not sign in: {}", b["error_description"].as_str().or(b["error"].as_str()).unwrap_or(status.as_str())),
+        };
+        let mut u = url::Url::parse(&format!("{admin}/users"))?;
+        u.query_pairs_mut().append_pair("username", username).append_pair("exact", "true");
+        let users: Vec<Value> = self.admin_http.get(u).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
+        let Some(id) = users.first().and_then(|x| x["id"].as_str()) else { return Ok(None) };
+        let creds: Vec<Value> = self.admin_http.get(format!("{admin}/users/{id}/credentials")).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
+        Ok(Some(creds.iter().any(|c| c["type"] == "otp")))
+    }
+
+    pub async fn start(&self, app: bool) -> Result<Started> {
+        let now = Utc::now();
+        self.room(now)?;
+        let d = self.discovery().await?;
+        let endpoint = d.device_authorization_endpoint.as_deref().ok_or_else(|| anyhow!("{} does not offer the device-code grant", self.label()))?;
+        let verifier = crate::connectors::random();
+        let challenge = crate::connectors::challenge(&verifier);
+        let r = self
+            .http
+            .post(endpoint)
+            .form(&[("client_id", self.cfg.client_id.as_str()), ("scope", self.cfg.scope.as_str()), ("code_challenge", challenge.as_str()), ("code_challenge_method", "S256")])
+            .send()
+            .await?;
         let status = r.status();
         let b: Value = r.json().await.unwrap_or_default();
         if !status.is_success() {
@@ -175,7 +383,7 @@ impl Provider {
         };
         self.pending.lock().unwrap().insert(
             flow,
-            Pending { device_code: field("device_code")?, interval: Duration::seconds(interval), next_poll: now, expires: now + Duration::seconds(expires_in), app },
+            Pending { device_code: field("device_code")?, verifier, interval: Duration::seconds(interval), next_poll: now, expires: now + Duration::seconds(expires_in), app },
         );
         Ok(started)
     }
@@ -184,7 +392,7 @@ impl Provider {
     /// often than the provider allows answers Pending without asking it.
     pub async fn poll(&self, flow: &str) -> Result<Polled> {
         let now = Utc::now();
-        let (device_code, app) = {
+        let (device_code, verifier, app) = {
             let mut p = self.pending.lock().unwrap();
             let Some(f) = p.get(flow) else { return Ok(Polled::Failed("This sign-in is over. Start again.".into())) };
             if f.expires <= now {
@@ -194,13 +402,18 @@ impl Provider {
             if now < f.next_poll {
                 return Ok(Polled::Pending);
             }
-            (f.device_code.clone(), f.app)
+            (f.device_code.clone(), f.verifier.clone(), f.app)
         };
         let d = self.discovery().await?;
         let r = self
             .http
             .post(&d.token_endpoint)
-            .form(&[("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("device_code", device_code.as_str()), ("client_id", self.cfg.client_id.as_str())])
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", device_code.as_str()),
+                ("client_id", self.cfg.client_id.as_str()),
+                ("code_verifier", verifier.as_str()),
+            ])
             .send()
             .await?;
         let status = r.status();
@@ -208,12 +421,8 @@ impl Provider {
         let mut p = self.pending.lock().unwrap();
         if status.is_success() {
             p.remove(flow);
-            let id_token = b["id_token"].as_str().ok_or_else(|| anyhow!("{} sent no ID token (is \"openid\" in the scope?)", self.label()))?;
-            return match claims(id_token).and_then(|c| person(&c, &d.issuer, &self.cfg.client_id, &self.cfg.person_claim, now).map(|p| (p, c))) {
-                Ok((person, c)) => {
-                    let rights = Rights { groups: names_at(&c, &self.cfg.groups_claim), roles: names_at(&c, &self.cfg.roles_claim) };
-                    Ok(Polled::Done { person, app, rights })
-                }
+            return match self.signed_in(d, &b, None, now) {
+                Ok((person, rights)) => Ok(Polled::Done { person, app, rights }),
                 Err(e) => {
                     tracing::warn!("oidc: refused an ID token: {e:#}");
                     Ok(Polled::Failed(format!("{} answered, but not with a sign-in for this appliance.", self.label())))
@@ -249,6 +458,22 @@ impl Provider {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::identity::Identity for Provider {
+    fn label(&self) -> String {
+        Provider::label(self)
+    }
+    async fn begin(&self, redirect_uri: &str, login_hint: Option<&str>, app: bool) -> Result<Begun> {
+        Provider::begin(self, redirect_uri, login_hint, app).await
+    }
+    async fn finish(&self, state: &str, code: &str, iss: Option<&str>) -> Result<Polled> {
+        Provider::finish(self, state, code, iss).await
+    }
+    async fn password(&self, username: &str, password: &str, code: Option<&str>, app: bool) -> Result<Polled> {
+        Provider::password(self, username, password, code, app).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +494,23 @@ mod tests {
             assert!(person(&c, iss, "magnus", "preferred_username", now).is_err(), "{k} was not checked");
         }
         assert!(person(&good, iss, "magnus", "email", now).is_err());
+    }
+
+    /// Keycloak always answers with the nonce it was sent, so only here can a
+    /// token for another sign-in be shown to be refused.
+    #[test]
+    fn a_browser_sign_in_needs_its_own_nonce() {
+        let iss = "https://id.example/realms/m";
+        let cfg: Cfg = toml::from_str(&format!("issuer = \"{iss}\"\nclient_id = \"magnus\"")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let p = Provider::new(cfg, Arc::new(crate::vault::Vault::open(dir.path()).unwrap())).unwrap();
+        let d = Discovery { issuer: iss.into(), token_endpoint: format!("{iss}/token"), authorization_endpoint: None, device_authorization_endpoint: None };
+        let b64 = |v: &Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+        let now = Utc::now();
+        let token = |nonce: &str| json!({ "id_token": format!("{}.{}.sig", b64(&json!({})), b64(&json!({ "iss": iss, "aud": "magnus", "exp": now.timestamp() + 60, "preferred_username": "carol", "nonce": nonce }))) });
+        assert_eq!(p.signed_in(&d, &token("n-1"), Some("n-1"), now).unwrap().0, "carol");
+        assert!(p.signed_in(&d, &token("n-2"), Some("n-1"), now).is_err(), "a token for another sign-in was taken");
+        assert!(p.signed_in(&d, &json!({ "id_token": format!("{}.{}.sig", b64(&json!({})), b64(&json!({ "iss": iss, "aud": "magnus", "exp": now.timestamp() + 60, "preferred_username": "carol" }))) }), Some("n-1"), now).is_err(), "a token with no nonce was taken");
     }
 
     #[test]
