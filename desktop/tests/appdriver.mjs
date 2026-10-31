@@ -15,7 +15,9 @@ export async function open(wd, app, shots, prefix) {
   if (shots) mkdirSync(shots, { recursive: true });
   async function call(method, path, body) {
     const r = await fetch(`${wd}${path}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-    const j = await r.json();
+    const text = await r.text();
+    let j;
+    try { j = JSON.parse(text); } catch { throw new Error(`${method} ${path}: HTTP ${r.status}, not WebDriver's answer: ${text.slice(0, 200) || "(empty)"}`); }
     if (!r.ok || (j.value && j.value.error)) throw new Error(`${method} ${path}: ${JSON.stringify(j.value)}`);
     return j.value;
   }
@@ -32,18 +34,35 @@ export async function open(wd, app, shots, prefix) {
     }
     throw new Error(`timed out waiting for ${what}${last ? `: ${last.message}` : ""}`);
   };
+  // Where each element was found, to find it again: the app redraws parts
+  // of its page (its navigation, as counts change), and an element found
+  // just before a redraw is gone ("stale element reference") when used.
+  const how = new Map();
   const find = (using, value) => d.until(value, async () => {
     const els = await call("POST", s("/elements"), { using, value });
-    return els.length ? els[0][E] : null;
+    if (!els.length) return null;
+    how.set(els[0][E], [using, value]);
+    return els[0][E];
   });
+  const on = async (el, act) => {
+    let id = await el;
+    const end = Date.now() + T;
+    for (;;) {
+      try { return await act(id); }
+      catch (e) {
+        if (!/stale element reference/.test(e.message) || !how.has(id) || Date.now() > end) throw e;
+        id = await find(...how.get(id));
+      }
+    }
+  };
   d.css = v => find("css selector", v);
   d.xpath = v => find("xpath", v);
   d.button = (label, within = "") => d.xpath(`${within}//button[normalize-space()='${label}']`);
-  d.click = async el => call("POST", s(`/element/${await el}/click`), {});
-  d.type = async (el, text) => call("POST", s(`/element/${await el}/value`), { text });
-  d.clear = async el => call("POST", s(`/element/${await el}/clear`), {});
-  d.text = async el => call("GET", s(`/element/${await el}/text`));
-  d.attr = async (el, name) => call("GET", s(`/element/${await el}/attribute/${name}`));
+  d.click = el => on(el, id => call("POST", s(`/element/${id}/click`), {}));
+  d.type = (el, text) => on(el, id => call("POST", s(`/element/${id}/value`), { text }));
+  d.clear = el => on(el, id => call("POST", s(`/element/${id}/clear`), {}));
+  d.text = el => on(el, id => call("GET", s(`/element/${id}/text`)));
+  d.attr = (el, name) => on(el, id => call("GET", s(`/element/${id}/attribute/${name}`)));
   d.seen = t => d.until(`"${t}"`, () => d.run("return document.body.innerText.includes(arguments[0])", t));
   let n = 0;
   const shot = async name => { if (shots) writeFileSync(join(shots, `${prefix}-${String(++n).padStart(2, "0")}-${name}.png`), Buffer.from(await call("GET", s("/screenshot")), "base64")); };
@@ -97,7 +116,8 @@ export async function signIn(d, { provider, person, as, browser = true }) {
     await d.type(d.css("#who"), who);
     await d.type(d.css("#pw"), passwords[who]);
     await d.click(d.button("Sign in"));
-    await d.xpath("//h1[normalize-space()='Home']");
+    // The conversation is home: the workspace shows, with Needs you.
+    await d.xpath("//nav//button[starts-with(normalize-space(),'Needs you')]");
     const page = await d.run("return JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie");
     if (page.includes("mgs_")) throw new Error("the session token reached the page");
     if (page.includes(passwords[who])) throw new Error("the password stayed in the page's storage");

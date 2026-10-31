@@ -21,8 +21,19 @@ function hush() {
 }
 async function readAloud(text) {
   await hush();
-  const run = voice.run, parts = text.split(/(?<=[.!?])\s+/).filter(s => s.trim());
-  const make = s => { const p = api("POST", "/v1/speak", { text: s }); p.catch(() => {}); return p; };
+  // A sentence at a time; a very long one in pieces, as the appliance reads
+  // at most 2000 characters at once.
+  const pieces = s => { const out = []; let cur = ""; for (const w of s.split(/\s+/)) { if (cur && (cur + " " + w).length > 1500) { out.push(cur); cur = w; } else cur = cur ? `${cur} ${w}` : w; } if (cur) out.push(cur); return out; };
+  const run = voice.run, parts = text.split(/(?<=[.!?])\s+/).filter(s => s.trim()).flatMap(pieces);
+  // The voice makes a few pieces at a time for everyone: busy, wait and ask again.
+  const ask = async (s, tries = 8) => {
+    try { return await api("POST", "/v1/speak", { text: s }); } catch (e) {
+      if (e.status !== 429 || tries <= 1 || run !== voice.run) throw e;
+      await new Promise(r => setTimeout(r, 400));
+      return ask(s, tries - 1);
+    }
+  };
+  const make = s => { const p = ask(s); p.catch(() => {}); return p; };
   let next = parts.length ? make(parts[0]) : null;
   for (let i = 0; i < parts.length; i++) {
     let r;
@@ -46,17 +57,27 @@ const App = {
   me: null,
   appliance: "",
   inbox: [],
+  tasks: [],
+  schedules: [],
+  threads: [],
+  projects: [],
+  health: null,
+  thread: null,
   versions: null,
   update: null,
   timers: [],
   leave: [],
   routes: [],
+  seq: 0,
 };
 
 function toast(msg, ms = 3200) {
   const t = document.createElement("div");
   t.className = "toast"; t.textContent = msg; t.setAttribute("role", "status");
-  document.body.append(t);
+  // Toasts stack, newest at the bottom, rather than covering each other.
+  let box = $("#toasts");
+  if (!box) { box = document.createElement("div"); box.id = "toasts"; document.body.append(box); }
+  box.append(t);
   setTimeout(() => t.remove(), ms);
 }
 
@@ -114,40 +135,83 @@ const chip = st => { const [c, l] = STATUS[st] || ["", st]; return `<span class=
 
 // ---------- shell ----------
 
+// One workspace: the conversation in the middle, what was asked of it beside
+// it in a panel, and the sidebar. Everything it shows is read together
+// (refresh), so a task, a schedule or a decision is one object wherever it
+// appears, and acting on it anywhere redraws every place it is shown.
+const needsMe = () => App.inbox.filter(i => i.status === "open" && i.can_respond);
+
+// The workspace's icons, drawn as in the Magnus Workspace design: 24px
+// outlines in the current color.
+const UI = {
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  tasks: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/>',
+  file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+  chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  done: '<circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/>',
+  need: '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>',
+  working: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  stopped: '<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  attach: '<path d="m21 11-8.6 8.6a5 5 0 0 1-7-7l8.5-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.3-2.3l8-8"/>',
+  send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  shield: '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/>',
+  close: '<path d="M18 6 6 18M6 6l12 12"/>',
+  download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+  chev: '<path d="m9 6 6 6-6 6"/>',
+};
+const icon = (k, cls = "") => `<svg class="ic${cls ? ` ${cls}` : ""}" viewBox="0 0 24 24" aria-hidden="true">${UI[k]}</svg>`;
+
 function nav() {
   const route = location.hash || "#/home";
-  const blocking = App.inbox.filter(i => i.status === "open" && i.can_respond && i.blocking).length;
-  const batched = App.inbox.filter(i => i.status === "open" && i.can_respond && !i.blocking).length;
-  const link = (href, label, extra = "") => `<a href="${href}" class="${route === href || route.startsWith(href + "/") ? "on" : ""}">${label}${extra}</a>`;
-  const badges = (blocking ? `<span class="badge" title="Needs you now">${blocking}</span>` : "") + (batched ? ` <span class="badge quiet" title="When you have a moment">${batched}</span>` : "");
+  const link = (href, label, ic) => `<a href="${href}" class="${route === href || route.startsWith(href + "/") ? "on" : ""}">${ic ? icon(ic) : ""}<span class="ttl">${label}</span></a>`;
+  const on = what => Panel.what === what ? " on" : "";
+  const waiting = needsMe(), blocking = waiting.filter(i => i.blocking).length;
   const ready = App.update?.ready;
+  // A project's conversations sit under it; the rest, each with its icon.
+  const conv = (t, nested = true) => `<a href="#/chat/${enc(t.thread)}" class="${nested ? "conv" : ""}${t.thread === App.thread ? " on" : ""}"${t.thread === App.thread ? ` aria-current="page"` : ""} title="${esc(t.title)}">${nested ? "" : icon("chat")}<span class="ttl">${esc(t.title)}</span></a>`;
+  const loose = App.threads.filter(t => !t.project);
+  const running = App.tasks.filter(t => t.status === "running").length;
+  const count = n => n ? `<span class="count">${n}</span>` : "";
   return `
-    <div class="brand">Magnus</div>
     ${ready ? `<div class="update-ready" title="${esc(ready.notes || "")}"><div class="small">Magnus ${esc(ready.version)} is ready.</div>
       <button class="primary small" data-act="restart-update">Restart to update</button></div>` : ""}
-    ${link("#/home", "Home")}
-    ${link("#/chat", "Chat")}
-    ${link("#/inbox", "Inbox", `<span>${badges}</span>`)}
-    ${link("#/new", "New task")}
-    ${link("#/tasks", "Tasks")}
-    ${link("#/schedules", "Schedules")}
-    ${link("#/library", "Library")}
-    ${link("#/projects", "Projects")}
-    ${link("#/trash", "Trash")}
-    ${link("#/settings", "Settings")}
-    ${isDev() ? `<div class="group">Developer</div>
+    <button class="needs${waiting.length ? " some" : ""}${on("needs")}" data-open="needs" title="${blocking ? `${blocking} waiting on you now` : "Approvals, questions and reviews"}">${icon("bell")}<span class="ttl">Needs you</span><span class="pill${blocking ? "" : " quiet"}" data-needs-count>${waiting.length}</span></button>
+    <div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more${on("projects")}" title="All projects, and a new one">All</a></div>
+    ${App.projects.map(p => `<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" class="${on(`project:${p.id}`).trim()}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>
+      ${App.threads.filter(t => t.project?.id === p.id).map(conv).join("")}`).join("") || `<p class="small faint pad">None yet.</p>`}
+    ${loose.length ? `<div class="group"><span>Conversations</span></div>${loose.map(t => conv(t, false)).join("")}` : ""}
+    <div class="group"><span>Across everything</span></div>
+    <div class="views">
+      <a href="#/tasks" data-open="tasks" class="${on("tasks").trim()}">${icon("tasks")}<span class="ttl">Tasks</span>${running ? `<span class="count">${running} running</span>` : ""}</a>
+      <a href="#/schedules" data-open="schedules" class="${on("schedules").trim()}">${icon("calendar")}<span class="ttl">Schedules</span>${count(App.schedules.length)}</a>
+      <a href="#/library" data-open="library" class="${on("library").trim()}">${icon("file")}<span class="ttl">Library</span></a></div>
+    <div class="foot">${link("#/trash", "Trash", "trash")}
+    ${isDev() ? `<div class="group"><span>Developer</span></div>
       ${link("#/dev/runs", "Runs")}
       ${link("#/dev/experiments", "Experiments")}
       ${link("#/dev/system", "System")}
       ${link("#/dev/policy", "Policy")}
       ${link("#/dev/playbook", "Playbook")}` : ""}
-    <div class="who"><div>${esc(App.me?.name)} <span class="faint">(${esc(App.me?.id)})</span></div>
-      <div class="faint small">${esc(App.appliance)}</div>
-      <button class="link small" data-act="sign-out" style="margin-top:6px">Sign out</button></div>`;
+    <div class="who"><span class="avatar" aria-hidden="true">${esc((App.me?.name || "?").trim().charAt(0).toUpperCase())}</span>
+      <div class="whoami"><div class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</div><div class="faint small ttl">${esc(App.appliance)}</div>
+      <button class="link small" data-act="sign-out">Sign out</button></div>
+      <a href="#/settings" class="icon-btn${route.startsWith("#/settings") ? " on" : ""}" title="Settings">${icon("gear")}<span class="sr">Settings</span></a></div></div>`;
 }
+const sidebar = () => paint($("#side"), nav());
 
 function shell() {
-  document.body.innerHTML = `<div class="shell"><nav class="side" aria-label="Sections"></nav><main id="main" tabindex="-1"></main></div>`;
+  document.body.innerHTML = `<div class="shell"><nav class="side" aria-label="Sections"><div class="brand"><span class="logo" aria-hidden="true">M</span><span>Magnus</span>
+    <a href="#/chat/new" class="icon-btn new-chat" title="New conversation">${icon("plus")}<span class="sr">New conversation</span></a></div>
+    <form id="find" role="search">${icon("search")}<label class="sr" for="q">Search conversations, tasks and files</label><input id="q" type="search" placeholder="Search chats, tasks, files" autocomplete="off"></form>
+    <div id="side"></div></nav>
+    <main id="main" tabindex="-1"></main><aside id="detail" class="detail" aria-label="Details" hidden></aside></div>`;
   $("nav.side").addEventListener("click", async e => {
     if (e.target.closest("[data-act=restart-update]")) return restartToUpdate();
     if (e.target.closest("[data-act=sign-out]")) {
@@ -157,7 +221,31 @@ function shell() {
       start();
     }
   });
-  paint($("nav.side"), nav());
+  $("#find").onsubmit = e => { e.preventDefault(); const q = $("#q").value.trim(); if (q) openPanel(`search:${q}`); };
+  sidebar();
+  wirePanel();
+  if (!App.wired) { App.wired = true; wireDocument(); }
+}
+
+// What works wherever it is shown, set once for the page.
+function wireDocument() {
+  // Anything that names an item opens it beside the conversation, without
+  // leaving it.
+  document.addEventListener("click", e => {
+    const o = e.target.closest("[data-open]");
+    if (!o || e.button !== 0 || e.ctrlKey || e.metaKey) return;
+    e.preventDefault();
+    // From Settings, Trash or a developer view: back to the conversation,
+    // with it open beside.
+    if (!App.workspace) { App.openAfter = o.dataset.open; location.hash = "#/home"; return; }
+    openPanel(o.dataset.open);
+  });
+  // A decision is made from its card wherever the card is shown: in its
+  // conversation, beside it, or under Needs you.
+  document.addEventListener("click", e => {
+    const b = e.target.closest("button[data-item]");
+    if (b) respond(b, b.closest("article") || document);
+  });
   // A library file downloads from wherever it is listed; a move control
   // moves its item into a project or out, wherever it is shown.
   document.addEventListener("click", async e => {
@@ -178,7 +266,7 @@ function shell() {
       delete drafts[box.dataset.draft];
       $$("[data-verdict]", bar).forEach(x => { const on = x.dataset.verdict === verdict; x.classList.toggle("on", on); x.setAttribute("aria-pressed", on); });
       toast(b.dataset.verdictSave !== undefined ? "Note saved." : "Recorded.");
-      await App.redraw?.();
+      await refresh();
     } catch (err) { toast(err.message); }
   });
   // Delete, wherever an item offers it: to the trash, where it can be
@@ -191,7 +279,8 @@ function shell() {
     try {
       await api("POST", "/v1/trash", { item: b.dataset.trash });
       toast("Moved to the trash.");
-      if (b.dataset.then) location.hash = b.dataset.then; else await App.redraw?.();
+      if (b.closest("#detail")) closePanel();
+      if (b.dataset.then) location.hash = b.dataset.then; else await refresh();
     } catch (err) { toast(err.message); b.disabled = false; }
   });
   document.addEventListener("change", async e => {
@@ -200,12 +289,14 @@ function shell() {
     try {
       await api("POST", "/v1/moves", { item: sel.dataset.move, project: sel.value || null });
       toast(sel.value ? `Moved to ${sel.selectedOptions[0].textContent}.` : "Taken out of the project.");
-      await App.redraw?.();
+      await refresh();
     } catch (err) { toast(err.message); }
   });
 }
 
-function route(re, view) { App.routes.push([re, view]); }
+// A view of the workspace (a conversation) keeps the panel beside it; any
+// other view (Settings, Trash, the developer's) has the page to itself.
+function route(re, view, workspace = false) { App.routes.push([re, view, workspace]); }
 
 // A Delete button for an item: to the trash, then to `then` (or redrawn).
 const trashButton = (item, label, then = "") => `<button data-trash="${esc(item)}"${then ? ` data-then="${esc(then)}"` : ""}>${esc(label)}</button>`;
@@ -215,19 +306,19 @@ const trashButton = (item, label, then = "") => `<button data-trash="${esc(item)
 const kb = n => `${Math.max(1, Math.round(n / 1024))} KB`;
 // A file wherever it is listed: its name opens it, Download saves it.
 function fileChip(f) {
-  return `<span class="fchip"><a href="#/file/${enc(f.id)}">${esc(f.name)}</a> <span class="small faint">${esc(kb(f.size))}</span> <button class="link small" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}" aria-label="Download ${esc(f.name)}">Download</button></span>`;
+  return `<span class="fchip"><a href="#/file/${enc(f.id)}" data-open="file:${esc(f.id)}">${esc(f.name)}</a> <span class="small faint">${esc(kb(f.size))}</span> <button class="link small" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}" aria-label="Download ${esc(f.name)}">Download</button></span>`;
 }
 // One tap records the person's verdict on an outcome; a note is optional.
 const VERDICTS = [["right", "Right"], ["partly", "Partly"], ["wrong", "Wrong"]];
 const ENDED = ["completed", "failed", "cancelled"];
 function verdictBar(taskId, v) {
-  return `<div class="verdict" data-verdict-for="${esc(taskId)}"><span class="small muted">Was this right?</span>
+  return `<div class="verdict" data-verdict-for="${esc(taskId)}"><span class="vq">How did Magnus do?</span>
     ${VERDICTS.map(([k, label]) => `<button class="${v?.verdict === k ? "on" : ""}" data-verdict="${k}" aria-pressed="${v?.verdict === k}">${label}</button>`).join("")}
     <details class="vnote" data-key="note:${esc(taskId)}"${v?.note ? " open" : ""}><summary class="small">${v?.note ? "Note" : "Add a note"}</summary>
     <textarea rows="2" aria-label="Note" data-draft="note:${esc(taskId)}">${esc(v?.note || "")}</textarea> <button data-verdict-save>Save note</button></details></div>`;
 }
 // Where a library file came from, as a link.
-const fileFrom = f => f.origin.kind === "task" ? `<a href="#/task/${enc(f.origin.task_id)}">${esc(f.origin.title)}</a>`
+const fileFrom = f => f.origin.kind === "task" ? `<a href="#/task/${enc(f.origin.task_id)}" data-open="task:${esc(f.origin.task_id)}">${esc(f.origin.title)}</a>`
   : f.origin.kind === "chat" ? `<a href="#/chat/${enc(f.origin.thread)}">Chat: ${esc(f.origin.title || "conversation")}</a>` : `<span class="faint">Uploaded to the library</span>`;
 function readFile(file) {
   return new Promise((ok, no) => {
@@ -243,153 +334,63 @@ async function upload(list, where = {}) {
   for (const file of list) out.push(await api("POST", "/v1/files", { ...(await readFile(file)), ...where }));
   return out;
 }
-async function projectList() {
-  return (await api("GET", "/v1/projects").catch(() => ({ projects: [] }))).projects;
-}
 function projectOptions(projects, current, none = "No project") {
   return `<option value="">${esc(none)}</option>${projects.map(p => `<option value="${esc(p.id)}"${p.id === current ? " selected" : ""}>${esc(p.name)}</option>`).join("")}`;
 }
 // A control that moves an item into one of the person's projects, or out.
-function moveControl(item, current, projects) {
-  return `<label class="small move"><span class="muted">Project</span> <select data-move="${esc(item)}" aria-label="Project">${projectOptions(projects, current?.id)}</select></label>`;
+function moveControl(item, current, projects, compact = false) {
+  return `<label class="small move"><span class="${compact ? "sr" : "muted"}">Project</span> <select data-move="${esc(item)}" aria-label="Project">${projectOptions(projects, current?.id)}</select></label>`;
 }
 // A file input behind a button; `onFiles` gets the chosen files.
-function attachButton(label = "Add files") {
-  return `<label class="button attach">${esc(label)}<input type="file" multiple hidden data-attach></label>`;
+function attachButton(label = "Add files", iconOnly = false) {
+  return iconOnly ? `<label class="icon-btn attach" title="${esc(label)}">${icon("attach")}<span class="sr">${esc(label)}</span><input type="file" multiple hidden data-attach></label>`
+    : `<label class="button attach">${esc(label)}<input type="file" multiple hidden data-attach></label>`;
 }
 
-route(/^#\/library$/, async main => {
-  let q = "", project = "";
-  const projects = await projectList();
-  paint(main, `<h1>Library</h1><p class="muted">Every file you uploaded and every file Magnus delivered to you.</p>
-    <div class="row lib-bar"><label class="sr" for="lq">Search files</label><input id="lq" type="search" placeholder="Search by name, task, project or text" autocomplete="off">
-    <label class="sr" for="lp">Project</label><select id="lp" aria-label="Filter by project"><option value="">All files</option><option value="none">In no project</option>${projects.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>
-    ${attachButton("Upload")}</div><div id="files"></div>`);
-  const draw = async () => {
-    const qs = new URLSearchParams();
-    if (q) qs.set("q", q);
-    if (project) qs.set("project", project);
-    const { files } = await api("GET", `/v1/files${qs.size ? `?${qs}` : ""}`);
-    paint($("#files", main), files.length ? `<table class="t files"><thead><tr><th>File</th><th>From</th><th>Project</th><th>Added</th></tr></thead><tbody>${files.map(f => `<tr data-lib-file="${esc(f.id)}">
-      <td>${fileChip(f)}<div class="small faint">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"}</div></td><td class="small">${fileFrom(f)}</td>
-      <td>${moveControl(f.id, f.project, projects)}</td><td class="small faint n">${esc(when(f.at))}</td></tr>`).join("")}</tbody></table>`
-      : `<p class="empty">${q || project ? "No file matches." : "No files yet. Upload one, or ask Magnus for a document."}</p>`);
-  };
-  let t;
-  $("#lq", main).oninput = e => { clearTimeout(t); t = setTimeout(() => { q = e.target.value.trim(); draw(); }, 200); };
-  $("#lp", main).onchange = e => { project = e.target.value; draw(); };
-  $("[data-attach]", main).onchange = async e => {
-    try { const up = await upload(e.target.files, project && project !== "none" ? { project } : {}); toast(`Uploaded ${up.map(f => f.name).join(", ")}.`); }
-    catch (err) { toast(err.message); }
-    e.target.value = "";
-    draw();
-  };
-  App.redraw = draw;
-  onLeave(() => { App.redraw = null; });
-  await draw();
-  every(5000, draw);
-});
-
-// One file: shown in full, drawn the way the outcome page draws it, with
-// where it came from and a way to save it.
-route(/^#\/file\/([^/]+)$/, async (main, id) => {
-  const [f, projects] = await Promise.all([api("GET", `/v1/files/${enc(id)}/info`), projectList()]);
-  const path = `/v1/files/${enc(id)}`;
-  paint(main, `<p class="small"><a href="#/library">Library</a></p><h1>${esc(f.name)}</h1>
-    <p class="small muted">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"} · ${fileFrom(f)} · ${esc(kb(f.size))} · ${esc(when(f.at))}</p>
-    <div class="row"><button class="primary" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}">Download</button> ${moveControl(f.id, f.project, projects)} ${trashButton(f.id, "Delete file", "#/library")}</div>
-    <iframe class="composed" sandbox="allow-same-origin" title="${esc(f.name)}"></iframe>`);
-  const files = {};
-  try {
-    if (/^image\/(png|jpeg|gif|webp)$/.test(f.media_type)) files[f.name] = { image: await Magnus.dataUrl(path, f.media_type) };
-    else if (Compose.TEXT.test(f.media_type)) files[f.name] = { text: decodeText(await Magnus.dataUrl(path, f.media_type)), media_type: f.media_type };
-  } catch (e) { toast(e.message); }
-  const frame = $("iframe.composed", main);
-  frame.srcdoc = Compose.documentFor([{ type: "file", file: f.name }], files, fontCss(), f.preview);
-  frame.onload = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* sized by CSS */ } };
-  App.redraw = () => go();
-  onLeave(() => { App.redraw = null; });
-});
-
-route(/^#\/projects$/, async main => {
-  const draw = async () => {
-    const projects = await projectList();
-    paint(main, `<h1>Projects</h1><p class="muted">A project groups chats, tasks, schedules and files. Its instructions and files apply to everything in it.</p>
-      ${projects.length ? `<ul class="plist">${projects.map(p => `<li><a href="#/project/${enc(p.id)}"><strong>${esc(p.name)}</strong><span class="small muted">${p.counts.tasks} tasks · ${p.counts.files} files · ${p.counts.schedules} schedules</span></a></li>`).join("")}</ul>` : `<p class="empty">No projects yet.</p>`}
-      <form id="np" class="card flat"><h3>New project</h3><label>Name <input id="pn" required></label>
-      <label>Instructions for everything in it <span class="faint small">(optional)</span><textarea id="pi" rows="3" data-draft="new-project" placeholder="For example: Prices in euros. Keep every document to one page."></textarea></label>
-      <div class="row"><button class="primary">Create</button></div></form>`);
-    $("#np", main).onsubmit = async e => {
-      e.preventDefault();
-      try {
-        const r = await api("POST", "/v1/projects", { name: $("#pn", main).value, instructions: $("#pi", main).value });
-        $("#pi", main).value = "";
-        delete drafts["new-project"];
-        location.hash = `#/project/${enc(r.id)}`;
-      } catch (err) { toast(err.message); }
-    };
-  };
-  await draw();
-});
-
-route(/^#\/project\/([^/]+)$/, async (main, id) => {
-  const projects = await projectList();
-  const draw = async () => {
-    const p = await api("GET", `/v1/projects/${enc(id)}`);
-    paint(main, `<p class="small"><a href="#/projects">Projects</a></p><div class="spread"><h1>${esc(p.name)}</h1>${trashButton(id, "Delete project", "#/projects")}</div>
-      <section class="card flat"><h3>Instructions</h3><p class="small muted">Applied to every task and chat in this project. Only you change them; Magnus reads them.</p>
-        <textarea id="pin" rows="4" data-draft="pin-${esc(id)}">${esc(p.instructions || "")}</textarea><div class="row"><button data-act="save-ins">Save instructions</button></div></section>
-      <section><div class="spread"><h3>Files</h3>${attachButton("Upload to this project")}</div>
-        ${p.files.length ? `<ul class="flist">${p.files.map(f => `<li data-project-file="${esc(f.id)}">${fileChip(f)} <span class="small faint">${f.source === "delivered" ? "delivered" : "uploaded"} ${esc(when(f.at))}</span> ${moveControl(f.id, f.project, projects)}</li>`).join("")}</ul>` : `<p class="empty">No files. Tasks here read the project's files when they need them.</p>`}</section>
-      <section><h3>Start here</h3><form id="pt"><label class="sr" for="ptt">Task</label><textarea id="ptt" rows="3" data-draft="ptask-${esc(id)}" placeholder="Say what you want done in this project."></textarea>
-        <div class="row" style="margin-top:8px">${await modelPicker()}<button class="primary">Start task</button><a class="button" href="#/chat/new/${enc(id)}">New chat in this project</a></div></form></section>
-      <section><h3>Conversations</h3>${p.threads.length ? `<ul class="tlist">${p.threads.map(t => `<li class="trow"><a href="#/chat/${enc(t.thread)}"><span class="ttl">${esc(t.title)}</span><span class="small faint when">${esc(when(t.updated_at))}</span></a></li>`).join("")}</ul>` : `<p class="empty">No conversations.</p>`}</section>
-      <section><h3>Tasks</h3>${p.tasks.length ? `<ul class="tlist">${p.tasks.map(taskRow).join("")}</ul>` : `<p class="empty">No tasks.</p>`}</section>
-      <section><h3>Schedules</h3>${p.schedules.length ? `<ul class="tlist">${p.schedules.map(x => `<li class="trow"><a href="#/schedules"><span class="ttl">${esc(x.title)}</span><span class="small faint when">Next ${esc(until(x.next))}</span></a></li>`).join("")}</ul>` : `<p class="empty">No schedules.</p>`}</section>`);
-  };
-  main.onclick = async e => {
-    if (!e.target.closest("[data-act=save-ins]")) return;
-    try { await api("PUT", `/v1/projects/${enc(id)}`, { instructions: $("#pin", main).value }); delete drafts[`pin-${id}`]; toast("Instructions saved. New tasks here use them."); }
-    catch (err) { toast(err.message); }
-  };
-  main.onchange = async e => {
-    if (!e.target.matches("[data-attach]")) return;
-    try { const up = await upload(e.target.files, { project: id }); toast(`Uploaded ${up.map(f => f.name).join(", ")}.`); } catch (err) { toast(err.message); }
-    draw();
-  };
-  main.onsubmit = async e => {
-    if (e.target.id !== "pt") return;
-    e.preventDefault();
-    const text = $("#ptt", main).value.trim();
-    if (!text) return;
+// A file shown where it is mentioned: a glimpse of it (an image, or the
+// first lines of a text file), its name to open it beside the conversation,
+// and Download. Glimpses are fetched once, by the app itself.
+const GLIMPSE_IMAGE = /^image\/(png|jpeg|gif|webp)$/;
+const glimpses = {};
+function filePreview(f) {
+  const can = (GLIMPSE_IMAGE.test(f.media_type) && f.size <= 4 << 20) || (Compose.TEXT.test(f.media_type) && f.size <= 256 << 10);
+  const g = !can ? `<span class="small faint">${esc(f.media_type)}</span>` : glimpses[f.id] ?? `<span class="small faint">Loading a preview…</span>`;
+  return `<div class="fprev" data-preview="${esc(f.id)}"${can && !(f.id in glimpses) ? ` data-glimpse="${esc(f.media_type)}"` : ""}>
+    <a class="glimpse" href="#/file/${enc(f.id)}" data-open="file:${esc(f.id)}" aria-hidden="true" tabindex="-1">${g}</a>${fileChip(f)}</div>`;
+}
+async function loadGlimpses(root) {
+  const want = $$("[data-glimpse]", root).filter(el => !(el.dataset.preview in glimpses));
+  if (!want.length) return;
+  for (const el of want) glimpses[el.dataset.preview] = undefined;
+  await Promise.all(want.map(async el => {
+    const id = el.dataset.preview, type = el.dataset.glimpse;
     try {
-      const r = await api("POST", "/v1/tasks", { text, project: id, model: chosenModel($("#pt", main)) });
-      $("#ptt", main).value = "";
-      delete drafts[`ptask-${id}`];
-      location.hash = `#/task/${enc(r.task_id)}`;
-    } catch (err) { toast(err.message); }
-  };
-  App.redraw = draw;
-  onLeave(() => { App.redraw = null; });
-  await draw();
-  every(5000, draw);
-});
+      const url = await Magnus.dataUrl(`/v1/files/${enc(id)}`, type);
+      glimpses[id] = GLIMPSE_IMAGE.test(type) ? `<img alt="" src="${esc(url)}">` : `<pre>${esc(decodeText(url).split("\n").slice(0, 8).join("\n"))}</pre>`;
+    } catch { glimpses[id] = `<span class="small faint">No preview</span>`; }
+  }));
+  await Promise.all([App.redraw?.(), drawPanel()]);
+}
 
 async function go() {
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   const h = location.hash || "#/home";
-  paint($("nav.side"), nav());
-  // Each view gets a main of its own: one still loading when the person
-  // moves on (and its handlers) only ever touches the main they left, never
-  // the next view's.
+  // A view still loading when the person moves on stops where it is: only
+  // the latest navigation draws. Each view gets a main of its own, so one
+  // still loading (and its handlers) only ever touches the main it left,
+  // never the next view's.
+  const seq = ++App.seq;
   const left = $("#main"), main = left.cloneNode(false);
   left.replaceWith(main);
-  for (const [re, view] of App.routes) {
+  for (const [re, view, workspace] of App.routes) {
     const m = h.match(re);
     if (m) {
+      App.workspace = workspace;
+      if (!workspace) { App.thread = null; closePanel(); }
+      sidebar();
       try { await view(main, ...m.slice(1).map(x => x === undefined ? x : decodeURIComponent(x))); }
-      catch (e) { paint(main, `<div class="banner bad">${esc(e.message)}</div>`); }
+      catch (e) { if (seq === App.seq) paint(main, `<div class="banner bad">${esc(e.message)}</div>`); }
       return;
     }
   }
@@ -480,10 +481,13 @@ async function signInScreen(note) {
     } else {
       // Username and password, then the code from an authenticator app if
       // the person uses one. The password stays in this closure only.
-      const coding = stage === "code";
+      const coding = stage === "code" || stage === "machine";
+      const machine = stage === "machine";
       paint(box, `<form id="f"><p class="small muted">${esc(data.url || location.origin)}</p>
         ${data.error ? `<p class="small" style="color:var(--bad)" role="alert">${esc(data.error)}</p>` : ""}
-        ${coding
+        ${machine
+          ? `<label for="otp">Enter the code \`magnus sign-in-code\` printed on the appliance</label><input id="otp" style="width:100%" autocomplete="one-time-code" maxlength="16" required autofocus>`
+          : coding
           ? `<label for="otp">Enter the 6-digit code from your authenticator app</label><input id="otp" style="width:100%" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" required autofocus>`
           : `<label for="who">Username</label><input id="who" style="width:100%" autocomplete="username" value="${esc(data.person || localStorage.getItem("magnus.person") || "")}" required>
         <label for="pw">Password</label><input id="pw" type="password" style="width:100%" autocomplete="current-password" required>`}
@@ -497,7 +501,9 @@ async function signInScreen(note) {
         const password = coding ? data.password : $("#pw").value;
         $("#go").disabled = true;
         try {
-          const r = await Magnus.signIn(person, password, coding ? $("#otp").value.trim() : undefined);
+          const typed = coding ? $("#otp").value.trim() : undefined;
+          const r = await Magnus.signIn(person, password, machine ? undefined : typed, machine ? typed : undefined);
+          if (r?.machine_code_needed) return ask("machine", { ...data, person, password, error: r.error });
           if (r?.code_needed) return ask("code", { ...data, person, password, error: coding ? r.error : undefined });
           if (r?.browser) return ask("browser", { ...data, person, password: undefined, message: r.error });
           localStorage.setItem("magnus.person", person);
@@ -530,7 +536,7 @@ async function pollInbox() {
     const fresh = items.filter(i => i.status === "open" && i.can_respond && !told.has(i.id));
     for (const i of fresh.filter(wants)) Magnus.notify(i.blocking ? "A task needs you" : "Something for you", i.summary);
     if (fresh.length) save("told", [...told, ...fresh.map(i => i.id)].slice(-500));
-    paint($("nav.side"), nav());
+    sidebar();
   } catch (e) {
     // A dead session must land on sign-in once. Calling start() again
     // restores the same session and boots forever.
@@ -550,7 +556,7 @@ async function pollVersions() {
       if (App.prefs?.notify_agent_changes !== false) Magnus.notify("The agent changed", news.map(describeChange).join("; "));
       save("version-told", v.latest_seq);
     }
-  } catch { /* shown on Home */ }
+  } catch { /* shown above the conversation */ }
 }
 
 function describeChange(c) {
@@ -558,69 +564,34 @@ function describeChange(c) {
   return `${what} is now ${c.value}`;
 }
 
-// ---------- Home ----------
+// ---------- the workspace's objects ----------
 
-route(/^#\/home$/, async main => {
-  const draw = async () => {
-    const [health, { tasks }, model, ks, bk] = await Promise.all([api("GET", "/v1/health"), api("GET", "/v1/tasks"), api("GET", "/v1/model"),
-      isOwner() ? api("GET", "/v1/kill-switch") : null, isOwner() ? api("GET", "/v1/backups").catch(() => null) : null]);
-    const v = App.versions;
-    const seen = load("version", 0);
-    const news = v ? v.changes.filter(c => c.seq > seen) : [];
-    const open = App.inbox.filter(i => i.status === "open" && i.can_respond);
-    const blocking = open.filter(i => i.blocking);
-    tasks.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
-    const active = tasks.filter(t => t.status === "running" || t.status === "suspended");
-    const recent = tasks.filter(t => !(t.status === "running" || t.status === "suspended")).slice(0, 8);
-    const row = t => `<tr class="click" data-href="#/task/${enc(t.task_id)}"><td>${esc(t.title)}</td><td>${chip(t.status)}</td><td class="small muted">${esc(WAITING[t.waiting_on] || "")}</td><td class="small faint n">${esc(when(t.created_at))}</td></tr>`;
-    paint(main, `
-      ${news.length ? `<div class="banner" role="status"><strong>The agent changed since you last looked.</strong>
-        <ul class="small" style="margin:6px 0">${news.map(c => `<li>${esc(describeChange(c))} <span class="faint">(${esc(when(c.at))})</span></li>`).join("")}</ul>
-        <button data-act="seen-versions">Got it</button></div>` : ""}
-      ${health.kill_switch ? `<div class="banner bad"><strong>The kill switch is on.</strong> No task acts until the owner turns it off.</div>` : ""}
-      <h1>Home</h1>
-      <p class="muted">New tasks run on <span class="mono">${esc(model.adapter)} · ${esc(model.model)}</span>.</p>
-      <div class="grid" style="margin-top:18px">
-        <a class="card" href="#/inbox"><div class="small muted">Needs you now</div><div class="num" style="font-size:28px;font-weight:650">${blocking.length}</div></a>
-        <a class="card" href="#/inbox"><div class="small muted">Waiting in the inbox</div><div class="num" style="font-size:28px;font-weight:650">${open.length - blocking.length}</div></a>
-        <a class="card" href="#/tasks"><div class="small muted">Running</div><div class="num" style="font-size:28px;font-weight:650">${active.length}</div></a>
-      </div>
-      <h2>Running</h2>
-      ${active.length ? `<table class="t"><tbody>${active.map(row).join("")}</tbody></table>` : `<p class="empty">Nothing is running. <a href="#/new">Start a task</a>.</p>`}
-      <h2>Recent</h2>
-      ${recent.length ? `<table class="t"><tbody>${recent.map(row).join("")}</tbody></table>` : `<p class="empty">No finished tasks yet.</p>`}
-      ${ks ? killSwitch(ks) : ""}
-      ${bk ? backups(bk) : ""}`);
-  };
-  main.onclick = e => {
-    const r = e.target.closest("[data-href]"); if (r) location.hash = r.dataset.href;
-    if (e.target.closest("[data-act=seen-versions]")) { save("version", App.versions?.latest_seq ?? 0); main._html = null; draw(); }
-    const bb = e.target.closest("[data-act=back-up]");
-    if (bb) {
-      bb.disabled = true;
-      api("POST", "/v1/backups", {}).then(r => { toast(r.restored ? "Backed up, and the backup restores." : `Backed up, but it does not restore: ${r.detail}`); draw(); })
-        .catch(err => { toast(err.message); bb.disabled = false; });
-    }
-    const kill = e.target.closest("[data-kill]");
-    if (kill) {
-      const on = kill.dataset.kill === "on";
-      const sure = on ? confirm("Stop everything? Every action is refused, every task is suspended, every sign-in in the vault is revoked at its provider, and every key in the vault is sealed. You will sign in to providers again afterwards.")
-        : confirm("Turn the kill switch off? Suspended tasks stay suspended until you resume each one.");
-      if (sure) api("POST", "/v1/kill-switch", { engaged: on }).then(() => { toast(on ? "Everything is stopped." : "The kill switch is off."); draw(); }).catch(err => toast(err.message));
-    }
-  };
-  await draw();
-  every(4000, draw);
-});
+// Tasks, schedules, conversations and projects, read together with the
+// inbox; then every view that shows them is drawn again from what was read.
+async function refresh() {
+  const get = (path, k) => api("GET", path).then(v => v[k]).catch(() => null);
+  const [tasks, schedules, threads, projects, health] = await Promise.all([get("/v1/tasks", "tasks"), get("/v1/schedules", "schedules"), get("/v1/chat", "threads"), get("/v1/projects", "projects"), api("GET", "/v1/health").catch(() => null), pollInbox()]);
+  if (!App.me) return;
+  if (tasks) App.tasks = tasks;
+  if (schedules) App.schedules = schedules;
+  if (threads) App.threads = threads;
+  if (projects) App.projects = projects;
+  if (health) App.health = health;
+  sidebar();
+  banners();
+  await Promise.all([App.redraw?.(), drawPanel()]);
+}
 
-// Backups of the log and the vault (K10): the latest, whether it restores,
-// and where they are kept.
-function backups(b) {
-  const l = b.latest;
-  return `<div class="card" data-backups style="margin-top:16px"><div class="spread"><h2 style="margin:0">Backups</h2><button data-act="back-up">Back up now</button></div>
-    <p class="small">${l ? `Latest ${esc(when(l.at))}: ${l.restored ? `<span class="chip ok">restores</span>` : `<span class="chip bad">does not restore</span> ${esc(l.detail)}`}` : "None yet."}
-      Every ${esc(String(b.every_hours))} hours, kept ${esc(String(b.keep_days))} days, in <span class="mono">${esc(b.dir)}</span>.</p>
-    ${b.on_appliance_disk ? `<p class="small" style="color:var(--warn)">They are on the appliance's own disk, so a lost disk loses them too: set <span class="mono">[backup] dir</span> to another disk, and keep a copy of the backup key off the appliance.</p>` : ""}</div>`;
+// Above the conversation: the kill switch when it is on, and how the agent
+// changed since the person last looked.
+function banners() {
+  const el = $("#banners");
+  if (!el) return;
+  const v = App.versions, news = v ? v.changes.filter(c => c.seq > load("version", 0)) : [];
+  paint(el, `${App.health?.kill_switch ? `<div class="banner bad"><strong>The kill switch is on.</strong> No task acts until the owner turns it off.</div>` : ""}
+    ${news.length ? `<div class="banner" role="status"><strong>The agent changed since you last looked.</strong>
+      <ul class="small" style="margin:6px 0">${news.map(c => `<li>${esc(describeChange(c))} <span class="faint">(${esc(when(c.at))})</span></li>`).join("")}</ul>
+      <button data-act="seen-versions">Got it</button></div>` : ""}`);
 }
 
 // The owner's kill switch (B11): one control that refuses every action,
@@ -681,110 +652,78 @@ function progress(g) {
 
 function taskRow(t) {
   const why = t.status === "suspended" ? WAITING[t.waiting_on] || (t.needs_you ? "waiting for you" : "") : "";
-  return `<li class="trow" data-state="${STATE(t)}"><a href="#/task/${enc(t.task_id)}"><span class="ttl" title="${esc(t.text)}">${esc(t.title)}</span>${chip(t.status)}<span class="small muted why">${esc(why)}</span><span class="small faint when">${esc(when(t.ended_at || t.created_at))}</span></a></li>`;
+  return `<li class="trow" data-state="${STATE(t)}" data-task="${esc(t.task_id)}"><a href="#/task/${enc(t.task_id)}" data-open="task:${esc(t.task_id)}"><span class="ttl" title="${esc(t.text)}">${esc(t.title)}</span>${chip(t.status)}<span class="small muted why">${esc(why)}</span><span class="small faint when">${esc(when(t.ended_at || t.created_at))}</span></a></li>`;
 }
 
 // A group: its request and progress, the tasks that need the person in
 // view, the rest folded away.
 function groupBlock(g, section) {
   if (!g.group && g.tasks.length === 1) return `<ul class="tlist">${taskRow(g.tasks[0])}</ul>`;
-  const href = g.group.kind === "chat" ? `#/chat/${enc(g.group.thread)}` : "#/schedules";
+  const href = g.group.kind === "chat" ? `href="#/chat/${enc(g.group.thread)}"` : `href="#/schedules" data-open="schedule:${esc(g.group.id)}"`;
   const shown = section === "needs" ? g.tasks.filter(t => t.needs_you) : [];
   const rest = g.tasks.filter(t => !shown.includes(t));
-  return `<div class="tgroup" data-group="${esc(g.key)}"><div class="ghead"><a class="ttl" href="${href}" title="${esc(g.group.title)}">${g.group.kind === "schedule" ? "Schedule: " : ""}${esc(g.group.title)}</a><span class="small muted">${esc(progress(g))}</span></div>
+  return `<div class="tgroup" data-group="${esc(g.key)}"><div class="ghead"><a class="ttl" ${href} title="${esc(g.group.title)}">${g.group.kind === "schedule" ? "Schedule: " : ""}${esc(g.group.title)}</a><span class="small muted">${esc(progress(g))}</span></div>
     ${shown.length ? `<ul class="tlist">${shown.map(taskRow).join("")}</ul>` : ""}
     ${rest.length ? `<details data-key="${esc(g.key)}"><summary class="small muted">${shown.length ? `The other ${rest.length}` : `${rest.length} task${rest.length === 1 ? "" : "s"}`}</summary><ul class="tlist">${rest.map(taskRow).join("")}</ul></details>` : ""}</div>`;
 }
 
-route(/^#\/tasks$/, async main => {
+// Tasks, as a view over the same tasks the conversations show: grouped by
+// the request that started them, in sections by where they stand.
+const MORE = new Set();
+function tasksView() {
   const LIMIT = { done: 15, failed: 15 };
-  const more = new Set();
-  const draw = async () => {
-    const { tasks } = await api("GET", "/v1/tasks");
-    const sections = groupTasks(tasks);
-    paint(main, `<h1>Tasks</h1>${sections.length ? sections.map(sec => {
-      const n = sec.groups.reduce((k, g) => k + g.count[sec.state], 0);
-      const cap = LIMIT[sec.state] && !more.has(sec.state) ? LIMIT[sec.state] : Infinity;
-      const left = sec.groups.length - Math.min(cap, sec.groups.length);
-      return `<section class="tsec" data-section="${sec.state}"><h2>${esc(sec.label)} <span class="count">${n}</span></h2>
-        ${sec.groups.slice(0, cap).map(g => groupBlock(g, sec.state)).join("")}
-        ${left ? `<button class="link small" data-more="${sec.state}">Show ${left} more</button>` : ""}</section>`;
-    }).join("") : `<p class="empty">No tasks yet.</p>`}`);
-  };
-  main.onclick = e => { const b = e.target.closest("[data-more]"); if (b) { more.add(b.dataset.more); draw(); } };
-  await draw();
-  every(4000, draw);
-});
+  const sections = groupTasks(App.tasks);
+  return sections.length ? sections.map(sec => {
+    const n = sec.groups.reduce((k, g) => k + g.count[sec.state], 0);
+    const cap = LIMIT[sec.state] && !MORE.has(sec.state) ? LIMIT[sec.state] : Infinity;
+    const left = sec.groups.length - Math.min(cap, sec.groups.length);
+    return `<section class="tsec" data-section="${sec.state}"><h3>${esc(sec.label)} <span class="count">${n}</span></h3>
+      ${sec.groups.slice(0, cap).map(g => groupBlock(g, sec.state)).join("")}
+      ${left ? `<button class="link small" data-more="${sec.state}">Show ${left} more</button>` : ""}</section>`;
+  }).join("") : `<p class="empty">No tasks yet. Ask for something in a conversation.</p>`;
+}
 
-// ---------- Schedules ----------
+// A schedule's next run and its last result, in one line.
+function scheduleState(sc) {
+  const last = sc.last;
+  return `${sc.paused ? "" : `Next run ${esc(until(sc.next))} · `}${sc.last_failed ? `Last firing <span class="chip bad">could not start</span> ${esc(sc.last_failed.error)} <span class="faint">${esc(when(sc.last_failed.at))}</span>`
+    : last ? `Last result: ${chip(last.status)} <a href="#/task/${enc(last.task_id)}" data-open="task:${esc(last.task_id)}">${esc(firstLine(last.summary) || last.title)}</a> <span class="faint">${esc(when(last.ended_at || last.created_at))}</span>` : "No results yet"}`;
+}
 
-// Each schedule with its next run and last result; its runs fold beneath,
-// except those waiting on the person.
-route(/^#\/schedules$/, async main => {
-  const draw = async () => {
-    const [{ schedules }, projects] = await Promise.all([api("GET", "/v1/schedules"), projectList()]);
-    schedules.sort((a, b) => (a.next || "").localeCompare(b.next || ""));
-    paint(main, `<h1>Schedules</h1>${schedules.length ? schedules.map(sc => {
-      const waiting = sc.runs.filter(r => r.needs_you), last = sc.last;
-      return `<div class="card sched" data-schedule="${esc(sc.id)}">
-        <div class="spread"><strong class="ttl" title="${esc(sc.text)}">${esc(sc.title)}</strong><span class="small muted">${esc(rule(sc))} ${moveControl(sc.id, sc.project, projects)} ${sc.paused && !sc.paused_on ? `<button data-resume="${esc(sc.id)}">Resume</button>` : ""}<button data-stop="${esc(sc.id)}">Stop schedule</button></span></div>
-        <div class="small muted" data-ends>${sc.until || sc.max_runs ? `Ends: ${esc(ends(sc))}` : "Runs until you stop it"}${sc.max_runs ? ` · ${esc(sc.started)} of ${esc(sc.max_runs)} runs so far` : ""}${sc.budget ? ` · up to $${esc(sc.budget.max_usd)} a run` : ""}</div>
-        ${sc.paused ? `<div class="small" data-paused><span class="chip bad">Paused</span> ${esc(sc.paused)}. ${sc.paused_on ? `It goes on once you answer that run (<a href="#/task/${enc(sc.paused_on)}">open it</a>).` : "Nothing runs until you resume it."}</div>` : ""}
-        ${sc.skipped ? `<div class="small muted" data-skipped>Skipped a run ${esc(when(sc.skipped.at))}: ${esc(sc.skipped.why)} (<a href="#/task/${enc(sc.skipped.task)}">open it</a>)</div>` : ""}
-        <div class="small muted" data-last>${sc.paused ? "" : `Next run ${esc(until(sc.next))} · `}${sc.last_failed ? `Last firing <span class="chip bad">could not start</span> ${esc(sc.last_failed.error)} <span class="faint">${esc(when(sc.last_failed.at))}</span>`
-          : last ? `Last result: ${chip(last.status)} <a href="#/task/${enc(last.task_id)}">${esc(firstLine(last.summary) || last.title)}</a> <span class="faint">${esc(when(last.ended_at || last.created_at))}</span>` : "No results yet"}</div>
-        ${waiting.length ? `<ul class="tlist">${waiting.map(taskRow).join("")}</ul>` : ""}
-        ${sc.runs.length ? `<details data-key="sched:${esc(sc.id)}"><summary class="small muted">${sc.runs.length} run${sc.runs.length === 1 ? "" : "s"}</summary><ul class="tlist">${sc.runs.map(taskRow).join("")}</ul></details>` : ""}
-      </div>`;
-    }).join("") : `<p class="empty">No schedules yet. Ask in Chat for something done every day or every week.</p>`}`);
-  };
-  main.onclick = async e => {
-    const stop = e.target.closest("[data-stop]"), resume = e.target.closest("[data-resume]");
-    try {
-      if (stop) {
-        if (!confirm("Stop this schedule? No more of its runs start. Runs already started go on, and stay in Tasks.")) return;
-        await api("DELETE", `/v1/schedules/${enc(stop.dataset.stop)}`);
-        toast("Schedule stopped.");
-      } else if (resume) {
-        await api("POST", `/v1/schedules/${enc(resume.dataset.resume)}/resume`, {});
-        toast("Schedule resumed.");
-      } else return;
-      await draw();
-    } catch (err) { toast(err.message); }
-  };
-  await draw();
-  every(5000, draw);
-});
+// When a schedule ends, what it may spend a run, and why it is paused or
+// skipped a run: the same lines in the list and in the schedule itself.
+function scheduleFacts(sc) {
+  return `<div class="small muted" data-ends>${sc.until || sc.max_runs ? `Ends: ${esc(ends(sc))}` : "Runs until you stop it"}${sc.max_runs ? ` · ${esc(sc.started)} of ${esc(sc.max_runs)} runs so far` : ""}${sc.budget ? ` · up to $${esc(sc.budget.max_usd)} a run` : ""}</div>
+    ${sc.paused ? `<div class="small" data-paused><span class="chip bad">Paused</span> ${esc(sc.paused)}. ${sc.paused_on ? `It goes on once you answer that run (<a href="#/task/${enc(sc.paused_on)}" data-open="task:${esc(sc.paused_on)}">open it</a>).` : "Nothing runs until you resume it."}</div>` : ""}
+    ${sc.skipped ? `<div class="small muted" data-skipped>Skipped a run ${esc(when(sc.skipped.at))}: ${esc(sc.skipped.why)} (<a href="#/task/${enc(sc.skipped.task)}" data-open="task:${esc(sc.skipped.task)}">open it</a>)</div>` : ""}`;
+}
+// Resume, for a schedule paused until the person says so (one paused on a
+// run waiting for them goes on once they answer it), and Stop schedule.
+function scheduleButtons(sc, stop = "Stop schedule") {
+  return `${sc.paused && !sc.paused_on ? `<button data-act="resume-schedule" data-id="${esc(sc.id)}">Resume</button>` : ""}<button data-act="stop-schedule" data-id="${esc(sc.id)}">${stop}</button>`;
+}
 
-// ---------- New task ----------
+// Schedules, soonest first: each opens beside the conversation.
+function schedulesView() {
+  const list = [...App.schedules].sort((a, b) => (a.next || "").localeCompare(b.next || ""));
+  return list.length ? list.map(sc => `<div class="card flat sched" data-schedule="${esc(sc.id)}">
+      <div class="spread"><a class="ttl" href="#/schedules" data-open="schedule:${esc(sc.id)}" title="${esc(sc.text)}">${esc(sc.title)}</a><span class="small muted">${esc(rule(sc))} ${scheduleButtons(sc)}</span></div>
+      ${scheduleFacts(sc)}
+      <div class="small muted" data-last>${scheduleState(sc)}</div>
+      ${sc.runs.some(r => r.needs_you) ? `<ul class="tlist">${sc.runs.filter(r => r.needs_you).map(taskRow).join("")}</ul>` : ""}</div>`).join("")
+    : `<p class="empty">No schedules yet. Ask in a conversation for something done every day or every week.</p>`;
+}
 
-route(/^#\/new$/, async main => {
-  const projects = await projectList();
-  let files = [];
-  paint(main, `<h1>New task</h1><p class="muted">Say what you want done, the way you would to a colleague.</p>
-    <form id="f"><label for="text" class="sr">Task</label><textarea id="text" rows="6" data-draft="new-task" placeholder="For example: Make a one-page summary of last month's sales from the attached sheet." required></textarea>
-    <div class="row" style="margin-top:8px">${attachButton("Attach files")}<span id="att" class="small"></span></div>
-    <div class="row" style="margin-top:12px">${projects.length ? `<label class="small">Project <select id="proj" aria-label="Project">${projectOptions(projects, null)}</select></label>` : ""}${await modelPicker()}<button class="primary" id="go">Start</button></div></form>`);
-  $("#text").focus();
-  $("[data-attach]", main).onchange = async e => {
-    try { files.push(...await upload(e.target.files)); } catch (err) { toast(err.message); }
-    e.target.value = "";
-    $("#att", main).innerHTML = files.map(fileChip).join(" ");
-  };
-  $("#f").onsubmit = async e => {
-    e.preventDefault();
-    const text = $("#text").value.trim();
-    if (!text) return;
-    $("#go").disabled = true;
-    try {
-      const body = { text, model: chosenModel($("#f")), files: files.map(f => f.id) };
-      if ($("#proj", main)?.value) body.project = $("#proj", main).value;
-      const r = await api("POST", "/v1/tasks", body);
-      delete drafts["new-task"];
-      location.hash = `#/task/${enc(r.task_id)}`;
-    } catch (err) { toast(err.message); $("#go").disabled = false; }
-  };
-});
+// One schedule: what it does, when, how its runs went, and a way to stop it.
+function scheduleView(id) {
+  const sc = App.schedules.find(x => x.id === id);
+  if (!sc) return `<p class="empty">This schedule was stopped.</p>`;
+  return `<h2 class="ptitle">${esc(sc.title)}</h2><p class="small muted">${esc(rule(sc))}</p>
+    <div class="card flat sched" data-schedule="${esc(sc.id)}"><p>${esc(sc.text)}</p>${scheduleFacts(sc)}<div class="small" data-last>${scheduleState(sc)}</div></div>
+    <div class="row">${moveControl(sc.id, sc.project, App.projects)}${scheduleButtons(sc, "Stop this schedule")}</div>
+    <h3>Runs</h3>${sc.runs.length ? `<ul class="tlist">${sc.runs.map(taskRow).join("")}</ul>` : `<p class="empty">None yet.</p>`}
+    ${sc.failures?.length ? `<h3>Firings that could not start</h3><ul class="small">${sc.failures.map(f => `<li>${esc(when(f.at))}: ${esc(f.error)}</li>`).join("")}</ul>` : ""}`;
+}
 
 // ---------- Model choice ----------
 
@@ -814,12 +753,13 @@ function chosenModel(root) {
 
 // A message is answered, or becomes a task or a schedule to confirm: the
 // model decides. A conversation goes on until the person starts a new one;
-// opening Chat returns to the latest. Approvals and questions stay in the
-// inbox; the thread links to them.
+// opening Magnus returns to the latest. What it starts shows in the thread
+// as it goes: tasks with their status, the decisions they wait on (the same
+// cards as under Needs you), schedules, results and their files.
 function composer(placeholder, picker) {
-  return `<form id="say" class="say"><div class="say-main"><label for="msg" class="sr">Message</label><textarea id="msg" rows="2" data-draft="chat-${esc(location.hash)}" placeholder="${esc(placeholder)}" required></textarea>
-    <div class="row small" id="pending"></div></div>
-    <div class="say-side">${picker}${attachButton("Attach")}<button class="primary" id="send">Send</button></div></form>`;
+  return `<form id="say" class="say"><label for="msg" class="sr">Message</label><textarea id="msg" rows="1" data-draft="chat-${esc(location.hash)}" placeholder="${esc(placeholder)}" required></textarea>
+    <div class="row small" id="pending"></div>
+    <div class="say-bar">${picker}<span class="grow"></span>${attachButton("Attach files", true)}<button class="send" id="send" title="Send">${icon("send")}<span class="sr">Send</span></button></div></form>`;
 }
 // Files added to the next message: uploaded at once, sent with it.
 function wireComposer(thread, project) {
@@ -833,6 +773,10 @@ function wireComposer(thread, project) {
   const box = $("#msg");
   box.focus();
   box.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#say").requestSubmit(); } };
+  // The box grows with the message, up to a third of the window.
+  const fit = () => { box.style.height = "auto"; box.style.height = `${Math.min(box.scrollHeight, innerHeight / 3)}px`; };
+  box.oninput = fit;
+  fit();
   $("#say").onsubmit = async e => {
     e.preventDefault();
     const text = box.value.trim();
@@ -845,41 +789,52 @@ function wireComposer(thread, project) {
       const r = await api("POST", "/v1/chat", body);
       delete drafts[`chat-${location.hash}`];
       box.value = "";
+      fit();
       files = [];
       shown();
-      if (!thread) location.hash = `#/chat/${enc(r.thread)}`;
-      else await App.redraw?.();
+      // A new conversation becomes the one shown, in place.
+      if (!thread) { history.replaceState(null, "", `#/chat/${enc(r.thread)}`); go(); }
+      else await refresh();
     } catch (err) { toast(err.message); }
-    $("#send").disabled = false;
+    if ($("#send")) $("#send").disabled = false;
   };
 }
 
-// The person's conversations beside the open one, with a button for a new one.
+// Lays out a conversation; false when the person moved on while it loaded.
 async function chatLayout(main, thread, project) {
-  paint(main, `<div class="chat">
-    <aside class="convos" aria-label="Conversations"><button class="primary" data-act="new-chat">New conversation</button><div id="convos"></div></aside>
-    <section class="conv"><h1 class="sr">Chat</h1><div id="thread" class="thread" aria-live="polite"></div><div id="composer"></div></section></div>`);
-  const list = async () => {
-    const { threads } = await api("GET", "/v1/chat");
-    paint($("#convos", main), threads.length ? `<ul>${threads.map(t => `<li><a href="#/chat/${enc(t.thread)}"${t.thread === thread ? ` class="on" aria-current="page"` : ""}><span>${esc(t.title)}</span><span class="small faint">${esc(when(t.updated_at))}</span></a></li>`).join("")}</ul>` : `<p class="small muted">No conversations yet.</p>`);
-    return threads;
-  };
-  $("[data-act=new-chat]", main).onclick = () => { location.hash = "#/chat/new"; };
-  paint($("#composer", main), composer(thread ? "Reply" : "Ask a question, or say what you want done. For example: Every Monday, summarise my open invoices.", await modelPicker()));
+  const seq = App.seq;
+  App.thread = thread;
+  sidebar();
+  paint(main, `<section class="conv"><header class="conv-head" id="conv-head"></header><div id="banners"></div><div id="thread" class="thread" aria-live="polite"></div><div id="composer"></div></section>`);
+  convHead(thread, project);
+  banners();
+  $("#banners", main).onclick = e => { if (e.target.closest("[data-act=seen-versions]")) { save("version", App.versions?.latest_seq ?? 0); banners(); } };
+  const picker = await modelPicker();
+  if (seq !== App.seq) return false;
+  paint($("#composer", main), composer(thread ? "Reply, or give Magnus more to do" : "Ask anything, or give Magnus work to do", picker));
   wireComposer(thread, project);
-  every(5000, list);
-  return list();
+  return true;
+}
+
+// Above the conversation: its project (a link to it) and its title, and
+// what can be done to the whole conversation.
+function convHead(thread, project) {
+  const el = $("#conv-head");
+  if (!el) return;
+  const here = thread && App.threads.find(t => t.thread === thread);
+  const p = here ? here.project : project && App.projects.find(x => x.id === project);
+  paint(el, `<div class="conv-title"><div class="small muted">${p ? `<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}">${esc(p.name)}</a>` : thread ? "No project" : ""}</div>
+    <h1 title="${esc(here?.title || "")}">${esc(here?.title || "New conversation")}</h1></div>
+    ${thread ? `<div class="row">${moveControl(thread, here?.project, App.projects, true)}<button class="icon-btn" data-trash="${esc(thread)}" data-then="#/home" title="Delete conversation">${icon("trash")}<span class="sr">Delete conversation</span></button></div>` : ""}`);
 }
 
 async function showNewChat(main, project) {
-  await chatLayout(main, null, project);
-  const p = project && (await projectList()).find(x => x.id === project);
-  paint($("#thread", main), `${p ? `<p class="small">In the project <a href="#/project/${enc(p.id)}">${esc(p.name)}</a></p>` : ""}<p class="muted">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm.</p>`);
+  if (!await chatLayout(main, null, project)) return;
+  paint($("#thread", main), `<p class="muted hello">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm. What it starts shows here as it goes.</p>`);
 }
 
 async function showThread(main, thread) {
-  await chatLayout(main, thread);
-  const projects = await projectList();
+  if (!await chatLayout(main, thread)) return;
   // An answer being written shows as it streams; `live` holds its text so far.
   const ui = { editing: null, sharing: null, people: [], live: {} };
   const listening = {};
@@ -894,15 +849,24 @@ async function showThread(main, thread) {
   };
   let shown = [];
   const draw = async () => {
-    const [{ entries }, { threads }] = await Promise.all([api("GET", `/v1/chat/${enc(thread)}`), api("GET", "/v1/chat")]);
+    const { entries } = await api("GET", `/v1/chat/${enc(thread)}`);
+    if (App.thread !== thread) return;
     shown = entries;
-    const here = threads.find(t => t.thread === thread);
-    const head = `<div class="spread thread-head"><span class="small">${here?.project ? `In the project <a href="#/project/${enc(here.project.id)}">${esc(here.project.name)}</a>` : ""}</span><span class="row">${moveControl(thread, here?.project, projects)}${trashButton(thread, "Delete conversation", "#/chat")}</span></div>`;
+    // A decision the thread now waits on, not read yet: read the inbox first.
+    const waits = entries.flatMap(e => e.kind === "tasks" ? e.tasks.map(t => t.waiting_item) : [e.waiting_item]).filter(Boolean);
+    if (waits.some(id => !App.inbox.some(i => i.id === id))) await pollInbox();
+    convHead(thread);
+    ui.composed = [];
     const body = entries.map(e => `<div class="entry ${e.kind === "message" ? "me" : "them"}" data-entry="${esc(e.id || "")}" data-kind="${esc(e.kind)}">${entry(e, ui)}${msgActions(e, ui)}</div>`).join("");
-    const grew = paint($("#thread", main), head + body);
+    const el = $("#thread", main);
+    if (!el) return;
+    const grew = paint(el, body);
+    motion(el, ui);
     for (const e of entries.filter(e => e.view)) fill($(`iframe[data-shown="${CSS.escape(e.id)}"]`, main), e.view);
+    for (const [id, view, , task] of ui.composed) fill($(`iframe[data-view="${CSS.escape(id)}"]`, el), view, task);
     listen(entries);
-    if (grew && !ui.editing && !ui.sharing) $("#thread", main).lastElementChild?.scrollIntoView({ block: "end" });
+    loadGlimpses(el);
+    if (grew && !ui.editing && !ui.sharing && !el.contains(document.activeElement)) el.lastElementChild?.scrollIntoView({ block: "end" });
   };
   const path = (id, act) => `/v1/chat/${enc(thread)}/entries/${enc(id)}/${act}`;
   const msgAct = async (b, el) => {
@@ -930,7 +894,7 @@ async function showThread(main, thread) {
       case "save": await api("POST", path(id, "save"), {}); return toast("Saved to the library.");
       case "listen": { b.disabled = true; try { await readAloud((await api("POST", path(id, "spoken"), {})).script); } finally { b.disabled = false; } return; }
       case "hush": return hush();
-      case "task": { const r = await api("POST", path(id, "task"), {}); toast("Started a task."); await draw(); return r; }
+      case "task": { const r = await api("POST", path(id, "task"), {}); toast("Started a task."); await refresh(); return r; }
       case "delete":
         if (!confirm("Delete this message? It leaves this chat and what Magnus reads next, and waits in the trash until it is gone for good.")) return;
         await api("POST", path(id, "delete"), {}); return draw();
@@ -941,35 +905,67 @@ async function showThread(main, thread) {
   $("#thread", main).onclick = async e => {
     const m = e.target.closest("[data-msg-act]");
     if (m) { try { await msgAct(m, m.closest("[data-entry]")); } catch (err) { toast(err.message); m.disabled = false; } return; }
+    if (e.target.closest("[data-act=change-schedule]")) {
+      const box = $("#msg");
+      box.value = "Change the schedule: ";
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+      return;
+    }
     const b = e.target.closest("[data-decide]");
     if (!b) return;
     const card = b.closest("[data-card]").dataset.card;
     b.disabled = true;
-    try { await api("POST", `/v1/chat/cards/${enc(card)}`, { decision: b.dataset.decide }); await draw(); }
-    catch (err) { toast(err.message); b.disabled = false; }
+    try {
+      await api("POST", `/v1/chat/cards/${enc(card)}`, { decision: b.dataset.decide });
+      toast(b.dataset.decide === "confirm" ? "Scheduled." : "Declined.");
+      await refresh();
+    } catch (err) { toast(err.message); b.disabled = false; }
   };
   await draw();
-  every(2000, draw);
 }
 
-// Open the latest conversation in place. Replacing the window address
-// reloads this app on every entry to Chat.
-function showChat(main, hash, view) {
+// Open a conversation in place, with `panel` beside it. Replacing the
+// window address reloads this app on every entry.
+function showChat(main, hash, view, panel) {
   if (location.hash !== hash) history.replaceState(null, "", hash);
+  if (panel) openPanel(panel);
   return view(main);
 }
 
-route(/^#\/chat$/, async main => {
-  const { threads } = await api("GET", "/v1/chat");
+// Home is the latest conversation (a new one when there is none), with
+// `panel` open beside it.
+async function home(main, panel = App.openAfter) {
+  App.openAfter = null;
+  const seq = App.seq;
+  const threads = (await api("GET", "/v1/chat")).threads;
+  App.threads = threads;
+  if (seq !== App.seq) return;
   if (threads.length) {
     const id = threads[0].thread;
-    return showChat(main, `#/chat/${enc(id)}`, m => showThread(m, id));
+    return showChat(main, `#/chat/${enc(id)}`, m => showThread(m, id), panel);
   }
-  return showChat(main, "#/chat/new", showNewChat);
-});
+  return showChat(main, "#/chat/new", m => showNewChat(m), panel);
+}
 
-route(/^#\/chat\/new$/, m => showNewChat(m));
-route(/^#\/chat\/new\/([^/]+)$/, (m, project) => showNewChat(m, project));
+route(/^#\/(?:home|chat)?$/, main => home(main), true);
+route(/^#\/chat\/new$/, m => showNewChat(m), true);
+route(/^#\/chat\/new\/([^/]+)$/, (m, project) => showNewChat(m, project), true);
+// Where the views over tasks, schedules, files and decisions used to be
+// pages: each opens beside the latest conversation.
+route(/^#\/inbox$/, main => home(main, "needs"), true);
+route(/^#\/(tasks|schedules|library|projects)$/, (main, k) => home(main, k), true);
+route(/^#\/new$/, main => home(main), true);
+route(/^#\/file\/([^/]+)$/, (main, id) => home(main, `file:${id}`), true);
+route(/^#\/project\/([^/]+)$/, (main, id) => home(main, `project:${id}`), true);
+// A task opens beside the conversation it came from.
+route(/^#\/task\/([^/]+)$/, async (main, id) => {
+  const seq = App.seq;
+  const t = await api("GET", `/v1/tasks/${enc(id)}`);
+  if (seq !== App.seq) return;
+  if (!t.thread) return home(main, `task:${id}`);
+  return showChat(main, `#/chat/${enc(t.thread)}`, m => showThread(m, t.thread), `task:${id}`);
+}, true);
 
 function rule(e) {
   const m = e.every_minutes;
@@ -982,6 +978,12 @@ function rule(e) {
   if (e.daily_at) return `Every day at ${e.daily_at}`;
   return "";
 }
+// The decision an entry waits on, as its card, where the person can make it:
+// the same card as under Needs you and beside the conversation.
+function waitingCard(id, ui) {
+  const i = id && App.inbox.find(x => x.id === id && x.status === "open");
+  return i ? card(i, ui.composed || []) : "";
+}
 // When a schedule stops: a time, a number of runs, both, or never.
 function ends(e) {
   const parts = [];
@@ -989,10 +991,57 @@ function ends(e) {
   if (e.max_runs) parts.push(`at most ${e.max_runs} run${e.max_runs === 1 ? "" : "s"}`);
   return parts.length ? parts.join(", ") : "until you stop it";
 }
-function waitingLink(e) {
-  if (!e.waiting_item) return "";
-  return ` · <a href="#/inbox" data-waiting="${esc(e.waiting_item)}">${esc(WAITING[e.waiting_on] || "waiting for you")}: open the inbox</a>`;
+// Where a task stands, as the design draws it: an icon and a pill. A task
+// waiting on a decision the person can make needs them.
+const needsYou = t => !!t.waiting_item && App.inbox.some(i => i.id === t.waiting_item && i.status === "open" && i.can_respond);
+function standing(t) {
+  if (needsYou(t)) return ["need", `<span class="chip warn">Needs you</span>`];
+  return [{ completed: "done", running: "working", failed: "stopped", cancelled: "stopped" }[t.status] || "working", chip(t.status)];
 }
+// A task in its conversation: one row that opens it beside the thread, its
+// status live; what it waits on from the person follows the request's rows.
+function taskCard(t) {
+  const why = t.status === "suspended" ? WAITING[t.waiting_on] || "" : t.status === "running" ? "working on it" : "";
+  const [ic, pill] = standing(t);
+  return `<li class="tcard" data-chat-task="${esc(t.task_id)}" data-status="${esc(t.status)}"><a class="rg-row" href="#/task/${enc(t.task_id)}" data-open="task:${esc(t.task_id)}" title="${esc(t.text)}">
+    <span class="st ${ic}">${icon(ic)}</span><span class="rg-main"><span class="ttl">${esc(t.title)}</span>${why ? `<span class="sub why">${esc(why)}</span>` : `<span class="sub">${esc(firstLine(t.text))}</span>`}</span>${pill}${icon("chev", "chev")}</a></li>`;
+}
+// A schedule where it was confirmed: a row that opens it, with when it runs
+// next and how its last run went.
+function scheduleText(sc) {
+  const last = sc.last;
+  return `${sc.paused ? `Paused: ${sc.paused}` : `Next run ${until(sc.next)}`} · ${sc.last_failed ? `Last firing could not start: ${sc.last_failed.error}` : last ? `Last result: ${(STATUS[last.status] || ["", last.status])[1]}, ${when(last.ended_at || last.created_at)}` : "No results yet"}`;
+}
+function scheduleLine(e) {
+  if (e.state === "declined") return `<p class="small"><span class="chip">Declined</span></p>`;
+  if (e.state !== "confirmed") return "";
+  const sc = App.schedules.find(x => x.id === e.schedule);
+  if (!sc) return "";
+  return `<div class="reqgroup sched-state" data-schedule="${esc(sc.id)}"><a class="rg-row" href="#/schedules" data-open="schedule:${esc(sc.id)}" title="Open the schedule">
+    <span class="st sch">${icon("calendar")}</span><span class="rg-main"><span class="ttl">${esc(sc.title)}</span><span class="sub" data-last>${esc(scheduleText(sc))}</span></span><span class="chip sch">Scheduled</span>${icon("chev", "chev")}</a></div>`;
+}
+
+// Motion (U7): what is new in the thread rises into place, a task whose
+// status changed shows its new status gently, and finished work gets a quiet
+// moment. A repaint draws every node afresh, so only what changed is marked;
+// the stylesheet decides, by the motion setting, how each mark moves, if at
+// all.
+function motion(el, ui) {
+  const first = !ui.seen;
+  ui.seen ||= new Set();
+  ui.status ||= {};
+  for (const n of $$(".entry[data-entry]", el)) {
+    const k = n.dataset.entry;
+    if (!first && k && !ui.seen.has(k)) n.classList.add("enter");
+    ui.seen.add(k);
+  }
+  for (const n of $$("[data-chat-task]", el)) {
+    const k = n.dataset.chatTask, st = n.dataset.status, was = ui.status[k];
+    if (was && was !== st) n.classList.add(st === "completed" ? "finished" : "changed");
+    ui.status[k] = st;
+  }
+}
+
 // The clipboard where the page may use it; the old way where it may not.
 async function copyText(t) {
   try { await navigator.clipboard.writeText(t); return; } catch { /* fall back */ }
@@ -1082,29 +1131,29 @@ function entry(e, ui = {}) {
     case "message": return ui.editing === e.id
       ? `<div class="msg me editing"><label class="sr" for="edit-${esc(e.id)}">Edit and resend</label><textarea id="edit-${esc(e.id)}" rows="3" data-draft="edit-${esc(e.id)}"></textarea>
         <div class="row small"><button class="primary" data-msg-act="edit-send">Send</button><button class="link" data-msg-act="edit-cancel">Cancel</button></div></div>`
-      : `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div>${e.files?.length ? `<div class="small files">${e.files.map(fileChip).join(" ")}</div>` : ""}</div>`;
+      : `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div>${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}</div>`;
     case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div>${e.view ? `<iframe class="composed" sandbox="allow-same-origin" title="What Magnus showed" data-shown="${esc(e.id)}"></iframe>` : ""}${verdictBar(e.task_id, e.verdict)}</div>`;
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
-      : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}${waitingLink(e)}</div>${e.status === "running" ? `<div class="pre" data-live="${esc(e.task_id)}">${esc(ui.live?.[e.task_id] || "")}</div>` : ""}</div>`;
-    case "tasks": return `<div class="card flat chatcard" data-chat-tasks="${esc(e.from_run)}"><div class="kind">${e.tasks.length === 1 ? "Started a task" : `Started ${e.tasks.length} tasks`}</div>
-      <ul class="tlist">${e.tasks.map(t => `<li class="crow" data-chat-task="${esc(t.task_id)}"><a class="ttl" href="#/task/${enc(t.task_id)}" title="${esc(t.text)}">${esc(t.title)}</a><span class="small why">${t.waiting_item ? `<a href="#/inbox" data-waiting="${esc(t.waiting_item)}">${esc(WAITING[t.waiting_on] || "waiting for you")}</a>` : ""}</span>${chip(t.status)}</li>`).join("")}</ul>
-      <div class="small muted">${e.tasks.length === 1 ? "It is" : "They are"} in Tasks; results post here.</div></div>`;
-    case "result": return `<details class="result" data-key="result:${esc(e.task_id)}" data-result="${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
-      <div class="pre">${esc(e.summary || "")}</div>${e.files?.length ? `<div class="small files">${e.files.map(fileChip).join(" ")}</div>` : ""}<a class="small" href="#/task/${enc(e.task_id)}">Open the task</a>${ENDED.includes(e.status) ? verdictBar(e.task_id, e.verdict) : ""}</details>`;
+      : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}</div>${e.status === "running" ? `<div class="pre" data-live="${esc(e.task_id)}">${esc(ui.live?.[e.task_id] || "")}</div>` : ""}</div>${waitingCard(e.waiting_item, ui)}`;
+    case "tasks": {
+      const done = e.tasks.filter(t => t.status === "completed").length, need = e.tasks.filter(needsYou).length;
+      return `<div class="reqgroup chatcard" data-chat-tasks="${esc(e.from_run)}"><div class="rg-head"><span>From this request</span><span class="small muted num">${done} of ${e.tasks.length} done${need ? ` · ${need} need${need === 1 ? "s" : ""} you` : ""}</span></div>
+        <ul class="rg-rows">${e.tasks.map(taskCard).join("")}</ul></div>
+        ${e.tasks.map(t => t.waiting_item && waitingCard(t.waiting_item, ui) ? `<div class="decide" data-for-task="${esc(t.task_id)}">${waitingCard(t.waiting_item, ui)}</div>` : "").join("")}`;
+    }
+    case "result": return `<div class="result" data-result="${esc(e.task_id)}"><details data-key="result:${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
+      <div class="pre">${esc(e.summary || "")}</div>${ENDED.includes(e.status) ? verdictBar(e.task_id, e.verdict) : ""}</details>
+      ${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}<a class="small see" href="#/task/${enc(e.task_id)}" data-open="task:${esc(e.task_id)}">See the outcome</a></div>`;
     case "schedule_card": {
       const b = e.budget || {};
-      const decided = e.state === "confirmed" ? `<p class="small"><span class="chip ok">Scheduled</span></p>` : e.state === "declined" ? `<p class="small"><span class="chip">Declined</span></p>` : "";
-      return `<div class="card flat chatcard" data-card="${esc(e.card)}"><div class="kind">Recurring task: confirm to schedule it</div>
-        <p><strong>${esc(e.text)}</strong></p>
-        <div class="what">
-          <div class="field"><span>When</span><span>${esc(rule(e))}</span></div>
-          <div class="field"><span>Ends</span><span>${esc(ends(e))}</span></div>
-          <div class="field"><span>Scope</span><span>${esc(e.scope || "")}</span></div>
-          <div class="field"><span>Budget per run</span><span>up to $${esc(b.max_usd)}, ${esc(b.max_model_calls)} model calls, ${esc(b.max_actions)} actions</span></div>
-          <div class="field"><span>Acts for</span><span>you (${esc(e.acts_for)}), with your access; approvals come to your inbox</span></div>
-        </div>${taintNote(e.taint)}
-        ${e.state === "open" ? `<div class="row" style="margin-top:10px"><button class="primary" data-decide="confirm">Confirm</button><button data-decide="decline">Decline</button></div>` : decided}</div>`;
+      if (e.state !== "open") return `<div data-card="${esc(e.card)}">${scheduleLine(e)}</div>`;
+      return `<div class="confirm chatcard" data-card="${esc(e.card)}"><div class="cc-head"><span class="st sch">${icon("calendar")}</span><strong>Start this schedule?</strong></div>
+        <p class="cc-text">${esc(e.text)}</p>
+        <div class="tiles"><div><span>When</span><strong>${esc(rule(e))}</strong></div><div><span>What</span><strong>${esc(e.scope || "")}</strong></div><div><span>Ends</span><strong>${esc(ends(e))}</strong></div>
+          <div><span>Budget</span><strong class="num">Up to $${esc(b.max_usd)} a run</strong><span class="small">${esc(b.max_model_calls)} model calls, ${esc(b.max_actions)} actions</span></div></div>
+        <p class="small muted">It acts for you (${esc(e.acts_for)}), with your access; what it needs from you shows under Needs you.</p>${taintNote(e.taint)}
+        <div class="row cc-act"><button class="primary" data-decide="confirm">Start schedule</button><button data-act="change-schedule">Change</button><button class="link" data-decide="decline">Not now</button></div></div>`;
     }
     default: return "";
   }
@@ -1113,7 +1162,7 @@ function entry(e, ui = {}) {
 route(/^#\/chat\/([^/]+)$/, async (main, thread) => {
   if (thread === "new") return showNewChat(main);
   return showThread(main, thread);
-});
+}, true);
 
 // ---------- Inbox ----------
 
@@ -1181,7 +1230,7 @@ function card(i, composed) {
   const d = i.details || {};
   const tier = i.kind === "approval" ? (i.tier || d.risk) : "";
   const head = `<div class="spread"><span class="kind">${esc(KIND[i.kind] || i.kind)}${tier ? ` · ${esc(TIER[tier] || tier)}` : ""}</span>
-    <span class="small faint">${i.blocking ? `<strong style="color:var(--fg)">A task is waiting</strong> · ` : ""}${esc(when(i.created_at))}${i.task_id ? ` · <a href="#/task/${enc(i.task_id)}">task</a>` : ""}</span></div>`;
+    <span class="small faint">${i.blocking ? `<strong style="color:var(--fg)">A task is waiting</strong> · ` : ""}${esc(when(i.created_at))}${i.task_id && i.person === App.me?.id ? ` · <a href="#/task/${enc(i.task_id)}" data-open="task:${esc(i.task_id)}">task</a>` : ""}</span></div>`;
   let body = "";
   if (i.status !== "open") {
     const r = i.resolution || {};
@@ -1233,7 +1282,8 @@ function card(i, composed) {
     case "notice": {
       const ev = d.evidence;
       const list = [];
-      if (typeof d.reason === "string") list.push(["resume", "Continue", "primary"]);
+      // A schedule's own notice stands for no run to continue: its Resume does that.
+      if (typeof d.reason === "string" && !d.reason.startsWith("schedule_") && i.run_id) list.push(["resume", "Continue", "primary"]);
       if (d.reason === "budget") list.push(["extend", "Double the budget and continue"]);
       list.push(["dismiss", "Dismiss"]);
       body = `<p class="small"><span class="muted">Why it stopped:</span> ${esc(d.reason)}</p>
@@ -1337,31 +1387,28 @@ async function respond(btn, root) {
     await api("POST", `/v1/inbox/${enc(id)}`, body);
     delete drafts[`ans-${id}`]; delete drafts[`rev-${id}`]; delete drafts[`cc-${id}`];
     toast({ endorse: "It is now a company fact.", approve: "Approved.", reject: decision === "reject" ? "Done." : "Done.", accept: "Accepted.", answer: "Sent.", dismiss: "Dismissed.", resume: "Continuing.", extend: "Budget doubled." }[decision] || "Done.");
-    await pollInbox();
+    await refresh();
   } catch (e) { toast(e.message); btn.disabled = false; }
 }
 
-route(/^#\/inbox$/, async main => {
-  const draw = async () => {
-    await pollInbox();
-    const mine = App.inbox;
-    const open = mine.filter(i => i.status === "open");
-    const now = open.filter(i => i.blocking), later = open.filter(i => !i.blocking);
-    const done = mine.filter(i => i.status !== "open").sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, 15);
-    const composed = [];
-    const html = `<h1>Inbox</h1><p class="muted">Every decision the agent needs from people is here, and only here.</p>
-      <h2>Needs you now ${now.length ? `<span class="badge">${now.length}</span>` : ""}</h2>
-      ${now.length ? now.map(i => card(i, composed)).join("") : `<p class="empty">No task is waiting on you.</p>`}
-      <h2>When you have a moment</h2>
-      ${later.length ? later.map(i => card(i, composed)).join("") : `<p class="empty">Nothing else.</p>`}
-      ${done.length ? `<h2>Decided</h2>${done.map(i => card(i, [])).join("")}` : ""}`;
-    paint(main, html);
-    for (const [id, view, , task] of composed) fill($(`iframe[data-view="${CSS.escape(id)}"]`, main), view, task);
+// Needs you: every decision waiting on the person (U1), most pressing
+// first, each the same card as in its conversation, with a way there.
+function needsView(composed) {
+  const mine = App.inbox, open = mine.filter(i => i.status === "open");
+  const now = open.filter(i => i.can_respond && i.blocking), later = open.filter(i => i.can_respond && !i.blocking), others = open.filter(i => !i.can_respond);
+  const done = mine.filter(i => i.status !== "open").sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, 15);
+  const where = i => {
+    const t = i.thread && App.threads.find(x => x.thread === i.thread);
+    return t ? `<div class="small where">In <a href="#/chat/${enc(t.thread)}">${esc(t.title)}</a></div>` : "";
   };
-  main.onclick = e => { const b = e.target.closest("button[data-item]"); if (b) respond(b, main).then(draw); };
-  await draw();
-  every(4000, draw);
-});
+  const list = items => items.map(i => `<div class="needs-item" data-needs="${esc(i.id)}">${where(i)}${card(i, composed)}</div>`).join("");
+  return `<h3>A task is waiting ${now.length ? `<span class="badge">${now.length}</span>` : ""}</h3>
+    ${now.length ? list(now) : `<p class="empty">No task is waiting on you.</p>`}
+    <h3>When you have a moment</h3>
+    ${later.length ? list(later) : `<p class="empty">Nothing else.</p>`}
+    ${others.length ? `<h3>Waiting on someone else</h3>${list(others)}` : ""}
+    ${done.length ? `<details data-key="decided"><summary class="small muted">Decided (${done.length})</summary>${done.map(i => card(i, [])).join("")}</details>` : ""}`;
+}
 
 // ---------- Task detail ----------
 
@@ -1443,59 +1490,266 @@ function deliverable(t) {
   return view;
 }
 
-route(/^#\/task\/([^/]+)$/, async (main, id) => {
-  let layer = "outcome", liveText = "", stopLive = null;
-  const projects = await projectList();
-  const draw = async () => {
-    const [t, tl] = await Promise.all([api("GET", `/v1/tasks/${enc(id)}`), api("GET", `/v1/tasks/${enc(id)}/timeline`)]);
-    const running = t.status === "running";
-    if (running && !stopLive) stopLive = Magnus.live(id, txt => { liveText += txt; const el = $("#live", main); if (el) el.textContent = liveText; });
-    if (!running && stopLive) { stopLive(); stopLive = null; liveText = ""; }
-    const open = App.inbox.filter(i => i.task_id === id && i.status === "open");
-    // The deliverable leads, drawn in full; every delivered file it does
-    // not show itself follows it inline. Then the summary, the evidence, the
-    // cost, and the trace.
-    const view = deliverable(t);
-    const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="view"></iframe>` : ""}
-      ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
-      ${t.outputs?.length ? `<h3>Files</h3>${t.outputs.map(o => `<div class="row"><button class="link" data-act="download" data-out="${esc(o.id)}" data-name="${esc(o.name)}">${esc(o.name)}</button><span class="small faint">${esc(o.media_type)} · ${Math.max(1, Math.round(o.size / 1024))} KB</span></div>`).join("")}` : ""}
-      ${ENDED.includes(t.status) ? verdictBar(t.task_id, t.verdict) : ""}
-      ${t.outcome_view && t.summary ? `<h3>Summary</h3><p data-summary>${esc(t.summary)}</p>` : ""}
-      <h3>Evidence</h3>${doneLine(t)}${criteria(t)}
-      <h3>Cost</h3><p class="small" data-cost>${esc(t.model?.adapter)} · ${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} model calls · ${t.usage?.actions ?? 0} actions · $${(t.usage?.cost_usd ?? 0).toFixed(2)}</p>
-      <details class="trace" data-key="trace:${esc(id)}"><summary><h3 style="display:inline">Full trace</h3></summary>${trace(tl)}</details>`;
-    const html = `<div class="spread"><p class="small"><a href="#/tasks">Tasks</a>${t.thread ? ` · <a href="#/chat/${enc(t.thread)}">From a chat</a>` : ""}${t.project ? ` · In the project <a href="#/project/${enc(t.project.id)}">${esc(t.project.name)}</a>` : ""}</p>${moveControl(t.task_id, t.project, projects)}</div>
-      ${t.files?.length ? `<p class="small"><span class="muted">Your files:</span> ${t.files.map(fileChip).join(" ")}</p>` : ""}
-      <div class="spread"><h1 style="max-width:44ch">${esc(t.text)}</h1><div class="row">${chip(t.status)}</div></div>
-      <p class="muted">${esc(WAITING[t.waiting_on] || "")}${t.waiting_on && glance(t) ? " · " : ""}${esc(glance(t))}</p>
-      ${open.length ? `<div class="banner">${open.length === 1 ? "A decision for this task is" : `${open.length} decisions for this task are`} in your <a href="#/inbox">inbox</a>.</div>` : ""}
-      ${running ? `<div class="live" id="live" aria-live="polite">${esc(liveText) || `<span class="faint">Working…</span>`}</div>` : ""}
-      <div class="layers" role="tablist">${[["outcome", "Outcome"], ["plan", "Contract and plan"]].map(([k, l]) => `<button role="tab" aria-selected="${layer === k}" class="${layer === k ? "on" : ""}" data-layer="${k}">${l}</button>`).join("")}</div>
-      <section>${layer === "outcome" ? outcome : `<h3>Task</h3><p>${esc(t.text)}</p><h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}`}</section>
-      <div class="row">${!["completed", "failed", "cancelled"].includes(t.status) ? `<button data-act="cancel">Cancel task</button>` : trashButton(t.task_id, "Delete task", "#/tasks")}${t.status === "suspended" && !t.waiting_item ? `<button data-act="resume">Resume</button>` : ""}</div>`;
-    if (paint(main, html) && layer === "outcome" && view.length) fill($("#view", main), view, id, t);
-    main._task = t;
+// ---------- The panel beside the conversation ----------
+
+// Whatever the person opens (a task, a file, a schedule, a decision, or a
+// view over them) shows here, beside the conversation, never instead of it.
+// `what` is "kind:id" or a view's name.
+const Panel = { what: null, layer: "outcome", seq: 0, live: null, liveFor: null, liveText: "", lib: { q: "", project: "" } };
+
+function openPanel(what) {
+  if (Panel.what !== what) { Panel.layer = "outcome"; stopPanelLive(); }
+  Panel.what = what;
+  const el = $("#detail");
+  if (!el) return;
+  // The panel glides in when it opens (as the motion setting allows).
+  if (el.hidden) { el.classList.add("opening"); el.addEventListener("animationend", () => el.classList.remove("opening"), { once: true }); }
+  el.hidden = false;
+  document.body.classList.add("with-detail");
+  sidebar();
+  return drawPanel();
+}
+function closePanel() {
+  stopPanelLive();
+  hush();
+  Panel.what = null;
+  const el = $("#detail");
+  if (!el) return;
+  el.hidden = true;
+  document.body.classList.remove("with-detail");
+  paint(el, "");
+  if ($("#side")) sidebar();
+}
+function stopPanelLive() {
+  if (Panel.live) Panel.live();
+  Panel.live = Panel.liveFor = null;
+  Panel.liveText = "";
+}
+
+const PANEL_TITLES = { needs: "Needs you", tasks: "Tasks", schedules: "Schedules", library: "Library", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Decision", search: "Search" };
+
+async function drawPanel() {
+  const el = $("#detail");
+  if (!el || !Panel.what) return;
+  const n = ++Panel.seq;
+  const at = Panel.what.indexOf(":");
+  const [kind, id] = at < 0 ? [Panel.what, ""] : [Panel.what.slice(0, at), Panel.what.slice(at + 1)];
+  const composed = [];
+  let body, after = null, head = null;
+  try {
+    ({ body, after, head } = await PANELS[kind](id, composed));
+  } catch (e) {
+    body = `<div class="banner bad">${esc(e.status === 404 ? "This is gone: it was deleted, or it is not yours." : e.message)}</div>`;
+  }
+  if (n !== Panel.seq || !Panel.what) return;
+  const title = kind === "search" ? `Search: ${id}` : PANEL_TITLES[kind] || kind;
+  // A view names itself in the head (a task: its title and where it
+  // stands); the others are named by what they are.
+  const changed = paint(el, `<div class="detail-head"><div class="dh-main">${head || `<h2>${esc(title)}</h2>`}</div><button class="icon-btn close" data-act="close-panel" title="Close">${icon("close")}<span class="sr">Close</span></button></div><div class="detail-body" data-panel="${esc(kind)}">${body}</div>`);
+  if (!changed) return;
+  for (const [iid, view, , task] of composed) fill($(`iframe[data-view="${CSS.escape(iid)}"]`, el), view, task);
+  if (after) await after(el);
+  loadGlimpses(el);
+}
+
+// A view whose content is already read (App's objects) or read here.
+const plain = body => ({ body });
+const PANELS = {
+  needs: (_, composed) => plain(needsView(composed)),
+  tasks: () => plain(tasksView()),
+  schedules: () => plain(schedulesView()),
+  schedule: id => plain(scheduleView(id)),
+  item: (id, composed) => {
+    const i = App.inbox.find(x => x.id === id);
+    return plain(i ? card(i, composed) : `<p class="empty">This decision is gone.</p>`);
+  },
+  task: taskView,
+  file: fileView,
+  library: libraryView,
+  projects: projectsView,
+  project: projectView,
+  search: searchView,
+};
+
+// A task: its request, the decisions it waits on (the same cards as in its
+// conversation), then its outcome, its contract and plan, or its trace.
+async function taskView(id, composed) {
+  const [t, tl] = await Promise.all([api("GET", `/v1/tasks/${enc(id)}`), Panel.layer === "trace" ? api("GET", `/v1/tasks/${enc(id)}/timeline`) : null]);
+  const running = t.status === "running";
+  if (running && Panel.liveFor !== id) {
+    stopPanelLive();
+    Panel.liveFor = id;
+    Panel.live = Magnus.live(id, txt => { Panel.liveText += txt; const el = $("#plive"); if (el) el.textContent = Panel.liveText; });
+  }
+  if (!running && Panel.liveFor === id) stopPanelLive();
+  const items = App.inbox.filter(i => i.task_id === id && i.status === "open");
+  const view = deliverable(t);
+  const files = latestOutputs(t);
+  const cs = t.criteria || [];
+  const checked = cs.filter(c => c.verified === true && !String(c.verified_by || "").startsWith("person:")).length;
+  const cost = `$${(t.usage?.cost_usd ?? 0).toFixed(2)}`;
+  // The result leads with the deliverable, then its files, the person's
+  // verdict, and the evidence; what it cost closes it.
+  const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="pview"></iframe>` : running ? "" : `<p class="empty">No result yet.</p>`}
+    ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
+    ${files.length ? `<div class="frows">${files.map(f => fileRow(f, t.project)).join("")}</div>` : ""}
+    ${ENDED.includes(t.status) ? verdictBar(t.task_id, t.verdict) : ""}
+    ${t.outcome_view && t.summary ? `<h3>Summary</h3><p data-summary>${esc(t.summary)}</p>` : ""}
+    <h3>Checks</h3>${doneLine(t)}${criteria(t)}
+    <p class="small muted foot-note num" data-cost>${esc(t.model?.adapter)} · ${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} steps · ${t.usage?.actions ?? 0} actions · ${cost}</p>`;
+  const contract = `<h3>Request</h3><p class="request">${esc(t.text)}</p>
+    ${t.files?.length ? `<p class="small"><span class="muted">Your files:</span> ${t.files.map(fileChip).join(" ")}</p>` : ""}
+    <h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}`;
+  const layers = { outcome, contract, trace: tl ? trace(tl) : "" };
+  const [, pill] = standing({ ...t, waiting_item: items.find(i => i.can_respond)?.id });
+  const head = `<h2 class="ptitle" data-task="${esc(t.task_id)}">${esc(t.title || t.text)}</h2>
+    <div class="row small dh-sub">${pill}${cs.length ? `<span class="checks">${icon("shield")}<span class="num">${checked} of ${cs.length} checks verified by the appliance</span></span>` : ""}${t.waiting_on ? `<span class="muted">${esc(WAITING[t.waiting_on] || "")}</span>` : ""}</div>`;
+  const body = `${items.map(i => card(i, composed)).join("")}
+    ${running ? `<div class="live" id="plive" aria-live="polite">${esc(Panel.liveText) || `<span class="faint">Working…</span>`}</div>` : ""}
+    <div class="seg layers" role="tablist" aria-label="What to show">${[["outcome", "Result"], ["contract", "Plan"], ["trace", "Steps"]].map(([k, l]) => `<button role="tab" aria-selected="${Panel.layer === k}" class="${Panel.layer === k ? "on" : ""}" data-layer="${k}">${l}</button>`).join("")}</div>
+    <section class="layer">${layers[Panel.layer]}</section>
+    <div class="row pactions">${moveControl(t.task_id, t.project, App.projects)}${!ENDED.includes(t.status) ? `<button data-act="cancel" data-id="${esc(id)}">Cancel task</button>` : trashButton(t.task_id, "Delete task")}${t.status === "suspended" && !t.waiting_item ? `<button data-act="resume" data-id="${esc(id)}">Resume</button>` : ""}</div>`;
+  Panel.task = t;
+  return { head, body, after: el => Panel.layer === "outcome" && view.length && fill($("#pview", el), view, id, t) };
+}
+
+// A delivered file as a row: its type, its name (opens it), where it is
+// kept, and Download.
+const FILE_TYPES = { "application/pdf": "PDF", "text/csv": "CSV", "text/markdown": "MD", "text/plain": "TXT", "text/html": "HTML", "application/json": "JSON" };
+function fileRow(f, project) {
+  const type = FILE_TYPES[f.media_type] || (f.media_type || "").split("/").pop().slice(0, 4).toUpperCase() || "FILE";
+  const p = project && (typeof project === "object" ? project : App.projects.find(x => x.id === project));
+  return `<div class="frow" data-file-row="${esc(f.id)}"><span class="ftype ${type === "PDF" ? "pdf" : ""}">${esc(type)}</span>
+    <div class="rg-main"><a class="ttl" href="#/file/${enc(f.id)}" data-open="file:${esc(f.id)}">${esc(f.name)}</a><span class="sub">Saved to Library${p ? ` · ${esc(p.name)}` : ""} · ${esc(kb(f.size))}</span></div>
+    <button class="icon-btn" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}" title="Download ${esc(f.name)}">${icon("download")}<span class="sr">Download</span></button></div>`;
+}
+
+// One file, drawn the way an outcome draws it, with where it came from and
+// a way to save it.
+async function fileView(id) {
+  const f = await api("GET", `/v1/files/${enc(id)}/info`);
+  const path = `/v1/files/${enc(id)}`;
+  const body = `<h2 class="ptitle">${esc(f.name)}</h2>
+    <p class="small muted">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"} · ${fileFrom(f)} · ${esc(kb(f.size))} · ${esc(when(f.at))}</p>
+    <div class="row"><button class="primary" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}">Download</button> ${moveControl(f.id, f.project, App.projects)} ${trashButton(f.id, "Delete file")}</div>
+    <iframe class="composed" sandbox="allow-same-origin" title="${esc(f.name)}" id="fview"></iframe>`;
+  return {
+    body,
+    after: async el => {
+      const files = {};
+      try {
+        if (GLIMPSE_IMAGE.test(f.media_type)) files[f.name] = { image: await Magnus.dataUrl(path, f.media_type) };
+        else if (Compose.TEXT.test(f.media_type)) files[f.name] = { text: decodeText(await Magnus.dataUrl(path, f.media_type)), media_type: f.media_type };
+      } catch (e) { toast(e.message); }
+      const frame = $("#fview", el);
+      frame.srcdoc = Compose.documentFor([{ type: "file", file: f.name }], files, fontCss(), f.preview);
+      frame.onload = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* sized by CSS */ } };
+    },
   };
-  App.redraw = draw;
-  onLeave(() => { App.redraw = null; });
-  main.onclick = async e => {
+}
+
+// Library: every file uploaded or delivered, as a view over the same files
+// the conversations show.
+async function libraryView() {
+  const { q, project } = Panel.lib;
+  const qs = new URLSearchParams();
+  if (q) qs.set("q", q);
+  if (project) qs.set("project", project);
+  const { files } = await api("GET", `/v1/files${qs.size ? `?${qs}` : ""}`);
+  return plain(`<div class="row lib-bar"><label class="sr" for="lq">Search files</label><input id="lq" type="search" data-draft="lib-q" placeholder="Name, task, project or text" autocomplete="off">
+    <label class="sr" for="lp">Project</label><select id="lp" aria-label="Filter by project"><option value="">All files</option><option value="none"${project === "none" ? " selected" : ""}>In no project</option>${App.projects.map(p => `<option value="${esc(p.id)}"${p.id === project ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
+    ${attachButton("Upload")}</div>
+    ${files.length ? `<ul class="flist">${files.map(f => `<li data-lib-file="${esc(f.id)}"><div class="rg-main">${fileChip(f)}<span class="small muted">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"} · ${esc(when(f.at))} · ${fileFrom(f)}</span></div>${moveControl(f.id, f.project, App.projects, true)}</li>`).join("")}</ul>`
+      : `<p class="empty">${q || project ? "No file matches." : "No files yet. Upload one, or ask Magnus for a document."}</p>`}`);
+}
+
+function projectsView() {
+  return plain(`${App.projects.length ? `<ul class="plist">${App.projects.map(p => `<li><a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}"><strong>${esc(p.name)}</strong><span class="small muted">${p.counts.tasks} tasks · ${p.counts.files} files · ${p.counts.schedules} schedules</span></a></li>`).join("")}</ul>` : `<p class="empty">No projects yet.</p>`}
+    <form id="np" class="card flat"><h3>New project</h3><p class="small muted">A project groups conversations, tasks, schedules and files. Its instructions and files apply to everything in it.</p><label>Name <input id="pn" required></label>
+    <label>Instructions for everything in it <span class="faint small">(optional)</span><textarea id="pi" rows="3" data-draft="new-project" placeholder="For example: Prices in euros. Keep every document to one page."></textarea></label>
+    <div class="row"><button class="primary">Create</button></div></form>`);
+}
+
+async function projectView(id) {
+  const p = await api("GET", `/v1/projects/${enc(id)}`);
+  return plain(`<div class="spread"><h2 class="ptitle">${esc(p.name)}</h2>${trashButton(id, "Delete project")}</div>
+    <div class="row"><a class="button primary" href="#/chat/new/${enc(id)}">New conversation in this project</a></div>
+    <h3>Instructions</h3><p class="small muted">Applied to every task and conversation in this project. Only you change them; Magnus reads them.</p>
+      <textarea id="pin" rows="4" data-draft="pin-${esc(id)}">${esc(p.instructions || "")}</textarea><div class="row"><button data-act="save-ins" data-id="${esc(id)}">Save instructions</button></div>
+    <div class="spread"><h3>Files</h3>${attachButton("Upload to this project")}</div>
+      ${p.files.length ? `<ul class="flist">${p.files.map(f => `<li data-project-file="${esc(f.id)}">${fileChip(f)} <span class="small faint">${f.source === "delivered" ? "delivered" : "uploaded"} ${esc(when(f.at))}</span></li>`).join("")}</ul>` : `<p class="empty">No files. Tasks here read the project's files when they need them.</p>`}
+    <h3>Conversations</h3>${p.threads.length ? `<ul class="tlist">${p.threads.map(t => `<li class="trow"><a href="#/chat/${enc(t.thread)}"><span class="ttl">${esc(t.title)}</span><span class="small faint when">${esc(when(t.updated_at))}</span></a></li>`).join("")}</ul>` : `<p class="empty">No conversations.</p>`}
+    <h3>Tasks</h3>${p.tasks.length ? `<ul class="tlist">${p.tasks.map(taskRow).join("")}</ul>` : `<p class="empty">No tasks.</p>`}
+    <h3>Schedules</h3>${p.schedules.length ? `<ul class="tlist">${p.schedules.map(x => `<li class="trow"><a href="#/schedules" data-open="schedule:${esc(x.id)}"><span class="ttl">${esc(x.title)}</span><span class="small faint when">Next ${esc(until(x.next))}</span></a></li>`).join("")}</ul>` : `<p class="empty">No schedules.</p>`}`);
+}
+
+// One search across conversations, tasks and files.
+async function searchView(q) {
+  const r = await api("GET", `/v1/search?q=${enc(q)}`);
+  const none = !r.conversations.length && !r.tasks.length && !r.files.length;
+  return plain(none ? `<p class="empty">Nothing matches “${esc(q)}”.</p>` : `
+    ${r.conversations.length ? `<h3>Conversations</h3><ul class="tlist">${r.conversations.map(c => `<li class="trow found" data-found-thread="${esc(c.thread)}"><a href="#/chat/${enc(c.thread)}"><span class="ttl">${esc(c.title)}</span><span class="small faint when">${esc(when(c.updated_at))}</span></a>${c.snippet ? `<div class="small muted snippet">${esc(c.snippet)}</div>` : ""}</li>`).join("")}</ul>` : ""}
+    ${r.tasks.length ? `<h3>Tasks</h3><ul class="tlist">${r.tasks.map(taskRow).join("")}</ul>` : ""}
+    ${r.files.length ? `<h3>Files</h3><ul class="flist">${r.files.map(f => `<li data-lib-file="${esc(f.id)}">${fileChip(f)}<span class="small">${fileFrom(f)}</span></li>`).join("")}</ul>` : ""}`);
+}
+
+// What can be done in the panel, whichever view it shows.
+function wirePanel() {
+  const el = $("#detail");
+  el.addEventListener("click", async e => {
+    if (e.target.closest("[data-act=close-panel]")) return closePanel();
     const l = e.target.closest("[data-layer]");
-    if (l) { layer = l.dataset.layer; return draw(); }
-    const a = e.target.closest("[data-act]");
+    if (l) { Panel.layer = l.dataset.layer; return drawPanel(); }
+    const m = e.target.closest("[data-more]");
+    if (m) { MORE.add(m.dataset.more); return drawPanel(); }
+    const a = e.target.closest("button[data-act]");
     if (!a) return;
-    const t = main._task;
+    const id = a.dataset.id;
     try {
-      if (a.dataset.act === "speak") await readAloud(t.spoken);
-      if (a.dataset.act === "hush") await hush();
-      if (a.dataset.act === "download") { const where = await Magnus.download(`/v1/tasks/${enc(id)}/outputs/${enc(a.dataset.out)}`, a.dataset.name); toast(`Saved ${where}`); }
-      if (a.dataset.act === "cancel" && confirm("Cancel this task? What it already did stays done.")) { await api("POST", `/v1/tasks/${enc(id)}/cancel`, {}); draw(); }
-      if (a.dataset.act === "resume") { await api("POST", `/v1/tasks/${enc(id)}/resume`, {}); draw(); }
+      switch (a.dataset.act) {
+        case "speak": await readAloud(Panel.task.spoken); break;
+        case "hush": await hush(); break;
+        case "cancel":
+          if (!confirm("Cancel this task? What it already did stays done.")) return;
+          await api("POST", `/v1/tasks/${enc(id)}/cancel`, {}); break;
+        case "resume": await api("POST", `/v1/tasks/${enc(id)}/resume`, {}); break;
+        case "stop-schedule":
+          if (!confirm("Stop this schedule? No more of its runs start. Runs already started go on, and stay in Tasks.")) return;
+          await api("DELETE", `/v1/schedules/${enc(id)}`); toast("The schedule is stopped."); break;
+        case "resume-schedule": await api("POST", `/v1/schedules/${enc(id)}/resume`, {}); toast("Schedule resumed."); break;
+        case "save-ins":
+          await api("PUT", `/v1/projects/${enc(id)}`, { instructions: $("#pin", el).value }); delete drafts[`pin-${id}`];
+          toast("Instructions saved. New tasks here use them."); break;
+        default: return;
+      }
+      await refresh();
     } catch (err) { toast(err.message); }
-  };
-  onLeave(() => { if (stopLive) stopLive(); hush(); });
-  await draw();
-  every(2500, draw);
-});
+  });
+  let t;
+  el.addEventListener("input", e => {
+    if (e.target.id !== "lq") return;
+    clearTimeout(t);
+    t = setTimeout(() => { Panel.lib.q = e.target.value.trim(); drawPanel(); }, 200);
+  });
+  el.addEventListener("change", async e => {
+    if (e.target.id === "lp") { Panel.lib.project = e.target.value; return drawPanel(); }
+    if (!e.target.matches("[data-attach]")) return;
+    const project = Panel.what.startsWith("project:") ? Panel.what.slice(8) : Panel.lib.project && Panel.lib.project !== "none" ? Panel.lib.project : null;
+    try { const up = await upload(e.target.files, project ? { project } : {}); toast(`Uploaded ${up.map(f => f.name).join(", ")}.`); } catch (err) { toast(err.message); }
+    e.target.value = "";
+    refresh();
+  });
+  el.addEventListener("submit", async e => {
+    if (e.target.id !== "np") return;
+    e.preventDefault();
+    try {
+      const r = await api("POST", "/v1/projects", { name: $("#pn", el).value, instructions: $("#pi", el).value });
+      delete drafts["new-project"];
+      await refresh();
+      openPanel(`project:${r.id}`);
+    } catch (err) { toast(err.message); }
+  });
+}
 
 // ---------- Trash ----------
 
@@ -1657,7 +1911,7 @@ async function connectorsSection(main) {
     try {
       const got = await Magnus.loopbackWait();
       if (got.state !== r.state) throw new Error("the sign-in came back for a different request; start again");
-      await api("POST", `/v1/connectors/${enc(app)}/sign-in/complete`, { state: got.state, code: got.code });
+      await api("POST", `/v1/connectors/${enc(app)}/sign-in/complete`, { state: got.state, code: got.code, iss: got.iss });
       say(app, `<p class="small" style="color:var(--ok)">Connected.</p>`);
       await draw();
     } catch (e) { say(app, `<p class="small" style="color:var(--bad)">${esc(e.message)}</p>`); }
@@ -1704,7 +1958,8 @@ async function connectorsSection(main) {
 // own group. Sections that need the owner role are shown only to owners.
 const SETTINGS = [
   ["models", "Models", modelsSection, true], ["connectors", "Connectors", connectorsSection, true], ["account", "Account", accountSection],
-  ["notifications", "Notifications", notificationsSection], ["updates", "Updates", updatesSection], ["data", "Data and privacy", dataSection],
+  ["appearance", "Appearance", appearanceSection], ["notifications", "Notifications", notificationsSection], ["updates", "Updates", updatesSection], ["data", "Data and privacy", dataSection],
+  ["safety", "Kill switch", killSwitchSection, true],
 ];
 route(/^#\/settings(?:\/([a-z]+))?$/, async (main, which) => {
   const shown = SETTINGS.filter(x => !x[3] || isOwner());
@@ -1716,6 +1971,52 @@ route(/^#\/settings(?:\/([a-z]+))?$/, async (main, which) => {
 // Where these lived before Settings.
 route(/^#\/models$/, () => { location.hash = "#/settings/models"; });
 route(/^#\/apps$/, () => { location.hash = "#/settings/connectors"; });
+
+// How Magnus looks on this device (U7, amended): light, dark or the
+// computer's; solid or glass; an accent; and how much it moves. The choice
+// takes effect at once; the computer's own settings for less motion and less
+// transparency still apply on top.
+function appearanceSection(el) {
+  const radio = (look, value, label, inner = label, cls = "", style = "") => {
+    const on = Theme.prefs()[look] === value;
+    return `<button class="${cls}${on ? " on" : ""}" role="radio" aria-checked="${on}" data-look="${look}" data-value="${value}" title="${esc(label)}"${style ? ` style="${style}"` : ""}>${inner}</button>`;
+  };
+  const draw = () => {
+    const p = Theme.prefs(), os = Theme.os(), look = Theme.look;
+    paint(el, `<h2>Appearance</h2><div class="appearance">
+      <h3 id="mode-h">Mode</h3><div class="seg" role="radiogroup" aria-labelledby="mode-h">${Theme.MODES.map(([k, l]) => radio("mode", k, l)).join("")}</div>
+      <h3 id="mat-h">Material</h3><div class="materials" role="radiogroup" aria-labelledby="mat-h">${Theme.MATERIALS.map(([k, l, hint]) => radio("material", k, l,
+        `<span class="mprev ${k}" aria-hidden="true"><span class="ms"></span><span class="mm"></span></span><span class="mt"><span class="ml">${esc(l)}</span><span class="small muted">${esc(hint)}</span></span>`, "material")).join("")}</div>
+      ${p.material === "glass" && os.reduceTransparency ? `<p class="small muted" data-look-note>Your computer asks for less transparency, so Magnus stays solid.</p>` : ""}
+      <h3 id="acc-h">Accent</h3><div class="swatches" role="radiogroup" aria-labelledby="acc-h">${Theme.ACCENTS.map(a => radio("accent", a.id, a.label, `<span class="sr">${esc(a.label)}</span>`, "swatch", `--swatch:${a.swatch};background:${a.swatch}`)).join("")}</div>
+      <h3 id="mot-h">Motion</h3><div class="seg" role="radiogroup" aria-labelledby="mot-h">${Theme.MOTIONS.map(([k, l]) => radio("motion", k, l)).join("")}</div>
+      <p class="small muted" data-motion-hint>${esc(Theme.MOTION_HINTS[p.motion])}${look.motion !== p.motion ? " Your computer asks for reduced motion, so Magnus uses quick fades." : ""}</p>
+      <p class="small faint">Magnus also follows your computer's settings for reduced motion and reduced transparency.</p></div>`);
+  };
+  el.onclick = e => {
+    const b = e.target.closest("[data-look]");
+    if (!b) return;
+    Theme.set({ [b.dataset.look]: b.dataset.value });
+    draw();
+  };
+  draw();
+}
+
+// The owner's kill switch, and what it revoked.
+async function killSwitchSection(el) {
+  const draw = async () => paint(el, `<h2>Kill switch</h2>${killSwitch(await api("GET", "/v1/kill-switch"))}`);
+  el.onclick = e => {
+    const kill = e.target.closest("[data-kill]");
+    if (!kill) return;
+    const on = kill.dataset.kill === "on";
+    const sure = on ? confirm("Stop everything? Every action is refused, every task is suspended, every sign-in in the vault is revoked at its provider, and every key in the vault is sealed. You will sign in to providers again afterwards.")
+      : confirm("Turn the kill switch off? Suspended tasks stay suspended until you resume each one.");
+    if (sure) api("POST", "/v1/kill-switch", { engaged: on }).then(() => { toast(on ? "Everything is stopped." : "The kill switch is off."); draw(); refresh(); }).catch(err => toast(err.message));
+  };
+  App.redraw = draw;
+  onLeave(() => { App.redraw = null; });
+  await draw();
+}
 
 async function accountSection(el) {
   const draw = async () => {
@@ -1746,7 +2047,7 @@ async function accountSection(el) {
         const roles = $(`[data-roles="${CSS.escape(b.dataset.id)}"]`, el).value.split(",").map(x => x.trim()).filter(Boolean);
         await api("PUT", `/v1/people/${enc(b.dataset.id)}/roles`, { roles });
         toast("Roles saved.");
-        if (b.dataset.id === App.me.id) { App.me = await api("GET", "/v1/me"); paint($("nav.side"), nav()); }
+        if (b.dataset.id === App.me.id) { App.me = await api("GET", "/v1/me"); sidebar(); }
       }
       el._html = null; await draw();
     } catch (err) { toast(err.message); b.disabled = false; }
@@ -1788,6 +2089,9 @@ async function updatesSection(el) {
         ${appl ? `<div class="small muted">${appl.automatic ? "Updates install on their own." : "Updates install when you choose."}${appl.previous ? ` Rolls back to ${esc(appl.previous)} if one fails.` : ""}</div>
           ${appl.latest ? `<h3>What's new in ${esc(appl.latest.version)}</h3><div class="notes">${para(appl.latest.notes)}</div>` : ""}` : ""}</div>`);
   };
+  // A look that ends while this is showing (a download finishing) shows here
+  // too, not only in the sidebar.
+  App.redrawUpdates = () => el.isConnected ? draw() : (App.redrawUpdates = null);
   el.onclick = async e => {
     const b = e.target.closest("button[data-act]"); if (!b) return;
     try {
@@ -1845,7 +2149,8 @@ let background = [];
 // look may have run before it was connected).
 async function refreshUpdate(look = false) {
   try { App.update = await (look ? Magnus.updateLook() : Magnus.updateState()); } catch { App.update = await Magnus.updateState().catch(() => null); }
-  if ($("nav.side")) paint($("nav.side"), nav());
+  if ($("#side")) sidebar();
+  await App.redrawUpdates?.();
 }
 
 async function restartToUpdate() {
@@ -1901,8 +2206,8 @@ async function boot() {
   refreshUpdate(true);
   showWhatsNew();
   App.prefs = await api("GET", "/v1/preferences").catch(() => null);
-  await Promise.all([pollInbox(), pollVersions()]);
-  background = [setInterval(pollInbox, 5000), setInterval(pollVersions, 30000)];
+  await Promise.all([refresh(), pollVersions()]);
+  background = [setInterval(refresh, 3000), setInterval(pollVersions, 30000)];
   go();
 }
 
@@ -1911,7 +2216,10 @@ function stop() {
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   window.onhashchange = null;
-  App.me = null; App.inbox = [];
+  Panel.what = null;
+  App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null;
+  // What one person was typing is not shown to the next who signs in here.
+  for (const k of Object.keys(drafts)) delete drafts[k];
 }
 
 async function start() {

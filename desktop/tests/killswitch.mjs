@@ -35,16 +35,26 @@ await step("sign in", async () => {
   await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("heading", { name: "Home" }).waitFor({ timeout: T });
+  // Signed in: the workspace, with Needs you in the sidebar.
+  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
+const killSwitch = async () => {
+  await page.getByRole("link", { name: "Settings" }).click();
+  await page.getByRole("navigation", { name: "Settings" }).getByRole("link", { name: "Kill switch" }).click();
+};
+
 await step("one control stops everything", async () => {
+  await killSwitch();
   await page.locator('[data-kill-switch="off"]').getByRole("button", { name: "Stop everything" }).click();
   await page.locator('[data-kill-switch="on"]').waitFor({ timeout: T });
   if (!dialogs.some(m => m.includes("every sign-in in the vault is revoked at its provider"))) throw new Error(`no confirmation said what it does: ${dialogs}`);
-  await page.getByText("The kill switch is on.").waitFor({ timeout: T });
   await page.locator('[data-revoked] tr[data-secret="oa_credential"]', { hasText: "revoked by the provider" }).waitFor({ timeout: T });
   await page.locator('[data-sealed] [data-secret="mail_token"]').waitFor({ timeout: T });
+  // Above the conversation, it says so.
+  await page.getByRole("link", { name: "New conversation" }).click();
+  await page.getByText("The kill switch is on.").waitFor({ timeout: T });
+  await killSwitch();
 });
 
 await step("turning it off resumes nothing", async () => {

@@ -12,6 +12,11 @@
 //! - `desktop/tests/app-update.mjs`: the app, an AppImage, updates itself
 //!   from the appliance while a task waits there, and restarts as the new
 //!   version (two builds signed with a test key: MAGNUS_UPDATE_BUILDS).
+//! - `desktop/tests/app-workspace.mjs`: research, approval, result, file and
+//!   schedule in one conversation, each flow held to its ease-of-use budget
+//!   (`desktop/tests/ease-budgets.json`).
+//! - `desktop/tests/app-looks.mjs`: the four looks, each readable, glass on
+//!   the chrome only.
 //! - `desktop/tests/app-channels.mjs`: the owner's app updates from the
 //!   development channel (pull requests' builds), asking with its session.
 //!
@@ -25,6 +30,55 @@ use magnus_scratch::*;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+
+/// A free loopback port below the ephemeral range: outgoing connections take
+/// their local ports from that range (`ip_local_port_range`), and the tests
+/// make many, so a port picked there can be taken by one before the listener
+/// it was picked for binds it.
+fn listener_port() -> u16 {
+    let low: u16 = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .ok()
+        .and_then(|r| r.split_whitespace().next()?.parse().ok())
+        .expect("the ephemeral port range");
+    loop {
+        let p = 1024 + (uuid::Uuid::new_v4().as_u128() % u128::from(low - 1024)) as u16;
+        if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
+            return p;
+        }
+    }
+}
+
+/// What listens on loopback `port`, as `ss` says.
+fn listener(port: u16) -> String {
+    let out = std::process::Command::new("ss").args(["-Hltnp", &format!("sport = :{port}")]).output().expect("ss");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Whether the process listening on loopback `port` descends from `root`;
+/// None while nothing listens there, or while `ss` does not yet name its
+/// owner: it reads the processes' open files before it lists the sockets, so
+/// a socket bound in between is listed without one (as this driver's own
+/// were, three times in a row, in CI on 2026-10-31). A driver that cannot
+/// bind its port exits, which the caller sees.
+fn held_by(port: u16, root: u32) -> Option<bool> {
+    let text = listener(port);
+    let pids: Vec<u32> = text.split("pid=").skip(1).filter_map(|s| s.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).collect();
+    if pids.is_empty() {
+        return None;
+    }
+    Some(pids.iter().any(|&p| {
+        let mut p = p;
+        while p > 1 {
+            if p == root {
+                return true;
+            }
+            // The parent pid is the second field after the parenthesised name.
+            let stat = std::fs::read_to_string(format!("/proc/{p}/stat")).unwrap_or_default();
+            p = stat.rsplit(')').next().and_then(|r| r.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).unwrap_or(0);
+        }
+        false
+    }))
+}
 
 fn which(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(name)).find(|f| f.is_file()))
@@ -43,6 +97,14 @@ struct Driver {
     wd: String,
     home: tempfile::TempDir,
     _driver: tokio::process::Child,
+}
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        if let Some(pid) = self._driver.id() {
+            let _ = std::process::Command::new("kill").args(["--", &format!("-{pid}")]).status();
+        }
+    }
 }
 
 impl Driver {
@@ -68,32 +130,65 @@ impl Driver {
         let browser = workspace_root().join("tests/scratch/sign-in-browser.mjs");
         std::fs::write(apps.join("magnus-test-browser.desktop"), format!("[Desktop Entry]\nType=Application\nName=Test browser\nExec={} {} %u\nMimeType=x-scheme-handler/http;x-scheme-handler/https;\n", node.display(), browser.display())).unwrap();
         std::fs::write(config.join("mimeapps.list"), "[Default Applications]\nx-scheme-handler/http=magnus-test-browser.desktop\nx-scheme-handler/https=magnus-test-browser.desktop\n").unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let native_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let child = tokio::process::Command::new("xvfb-run")
-            .args(["-a", "-s", "-screen 0 1280x900x24"])
-            .arg(&driver)
-            .args(["--port", &port.to_string(), "--native-port", &native_port.to_string(), "--native-driver"])
-            .arg(&native)
-            .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", &config)
-            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
-            .env("MAGNUS_SIGN_IN_AS", home.path().join("sign-in-as"))
-            .env("MAGNUS_CHROMIUM", chromium())
-            .env("NO_AT_BRIDGE", "1")
-            .envs(envs.iter().copied())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("start tauri-driver");
-        let wd = format!("http://127.0.0.1:{port}");
-        eventually("tauri-driver", PATIENCE, || {
-            let wd = wd.clone();
-            async move { reqwest::get(format!("{wd}/status")).await.ok().map(|_| ()) }
-        })
-        .await;
-        Driver { wd, home, _driver: child }
+        // tauri-driver cannot take port 0 (it must tell WebKitWebDriver its
+        // port, and reports neither), so a start counts only when both ports
+        // are held by this driver's own processes; otherwise pick again, and
+        // say why if no try does.
+        let mut tries = Vec::new();
+        for _ in 0..3 {
+            let (port, native_port) = (listener_port(), listener_port());
+            let log = home.path().join("tauri-driver.log");
+            let mut child = tokio::process::Command::new("xvfb-run")
+                .args(["-a", "-s", "-screen 0 1280x900x24"])
+                .arg(&driver)
+                .args(["--port", &port.to_string(), "--native-port", &native_port.to_string(), "--native-driver"])
+                .arg(&native)
+                .env("HOME", home.path())
+                .env("XDG_CONFIG_HOME", &config)
+                .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+                .env("MAGNUS_SIGN_IN_AS", home.path().join("sign-in-as"))
+                .env("MAGNUS_CHROMIUM", chromium())
+                .env("NO_AT_BRIDGE", "1")
+                .envs(envs.iter().copied())
+                .stdout(Stdio::null())
+                .stderr(std::fs::File::create(&log).unwrap())
+                // Its own process group, so the driver, the app and whatever
+                // the app opens (the sign-in page in a browser) end with it.
+                .process_group(0)
+                .kill_on_drop(true)
+                .spawn()
+                .expect("start tauri-driver");
+            let root = child.id().expect("tauri-driver's pid");
+            let start = std::time::Instant::now();
+            let lost = loop {
+                if let Ok(Some(status)) = child.try_wait() {
+                    break Some(format!("it exited ({status}): {}", std::fs::read_to_string(&log).unwrap_or_default().trim()));
+                }
+                match (held_by(port, root), held_by(native_port, root)) {
+                    (Some(true), Some(true)) => break None,
+                    (Some(false), _) | (_, Some(false)) => {
+                        break Some(format!("another process listens on {port} or {native_port}: {} {}", listener(port), listener(native_port)))
+                    }
+                    _ => {}
+                }
+                assert!(start.elapsed() < PATIENCE, "tauri-driver did not listen on {port} and {native_port}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            };
+            if let Some(why) = lost {
+                // End its process group, as Drop does, and pick again.
+                let _ = std::process::Command::new("kill").args(["--", &format!("-{root}")]).status();
+                tries.push(why);
+                continue;
+            }
+            let wd = format!("http://127.0.0.1:{port}");
+            eventually("tauri-driver", PATIENCE, || {
+                let wd = wd.clone();
+                async move { reqwest::get(format!("{wd}/status")).await.ok().map(|_| ()) }
+            })
+            .await;
+            return Driver { wd, home, _driver: child };
+        }
+        panic!("tauri-driver did not start in three tries: {tries:#?}");
     }
 
     fn config(&self) -> PathBuf {
@@ -216,8 +311,9 @@ async fn the_installed_app_downloads_a_file_from_the_library() {
 #[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
 async fn settings_holds_every_section_and_each_works_in_the_installed_app() {
     let (f, _idp, url, fingerprint) = appliance().await;
-    // The owner is signed in elsewhere too: a second device to sign out.
-    let r = reqwest::Client::new().post(format!("{}/v1/sign-in", f.app.base)).json(&json!({ "person": PERSON, "password": PASSWORD, "client": "app" })).send().await.unwrap();
+    // The owner is signed in elsewhere too (their backup, with a code from
+    // the appliance's machine): a second device to sign out.
+    let r = reqwest::Client::new().post(format!("{}/v1/sign-in", f.app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "person": PERSON, "password": PASSWORD, "machine_code": magnus_scratch::sign_in_code(&f.app), "client": "app" })).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let elsewhere = r.json::<serde_json::Value>().await.unwrap()["token"].as_str().unwrap().to_string();
     let d = Driver::start().await;
@@ -565,6 +661,83 @@ async fn the_installed_app_updates_itself_from_the_appliance_while_a_task_waits(
         .map(|r| r.get(0))
         .collect();
     assert_eq!(stops, ["approval", "review"], "the task was stopped other than for the person's approval and review");
+}
+
+/// One workspace (owner, 2026-10-30): research started in a conversation,
+/// approved there, its result read and its file downloaded there, and a
+/// schedule created and its status checked there, with no navigation. The
+/// decisions are the same cards under Needs you. Checked again on the
+/// appliance afterwards.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn research_approval_result_file_and_schedule_happen_in_one_conversation_in_the_installed_app() {
+    use magnus_invariants::{script, steps, tool, FakeWeb, Reply};
+    const RESEARCH: &str = "Look into Q3 revenue and send me a one-line summary file.";
+    const SCHEDULE: &str = "Check the finance page every morning at nine.";
+    let web = FakeWeb::start(&[("/finance/q3", "<p>Q3 revenue: 41.7M. Q2 revenue: 38.2M.</p>")]).await;
+    let task = steps(replies(web.url("/finance/q3")));
+    let s = script(move |c| {
+        let task = task.clone();
+        async move {
+            if !c.body["system"].to_string().contains("in a chat") {
+                return task(c).await;
+            }
+            let first = c.messages().first().cloned().unwrap_or_default();
+            let said = first["content"].as_array().and_then(|b| b.last()).and_then(|b| b["text"].as_str()).unwrap_or_default().to_string();
+            match (said.as_str(), c.turn()) {
+                (RESEARCH, 0) => tool("create_task", json!({ "title": "Q3 revenue summary", "text": TASK })),
+                (SCHEDULE, 0) => tool("create_schedule", json!({ "title": "Morning finance check", "text": "Read the finance page and note Q3 revenue.", "daily_at": "09:00", "scope": "Reads one web page; sends nothing." })),
+                _ => Reply::Text("Started; it shows here as it goes.".into()),
+            }
+        }
+    });
+    let mut f = Flow::start_with(web, s).await;
+    let _kc = keycloak(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let d = Driver::start().await;
+    let (ok, log) = d.script("app-workspace.mjs", &url, &fingerprint, &[("MAGNUS_RESEARCH", RESEARCH), ("MAGNUS_SCHEDULE", SCHEDULE)]).await;
+    assert!(ok, "the workspace flow failed:\n{log}\n{}", f.report().await);
+    // What each flow took, against its ease-of-use budget.
+    println!("{log}");
+
+    let alice = f.app.api(PERSON);
+    let tasks = alice.tasks().await;
+    let t = &tasks["tasks"][0];
+    assert_eq!(t["status"], "completed", "{tasks}");
+    assert!(t["thread"].is_string(), "the task did not come from the conversation: {t}");
+    let decided: Vec<_> = alice.inbox().await.into_iter().filter(|i| i["kind"] == "approval" || i["kind"] == "review").collect();
+    assert_eq!(decided.len(), 2, "{decided:?}");
+    assert!(decided.iter().all(|i| i["resolution"]["by"] == format!("person:{PERSON}") && i["thread"] == t["thread"]), "{decided:?}");
+    let (_, sc) = alice.get("/v1/schedules").await;
+    assert_eq!(sc["schedules"][0]["daily_at"], "09:00", "{sc}");
+    let saved = std::fs::read_to_string(d.downloads().join("summary.txt")).expect("the file was not downloaded");
+    assert!(saved.contains("41.7M"), "{saved}");
+}
+
+/// The four looks (U7, amended): light and dark, solid and glass, chosen in
+/// Settings > Appearance; glass on the chrome only, reading surfaces solid,
+/// every text on screen at 4.5:1 or more against the worst case behind it;
+/// the accent and the motion setting take effect, and the look is kept on
+/// the device.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn each_of_the_four_looks_keeps_text_readable_and_reading_surfaces_solid_in_the_installed_app() {
+    use magnus_invariants::{complete, contract_unchecked, script, FakeWeb, Reply};
+    let s = script(|c| async move {
+        if c.body["system"].to_string().contains("in a chat") {
+            return Reply::Text("Hello. Ask me anything, or give me work to do.".into());
+        }
+        match c.turn() {
+            0 => contract_unchecked("do the work", "the work is done"),
+            _ => complete("done"),
+        }
+    });
+    let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
+    let _kc = keycloak(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let d = Driver::start().await;
+    let (ok, log) = d.script("app-looks.mjs", &url, &fingerprint, &[]).await;
+    assert!(ok, "a look failed:\n{log}");
 }
 
 /// Release channels (owner, 2026-10-31): the owner's app, a release (0.7.0

@@ -45,12 +45,14 @@ await step("sign in", async () => {
   await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("heading", { name: "Home" }).waitFor({ timeout: T });
+  // Signed in: the workspace, with Needs you in the sidebar.
+  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
 await step("everything that needs you fits one screen", async () => {
-  await page.getByRole("link", { name: "Tasks", exact: true }).click();
-  const rows = page.locator('[data-section="needs"] .trow[data-state="needs"]');
+  // Tasks opens beside the conversation.
+  await page.getByRole("link", { name: /^Tasks/ }).click();
+  const rows = page.locator('#detail [data-section="needs"] .trow[data-state="needs"]');
   await until(`${needs} tasks needing you`, async () => await rows.count() === Number(needs));
   const order = await page.locator("section.tsec").evaluateAll(els => els.map(e => e.dataset.section));
   const wanted = ["needs", "running", "waiting", "done", "failed"];
@@ -82,16 +84,16 @@ await step("a chat message's tasks are one card, results one-liners", async () =
   if (await card.count() !== 1) throw new Error(`${await card.count()} task cards for one message`);
   if (await card.locator("[data-chat-task]").count() !== 5) throw new Error("the card does not list the message's five tasks");
   await card.getByText("Write the invitation").waitFor({ timeout: T });
-  const results = page.locator("details.result");
+  const results = page.locator(".result > details");
   await until("three folded results", async () => await results.count() === 3);
-  if (await page.locator("details.result[open]").count()) throw new Error("a result is not folded");
+  if (await page.locator(".result > details[open]").count()) throw new Error("a result is not folded");
   await results.first().locator(":scope > summary").click();
   await results.first().getByText("The details are in the task.").waitFor({ timeout: T });
 });
 
 await step("a schedule shows its next run", async () => {
-  await page.getByRole("link", { name: "Schedules", exact: true }).click();
-  const sched = page.locator("[data-schedule]");
+  await page.getByRole("link", { name: /^Schedules/ }).click();
+  const sched = page.locator("#detail [data-schedule]");
   await sched.first().waitFor({ timeout: T });
   await sched.first().getByText("Weekly invoice summary").waitFor({ timeout: T });
   await sched.first().getByText(/Next run /).waitFor({ timeout: T });

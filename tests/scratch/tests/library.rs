@@ -111,7 +111,23 @@ async fn a_file_uploaded_into_a_project_is_used_by_a_task_there_and_its_output_l
         tool("deliver_file", json!({ "path": "report.md" })),
         tool("task_complete", json!({ "summary": "Totalled the two prices: 42 euros.", "deliverable": [{ "type": "file", "file": "report.md" }] })),
     ];
-    let mut m = FakeModel::start(model(vec![Reply::Text("Noted.".into())], task)).await;
+    // Asked for in the project's conversation, the work becomes a task there.
+    let task = Arc::new(task);
+    let s = script(move |c| {
+        let task = task.clone();
+        async move {
+            if !is_chat(&c) {
+                return task.get(c.turn()).cloned().unwrap_or_else(|| tool("task_fail", json!({ "reason": "script exhausted" })));
+            }
+            let asked = c.messages().first().map(|m| m.to_string()).unwrap_or_default().contains("Total the prices");
+            match (asked, c.turn()) {
+                (true, 0) => tool("create_task", json!({ "title": "Total the prices", "text": "Total the prices in prices.csv." })),
+                (true, _) => Reply::Text("Started; it shows here as it goes.".into()),
+                _ => Reply::Text("Noted.".into()),
+            }
+        }
+    });
+    let mut m = FakeModel::start(s).await;
     m.url = provider(&m).await;
     let app = Appliance::start(Spec::default(), &m).await;
     assert!(set_password(&app, PERSON, PASSWORD));
@@ -167,9 +183,10 @@ async fn a_file_uploaded_into_a_project_is_used_by_a_task_there_and_its_output_l
     // Search reaches names and text content.
     assert_eq!(names(&files(&alice, "?q=widget").await), ["prices.csv", "report.md"]);
     assert_eq!(names(&files(&alice, "?q=bathroom").await), ["notes.txt"]);
-    // The chat started in the project is in it, with the file sent with its message.
-    let threads = p["threads"].as_array().unwrap();
-    assert_eq!(threads.len(), 1, "{p}");
+    // The conversations started in the project are in it: the one that asked
+    // for the work, and the one with the file sent with its message.
+    let threads: Vec<&str> = p["threads"].as_array().unwrap().iter().filter_map(|t| t["title"].as_str()).collect();
+    assert_eq!(threads, ["Keep these notes for later.", "Total the prices in prices.csv."], "{p}");
     let notes = files(&alice, "?q=notes").await;
     assert_eq!(notes[0]["origin"]["kind"], "chat");
     assert_eq!(notes[0]["project"]["id"], pid.as_str());

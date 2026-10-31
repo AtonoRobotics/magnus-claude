@@ -24,8 +24,8 @@ const row = `//tr[@data-trashed][.//div[@data-title][normalize-space()='${QUESTI
 
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
-await d.step("ask in a new chat", async () => {
-  await nav("Chat");
+await d.step("ask in a new conversation", async () => {
+  await nav("New conversation");
   await d.type(d.css("#msg"), QUESTION);
   await d.click(d.css("#send"));
   await d.seen(`Answer to: ${QUESTION}`);
@@ -44,7 +44,8 @@ await d.step("restore it from the trash", async () => {
   await d.click(d.button("Restore", row));
   await d.seen("Restored.");
   await gone("the restored row", row);
-  await nav("Chat");
+  // Back in the sidebar; it opens as it was.
+  await d.click(d.xpath(`//nav//a[@title='${QUESTION}']`));
   await d.seen(`Answer to: ${QUESTION}`);
 });
 
@@ -52,6 +53,8 @@ await d.step("delete it again and empty the trash", async () => {
   await d.click(d.button("Delete conversation"));
   await accept("moves to the trash");
   await d.seen("Moved to the trash.");
+  // The sidebar is redrawn without it; Trash is clicked after that.
+  await gone("the deleted conversation in the sidebar", `//nav//a[@title='${QUESTION}']`);
   await nav("Trash");
   await d.xpath(row);
   await d.click(d.button("Empty trash now"));

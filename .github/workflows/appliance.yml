@@ -16,17 +16,23 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: never
-  MAGNUS_GUEST_KERNEL: ${{ vars.MAGNUS_SANDBOX_OUT }}/vmlinux
-  MAGNUS_GUEST_ROOTFS: ${{ vars.MAGNUS_SANDBOX_OUT }}/rootfs.ext4
 
 jobs:
   release:
     runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 120
     steps:
+      # The whole history, so publishing can check a release contains the
+      # one before it.
       - uses: actions/checkout@v7
-        with: { clean: false }
+        with: { clean: false, fetch-depth: 0 }
       # The browser sidecar's packages (some suites drive a browser).
+      # The sandbox guest built from this commit (sandbox/image.sh).
+      - name: Sandbox image
+        run: |
+          d=$(sandbox/image.sh)
+          echo "MAGNUS_GUEST_KERNEL=$d/vmlinux" >> "$GITHUB_ENV"
+          echo "MAGNUS_GUEST_ROOTFS=$d/rootfs.ext4" >> "$GITHUB_ENV"
       - name: Browser sidecar
         run: npm ci --prefix browser
       - name: Programs the tests launch
@@ -45,4 +51,4 @@ jobs:
           git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
           git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG" > "$RUNNER_TEMP/notes"
           release/publish.sh appliance "$v" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" \
-            target/release/magnus target/release/magnus-adapter-anthropic target/release/magnus-adapter-openai
+            target/release/magnus target/release/magnus-adapter-anthropic target/release/magnus-adapter-openai browser

@@ -230,6 +230,13 @@ pub struct Budget {
     pub max_usd: f64,
 }
 
+impl Budget {
+    /// Each limit the lower of the two.
+    pub fn within(&self, cap: &Budget) -> Budget {
+        Budget { max_model_calls: self.max_model_calls.min(cap.max_model_calls), max_actions: self.max_actions.min(cap.max_actions), max_usd: self.max_usd.min(cap.max_usd) }
+    }
+}
+
 impl Default for Budget {
     fn default() -> Self {
         Budget { max_model_calls: 300, max_actions: 500, max_usd: 50.0 }
@@ -470,6 +477,13 @@ pub struct ReadAloud {
     pub voices: PathBuf,
     /// One of Kokoro's voices, such as `af_heart`.
     pub voice: String,
+    /// Seconds one piece may take before it is stopped.
+    #[serde(default = "speak_timeout")]
+    pub timeout_s: u64,
+}
+
+fn speak_timeout() -> u64 {
+    60
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -583,6 +597,7 @@ impl Config {
         let text = std::fs::read_to_string(path)?;
         let mut cfg: Config = toml::from_str(&text)?;
         cfg.path = path.canonicalize()?;
+        anyhow::ensure!(cfg.backup.keep_days >= 1, "[backup] keep_days must be at least 1: with 0 every backup is deleted as soon as it is made");
         for c in &cfg.connectors {
             anyhow::ensure!(
                 !c.name.contains("__") && c.name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),
