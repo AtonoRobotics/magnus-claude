@@ -5,11 +5,18 @@
 # release's tests pass; the signing key never leaves that machine.
 #
 #   release/publish.sh appliance VERSION UPDATES_DIR NOTES_FILE PROGRAM...
-#   release/publish.sh desktop   VERSION UPDATES_DIR NOTES_FILE DIST_DIR
+#   release/publish.sh desktop   VERSION UPDATES_DIR NOTES_FILE DIST_DIR [CHANNEL]
+#
+# The desktop app's CHANNEL (DECISIONS.md, "Release channels") is
+# production (the default: tagged releases, in desktop/), test (master, in
+# desktop/test/) or development (pull requests, in desktop/development/);
+# test and development keep only their latest packages.
 #
 # Every package is signed with `tauri signer sign --app-version`, so the
 # signature binds the version it was published as. latest.json is written
-# last, by rename, so an appliance never reads a release half-written.
+# last, by rename, so an appliance never reads a release half-written, and
+# never replaced by an older version (a slower run finishing after a newer
+# one): a channel only ever moves forward.
 set -eu
 
 what=$1 version=$2 updates=$3 notes=$4
@@ -20,6 +27,20 @@ key=${MAGNUS_RELEASE_KEY:-$HOME/.magnus-release/update.key}
 sign() {
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" cargo tauri signer sign -f "$key" -p "" --app-version "$version" "$1" >/dev/null
   cat "$1.sig"
+}
+
+# Whether VERSION is older than the one $1/latest.json names, by semantic
+# version precedence (semver.org, item 11).
+older() {
+  [ -f "$1/latest.json" ] || return 1
+  python3 -I - "$1/latest.json" "$version" <<'EOF'
+import json, sys
+def key(v):
+    core, _, pre = v.split("+")[0].partition("-")
+    ids = [(0, int(i), "") if i.isdigit() else (1, 0, i) for i in pre.split(".")] if pre else []
+    return [int(n) for n in core.split(".")], not pre, ids
+sys.exit(0 if key(sys.argv[2]) < key(json.load(open(sys.argv[1]))["version"]) else 1)
+EOF
 }
 
 # latest.json from its fields, by python so the notes are quoted correctly.
@@ -38,8 +59,24 @@ EOF
 }
 
 case $what in
+appliance) dir=$updates/appliance ;;
+desktop)
+  channel=${2:-production}
+  case $channel in
+  production) dir=$updates/desktop ;;
+  test | development) dir=$updates/desktop/$channel ;;
+  *) echo "no channel $channel: production, test or development" >&2; exit 2 ;;
+  esac
+  ;;
+*) echo "publish appliance or desktop" >&2; exit 2 ;;
+esac
+if older "$dir"; then
+  echo "not publishing $what $version: $dir/latest.json names a newer version" >&2
+  exit 0
+fi
+
+case $what in
 appliance)
-  dir=$updates/appliance
   mkdir -p "$dir"
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
@@ -51,7 +88,6 @@ appliance)
   ;;
 desktop)
   dist=$1
-  dir=$updates/desktop
   mkdir -p "$dir"
   linux=Magnus_${version}_amd64.AppImage
   windows=Magnus_${version}_x64-setup.exe
@@ -60,7 +96,11 @@ desktop)
     linux-x86_64 "$linux" "$(sign "$dir/$linux")" \
     windows-x86_64 "$windows" "$(sign "$dir/$windows")"
   ;;
-*) echo "publish appliance or desktop" >&2; exit 2 ;;
 esac
 mv "$dir/latest.json.tmp" "$dir/latest.json"
+if [ "$what" = desktop ] && [ "$channel" != production ]; then
+  for f in "$dir"/Magnus_*; do
+    case $f in "$dir/$linux" | "$dir/$windows" | "$dir/$linux.sig" | "$dir/$windows.sig") ;; *) rm -f "$f" ;; esac
+  done
+fi
 echo "published $what $version to $dir"

@@ -5,6 +5,10 @@
 //! when the person chooses "Restart to update". After the restart the app
 //! shows what changed, in plain words.
 //!
+//! The appliance decides which release channel the app gets by who is signed
+//! in (DECISIONS.md, "Release channels"), so the app asks with its session.
+//! It only ever moves forward (the updater's own rule: a newer version).
+//!
 //! On Windows the NSIS installer updates in place; on Linux only the
 //! AppImage updates itself (a .deb is updated with the package manager).
 
@@ -33,15 +37,17 @@ pub fn can_update() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// The manifest's address on the appliance, and a client pinned to its certificate.
-fn source(app: &crate::App) -> Result<(url::Url, Option<String>), String> {
+/// The manifest's address on the appliance, a client pinned to its
+/// certificate, and the session to ask with, if signed in.
+fn source(app: &crate::App) -> Result<(url::Url, Option<String>, Option<String>), String> {
     let cfg = app.store.config();
     let base = cfg.appliance.ok_or("not connected to an appliance")?;
     if !base.starts_with("https://") {
         return Err("updates come only over the appliance's https address".into());
     }
     let pin = cfg.pins.get(&base).cloned().ok_or("the appliance's certificate is not trusted yet")?;
-    Ok((url::Url::parse(&format!("{base}/v1/updates/desktop/latest.json")).map_err(|e| e.to_string())?, Some(pin)))
+    let token = app.store.token(&base);
+    Ok((url::Url::parse(&format!("{base}/v1/updates/desktop/latest.json")).map_err(|e| e.to_string())?, Some(pin), token))
 }
 
 /// Look for a newer release and download it; true when one is ready.
@@ -52,14 +58,18 @@ pub async fn look<R: Runtime>(handle: &AppHandle<R>) -> Result<bool, String> {
         return Ok(true);
     }
     can_update()?;
-    let (endpoint, pin) = source(&app)?;
+    let (endpoint, pin, token) = source(&app)?;
     let tls = crate::pin::tls(pin.as_deref())?;
-    let updater = handle
+    let mut builder = handle
         .updater_builder()
         .endpoints(vec![endpoint])
         .map_err(|e| e.to_string())?
         .header("x-magnus-app", crate::app_version())
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}")).map_err(|e| e.to_string())?;
+    }
+    let updater = builder
         .configure_client(move |b| b.tls_backend_preconfigured(tls.clone()))
         .build()
         .map_err(|e| e.to_string())?;
