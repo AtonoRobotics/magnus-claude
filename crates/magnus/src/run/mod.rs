@@ -467,20 +467,37 @@ impl Kernel {
                     (_, Err(e)) => self.result(rid, call_id, format!("The policy does not parse: {e}. A retry with the same text will not help."), true).await?,
                 }
             }
-            "propose_schedule" => match crate::api::rule_for(input) {
-                Ok((every, daily)) => {
+            // A scheduled run may not set up another schedule: schedules
+            // would breed (2026-10-30, a test schedule's run proposed a second
+            // one, and both ran for hours). It may end its own.
+            "propose_schedule" if self.read(|s| s.tasks.get(&run.task).and_then(|t| t.schedule.clone())).is_some() => {
+                self.result(rid, call_id, "A scheduled task cannot set up another schedule. To stop this one, use end_schedule. A retry will not help.", true).await?
+            }
+            "propose_schedule" => match crate::api::rule_for(input, self.cfg.schedules.min_every_minutes).and_then(|r| crate::api::end_for(input).map(|e| (r, e))) {
+                Ok(((every, daily), (until, max_runs))) => {
                     let text = input["text"].as_str().unwrap_or_default().to_string();
                     let item = self
                         .item(
                             run,
                             "schedule_proposal",
                             format!("The worker proposes a recurring task: {text}"),
-                            json!({ "text": text, "every_minutes": every, "daily_at": daily, "call_id": call_id }),
+                            json!({ "text": text, "every_minutes": every, "daily_at": daily, "until": until, "max_runs": max_runs, "call_id": call_id }),
                         )
                         .await?;
                     self.result(rid, call_id, format!("Proposal {item} sent to the person. Nothing is scheduled until they accept it."), false).await?;
                 }
                 Err(m) => self.result(rid, call_id, format!("{m}. A retry with the same values will not help."), true).await?,
+            },
+            "end_schedule" => match self.read(|s| s.tasks.get(&run.task).and_then(|t| t.schedule.clone()).filter(|id| s.schedules.contains_key(id)).map(|id| (id.clone(), s.schedules[&id].clone()))) {
+                Some((id, sc)) => {
+                    let reason = input["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).unwrap_or("its run ended it").to_string();
+                    self.emit("model", Ev::ScheduleEnded { id: id.clone(), reason: reason.clone() }).await?;
+                    let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                    self.post_notice(Some(run.task.clone()), Some(rid.to_string()), sc.person.clone(), format!("A schedule ended itself: {title}"), json!({ "reason": "schedule_ended", "evidence": { "schedule": id, "why": reason } }))
+                        .await?;
+                    self.result(rid, call_id, "The schedule has ended; no more runs will start. This run goes on.", false).await?;
+                }
+                None => self.result(rid, call_id, "This task was not started by a schedule that is still set. A retry will not help.", true).await?,
             },
             "wait_until" => {
                 let at = input["at"].as_str().unwrap_or_default();

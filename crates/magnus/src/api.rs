@@ -144,6 +144,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/memory/{id}", axum::routing::delete(forget))
         .route("/v1/schedules", get(schedules).post(add_schedule))
         .route("/v1/schedules/{id}", axum::routing::delete(remove_schedule))
+        .route("/v1/schedules/{id}/resume", post(resume_schedule))
         .merge(crate::dev::router())
         .merge(crate::connectors::router())
         .merge(crate::library::router())
@@ -1344,6 +1345,10 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
                 json!({
                     "id": x.id, "person": x.person, "text": x.text, "title": x.title.clone().unwrap_or_else(|| x.text.clone()),
                     "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due(), "last_fired": x.last_fired,
+                    "until": x.until, "max_runs": x.max_runs, "started": x.started, "paused": x.paused, "paused_on": x.paused_on,
+                    // Each run's limit: its own, or the appliance's when it has none.
+                    "budget": x.budget.clone().unwrap_or_else(|| k.cfg.budget.clone()),
+                    "skipped": x.skipped.as_ref().map(|(at, task, why)| json!({ "at": at, "task": task, "why": why })),
                     "last": last, "last_failed": last_failed, "failures": failures, "runs": rows,
                     "project": s.project_of(&x.id).and_then(|id| s.projects.get(&id)).map(|p| json!({ "id": p.id, "name": p.name })),
                 })
@@ -1353,13 +1358,13 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
     Json(json!({ "schedules": list })).into_response()
 }
 
-fn schedule_rule(b: &Value) -> Result<(Option<u32>, Option<String>), String> {
+fn schedule_rule(b: &Value, min: u32) -> Result<(Option<u32>, Option<String>), String> {
     // A model that must fill every field sends 0 or "" for the one it does not mean.
     let every = b["every_minutes"].as_u64().filter(|m| *m > 0).map(|m| m as u32);
     let daily = b["daily_at"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
     match (every, &daily) {
-        (Some(m), None) if m >= 5 => Ok((Some(m), None)),
-        (Some(_), None) => Err("schedules run at most every 5 minutes".into()),
+        (Some(m), None) if m >= min => Ok((Some(m), None)),
+        (Some(_), None) => Err(format!("schedules run at most every {min} minutes")),
         (None, Some(t)) if t.split_once(':').is_some_and(|(h, m)| h.parse::<u32>().is_ok_and(|h| h < 24) && m.parse::<u32>().is_ok_and(|m| m < 60)) => Ok((None, daily)),
         _ => Err("give either every_minutes or daily_at as HH:MM".into()),
     }
@@ -1374,7 +1379,11 @@ async fn add_schedule(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respon
     if text.is_empty() {
         return err(StatusCode::BAD_REQUEST, "the schedule has no task text");
     }
-    let (every_minutes, daily_at) = match schedule_rule(&b) {
+    let (every_minutes, daily_at) = match schedule_rule(&b, k.cfg.schedules.min_every_minutes) {
+        Ok(r) => r,
+        Err(m) => return err(StatusCode::BAD_REQUEST, m),
+    };
+    let (until, max_runs) = match end_for(&b) {
         Ok(r) => r,
         Err(m) => return err(StatusCode::BAD_REQUEST, m),
     };
@@ -1384,7 +1393,7 @@ async fn add_schedule(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respon
     };
     let id = new_id("sched");
     let actor = format!("person:{}", p.id);
-    if let Err(e) = k.emit(&actor, Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at, budget: None, card: None, label: None, title: None }).await {
+    if let Err(e) = k.emit(&actor, Ev::ScheduleSet { id: id.clone(), person: p.id.clone(), text, every_minutes, daily_at, budget: None, card: None, label: None, title: None, until, max_runs }).await {
         return internal(e);
     }
     if project.is_some() {
@@ -1393,6 +1402,29 @@ async fn add_schedule(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respon
         }
     }
     (StatusCode::CREATED, Json(json!({ "id": id }))).into_response()
+}
+
+/// Start a paused schedule again: failures count afresh, and the next run
+/// is due one interval from now.
+async fn resume_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some((person, paused, on)) = k.read(|s| s.schedules.get(&id).map(|x| (x.person.clone(), x.paused.is_some(), x.paused_on.clone()))) else { return err(StatusCode::NOT_FOUND, "no such schedule") };
+    if person != p.id {
+        return err(StatusCode::NOT_FOUND, "no such schedule");
+    }
+    if !paused {
+        return err(StatusCode::CONFLICT, "the schedule is not paused");
+    }
+    if on.is_some() {
+        return err(StatusCode::CONFLICT, "its run is waiting on you; it goes on once you answer that run");
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::ScheduleResumed { id }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
 }
 
 async fn remove_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
@@ -1410,8 +1442,23 @@ async fn remove_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
     }
 }
 
-pub(crate) fn rule_for(b: &Value) -> Result<(Option<u32>, Option<String>), String> {
-    schedule_rule(b)
+pub(crate) fn rule_for(b: &Value, min: u32) -> Result<(Option<u32>, Option<String>), String> {
+    schedule_rule(b, min)
+}
+
+/// When a schedule ends: `until` (RFC 3339) and `max_runs`, either, both or
+/// neither. A model that must fill every field sends "" or 0 for one it
+/// does not mean.
+pub(crate) fn end_for(b: &Value) -> Result<(Option<chrono::DateTime<chrono::Utc>>, Option<u32>), String> {
+    let until = match b["until"].as_str().map(str::trim).filter(|u| !u.is_empty()) {
+        Some(u) => Some(chrono::DateTime::parse_from_rfc3339(u).map_err(|e| format!("until is not an RFC 3339 time ({e})"))?.with_timezone(&chrono::Utc)),
+        None => None,
+    };
+    if until.is_some_and(|u| u <= chrono::Utc::now()) {
+        return Err("until is already past".into());
+    }
+    let max_runs = b["max_runs"].as_u64().filter(|m| *m > 0).map(|m| u32::try_from(m).unwrap_or(u32::MAX));
+    Ok((until, max_runs))
 }
 
 /// Download a delivered file. Read from the log, the source of truth.
