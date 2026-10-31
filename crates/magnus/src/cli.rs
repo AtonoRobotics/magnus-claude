@@ -120,11 +120,14 @@ async fn run(cfg: Config) -> Result<()> {
     tracing::info!("magnus {} listening on http://{bound}", crate::update::version());
     let plain = axum::serve(plain, router(k.clone(), Transport::Plain).into_make_service_with_connect_info::<SocketAddr>());
     match tls {
-        Some((l, addr, fingerprint)) => {
-            use axum::serve::ListenerExt;
+        Some((l, _, fingerprint)) => {
+            use axum::serve::{Listener, ListenerExt};
+            // The bound address, as for the plain listener: it differs from
+            // `tls_listen` when that names port 0.
+            let bound = l.local_addr()?;
             // tap_io gives the TLS listener axum's connect-info for its peer address.
             let l = l.tap_io(|_| {});
-            tracing::info!("magnus listening on https://{addr}, certificate SHA-256 {fingerprint}");
+            tracing::info!("magnus listening on https://{bound}, certificate SHA-256 {fingerprint}");
             let secure = axum::serve(l, router(k, Transport::Tls).into_make_service_with_connect_info::<SocketAddr>());
             tokio::try_join!(async { plain.await }, async { secure.await })?;
         }
