@@ -31,12 +31,34 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+/// A free loopback port below the ephemeral range: outgoing connections take
+/// their local ports from that range (`ip_local_port_range`), and the tests
+/// make many, so a port picked there can be taken by one before the listener
+/// it was picked for binds it.
+fn listener_port() -> u16 {
+    let low: u16 = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .ok()
+        .and_then(|r| r.split_whitespace().next()?.parse().ok())
+        .expect("the ephemeral port range");
+    loop {
+        let p = 1024 + (uuid::Uuid::new_v4().as_u128() % u128::from(low - 1024)) as u16;
+        if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
+            return p;
+        }
+    }
+}
+
+/// What listens on loopback `port`, as `ss` says.
+fn listener(port: u16) -> String {
+    let out = std::process::Command::new("ss").args(["-Hltnp", &format!("sport = :{port}")]).output().expect("ss");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 /// Whether the process listening on loopback `port` descends from `root`;
 /// None while nothing listens there.
 fn held_by(port: u16, root: u32) -> Option<bool> {
-    let out = std::process::Command::new("ss").args(["-Hltnp", &format!("sport = :{port}")]).output().expect("ss");
-    let text = String::from_utf8_lossy(&out.stdout);
-    if text.trim().is_empty() {
+    let text = listener(port);
+    if text.is_empty() {
         return None;
     }
     let pids: Vec<u32> = text.split("pid=").skip(1).filter_map(|s| s.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).collect();
@@ -107,10 +129,12 @@ impl Driver {
         std::fs::write(config.join("mimeapps.list"), "[Default Applications]\nx-scheme-handler/http=magnus-test-browser.desktop\nx-scheme-handler/https=magnus-test-browser.desktop\n").unwrap();
         // tauri-driver cannot take port 0 (it must tell WebKitWebDriver its
         // port, and reports neither), so a start counts only when both ports
-        // are held by this driver's own processes; otherwise pick again.
+        // are held by this driver's own processes; otherwise pick again, and
+        // say why if no try does.
+        let mut tries = Vec::new();
         for _ in 0..3 {
-            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-            let native_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let (port, native_port) = (listener_port(), listener_port());
+            let log = home.path().join("tauri-driver.log");
             let mut child = tokio::process::Command::new("xvfb-run")
                 .args(["-a", "-s", "-screen 0 1280x900x24"])
                 .arg(&driver)
@@ -124,7 +148,7 @@ impl Driver {
                 .env("NO_AT_BRIDGE", "1")
                 .envs(envs.iter().copied())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(std::fs::File::create(&log).unwrap())
                 // Its own process group, so the driver, the app and whatever
                 // the app opens (the sign-in page in a browser) end with it.
                 .process_group(0)
@@ -133,21 +157,24 @@ impl Driver {
                 .expect("start tauri-driver");
             let root = child.id().expect("tauri-driver's pid");
             let start = std::time::Instant::now();
-            let ours = loop {
-                if let Ok(Some(_)) = child.try_wait() {
-                    break false;
+            let lost = loop {
+                if let Ok(Some(status)) = child.try_wait() {
+                    break Some(format!("it exited ({status}): {}", std::fs::read_to_string(&log).unwrap_or_default().trim()));
                 }
                 match (held_by(port, root), held_by(native_port, root)) {
-                    (Some(true), Some(true)) => break true,
-                    (Some(false), _) | (_, Some(false)) => break false,
+                    (Some(true), Some(true)) => break None,
+                    (Some(false), _) | (_, Some(false)) => {
+                        break Some(format!("another process listens on {port} or {native_port}: {} {}", listener(port), listener(native_port)))
+                    }
                     _ => {}
                 }
                 assert!(start.elapsed() < PATIENCE, "tauri-driver did not listen on {port} and {native_port}");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             };
-            if !ours {
+            if let Some(why) = lost {
                 // End its process group, as Drop does, and pick again.
                 let _ = std::process::Command::new("kill").args(["--", &format!("-{root}")]).status();
+                tries.push(why);
                 continue;
             }
             let wd = format!("http://127.0.0.1:{port}");
@@ -158,7 +185,7 @@ impl Driver {
             .await;
             return Driver { wd, home, _driver: child };
         }
-        panic!("tauri-driver lost its ports to other processes three times");
+        panic!("tauri-driver did not start in three tries: {tries:#?}");
     }
 
     fn config(&self) -> PathBuf {
