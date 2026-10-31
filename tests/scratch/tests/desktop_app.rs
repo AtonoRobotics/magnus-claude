@@ -610,8 +610,7 @@ async fn research_approval_result_file_and_schedule_happen_in_one_conversation_i
         }
     });
     let mut f = Flow::start_with(web, s).await;
-    let idp = FakeIdp::start(PERSON).await;
-    idp.configure(&mut f.app).await;
+    let _kc = keycloak(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
     let d = Driver::start().await;
     let (ok, log) = d.script("app-workspace.mjs", &url, &fingerprint, &[("MAGNUS_RESEARCH", RESEARCH), ("MAGNUS_SCHEDULE", SCHEDULE)]).await;
@@ -652,8 +651,7 @@ async fn each_of_the_four_looks_keeps_text_readable_and_reading_surfaces_solid_i
         }
     });
     let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
-    let idp = FakeIdp::start(PERSON).await;
-    idp.configure(&mut f.app).await;
+    let _kc = keycloak(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
     let d = Driver::start().await;
     let (ok, log) = d.script("app-looks.mjs", &url, &fingerprint, &[]).await;
