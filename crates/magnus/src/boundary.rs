@@ -327,8 +327,10 @@ impl Kernel {
 
         // 8. Execute: intent first, then the call, then the result. The
         // agent's first action that changes anything starts the work, and
-        // freezes the contract in force (invariant 7).
-        if a.issuer == Issuer::Model && f.risk != Risk::Read && !is_chat_tool(&f) && !run.work_started {
+        // freezes the contract in force (invariant 7). Writing the person's
+        // memory changes nothing in the world, and needs no contract.
+        let own_memory = f.connector.is_none() && f.app == "memory";
+        if a.issuer == Issuer::Model && f.risk != Risk::Read && !is_chat_tool(&f) && !own_memory && !run.work_started {
             self.emit("kernel", Ev::WorkStarted { run: a.run.clone() }).await?;
             if run.contract.is_some() && run.contract_frozen.is_none() {
                 self.emit("kernel", Ev::ContractFrozen { run: a.run.clone(), version: run.contract_version }).await?;
@@ -545,12 +547,12 @@ impl Kernel {
                     && ap.reason.as_deref() == Some(WEB_LOOKUPS)
                     && (ap.task == run.task || thread(&ap.task).is_some_and(|t| Some(t) == thread(&run.task)))
             });
-            if allowed.is_some() {
-                return allowed.cloned();
+            if let Some(ap) = allowed {
+                return vec![ap.clone()];
             }
             s.approvals
                 .iter()
-                .find(|ap| {
+                .filter(|ap| {
                     ap.person == run.person
                         && ap.tool == a.tool
                         && ap.reason.as_deref() != Some("unknown_outcome")
@@ -564,7 +566,15 @@ impl Kernel {
                         }
                 })
                 .cloned()
+                .collect::<Vec<_>>()
         });
+        // A lasting approval holds only while its approver may still give it:
+        // one whose approver role was taken away no longer covers anything.
+        let still_may = |ap: &crate::state::Approval| {
+            !matches!(ap.scope.as_str(), "standing" | "window")
+                || ap.by.strip_prefix("person:").and_then(|id| self.person(id)).is_some_and(|p| p.is_owner() || p.has_role(&format!("approver:{}", f.risk.as_str())))
+        };
+        let found = found.into_iter().find(|ap| still_may(ap));
         if let Some(ap) = found {
             self.decision(a, "allow", "approval", &format!("approved by {} ({})", ap.by, ap.scope), rule).await?;
             if ap.scope == "once" {
@@ -652,14 +662,14 @@ impl Kernel {
             return Ok(Gate::Pass);
         }
         self.decision(a, "ask", "idempotency", "outcome unknown and the app cannot deduplicate", None).await?;
-        let open = self.read(|s| s.items.values().any(|i| i.run.as_deref() == Some(&a.run) && i.kind == "approval" && i.resolution.is_none() && i.details["call_id"] == a.call_id.as_str()));
-        let item = if open {
-            None
-        } else {
-            let id = new_id("item");
-            self.emit(
-                "kernel",
-                Ev::Item {
+        // The card and the suspension in one write, so no reader sees one
+        // without the other.
+        let open = self.read(|s| s.items.values().find(|i| i.run.as_deref() == Some(&a.run) && i.kind == "approval" && i.resolution.is_none() && i.details["call_id"] == a.call_id.as_str()).map(|i| i.id.clone()));
+        let (id, item) = match open {
+            Some(id) => (id, None),
+            None => {
+                let id = new_id("item");
+                let ev = Ev::Item {
                     id: id.clone(),
                     item_kind: "approval".into(),
                     task: Some(run.task.clone()),
@@ -671,12 +681,11 @@ impl Kernel {
                         "risk": f.risk.as_str(), "app": f.app, "reason": "unknown_outcome",
                         "why": format!("the appliance stopped while {} was in flight and {} cannot tell a repeat from a new request", a.tool, f.app)
                     }),
-                },
-            )
-            .await?;
-            Some(id)
+                };
+                (id, Some(ev))
+            }
         };
-        self.suspend(&a.run, "approval", item).await?;
+        self.suspend_on(&a.run, "approval", id, item).await?;
         Ok(Gate::Stop(Verdict::Suspended))
     }
 

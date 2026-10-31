@@ -219,11 +219,27 @@ async fn download(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response
             Err(e) => return internal(e),
         },
     };
-    Response::builder()
-        .header("content-type", f.media_type)
-        .header("content-disposition", format!("attachment; filename=\"{}\"", f.name.replace('"', "")))
-        .body(axum::body::Body::from(bytes))
-        .unwrap()
+    attachment(&f.name, &f.media_type, bytes)
+}
+
+/// A file to save, never to run in the app's origin: whatever its name and
+/// stated type hold (control characters, quotes, non-ASCII letters), the
+/// answer is well-formed. The name goes plain where it is safe ASCII and in
+/// full as RFC 6266 `filename*`; a type that is not a valid header value is
+/// sent as `application/octet-stream`; the browser may not sniff another.
+pub fn attachment(name: &str, media_type: &str, bytes: Vec<u8>) -> Response {
+    let plain: String = name.chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' }).collect();
+    let plain = if plain.trim().is_empty() { "file".to_string() } else { plain };
+    let full: String = name.chars().filter(|c| !c.is_control()).collect::<String>().bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    let disposition = format!("attachment; filename=\"{plain}\"; filename*=UTF-8''{full}");
+    let ctype = axum::http::HeaderValue::from_str(media_type).unwrap_or(axum::http::HeaderValue::from_static("application/octet-stream"));
+    let mut r = Response::new(axum::body::Body::from(bytes));
+    r.headers_mut().insert("content-type", ctype);
+    if let Ok(v) = axum::http::HeaderValue::from_str(&disposition) {
+        r.headers_mut().insert("content-disposition", v);
+    }
+    r.headers_mut().insert("x-content-type-options", axum::http::HeaderValue::from_static("nosniff"));
+    r
 }
 
 fn project_json(s: &St, p: &crate::state::Project) -> Value {

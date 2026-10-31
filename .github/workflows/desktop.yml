@@ -1,7 +1,9 @@
 # The installed desktop app, tested on Linux; installers (Linux and Windows,
 # the same app) are published only when those tests pass (DECISIONS.md).
-# A tagged release is also put in the build box's appliance updates
-# directory, signed, from where the installed apps update themselves.
+# Tested builds are also put in the build box's appliance updates directory,
+# signed, from where the installed apps update themselves (DECISIONS.md,
+# "Release channels"): a pull request to development, master to test, a
+# tag to production.
 # Runs on a self-hosted runner, `magnus-linux`: the build box, with KVM, the
 # guest image and Postgres. One-time setup: desktop/README.md, "Release checks".
 # One job: the steps share the build box's disk, so nothing goes through
@@ -33,23 +35,25 @@ jobs:
     runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 150
     steps:
-      # Keep target/ between runs: a clean build of everything is long.
+      # Keep target/ between runs: a clean build of everything is long. The
+      # whole history, so publishing can check a release contains the one
+      # before it.
       - uses: actions/checkout@v7
-        with: { clean: false }
-      # The version every step builds, tests and publishes. A pull request's
-      # build is a pre-release of the next version, newer than any release,
-      # so the installed apps update to it and the owner reviews it there
-      # (DECISIONS.md, "Review builds"); the release that follows is newer.
-      # The run number comes first, so the newest build is the newest version
-      # whichever pull request it is; the pull request number only names it.
+        with: { clean: false, fetch-depth: 0 }
+      # The version every step builds, tests and publishes. A tag's is the
+      # app's own; any other build is a pre-release of the next version,
+      # numbered by run so each is newer than the one before (apps only move
+      # forward): `<next>-review.<run>.pr.<n>` for pull request n, else
+      # `<next>-test.<run>`.
       - name: Version
         env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
           PR: ${{ github.event.pull_request.number }}
         run: |
           v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
-          if [ -n "$PR" ]; then
+          if [ "$TAG" != true ]; then
             git ls-remote --exit-code --tags origin "desktop-v$v" >/dev/null && v="${v%.*}.$(( ${v##*.} + 1 ))"
-            v="$v-review.${{ github.run_number }}.pr.$PR"
+            if [ -n "$PR" ]; then v="$v-review.${{ github.run_number }}.pr.$PR"; else v="$v-test.${{ github.run_number }}"; fi
           fi
           echo "MAGNUS_VERSION=$v" >> "$GITHUB_ENV"
       # The updater packages (AppImage, setup.exe) are signed with the release
@@ -126,13 +130,21 @@ jobs:
           git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
           git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG" > "$RUNNER_TEMP/notes"
           release/publish.sh desktop "$v" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist
-      # A pull request's tested build goes to the installed apps the same way,
-      # named for the pull request, so every rebuild reaches the owner's app.
-      - name: Review build for the installed apps
+      # A pull request's tested build goes to development, the owner's apps;
+      # once merged, master's goes to test, the testers'.
+      - name: Development build for the installed apps
         if: github.event_name == 'pull_request'
         env:
           TITLE: ${{ github.event.pull_request.title }}
           PR: ${{ github.event.pull_request.number }}
+          MAGNUS_COMMIT: ${{ github.event.pull_request.head.sha }}
         run: |
-          printf '%s\n\nReview build of pull request #%s.\n' "$TITLE" "$PR" > "$RUNNER_TEMP/notes"
-          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist
+          printf '%s\n\nDevelopment build of pull request #%s.\n' "$TITLE" "$PR" > "$RUNNER_TEMP/notes"
+          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist development
+      - name: Test build for the installed apps
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          s=$(git log -1 --format=%s)
+          case $s in "Merge pull request #"*) t=$(git log -1 --format=%b | head -1) ;; *) t=$s ;; esac
+          printf '%s\n\nTest build: master at %s.\n' "$t" "$(git rev-parse --short HEAD)" > "$RUNNER_TEMP/notes"
+          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist test

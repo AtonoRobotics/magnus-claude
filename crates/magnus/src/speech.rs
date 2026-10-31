@@ -38,6 +38,35 @@ pub async fn transcribe(speech: Option<&Speech>, state_dir: &Path, data_b64: &st
     Ok(String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+/// The most text one request reads aloud: the app asks a sentence at a time.
+pub const MAX_SPEAK: usize = 2000;
+/// Read-aloud pieces made at once: each loads the voice's model.
+const SPEAKING: usize = 2;
+
+/// Why a piece was not read aloud.
+#[derive(Debug)]
+pub enum SpeakError {
+    TooLong,
+    Busy,
+    TimedOut,
+    Failed(anyhow::Error),
+}
+
+/// Text to speech on the appliance: MP3 of `text` in the configured voice,
+/// at most `SPEAKING` at a time and each within its time.
+pub async fn speak_limited(cfg: &ReadAloud, text: &str) -> std::result::Result<Vec<u8>, SpeakError> {
+    static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(SPEAKING);
+    if text.chars().count() > MAX_SPEAK {
+        return Err(SpeakError::TooLong);
+    }
+    let Ok(_slot) = SLOTS.try_acquire() else { return Err(SpeakError::Busy) };
+    match tokio::time::timeout(std::time::Duration::from_secs(cfg.timeout_s), speak(cfg, text)).await {
+        Ok(r) => r.map_err(SpeakError::Failed),
+        // The child is killed as its future is dropped (kill_on_drop).
+        Err(_) => Err(SpeakError::TimedOut),
+    }
+}
+
 /// Text to speech on the appliance: MP3 of `text` in the configured voice.
 pub async fn speak(cfg: &ReadAloud, text: &str) -> Result<Vec<u8>> {
     use tokio::io::AsyncWriteExt;

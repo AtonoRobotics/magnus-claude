@@ -712,7 +712,12 @@ impl State {
             _ => match () {
                 _ if self.files.get(item).is_some_and(|f| f.person == person) => true,
                 _ if self.projects.get(item).is_some_and(|p| p.person == person) => true,
-                _ if self.memory.iter().any(|m| m.id == item && m.person == person) => true,
+                _ if self.memory.iter().any(|m| m.id == item && m.person == person) => {
+                    // Deleting a memory deletes where it was written in its
+                    // run, so the run must have ended (invariant 3).
+                    let run = self.memory.iter().find(|m| m.id == item).map(|m| m.run.clone()).unwrap_or_default();
+                    return if ended(&run) { Ok(()) } else { Err(Running) };
+                }
                 _ => self.knowledge.get(item).is_some_and(|k| {
                     owner || k.author == format!("person:{person}") || k.author.strip_prefix("agent:").and_then(|r| self.runs.get(r)).is_some_and(|r| r.person == person)
                 }),
@@ -773,16 +778,40 @@ impl State {
         use crate::log::Holding;
         const OWN: [&str; 3] = ["output", "memory", "playbook"];
         let named = |kinds: Vec<&'static str>, field: &'static str, id: &str| Holding { kinds, field, id: id.into(), ..Default::default() };
+        // What belongs to a task but carries no run: its verdict's note and
+        // the person's answers to its cards.
+        let theirs = |task: &str, items: &mut dyn Iterator<Item = &Item>| -> Vec<(&'static str, &'static str, String)> {
+            let mut m = vec![("verdict", "task", task.to_string())];
+            m.extend(items.map(|i| ("item_resolved", "id", i.id.clone())));
+            m
+        };
+        let items_of = |task: &str| self.items.values().filter(|i| i.task.as_deref() == Some(task)).cloned().collect::<Vec<_>>();
         Some(match &self.trash.get(item)?.held {
-            Held::Task(t, ..) => Holding { runs: vec![t.run_id.clone()], except: OWN.to_vec(), ..Default::default() },
-            Held::Thread { id, turns, .. } => Holding { runs: turns.iter().map(|(t, _)| t.run_id.clone()).collect(), except: OWN.to_vec(), ..named(vec!["thread_branched"], "thread", id) },
+            Held::Task(t, _, items) => Holding { runs: vec![t.run_id.clone()], except: OWN.to_vec(), matches: theirs(&t.task_id, &mut items.iter()), ..Default::default() },
+            Held::Thread { id, turns, .. } => {
+                let matches = turns.iter().flat_map(|(t, _)| theirs(&t.task_id, &mut items_of(&t.task_id).iter())).collect();
+                Holding { runs: turns.iter().map(|(t, _)| t.run_id.clone()).collect(), except: OWN.to_vec(), matches, ..named(vec!["thread_branched"], "thread", id) }
+            }
             Held::Entry { .. } => match item.split_once(':')? {
                 ("m", task) => named(vec!["task_created"], "task", task),
-                (_, task) => Holding { runs: vec![self.tasks.get(task)?.run_id.clone()], except: [&OWN[..], &["task_created"]].concat(), ..Default::default() },
+                (_, task) => Holding {
+                    runs: vec![self.tasks.get(task)?.run_id.clone()],
+                    except: [&OWN[..], &["task_created"]].concat(),
+                    matches: theirs(task, &mut items_of(task).iter()),
+                    ..Default::default()
+                },
             },
             Held::File(_) => named(vec!["file_uploaded", "output"], "id", item),
             Held::Project(_) => named(vec!["project_set"], "id", item),
-            Held::Memory(_) => named(vec!["memory"], "id", item),
+            // A memory and where it was written: the call that wrote it, and
+            // the reply that made the call (the run's model, or the memory
+            // pass), found by the fact's text in that run.
+            Held::Memory(m) => {
+                let text = serde_json::to_string(&m.fact).unwrap_or_default();
+                let text = text.trim_matches('"').to_string();
+                let containing = ["intent", "tool_result", "model_reply", "memory_pass"].into_iter().map(|k| (k, m.run.clone(), text.clone())).filter(|_| !m.fact.trim().is_empty()).collect();
+                Holding { containing, ..named(vec!["memory"], "id", item) }
+            }
             Held::Knowledge(_) => named(vec!["knowledge_added"], "id", item),
         })
     }
@@ -1053,9 +1082,14 @@ impl State {
                 }
             }
             Ev::ScheduleFired { id, task } => {
+                // A run its schedule created was counted when it was created
+                // (below), so a firing lost after it never lets one more run.
+                let counted = self.tasks.get(task).is_some_and(|t| t.schedule.as_deref() == Some(id.as_str()));
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.last_fired = Some(e.at);
-                    s.started += 1;
+                    if !counted {
+                        s.started += 1;
+                    }
                     s.skipped = None;
                 }
                 if let Some(t) = self.tasks.get_mut(task) {
@@ -1085,6 +1119,12 @@ impl State {
                 // the turn that started it.
                 let pb = self.playbook_at(person, config.playbook).into_iter().fold(label.unwrap_or_default(), |l, i| l.join(i.label));
                 let uploads = !attachments.is_empty() || !files.is_empty();
+                // A schedule's run counts against it as it is created.
+                if let Some(s) = e.actor.strip_prefix("schedule:").and_then(|id| self.schedules.get_mut(id)) {
+                    s.last_fired = Some(e.at);
+                    s.started += 1;
+                    s.skipped = None;
+                }
                 if !attachments.is_empty() {
                     self.attachments.insert(task.clone(), attachments.clone());
                 }
@@ -1128,7 +1168,17 @@ impl State {
                         // content from elsewhere: data, not instructions.
                         untrusted: uploads || pb.untrusted,
                         private: uploads || pb.private,
-                        private_from: if uploads { ["library".to_string()].into() } else { Default::default() },
+                        // Privacy carried in from where the run started (a
+                        // thread, a schedule's source) has no app to name:
+                        // the unnamed source, as for a result without one,
+                        // so readers and the audience rule still see it.
+                        private_from: if uploads {
+                            ["library".to_string()].into()
+                        } else if pb.private {
+                            [String::new()].into()
+                        } else {
+                            Default::default()
+                        },
                         model_calls: 0,
                         actions: 0,
                         usd: 0.0,
@@ -1306,7 +1356,8 @@ impl State {
                 }
             }
             Ev::Verdict { task, person, verdict, note } => {
-                if let Some(t) = self.tasks.get_mut(task).filter(|t| &t.person == person) {
+                let trial = self.tasks.get(task).and_then(|t| self.runs.get(&t.run_id)).is_some_and(|r| r.experiment.is_some());
+                if let Some(t) = self.tasks.get_mut(task).filter(|t| &t.person == person || trial) {
                     t.verdict = Some(Verdict { verdict: verdict.clone(), note: note.clone(), at: e.at });
                 }
             }
@@ -1391,6 +1442,13 @@ impl State {
             Ev::ItemResolved { id, decision, scope, text } => {
                 if let Some(i) = self.items.get_mut(id) {
                     i.resolution = Some((decision.clone(), scope.clone(), text.clone(), e.actor.clone()));
+                    // A stopped run's notice put away: the run waits on no
+                    // card now, so its own Resume (or Cancel) is what is left.
+                    if decision == "dismiss" {
+                        if let Some(r) = i.run.as_ref().and_then(|r| self.runs.get_mut(r)).filter(|r| r.waiting_item.as_deref() == Some(id.as_str())) {
+                            r.waiting_item = None;
+                        }
+                    }
                 }
             }
             Ev::Approval { id, person, task, tool, input_hash, scope, until, reason, .. } => self.approvals.push(Approval {
@@ -1488,5 +1546,47 @@ impl State {
         self.items
             .values()
             .find(|i| i.run.as_deref() == Some(run) && i.kind == kind && i.resolution.is_none())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::State;
+    use crate::log::Event;
+    use serde_json::json;
+
+    fn ev(seq: i64, actor: &str, ev: serde_json::Value) -> Event {
+        Event { seq, at: chrono::Utc::now(), actor: actor.into(), ev: serde_json::from_value(ev).unwrap() }
+    }
+
+    /// A schedule's run counts against its limit as it is created, so a
+    /// crash before the firing is recorded never lets it run once more.
+    #[test]
+    fn a_scheduled_run_counts_when_it_is_created() {
+        let mut s = State::default();
+        s.apply(&ev(1, "person:alice", json!({ "kind": "schedule_set", "id": "s1", "person": "alice", "text": "Say hi.", "every_minutes": 60, "max_runs": 1 })));
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        s.apply(&ev(2, "schedule:s1", json!({ "kind": "task_created", "task": "t1", "run": "r1", "person": "alice", "text": "Say hi.", "config": config })));
+        // The firing itself was lost: the schedule is still out of runs.
+        assert_eq!(s.schedules["s1"].started, 1);
+        assert!(s.schedules["s1"].next_due().is_none(), "a lost firing let the schedule run again");
+        // And when the firing is recorded, it is not counted twice.
+        s.apply(&ev(3, "kernel", json!({ "kind": "schedule_fired", "id": "s1", "task": "t1" })));
+        assert_eq!(s.schedules["s1"].started, 1);
+    }
+
+    /// Dismissing the notice a stopped run waits on leaves the run waiting on
+    /// no card, so the task's own Resume is not refused for it.
+    #[test]
+    fn a_dismissed_stop_notice_frees_the_run() {
+        let mut s = State::default();
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        s.apply(&ev(1, "person:alice", json!({ "kind": "task_created", "task": "t1", "run": "r1", "person": "alice", "text": "Say hi.", "config": config })));
+        s.apply(&ev(2, "kernel", json!({ "kind": "item", "id": "i1", "item_kind": "notice", "task": "t1", "run": "r1", "person": "alice", "summary": "Stopped", "details": { "reason": "budget" } })));
+        s.apply(&ev(3, "kernel", json!({ "kind": "suspended", "run": "r1", "reason": "budget", "item": "i1" })));
+        assert_eq!(s.runs["r1"].waiting_item.as_deref(), Some("i1"));
+        s.apply(&ev(4, "person:alice", json!({ "kind": "item_resolved", "id": "i1", "decision": "dismiss" })));
+        assert_eq!(s.runs["r1"].waiting_item, None, "the run still waits on a card put away");
+        assert_eq!(s.runs["r1"].reason.as_deref(), Some("budget"), "dismissing it resumed nothing");
     }
 }

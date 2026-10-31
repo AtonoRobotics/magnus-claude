@@ -31,6 +31,8 @@ pub struct AppState {
     pub expires_in: i64,
     /// list_events' description as the app now advertises it, if changed.
     pub changed: Option<String>,
+    /// Answer refreshes without `expires_in` (it is only recommended).
+    pub refresh_without_expiry: bool,
     n: usize,
 }
 
@@ -147,7 +149,11 @@ async fn token(State((base, st)): S, Form(f): Form<HashMap<String, String>>) -> 
                 return oauth_error(400, "invalid_grant");
             }
             s.refreshes += 1;
-            Json(issue(&mut s)).into_response()
+            let mut t = issue(&mut s);
+            if s.refresh_without_expiry {
+                t.as_object_mut().unwrap().remove("expires_in");
+            }
+            Json(t).into_response()
         }
         _ => oauth_error(400, "unsupported_grant_type"),
     }

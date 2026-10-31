@@ -21,8 +21,19 @@ function hush() {
 }
 async function readAloud(text) {
   await hush();
-  const run = voice.run, parts = text.split(/(?<=[.!?])\s+/).filter(s => s.trim());
-  const make = s => { const p = api("POST", "/v1/speak", { text: s }); p.catch(() => {}); return p; };
+  // A sentence at a time; a very long one in pieces, as the appliance reads
+  // at most 2000 characters at once.
+  const pieces = s => { const out = []; let cur = ""; for (const w of s.split(/\s+/)) { if (cur && (cur + " " + w).length > 1500) { out.push(cur); cur = w; } else cur = cur ? `${cur} ${w}` : w; } if (cur) out.push(cur); return out; };
+  const run = voice.run, parts = text.split(/(?<=[.!?])\s+/).filter(s => s.trim()).flatMap(pieces);
+  // The voice makes a few pieces at a time for everyone: busy, wait and ask again.
+  const ask = async (s, tries = 8) => {
+    try { return await api("POST", "/v1/speak", { text: s }); } catch (e) {
+      if (e.status !== 429 || tries <= 1 || run !== voice.run) throw e;
+      await new Promise(r => setTimeout(r, 400));
+      return ask(s, tries - 1);
+    }
+  };
+  const make = s => { const p = ask(s); p.catch(() => {}); return p; };
   let next = parts.length ? make(parts[0]) : null;
   for (let i = 0; i < parts.length; i++) {
     let r;
@@ -366,12 +377,12 @@ async function go() {
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   const h = location.hash || "#/home";
   // A view still loading when the person moves on stops where it is: only
-  // the latest navigation draws.
+  // the latest navigation draws. Each view gets a main of its own, so one
+  // still loading (and its handlers) only ever touches the main it left,
+  // never the next view's.
   const seq = ++App.seq;
-  const main = $("#main");
-  main._html = null;
-  // Each view sets its own handlers on main; none outlives its view.
-  main.onclick = main.onchange = main.onsubmit = main.oninput = null;
+  const left = $("#main"), main = left.cloneNode(false);
+  left.replaceWith(main);
   for (const [re, view, workspace] of App.routes) {
     const m = h.match(re);
     if (m) {
@@ -470,10 +481,13 @@ async function signInScreen(note) {
     } else {
       // Username and password, then the code from an authenticator app if
       // the person uses one. The password stays in this closure only.
-      const coding = stage === "code";
+      const coding = stage === "code" || stage === "machine";
+      const machine = stage === "machine";
       paint(box, `<form id="f"><p class="small muted">${esc(data.url || location.origin)}</p>
         ${data.error ? `<p class="small" style="color:var(--bad)" role="alert">${esc(data.error)}</p>` : ""}
-        ${coding
+        ${machine
+          ? `<label for="otp">Enter the code \`magnus sign-in-code\` printed on the appliance</label><input id="otp" style="width:100%" autocomplete="one-time-code" maxlength="16" required autofocus>`
+          : coding
           ? `<label for="otp">Enter the 6-digit code from your authenticator app</label><input id="otp" style="width:100%" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" required autofocus>`
           : `<label for="who">Username</label><input id="who" style="width:100%" autocomplete="username" value="${esc(data.person || localStorage.getItem("magnus.person") || "")}" required>
         <label for="pw">Password</label><input id="pw" type="password" style="width:100%" autocomplete="current-password" required>`}
@@ -487,7 +501,9 @@ async function signInScreen(note) {
         const password = coding ? data.password : $("#pw").value;
         $("#go").disabled = true;
         try {
-          const r = await Magnus.signIn(person, password, coding ? $("#otp").value.trim() : undefined);
+          const typed = coding ? $("#otp").value.trim() : undefined;
+          const r = await Magnus.signIn(person, password, machine ? undefined : typed, machine ? typed : undefined);
+          if (r?.machine_code_needed) return ask("machine", { ...data, person, password, error: r.error });
           if (r?.code_needed) return ask("code", { ...data, person, password, error: coding ? r.error : undefined });
           if (r?.browser) return ask("browser", { ...data, person, password: undefined, message: r.error });
           localStorage.setItem("magnus.person", person);
@@ -1214,7 +1230,7 @@ function card(i, composed) {
   const d = i.details || {};
   const tier = i.kind === "approval" ? (i.tier || d.risk) : "";
   const head = `<div class="spread"><span class="kind">${esc(KIND[i.kind] || i.kind)}${tier ? ` · ${esc(TIER[tier] || tier)}` : ""}</span>
-    <span class="small faint">${i.blocking ? `<strong style="color:var(--fg)">A task is waiting</strong> · ` : ""}${esc(when(i.created_at))}${i.task_id ? ` · <a href="#/task/${enc(i.task_id)}" data-open="task:${esc(i.task_id)}">task</a>` : ""}</span></div>`;
+    <span class="small faint">${i.blocking ? `<strong style="color:var(--fg)">A task is waiting</strong> · ` : ""}${esc(when(i.created_at))}${i.task_id && i.person === App.me?.id ? ` · <a href="#/task/${enc(i.task_id)}" data-open="task:${esc(i.task_id)}">task</a>` : ""}</span></div>`;
   let body = "";
   if (i.status !== "open") {
     const r = i.resolution || {};
@@ -1266,7 +1282,8 @@ function card(i, composed) {
     case "notice": {
       const ev = d.evidence;
       const list = [];
-      if (typeof d.reason === "string") list.push(["resume", "Continue", "primary"]);
+      // A schedule's own notice stands for no run to continue: its Resume does that.
+      if (typeof d.reason === "string" && !d.reason.startsWith("schedule_") && i.run_id) list.push(["resume", "Continue", "primary"]);
       if (d.reason === "budget") list.push(["extend", "Double the budget and continue"]);
       list.push(["dismiss", "Dismiss"]);
       body = `<p class="small"><span class="muted">Why it stopped:</span> ${esc(d.reason)}</p>
@@ -1894,7 +1911,7 @@ async function connectorsSection(main) {
     try {
       const got = await Magnus.loopbackWait();
       if (got.state !== r.state) throw new Error("the sign-in came back for a different request; start again");
-      await api("POST", `/v1/connectors/${enc(app)}/sign-in/complete`, { state: got.state, code: got.code });
+      await api("POST", `/v1/connectors/${enc(app)}/sign-in/complete`, { state: got.state, code: got.code, iss: got.iss });
       say(app, `<p class="small" style="color:var(--ok)">Connected.</p>`);
       await draw();
     } catch (e) { say(app, `<p class="small" style="color:var(--bad)">${esc(e.message)}</p>`); }
@@ -2197,6 +2214,8 @@ function stop() {
   window.onhashchange = null;
   Panel.what = null;
   App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null;
+  // What one person was typing is not shown to the next who signs in here.
+  for (const k of Object.keys(drafts)) delete drafts[k];
 }
 
 async function start() {

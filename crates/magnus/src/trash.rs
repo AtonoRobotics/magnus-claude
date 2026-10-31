@@ -31,6 +31,7 @@ pub fn router() -> Router<Arc<Kernel>> {
 impl Kernel {
     /// Move a person's item to the trash.
     pub async fn trash(&self, person: &str, owner: bool, item: &str) -> Result<Result<(), NotTrashable>> {
+        let _one = changing().lock().await;
         if let Err(why) = self.read(|s| s.may_trash(person, owner, item)) {
             return Ok(Err(why));
         }
@@ -43,6 +44,7 @@ impl Kernel {
 
     /// Put a trashed item back. False when it is not in the person's trash.
     pub async fn restore(&self, person: &str, item: &str) -> Result<bool> {
+        let _one = changing().lock().await;
         if !self.read(|s| s.trash.get(item).is_some_and(|t| t.person == person)) {
             return Ok(false);
         }
@@ -57,6 +59,16 @@ impl Kernel {
     /// record of which events lost their content is written first, so a
     /// removal cut short finishes at the next start.
     pub async fn remove(&self, actor: &str, item: &str) -> Result<()> {
+        self.remove_content(actor, item).await?;
+        self.scrub_after_removal().await;
+        Ok(())
+    }
+
+    /// The removal itself, without the backups.
+    async fn remove_content(&self, actor: &str, item: &str) -> Result<()> {
+        // One trash change at a time: a restore between reading what the
+        // item holds and deleting it would put back an item with no content.
+        let _one = changing().lock().await;
         let Some(holding) = self.read(|s| s.holding(item)) else { return Ok(()) };
         let seqs = self.log.content_seqs(&holding).await?;
         self.emit(actor, Ev::Removed { item: item.into(), seqs: seqs.clone() }).await?;
@@ -64,21 +76,50 @@ impl Kernel {
         Ok(())
     }
 
-    /// Remove what has been in the trash for `keep_days`.
+    /// Removed content out of the backups kept too. The removal's record
+    /// makes a scrub that fails here happen at the next start.
+    async fn scrub_after_removal(&self) {
+        if let Err(e) = self.scrub_backups().await {
+            tracing::error!("taking removed content out of the backups: {e:#}");
+        }
+    }
+
+    /// Remove what has been in the trash for `keep_days`. One item that
+    /// cannot be removed now does not hold back the others; it is tried
+    /// again at the next round.
     pub async fn purge_trash(&self) -> Result<usize> {
         let cutoff = chrono::Utc::now() - chrono::Duration::days(self.cfg.trash.keep_days as i64);
         let due: Vec<String> = self.read(|s| s.trash.iter().filter(|(_, t)| t.at <= cutoff).map(|(id, _)| id.clone()).collect());
+        let mut removed = 0;
+        let mut failed = vec![];
         for item in &due {
-            self.remove("kernel:trash", item).await?;
+            match self.remove_content("kernel:trash", item).await {
+                Ok(()) => removed += 1,
+                Err(e) => failed.push(format!("{item}: {e:#}")),
+            }
         }
-        Ok(due.len())
+        if removed > 0 {
+            self.scrub_after_removal().await;
+        }
+        anyhow::ensure!(failed.is_empty(), "{removed} removed; not removed: {}", failed.join("; "));
+        Ok(removed)
     }
+}
+
+/// Trash changes (trash, restore, remove) one at a time.
+fn changing() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
 }
 
 /// Remove what is due, hourly from the appliance's start: an item is gone
 /// within the hour after its `keep_days`.
 pub fn schedule(k: Arc<Kernel>) {
     tokio::spawn(async move {
+        // A removal cut short before its backups were scrubbed.
+        if let Err(e) = k.scrub_backups().await {
+            tracing::error!("taking removed content out of the backups: {e:#}");
+        }
         let mut t = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
             t.tick().await;
@@ -155,9 +196,10 @@ async fn empty(State(k): K, h: HeaderMap) -> Response {
     let p = person!(k, h);
     let items: Vec<String> = k.read(|s| s.trash.iter().filter(|(_, t)| t.person == p.id).map(|(id, _)| id.clone()).collect());
     for item in &items {
-        if let Err(e) = k.remove(&format!("person:{}", p.id), item).await {
+        if let Err(e) = k.remove_content(&format!("person:{}", p.id), item).await {
             return internal(e);
         }
     }
+    k.scrub_after_removal().await;
     Json(json!({ "removed": items.len() })).into_response()
 }

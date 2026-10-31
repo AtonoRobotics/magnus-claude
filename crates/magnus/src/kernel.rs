@@ -205,6 +205,39 @@ impl Kernel {
     /// A person's rights: the identity provider's where it names them, else
     /// the roles the owner set in Settings, else the config's.
     /// The identity provider people sign in through, if the appliance has one.
+    /// End the sessions of people the identity provider has turned off or
+    /// no longer knows: once now, then every ten minutes. A provider that
+    /// cannot be asked ends nothing.
+    pub fn watch_sessions(self: &Arc<Self>) {
+        let k = self.clone();
+        tokio::spawn(async move {
+            let mut t = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                t.tick().await;
+                k.end_turned_off().await;
+            }
+        });
+    }
+
+    pub async fn end_turned_off(&self) -> usize {
+        let Some(id) = self.identity() else { return 0 };
+        let mut ended = 0;
+        for person in self.accounts.signed_in() {
+            match id.active(&person).await {
+                Ok(true) => {}
+                Ok(false) => match self.accounts.end_all(&person) {
+                    Ok(n) => {
+                        tracing::warn!("{} has {person} turned off or no longer knows them: their {n} sessions here are ended", id.label());
+                        ended += n;
+                    }
+                    Err(e) => tracing::error!("ending {person}'s sessions: {e:#}"),
+                },
+                Err(e) => tracing::debug!("cannot ask whether {person} is still on: {e:#}"),
+            }
+        }
+        ended
+    }
+
     pub fn identity(&self) -> Option<&dyn crate::identity::Identity> {
         self.oidc.as_ref().map(|o| o as &dyn crate::identity::Identity)
     }
@@ -401,7 +434,7 @@ impl Kernel {
             let finished: Vec<(crate::state::Schedule, String)> =
                 self.read(|s| s.schedules.values().filter_map(|x| x.finished(now).map(|why| (x.clone(), why))).collect());
             for (sc, why) in finished {
-                if self.emit("kernel", Ev::ScheduleEnded { id: sc.id.clone(), reason: why.clone() }).await.is_ok() {
+                if self.emit("kernel", Ev::ScheduleEnded { id: sc.id.clone(), reason: why.clone(), run: None }).await.is_ok() {
                     let _ = self.post_notice(None, None, sc.person.clone(), format!("A schedule ended: {}", sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect())), serde_json::json!({ "reason": "schedule_ended", "evidence": { "schedule": sc.id, "why": why } })).await;
                 }
             }
@@ -454,7 +487,8 @@ impl Kernel {
                 // within the schedule's budget.
                 // Its runs start in the project the schedule is in now.
                 let o = NewRun {
-                    budget: sc.budget.clone(),
+                    // A schedule's own limits, within the appliance's today.
+                    budget: sc.budget.as_ref().map(|b| b.within(&self.cfg.budget)),
                     label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label),
                     project: self.read(|s| s.project_of(&sc.id)),
                     ..Default::default()
@@ -555,14 +589,37 @@ impl Kernel {
     }
 
     /// In a chat turn: the actions the person asked for (start a task,
-    /// propose a schedule) whose every attempt failed, with the reason.
+    /// propose a schedule) that failed and were not made good later, with
+    /// the reason.
     pub fn unfinished_chat_actions(&self, run: &crate::state::Run) -> Vec<serde_json::Value> {
         let r = self.read(|s| s.runs.get(&run.id).cloned()).unwrap_or_else(|| run.clone());
         let mut out: Vec<serde_json::Value> = vec![];
         for tool in ["create_task", "create_schedule"] {
-            let tried: Vec<serde_json::Value> = r.results_in_order().into_iter().filter(|v| v["tool"] == tool).collect();
-            if !tried.is_empty() && tried.iter().all(|v| v["is_error"] == true) {
-                out.push(serde_json::json!({ "tool": tool, "attempts": tried.len(), "error": tried.last().map(|v| v["text"].clone()) }));
+            // Each attempt with its title and whether it worked, in order.
+            let tried: Vec<(String, bool, String)> = r
+                .replies
+                .iter()
+                .flat_map(|x| x.calls())
+                .filter(|(_, name, _)| name == tool)
+                .filter_map(|(id, _, input)| r.results.get(&id).map(|x| (input["title"].as_str().unwrap_or_default().trim().to_lowercase(), x.is_error, x.text.clone())))
+                .collect();
+            // A failed attempt is made good by a later success of the same
+            // thing (the same title, or any title when it had none); one
+            // success makes good one failure.
+            let mut used = vec![false; tried.len()];
+            let mut failed = vec![];
+            for (i, (title, err, text)) in tried.iter().enumerate() {
+                if !err {
+                    continue;
+                }
+                let later = (i + 1..tried.len()).find(|&j| !used[j] && !tried[j].1 && (title.is_empty() || tried[j].0 == *title));
+                match later {
+                    Some(j) => used[j] = true,
+                    None => failed.push(text.clone()),
+                }
+            }
+            if !failed.is_empty() {
+                out.push(serde_json::json!({ "tool": tool, "attempts": tried.iter().filter(|t| t.1).count(), "error": failed.last() }));
             }
         }
         out

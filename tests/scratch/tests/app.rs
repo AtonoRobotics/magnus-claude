@@ -5,7 +5,7 @@
 
 use magnus_invariants::appliance::{bin, Person};
 use magnus_invariants::{mcp, *};
-use magnus_scratch::{code_for, loopback_once, password_of, server_url, Keycloak, IDP_LABEL};
+use magnus_scratch::{code_for, loopback_once, password_of, server_url, sign_in_code, Keycloak, IDP_LABEL};
 use serde_json::{json, Value};
 use std::io::Write;
 
@@ -49,9 +49,15 @@ fn with_token(app: &Appliance, token: &str) -> Api {
 }
 
 async fn sign_in(app: &Appliance, person: &str, pw: &str) -> (reqwest::StatusCode, Value) {
+    sign_in_with(app, person, pw, None).await
+}
+
+/// With the owner's backup, the code `magnus sign-in-code` printed.
+async fn sign_in_with(app: &Appliance, person: &str, pw: &str, machine_code: Option<&str>) -> (reqwest::StatusCode, Value) {
     let r = reqwest::Client::new()
         .post(format!("{}/v1/sign-in", app.base))
-        .json(&json!({ "person": person, "password": pw, "client": "app" }))
+        .header("x-magnus-app", "0.5.0")
+        .json(&json!({ "person": person, "password": pw, "machine_code": machine_code, "client": "app" }))
         .send()
         .await
         .unwrap();
@@ -199,14 +205,23 @@ async fn sign_in_through_keycloak_keeps_no_provider_token_and_only_the_owner_kee
     let (st, v) = sign_in(&app, "carol", PASSWORD).await;
     assert_eq!(st, 401, "carol, turned off in Keycloak, signed in with her old appliance password: {v}");
     assert!(set_password(&app, "alice", PASSWORD).status.success());
+    // The backup password alone opens nothing: it takes a code printed on
+    // the appliance's machine too, once (a relay adds no proxy header, so
+    // the address alone cannot say "this machine").
     let (st, v) = sign_in(&app, "alice", PASSWORD).await;
+    assert_ne!(st, 200, "the owner's backup password alone signed her in: {v}");
+    let code = sign_in_code(&app);
+    let (st, v) = sign_in_with(&app, "alice", PASSWORD, Some(&code)).await;
     assert_eq!((st.as_u16(), v["person"]["id"].as_str()), (200, Some("alice")), "the owner's backup did not sign her in: {v}");
+    let (st, v) = sign_in_with(&app, "alice", PASSWORD, Some(&code)).await;
+    assert_eq!(st, 401, "a machine code signed in twice: {v}");
 
     // Only on the appliance's own machine (owner, 2026-10-30: "Make it
     // available only from the appliances own machine"): not through a
     // proxy in front of it, and not from another address.
+    let code = sign_in_code(&app);
     for (name, value) in [("x-forwarded-for", "203.0.113.7"), ("forwarded", "for=203.0.113.7"), ("x-real-ip", "203.0.113.7")] {
-        let r = reqwest::Client::new().post(format!("{}/v1/sign-in", app.base)).header(name, value).json(&json!({ "person": "alice", "password": PASSWORD, "client": "app" })).send().await.unwrap();
+        let r = reqwest::Client::new().post(format!("{}/v1/sign-in", app.base)).header(name, value).header("x-magnus-app", "0.5.0").json(&json!({ "person": "alice", "password": PASSWORD, "machine_code": code, "client": "app" })).send().await.unwrap();
         assert_eq!(r.status(), 401, "the owner's backup worked through a proxy ({name})");
     }
     // The machine's own network address, which is not loopback.
@@ -221,14 +236,14 @@ async fn sign_in_through_keycloak_keeps_no_provider_token_and_only_the_owner_kee
         c["appliance"].as_table_mut().unwrap().insert("tls_listen".into(), format!("0.0.0.0:{port}").into());
     })
     .await;
-    let over = |host: String| async move {
-        let r = reqwest::Client::builder().danger_accept_invalid_certs(true).build().unwrap().post(format!("https://{host}/v1/sign-in")).json(&json!({ "person": "alice", "password": PASSWORD, "client": "app" })).send().await.unwrap();
+    let over = |host: String, code: String| async move {
+        let r = reqwest::Client::builder().danger_accept_invalid_certs(true).build().unwrap().post(format!("https://{host}/v1/sign-in")).header("x-magnus-app", "0.5.0").json(&json!({ "person": "alice", "password": PASSWORD, "machine_code": code, "client": "app" })).send().await.unwrap();
         let st = r.status();
         (st, r.json::<Value>().await.unwrap_or(Value::Null))
     };
-    let (st, v) = over(format!("127.0.0.1:{port}")).await;
+    let (st, v) = over(format!("127.0.0.1:{port}"), sign_in_code(&app)).await;
     assert_eq!(st, 200, "the owner's backup did not work on this machine over HTTPS: {v}");
-    let (st, v) = over(format!("{lan}:{port}")).await;
+    let (st, v) = over(format!("{lan}:{port}"), sign_in_code(&app)).await;
     assert_eq!(st, 401, "the owner's backup worked from another address ({lan}): {v}");
 }
 
@@ -300,6 +315,7 @@ async fn a_password_typed_in_the_app_signs_in_through_keycloak_with_a_code_if_us
     drop(l);
     let begun: Value = reqwest::Client::new()
         .post(format!("{}/v1/sign-in/browser", app.base))
+        .header("x-magnus-app", "0.5.0")
         .json(&json!({ "redirect_uri": redirect, "login_hint": "carol", "client": "app" }))
         .send()
         .await
@@ -374,7 +390,7 @@ async fn a_keycloak_sign_in_refuses_strangers_forgeries_other_clients_and_declin
     let http = reqwest::Client::new();
     let begin = |redirect: String| {
         let (http, base) = (http.clone(), app.base.clone());
-        async move { http.post(format!("{base}/v1/sign-in/browser")).json(&json!({ "redirect_uri": redirect, "client": "app" })).send().await.unwrap() }
+        async move { http.post(format!("{base}/v1/sign-in/browser")).header("x-magnus-app", "0.5.0").json(&json!({ "redirect_uri": redirect, "client": "app" })).send().await.unwrap() }
     };
     let finish = |body: Value| {
         let (http, base) = (http.clone(), app.base.clone());
@@ -480,6 +496,11 @@ async fn a_client_that_prefers_http2_is_answered_over_https() {
     let browser = reqwest::Client::builder().danger_accept_invalid_certs(true).build().unwrap();
     let r = browser.get(format!("{url}/v1/health")).send().await.expect("an answer over HTTPS");
     assert_eq!(r.status(), 200);
+    // The appliance offers only HTTP/1.1. A build of the whole workspace
+    // can serve h2 (the scratch client's features unify into the server's
+    // hyper), so an answer alone would not catch h2 offered again; the
+    // protocol it agreed to does.
+    assert_eq!(r.version(), reqwest::Version::HTTP_11, "the appliance agreed to HTTP/2");
 }
 
 /// The whole operator flow: plan, an approval that blocks, a review card,

@@ -17,8 +17,14 @@
 //! cannot start, it swaps back and runs the old release, which resumes them.
 //! The owner can go back one release the same way.
 //!
-//! The desktop app's packages are served from `desktop/` to the apps
-//! (`/v1/updates/desktop/...`), which check their own signatures.
+//! The desktop app's packages are served to the apps, which check their own
+//! signatures, from three release channels (DECISIONS.md, "Release
+//! channels"): development (pull requests' builds, not merged;
+//! `desktop/development/`), test (master, merged; `desktop/test/`) and
+//! production (tagged releases; `desktop/`). The appliance decides which an
+//! app gets: the owner's apps development, testers' test, everyone else's
+//! production, and production's build to any app whose channel's is older.
+//! An app only ever moves forward.
 
 use crate::config::Config;
 use crate::events::Ev;
@@ -49,6 +55,25 @@ const DRAIN: Duration = Duration::from_secs(60);
 pub fn install_dir() -> Result<PathBuf> {
     static D: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     D.get_or_init(|| std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf))).clone().context("the program has no directory")
+}
+
+/// The install directory, when it is one an installer made: its own, with
+/// the release's VERSION. Updates move the whole directory aside, so they
+/// never run from a shared one (/usr/local/bin, a build tree).
+fn installed_dir() -> Result<PathBuf> {
+    let dir = install_dir()?;
+    anyhow::ensure!(dir.join("VERSION").is_file(), "{} is not an installed release (no VERSION beside the programs); updates are installed by hand here", dir.display());
+    Ok(dir)
+}
+
+/// Exchange the running programs with the kept release (both ways: a
+/// rollback, or undoing a switch).
+fn swap_with_prev(dir: &Path) -> Result<()> {
+    let prev = sibling(dir, ".prev");
+    let tmp = sibling(dir, ".swap");
+    swap(dir, &prev, &tmp)?;
+    std::fs::rename(&tmp, &prev)?;
+    Ok(())
 }
 
 fn sibling(dir: &Path, suffix: &str) -> PathBuf {
@@ -177,7 +202,7 @@ pub fn on_start(cfg: &Config) -> Result<()> {
 
 /// The release just switched to failed to start: go back and run the old one.
 pub fn roll_back_now(cfg: &Config, p: &Value, reason: &str) -> Result<()> {
-    if p["rollback"].as_bool() == Some(true) {
+    if p["rollback"].as_bool() == Some(true) && p["owner"].as_bool() != Some(true) {
         // The release we went back to failed too: stay down for a person.
         let _ = std::fs::remove_file(pending_path(cfg));
         bail!("the release rolled back to did not start either: {reason}");
@@ -257,20 +282,24 @@ impl Kernel {
         self.switch(actor, &current, &to, false, |dir| swap(dir, &new, &sibling(dir, ".prev"))).await
     }
 
-    /// Go back one release: the one kept beside the running programs.
+    /// Go back one release: the one kept beside the running programs. It
+    /// proves it can read this appliance first, as an update does; if it
+    /// still does not start, the appliance comes back to this release.
     pub async fn roll_back(self: &Arc<Self>, actor: &str) -> Result<Value> {
         let _one = updating().lock().await;
-        let dir = install_dir()?;
+        let dir = installed_dir()?;
         let prev = sibling(&dir, ".prev");
         let to = std::fs::read_to_string(prev.join("VERSION")).map(|v| v.trim().to_string()).context("no earlier release is kept")?;
         let current = version();
-        self.switch(actor, &current, &to, true, |dir| {
-            let tmp = sibling(dir, ".swap");
-            swap(dir, &prev, &tmp)?;
-            std::fs::rename(&tmp, &prev)?;
-            Ok(())
-        })
-        .await
+        let exe = std::env::current_exe()?;
+        let prog = prev.join(exe.file_name().context("program name")?);
+        let out = tokio::process::Command::new(&prog).args(["check", "--config"]).arg(&self.cfg.path).output().await.context("run the earlier release's check")?;
+        if !out.status.success() {
+            let reason = format!("the earlier release cannot read this appliance: {}", String::from_utf8_lossy(&out.stderr).trim());
+            self.emit(actor, Ev::UpdateFailed { to: to.clone(), reason: reason.clone() }).await?;
+            return Ok(json!({ "status": "failed", "version": current, "latest": to, "reason": reason }));
+        }
+        self.switch(actor, &current, &to, true, swap_with_prev).await
     }
 
     /// Verify, unpack and check a release; its programs' directory.
@@ -279,7 +308,7 @@ impl Kernel {
         anyhow::ensure!(!file.contains('/') && !file.contains(".."), "not a release file name");
         let bytes = std::fs::read(self.cfg.updates_dir().join("appliance").join(file)).with_context(|| format!("read {file}"))?;
         verify(&bytes, m["signature"].as_str().unwrap_or_default(), &self.cfg.updates.public_key, to)?;
-        let dir = install_dir()?;
+        let dir = installed_dir()?;
         let new = sibling(&dir, ".new");
         if new.exists() {
             std::fs::remove_dir_all(&new)?;
@@ -307,7 +336,7 @@ impl Kernel {
         }
         let dir = install_dir()?;
         let r = started_as().and_then(|how| {
-            write_pending(&self.cfg, &json!({ "from": from, "to": to, "rollback": rollback, "reason": if rollback { "the owner went back one release" } else { "" }, "started_as": how }))?;
+            write_pending(&self.cfg, &json!({ "from": from, "to": to, "rollback": rollback, "owner": rollback, "reason": if rollback { "the owner went back one release" } else { "" }, "started_as": how }))?;
             put(&dir)?;
             Ok(how)
         });
@@ -322,8 +351,14 @@ impl Kernel {
             }
         };
         tracing::info!("switching from {from} to {to}");
-        exec_installed(&how)?;
-        unreachable!()
+        let e = exec_installed(&how).unwrap_err();
+        // Still this release, running: put its programs back, and say so.
+        let _ = std::fs::remove_file(pending_path(&self.cfg));
+        let undone = swap_with_prev(&dir);
+        let reason = format!("{e:#}{}", undone.err().map(|u| format!("; putting this release back failed too: {u:#}")).unwrap_or_default());
+        self.emit("kernel", Ev::UpdateFailed { to: to.into(), reason: reason.clone() }).await?;
+        self.resume_updated().await?;
+        Ok(json!({ "status": "failed", "version": from, "latest": to, "reason": reason }))
     }
 
     /// Every running task waits for the switch.
@@ -360,18 +395,61 @@ pub fn schedule(k: Arc<Kernel>) {
     });
 }
 
-/// The desktop app's release manifest for the apps, with each package's
-/// address on this appliance (`origin` is the address the app used).
-pub fn desktop_manifest(cfg: &Config, origin: &str) -> Option<Value> {
-    let mut m: Value = serde_json::from_slice(&std::fs::read(cfg.updates_dir().join("desktop/latest.json")).ok()?).ok()?;
+/// The desktop app's release channels.
+pub const CHANNELS: [&str; 3] = ["development", "test", "production"];
+
+fn channel_dir(cfg: &Config, c: &str) -> PathBuf {
+    let desktop = cfg.updates_dir().join("desktop");
+    if c == "production" {
+        desktop
+    } else {
+        desktop.join(c)
+    }
+}
+
+fn channel_release(cfg: &Config, c: &str) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(channel_dir(cfg, c).join("latest.json")).ok()?).ok()
+}
+
+/// The desktop app's release manifest for an app on `channel`: the
+/// channel's build, or production's while the channel has none, with each
+/// package's address on this appliance (`origin` is the address the app
+/// used).
+pub fn desktop_manifest(cfg: &Config, origin: &str, channel: &str) -> Option<Value> {
+    // Not production's when it is newer: it need not hold the channel's work
+    // (a pull request not yet merged), and an app never loses what it has.
+    let channel = if channel_release(cfg, channel).is_some() { channel } else { "production" };
+    let mut m = channel_release(cfg, channel)?;
+    let files = if channel == "production" { "files".to_string() } else { format!("{channel}/files") };
     if let Some(platforms) = m["platforms"].as_object_mut() {
         for p in platforms.values_mut() {
             if let Some(f) = p["file"].as_str().map(String::from) {
-                p["url"] = json!(format!("{origin}/v1/updates/desktop/files/{f}"));
+                p["url"] = json!(format!("{origin}/v1/updates/desktop/{files}/{f}"));
             }
         }
     }
     Some(m)
+}
+
+/// The channel the app asking gets: development for the owner's apps, test
+/// for testers' (the `tester` role), production for everyone else's. Apps
+/// from before channels ask without a session and get the channel their
+/// version was built for: a pull request's (`.pr.<n>`) development, any
+/// other pre-release test; once updated, they ask with their session.
+pub fn assigned_channel(k: &Kernel, h: &HeaderMap) -> &'static str {
+    if crate::api::credential(h).is_none() {
+        let app = h.get("x-magnus-app").and_then(|v| v.to_str().ok()).and_then(|v| semver::Version::parse(v).ok());
+        return match app {
+            Some(v) if v.pre.split('.').any(|i| i == "pr") => "development",
+            Some(v) if !v.pre.is_empty() => "test",
+            _ => "production",
+        };
+    }
+    match crate::api::who(k, h) {
+        Ok(p) if p.is_owner() => "development",
+        Ok(p) if p.has_role("tester") => "test",
+        _ => "production",
+    }
 }
 
 use crate::api::{err, internal, owner, Transport};
@@ -393,7 +471,8 @@ pub fn router() -> Router<Arc<Kernel>> {
         .route("/v1/updates/check", post(check_now))
         .route("/v1/updates/rollback", post(roll_back))
         .route("/v1/updates/desktop/latest.json", get(desktop_latest))
-        .route("/v1/updates/desktop/files/{name}", get(desktop_file))
+        .route("/v1/updates/desktop/files/{name}", get(production_file))
+        .route("/v1/updates/desktop/{channel}/files/{name}", get(desktop_file))
 }
 
 /// Versions both ways: every answer names this release, and an app older
@@ -414,6 +493,22 @@ pub async fn app_version(req: Request, next: Next) -> Response {
         r.headers_mut().insert("x-magnus-appliance", v);
     }
     r
+}
+
+/// An app signing in without naming its version is older than 0.5.0 (the
+/// first that says it): told to update instead of given a session it would
+/// use with an API it gets wrong.
+pub fn unversioned_app(h: &HeaderMap) -> Option<Response> {
+    if h.contains_key("x-magnus-app") {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::UPGRADE_REQUIRED,
+            Json(json!({ "error": format!("This app is older than this appliance accepts. Update the app to {MIN_APP} or later."), "update_required": true, "min_app": MIN_APP, "version": version() })),
+        )
+            .into_response(),
+    )
 }
 
 async fn status(AxState(k): K, h: HeaderMap) -> Response {
@@ -475,23 +570,30 @@ async fn roll_back(AxState(k): K, h: HeaderMap) -> Response {
     (StatusCode::ACCEPTED, Json(json!({ "status": "rolling_back", "version": version(), "to": to.trim() }))).into_response()
 }
 
-/// The apps ask without a session: an app too old to sign in can still update.
+/// The apps ask with their session if they have one; without, an app too old
+/// to sign in can still update. The appliance decides the channel.
 async fn desktop_latest(AxState(k): K, Extension(t): Extension<Transport>, h: HeaderMap) -> Response {
+    let channel = assigned_channel(&k, &h);
     let Some(host) = h.get("host").and_then(|v| v.to_str().ok()) else {
         return err(StatusCode::BAD_REQUEST, "no host");
     };
     let scheme = if t == Transport::Tls { "https" } else { "http" };
-    match desktop_manifest(&k.cfg, &format!("{scheme}://{host}")) {
+    match desktop_manifest(&k.cfg, &format!("{scheme}://{host}"), channel) {
         Some(m) => Json(m).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     }
 }
 
-async fn desktop_file(AxState(k): K, UrlPath(name): UrlPath<String>) -> Response {
-    if name.contains('/') || name.contains("..") || name == "latest.json" {
+/// Production's packages, at the address apps before channels were given.
+async fn production_file(k: K, UrlPath(name): UrlPath<String>) -> Response {
+    desktop_file(k, UrlPath(("production".into(), name))).await
+}
+
+async fn desktop_file(AxState(k): K, UrlPath((channel, name)): UrlPath<(String, String)>) -> Response {
+    if !CHANNELS.contains(&channel.as_str()) || name.contains('/') || name.contains("..") || name == "latest.json" {
         return err(StatusCode::NOT_FOUND, "no such file");
     }
-    match tokio::fs::read(k.cfg.updates_dir().join("desktop").join(&name)).await {
+    match tokio::fs::read(channel_dir(&k.cfg, &channel).join(&name)).await {
         Ok(b) => ([("content-type", "application/octet-stream")], b).into_response(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => err(StatusCode::NOT_FOUND, "no such file"),
         Err(e) => internal(e.into()),

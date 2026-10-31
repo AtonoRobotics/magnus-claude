@@ -165,6 +165,14 @@ pub fn set_password(app: &Appliance, person: &str, pw: &str) -> bool {
     c.wait().unwrap().success()
 }
 
+/// A one-time code for the owner's backup password, as `magnus sign-in-code`
+/// prints it on the appliance's machine.
+pub fn sign_in_code(app: &Appliance) -> String {
+    let out = std::process::Command::new(bin("magnus-appliance")).args(["sign-in-code", "--config"]).arg(app.dir.path().join("magnus.toml")).output().unwrap();
+    assert!(out.status.success(), "sign-in-code failed: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
 impl Flow {
     pub async fn start() -> Flow {
         let web = FakeWeb::start(&[("/finance/q3", "<p>Q3 revenue: 41.7M. Q2 revenue: 38.2M.</p>")]).await;

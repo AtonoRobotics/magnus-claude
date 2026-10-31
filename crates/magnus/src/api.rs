@@ -212,6 +212,30 @@ async fn sign_in_method(State(k): K) -> Response {
     }
 }
 
+/// Sign-ins begun from one address in the last ten minutes: at most a
+/// quarter of the provider's waiting ones (`max_pending`), which everyone
+/// shares, so no one address can fill them and stop every first sign-in.
+fn may_begin(k: &Kernel, peer: SocketAddr) -> bool {
+    let most = k.cfg.sign_in.oidc.as_ref().map_or(25, |o| (o.max_pending / 4).max(5));
+    static BEGUN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, Vec<std::time::Instant>>>> = std::sync::OnceLock::new();
+    let mut m = BEGUN.get_or_init(Default::default).lock().unwrap();
+    let window = std::time::Duration::from_secs(600);
+    m.retain(|_, v| {
+        v.retain(|t| t.elapsed() < window);
+        !v.is_empty()
+    });
+    let v = m.entry(peer.ip().to_canonical()).or_default();
+    if v.len() >= most {
+        return false;
+    }
+    v.push(std::time::Instant::now());
+    true
+}
+
+fn too_many_begins() -> Response {
+    err(StatusCode::TOO_MANY_REQUESTS, "Too many sign-ins were started from here; finish one, or try again in a few minutes.")
+}
+
 /// A request made on the appliance's own machine: from a loopback address,
 /// and not passed on by a proxy or tunnel there, which connects from
 /// loopback for callers anywhere and says so in one of these headers.
@@ -233,6 +257,9 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
     let password = b["password"].as_str().unwrap_or_default();
     let code = b["code"].as_str().map(str::trim).filter(|c| !c.is_empty());
     let app = b["client"].as_str() == Some("app");
+    if let Some(r) = app.then(|| crate::update::unversioned_app(&h)).flatten() {
+        return r;
+    }
     let locked = |until: chrono::DateTime<chrono::Utc>| {
         (
             StatusCode::TOO_MANY_REQUESTS,
@@ -241,15 +268,46 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
             .into_response()
     };
     if let Some(id) = k.identity() {
+        // The owner's backup: their password set on the appliance and a
+        // one-time code printed on its machine (`magnus sign-in-code`),
+        // which no relay or tunnel can carry. Counted apart, so wrong
+        // passwords sent to the provider cannot lock the owner out of it.
+        if let Some(machine) = b["machine_code"].as_str().map(str::trim).filter(|c| !c.is_empty()) {
+            let counter = crate::accounts::Accounts::backup_counter(&person);
+            if !(k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h)) {
+                return err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong.");
+            }
+            if let Some(until) = k.accounts.locked(&counter) {
+                return locked(until);
+            }
+            match k.accounts.take_machine_code(machine) {
+                Ok(true) => {}
+                Ok(false) => {
+                    k.accounts.failed(&counter);
+                    return err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong.");
+                }
+                Err(e) => return internal(e),
+            }
+            return match k.accounts.sign_in_counted(&person, password, &counter) {
+                Ok(Ok(_)) => issue(&k, t, &person, app).await,
+                Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong."),
+                Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
+                Err(e) => internal(e),
+            };
+        }
         if let Some(until) = k.accounts.locked(&person) {
             return locked(until);
         }
-        let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h);
         // The first time, the provider's own page signs them in: it can walk
-        // them through what a new account needs. The owner's backup password
-        // needs nothing from the provider.
-        if !k.read(|s| s.signed_in_before.contains(&person)) && !backup {
+        // them through what a new account needs.
+        if !k.read(|s| s.signed_in_before.contains(&person)) {
             return provider_answered(&k, t, id.label(), crate::identity::Polled::UseBrowser(format!("The first time, sign in on the {} page that just opened in your browser.", id.label()))).await;
+        }
+        // Counted before the provider answers, so requests sent at once
+        // cannot all pass the lockout first; a right answer clears it.
+        let ours = k.cfg.person(&person).is_some();
+        if ours {
+            k.accounts.failed(&person);
         }
         let answer = match id.password(&person, password, code, app).await {
             Ok(polled @ crate::identity::Polled::Done { .. }) => {
@@ -262,24 +320,30 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
                 None
             }
         };
-        if !backup {
-            if matches!(answer, Some(crate::identity::Polled::Refused(_))) && k.cfg.person(&person).is_some() {
-                k.accounts.failed(&person);
+        return match answer {
+            Some(polled) => {
+                // Only a refusal says the password was wrong: one that needs
+                // the code or the browser was right, and stays uncounted.
+                if ours && !matches!(polled, crate::identity::Polled::Refused(_)) {
+                    k.accounts.forgive(&person);
+                }
+                provider_answered(&k, t, id.label(), polled).await
             }
-            return match answer {
-                Some(polled) => provider_answered(&k, t, id.label(), polled).await,
-                None => err(StatusCode::BAD_GATEWAY, format!("{} is not answering. Try again in a few minutes.", id.label())),
-            };
-        }
-        // The owner's backup, before whatever else the provider said.
-        return match k.accounts.sign_in(&person, password) {
-            Ok(Ok(_)) => issue(&k, t, &person, app).await,
-            Ok(Err(crate::accounts::SignInError::Rejected)) => match answer {
-                Some(polled) => provider_answered(&k, t, id.label(), polled).await,
-                None => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
-            },
-            Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
-            Err(e) => internal(e),
+            None => {
+                // Down: the attempt said nothing about the password.
+                if ours {
+                    k.accounts.forgive(&person);
+                }
+                let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h);
+                if backup {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({ "machine_code_needed": true, "error": format!("{} is not answering. On the appliance, run `magnus sign-in-code` and enter the code it prints, with your password.", id.label()) })),
+                    )
+                        .into_response();
+                }
+                err(StatusCode::BAD_GATEWAY, format!("{} is not answering. Try again in a few minutes.", id.label()))
+            }
         };
     }
     if k.cfg.person(&person).is_none() {
@@ -297,11 +361,17 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
 
 /// Start a sign-in through the identity provider: the person approves the
 /// code on the provider's page, then polls `/v1/sign-in/device/{flow}`.
-async fn device_start(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+async fn device_start(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Json(b): Json<Value>) -> Response {
     if let Err(r) = over_tls(&k, t, peer) {
         return r;
     }
+    if let Some(r) = (b["client"].as_str() == Some("app")).then(|| crate::update::unversioned_app(&h)).flatten() {
+        return r;
+    }
     let Some(o) = &k.oidc else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
+    if !may_begin(&k, peer) {
+        return too_many_begins();
+    }
     match o.start(b["client"].as_str() == Some("app")).await {
         Ok(s) => Json(json!({
             "flow": s.flow,
@@ -361,12 +431,18 @@ async fn provider_answered(k: &Kernel, t: Transport, label: String, polled: crat
 /// Begin a sign-in in the person's own browser (the app's way): it comes
 /// back to `redirect_uri`, a loopback address on their computer, and the app
 /// finishes it at `/v1/sign-in/browser/finish`.
-async fn browser_begin(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+async fn browser_begin(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Json(b): Json<Value>) -> Response {
     if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    if let Some(r) = (b["client"].as_str() == Some("app")).then(|| crate::update::unversioned_app(&h)).flatten() {
         return r;
     }
     let Some(id) = k.identity() else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
     let Some(redirect_uri) = b["redirect_uri"].as_str() else { return err(StatusCode::BAD_REQUEST, "name the redirect address") };
+    if !may_begin(&k, peer) {
+        return too_many_begins();
+    }
     if let Err(e) = crate::connectors::loopback(redirect_uri) {
         return err(StatusCode::BAD_REQUEST, format!("{e:#}"));
     }
@@ -506,14 +582,21 @@ fn needs(s: &crate::state::State, p: &Person, run: &Run) -> bool {
 /// person, and the request it came from (a chat message or a schedule).
 pub(crate) fn task_row(k: &Kernel, s: &crate::state::State, p: &Person, t: &crate::state::Task, r: &Run) -> Value {
     let mut v = task_json(k, t, r, false);
+    let mine = t.person == p.id;
     v["needs_you"] = json!(needs(s, p, r));
-    v["project"] = crate::library::project_ref(s, &t.task_id);
+    // Another person's projects and conversations are theirs alone: the
+    // owner sees that a task came from a chat, not what was said in it.
+    v["project"] = if mine { crate::library::project_ref(s, &t.task_id) } else { Value::Null };
     v["waiting_item"] = json!(r.waiting_item);
     v["ended_at"] = json!(r.ended_at);
     v["group"] = if let Some(sc) = t.schedule.as_ref().and_then(|id| s.schedules.get(id)) {
         json!({ "kind": "schedule", "id": sc.id, "title": sc.title.clone().unwrap_or_else(|| sc.text.clone()) })
     } else if let Some((c, turn)) = t.chat.as_ref().and_then(|c| c.from_run.as_ref().and_then(|f| s.runs.get(f)).and_then(|r| s.tasks.get(&r.task)).map(|turn| (c, turn))) {
-        json!({ "kind": "chat", "id": turn.task_id, "title": turn.text, "thread": c.thread })
+        if mine {
+            json!({ "kind": "chat", "id": turn.task_id, "title": turn.text, "thread": c.thread })
+        } else {
+            json!({ "kind": "chat", "id": turn.task_id, "title": format!("A conversation of {}", t.person) })
+        }
     } else {
         Value::Null
     };
@@ -788,7 +871,16 @@ async fn task(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
         Err(r) => return r,
     };
     match find(&k, &p, &id) {
-        Some((t, r)) => Json(task_json(&k, &t, &r, true)).into_response(),
+        Some((t, r)) => {
+            let mut v = task_json(&k, &t, &r, true);
+            // The owner sees every task, but not another person's library or
+            // projects (theirs alone).
+            if t.person != p.id {
+                v["files"] = json!([]);
+                v["project"] = Value::Null;
+            }
+            Json(v).into_response()
+        }
         None => err(StatusCode::NOT_FOUND, "no such task"),
     }
 }
@@ -875,8 +967,11 @@ async fn verdict(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Jso
         Ok(p) => p,
         Err(r) => return r,
     };
-    let Some((task, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
-    if task.person != p.id {
+    // An experiment's trials run as the eval people, who have no sign-in of
+    // their own: the owner judges them, though they see no one else's tasks.
+    let trial = || k.read(|s| s.tasks.get(&id).and_then(|t| s.runs.get(&t.run_id).filter(|r| r.experiment.is_some()).map(|r| (t.clone(), r.clone()))));
+    let Some((task, run)) = find(&k, &p, &id).or_else(|| p.is_owner().then(trial).flatten()) else { return err(StatusCode::NOT_FOUND, "no such task") };
+    if task.person != p.id && !(p.is_owner() && run.experiment.is_some()) {
         return err(StatusCode::FORBIDDEN, "only the person it is for gives a verdict");
     }
     let Some(v) = b["verdict"].as_str().filter(|v| crate::state::VERDICTS.contains(v)) else {
@@ -1027,25 +1122,33 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
     };
     let engaged = b["engaged"].as_bool().unwrap_or(true);
     let actor = format!("person:{}", p.id);
-    if let Err(e) = k.emit(&actor, Ev::KillSwitch { engaged }).await {
-        return internal(e);
-    }
+    // One at a time: a release racing an engage could unseal before the
+    // engage sealed, or seal after the release.
+    static SWITCHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = SWITCHING.lock().await;
     if !engaged {
-        // Released: the vault takes secrets again, but holds none; nothing
-        // resumes by itself (K53).
-        k.vault.unseal();
-        return Json(json!({ "engaged": false })).into_response();
-    }
-    // One control (B11): the policy is deny-all from the event above; every
-    // run is suspended; the vault is sealed, and each OAuth sign-in is taken
-    // out and revoked at its provider. API keys and app secrets stay sealed:
-    // only their provider's console can revoke them.
-    let active: Vec<String> = k.read(|s| s.runs.values().filter(|r| r.status == Status::Running).map(|r| r.id.clone()).collect());
-    for run in active {
-        if let Err(e) = k.suspend(&run, "kill_switch", None).await {
+        if let Err(e) = k.emit(&actor, Ev::KillSwitch { engaged }).await {
             return internal(e);
         }
+        // Released: the vault takes secrets again, but holds none; nothing
+        // resumes by itself (K53). Each person's tasks are their own: each
+        // is told which of theirs the switch stopped, and continues them.
+        k.vault.unseal();
+        let stopped: Vec<crate::state::Run> = k.read(|s| s.runs.values().filter(|r| r.status == Status::Suspended && r.reason.as_deref() == Some("kill_switch")).cloned().collect());
+        for r in &stopped {
+            let summary = format!("Stopped by the kill switch: {}", k.title_of(r));
+            if let Err(e) = k.notice(r, summary, json!({ "reason": "kill_switch", "evidence": { "why": "the owner engaged the kill switch, and has released it; Continue goes on from where it stopped" } })).await {
+                return internal(e);
+            }
+        }
+        return Json(json!({ "engaged": false, "told": stopped.len() })).into_response();
     }
+    // One control (B11). The vault is sealed first, and each OAuth sign-in
+    // taken out of it and revoked at its provider, whatever happens to the
+    // records after: the switch must work when the log cannot be written.
+    // API keys and app secrets stay sealed: only their provider's console
+    // can revoke them.
+    k.vault.seal();
     let names = match k.vault.names() {
         Ok(n) => n,
         Err(e) => return internal(e),
@@ -1064,10 +1167,6 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
         Ok(t) => t,
         Err(e) => return internal(e),
     };
-    let kept: Vec<String> = names.iter().filter(|n| !take.contains(n)).cloned().collect();
-    if let Err(e) = k.emit(&actor, Ev::VaultSealed { revoking: take.clone(), kept: kept.clone() }).await {
-        return internal(e);
-    }
     let kk = k.clone();
     tokio::spawn(async move {
         for (name, secret) in taken {
@@ -1082,6 +1181,25 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
             }
         }
     });
+    // Then the records: the policy is deny-all from this event on, and every
+    // run is suspended.
+    let kept: Vec<String> = names.iter().filter(|n| !take.contains(n)).cloned().collect();
+    let recorded = async {
+        k.emit(&actor, Ev::KillSwitch { engaged }).await?;
+        let active: Vec<String> = k.read(|s| s.runs.values().filter(|r| r.status == Status::Running).map(|r| r.id.clone()).collect());
+        for run in active {
+            k.suspend(&run, "kill_switch", None).await?;
+        }
+        k.emit(&actor, Ev::VaultSealed { revoking: take.clone(), kept: kept.clone() }).await?;
+        anyhow::Ok(())
+    };
+    if let Err(e) = recorded.await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("The vault is sealed and the sign-ins are being revoked, but recording the kill switch failed: {e:#}. Engage it again once the appliance can write."), "sealed": true })),
+        )
+            .into_response();
+    }
     Json(json!({ "engaged": true, "revoking": take, "sealed": kept })).into_response()
 }
 
@@ -1325,9 +1443,16 @@ async fn speak(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
     }
     let Some(cfg) = &k.cfg.read_aloud else { return err(StatusCode::SERVICE_UNAVAILABLE, "no read-aloud voice is installed on this appliance") };
     let Some(text) = b["text"].as_str().filter(|t| !t.trim().is_empty()) else { return err(StatusCode::BAD_REQUEST, "no text") };
-    match crate::speech::speak(cfg, text).await {
+    use crate::speech::SpeakError;
+    match crate::speech::speak_limited(cfg, text).await {
         Ok(mp3) => Json(json!({ "media_type": "audio/mpeg", "audio_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, mp3) })).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        Err(SpeakError::TooLong) => err(StatusCode::PAYLOAD_TOO_LARGE, format!("read aloud takes at most {} characters at a time", crate::speech::MAX_SPEAK)),
+        Err(SpeakError::Busy) => err(StatusCode::TOO_MANY_REQUESTS, "the voice is busy; try again in a moment"),
+        Err(SpeakError::TimedOut) => err(StatusCode::GATEWAY_TIMEOUT, "reading this aloud took too long"),
+        Err(SpeakError::Failed(e)) => {
+            tracing::warn!("read aloud: {e:#}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "read aloud failed")
+        }
     }
 }
 
@@ -1395,7 +1520,7 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
                     "budget": x.budget.clone().unwrap_or_else(|| k.cfg.budget.clone()),
                     "skipped": x.skipped.as_ref().map(|(at, task, why)| json!({ "at": at, "task": task, "why": why })),
                     "last": last, "last_failed": last_failed, "failures": failures, "runs": rows,
-                    "project": s.project_of(&x.id).and_then(|id| s.projects.get(&id)).map(|p| json!({ "id": p.id, "name": p.name })),
+                    "project": s.project_of(&x.id).filter(|_| x.person == p.id).and_then(|id| s.projects.get(&id)).map(|p| json!({ "id": p.id, "name": p.name })),
                 })
             })
             .collect()
@@ -1464,7 +1589,7 @@ async fn resume_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
         return err(StatusCode::CONFLICT, "the schedule is not paused");
     }
     if on.is_some() {
-        return err(StatusCode::CONFLICT, "its run is waiting on you; it goes on once you answer that run");
+        return err(StatusCode::CONFLICT, "its run is waiting on you: answer it, or resume or cancel that task, and the schedule goes on");
     }
     match k.emit(&format!("person:{}", p.id), Ev::ScheduleResumed { id }).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
@@ -1517,11 +1642,7 @@ async fn output(State(k): K, h: HeaderMap, Path((id, out)): Path<(String, String
         return err(StatusCode::NOT_FOUND, "no such file");
     }
     match k.output_bytes(&run.id, &out).await {
-        Ok(Some((name, mt, bytes))) => Response::builder()
-            .header("content-type", mt)
-            .header("content-disposition", format!("attachment; filename=\"{}\"", name.replace('"', "")))
-            .body(axum::body::Body::from(bytes))
-            .unwrap(),
+        Ok(Some((name, mt, bytes))) => crate::library::attachment(&name, &mt, bytes),
         Ok(None) => err(StatusCode::NOT_FOUND, "no such file"),
         Err(e) => internal(e),
     }

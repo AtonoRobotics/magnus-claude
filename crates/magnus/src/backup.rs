@@ -69,8 +69,10 @@ pub fn check(v: &Value) -> Result<(usize, i64)> {
         let seq = e["seq"].as_i64().context("an event without seq")?;
         anyhow::ensure!(seq > last, "events out of order at {seq}");
         last = seq;
+        // As the log loads it: its content put back, and a kind from a later
+        // release skipped.
         let body = crate::log::join(e["body"].clone(), Some(e["content"].clone()).filter(|c| !c.is_null()));
-        let ev: Ev = serde_json::from_value(body).with_context(|| format!("event {seq} does not parse"))?;
+        let Some(ev) = crate::log::parse_event(&body).with_context(|| format!("event {seq} does not parse"))? else { continue };
         let at = chrono::DateTime::parse_from_rfc3339(e["at"].as_str().unwrap_or_default()).with_context(|| format!("event {seq} has no time"))?.with_timezone(&chrono::Utc);
         state.apply(&crate::log::Event { seq, at, actor: e["actor"].as_str().unwrap_or_default().into(), ev });
     }
@@ -91,12 +93,21 @@ impl Kernel {
     /// drop backups older than `keep_days`.
     pub async fn back_up(&self, actor: &str) -> Result<Value> {
         let _one = backing_up().lock().await;
-        let rows = self.log.dump().await?;
+        let mut rows = self.log.dump().await?;
         let through = rows.last().map(|r| r["seq"].as_i64().unwrap_or(0)).unwrap_or(0);
+        // Every removal in the dump applies to it: content whose deletion
+        // was recorded but had not happened yet is left out, and the backup
+        // says it has had them all (`scrub_backups`).
+        let removed: std::collections::HashSet<i64> = rows.iter().filter(|r| r["kind"] == "removed").flat_map(|r| r["body"]["seqs"].as_array().cloned().unwrap_or_default()).filter_map(|q| q.as_i64()).collect();
+        let scrubbed = rows.iter().filter(|r| r["kind"] == "removed").filter_map(|r| r["seq"].as_i64()).max().unwrap_or(0);
+        for r in rows.iter_mut().filter(|r| r["seq"].as_i64().is_some_and(|q| removed.contains(&q))) {
+            r["content"] = Value::Null;
+            r["salt"] = Value::Null;
+        }
         let (vault_key, secrets) = self.vault.raw()?;
         let made = chrono::Utc::now();
         let doc = json!({
-            "format": FORMAT, "made_at": made, "through_seq": through, "events": rows,
+            "format": FORMAT, "made_at": made, "through_seq": through, "scrubbed_through": scrubbed, "events": rows,
             "vault": { "key": B64.encode(vault_key), "secrets": secrets },
         });
         let plain = serde_json::to_vec(&doc)?;
@@ -120,6 +131,49 @@ impl Kernel {
     }
 }
 
+impl Kernel {
+    /// Take removed content out of every backup kept, so a removed item is
+    /// gone from the backups when it is gone from the appliance, not a
+    /// month later. Each backup records the last removal it has had applied
+    /// (`scrubbed_through`); one made before that removal is rewritten, its
+    /// removed events' content and salt dropped, and encrypted again. Run
+    /// after each removal and at start (for a removal cut short).
+    pub async fn scrub_backups(&self) -> Result<usize> {
+        let removals = self.log.removals().await?;
+        let Some(&(latest, _)) = removals.last() else { return Ok(0) };
+        let dir = self.cfg.backup_dir();
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let _one = backing_up().lock().await;
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || -> Result<usize> {
+            let cipher = key(&cfg, false)?;
+            let mut rewritten = 0;
+            for (name, _) in list(&dir) {
+                let path = dir.join(&name);
+                let mut v = open(&cipher, &std::fs::read(&path)?)?;
+                let done = v["scrubbed_through"].as_i64().unwrap_or(0);
+                if done >= latest {
+                    continue;
+                }
+                let gone: std::collections::HashSet<i64> = removals.iter().filter(|(at, _)| *at > done).flat_map(|(_, seqs)| seqs.iter().copied()).collect();
+                for e in v["events"].as_array_mut().into_iter().flatten() {
+                    if e["seq"].as_i64().is_some_and(|q| gone.contains(&q)) {
+                        e["content"] = Value::Null;
+                        e["salt"] = Value::Null;
+                    }
+                }
+                v["scrubbed_through"] = json!(latest);
+                crate::vault::write_private(&path, &seal(&cipher, &serde_json::to_vec(&v)?)?)?;
+                rewritten += 1;
+            }
+            Ok(rewritten)
+        })
+        .await?
+    }
+}
+
 fn backing_up() -> &'static tokio::sync::Mutex<()> {
     static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
@@ -129,11 +183,13 @@ fn backing_up() -> &'static tokio::sync::Mutex<()> {
 fn prune(dir: &Path, keep_days: u32) -> Result<Vec<String>> {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(keep_days as i64);
     let mut removed = vec![];
+    if !dir.exists() {
+        return Ok(removed);
+    }
     for e in std::fs::read_dir(dir)? {
         let name = e?.file_name().to_string_lossy().to_string();
-        let Some(ts) = name.strip_prefix("magnus-").and_then(|n| n.strip_suffix(".backup")) else { continue };
-        let Ok(t) = chrono::NaiveDateTime::parse_from_str(ts, "%Y%m%dT%H%M%S%.3fZ") else { continue };
-        if t.and_utc() < cutoff {
+        let Some(t) = made_at(&name) else { continue };
+        if t < cutoff {
             std::fs::remove_file(dir.join(&name))?;
             removed.push(name);
         }
@@ -141,19 +197,48 @@ fn prune(dir: &Path, keep_days: u32) -> Result<Vec<String>> {
     Ok(removed)
 }
 
-/// Back up every `every_hours`, from the appliance's start.
+/// When the newest backup in `dir` was made, by its name.
+fn newest(dir: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+    list(&dir.to_path_buf()).iter().filter_map(|(n, _)| made_at(n)).max()
+}
+
+fn made_at(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let ts = name.strip_prefix("magnus-")?.strip_suffix(".backup")?;
+    chrono::NaiveDateTime::parse_from_str(ts, "%Y%m%dT%H%M%S%.3fZ").ok().map(|t| t.and_utc())
+}
+
+/// Back up every `every_hours`, counted from the last backup, so a restart
+/// (an update, a crash) does not put the next one off; a first backup soon
+/// after the first start. Old backups are dropped on every round, whether
+/// or not a new one could be made.
 pub fn schedule(k: Arc<Kernel>) {
     let every = k.cfg.backup.every_hours;
+    let dir = k.cfg.backup_dir();
+    let keep = k.cfg.backup.keep_days;
+    let drop_old = move |dir: &Path| {
+        if let Err(e) = prune(dir, keep) {
+            tracing::error!("dropping old backups: {e:#}");
+        }
+    };
+    drop_old(&dir);
     if every == 0 {
         return;
     }
     tokio::spawn(async move {
-        let mut t = tokio::time::interval(std::time::Duration::from_secs(every as u64 * 3600));
-        t.tick().await;
+        let period = chrono::Duration::hours(every as i64);
         loop {
-            t.tick().await;
+            let wait = match newest(&dir) {
+                Some(at) => (at + period - chrono::Utc::now()).max(chrono::Duration::seconds(60)),
+                None => chrono::Duration::minutes(10).min(period),
+            };
+            tokio::time::sleep(wait.to_std().unwrap_or(std::time::Duration::from_secs(60))).await;
             if let Err(e) = k.back_up("kernel:backup").await {
                 tracing::error!("scheduled backup: {e:#}");
+            }
+            drop_old(&dir);
+            // A failing backup is tried again after an hour, not at once.
+            if newest(&dir).is_none_or(|at| chrono::Utc::now() - at > period) {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             }
         }
     });
@@ -171,6 +256,9 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
     crate::log::migrate(admin_url, &cfg.database.url).await?;
     let admin = crate::log::connect(admin_url).await?;
     let mut db = admin;
+    // No kernel may run on the log while it is restored: it would keep its
+    // empty state and its vault key, and write over the restored ones.
+    crate::log::hold(&db).await.context("a kernel is running on this event log; stop it before restoring")?;
     let tx = db.transaction().await?;
     let have: i64 = tx.query_one("SELECT (SELECT count(*) FROM public.events) + (SELECT count(*) FROM public.content)", &[]).await?.get(0);
     if have > 0 {
@@ -191,12 +279,37 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
     if last > 0 {
         tx.execute("SELECT setval(pg_get_serial_sequence('public.events', 'seq'), $1)", &[&last]).await?;
     }
-    tx.commit().await?;
-    std::fs::create_dir_all(&vault_dir)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&vault_dir, std::fs::Permissions::from_mode(0o700))?;
-    crate::vault::write_private(&vault_dir.join("key"), &B64.decode(v["vault"]["key"].as_str().unwrap_or_default())?)?;
-    crate::vault::write_private(&vault_dir.join("secrets.json"), v["vault"]["secrets"].as_str().unwrap_or("{}").as_bytes())?;
+    // The vault first, then the log's commit: a vault that cannot be
+    // written leaves the log empty, so the restore can be run again; a
+    // commit that fails takes the written vault back out.
+    let write_vault = || -> Result<()> {
+        std::fs::create_dir_all(&vault_dir)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&vault_dir, std::fs::Permissions::from_mode(0o700))?;
+        crate::vault::write_private(&vault_dir.join("key"), &B64.decode(v["vault"]["key"].as_str().unwrap_or_default())?)?;
+        crate::vault::write_private(&vault_dir.join("secrets.json"), v["vault"]["secrets"].as_str().unwrap_or("{}").as_bytes())?;
+        Ok(())
+    };
+    let old_key = std::fs::read(vault_dir.join("key")).ok();
+    let undo = || {
+        let _ = std::fs::remove_file(vault_dir.join("secrets.json"));
+        match &old_key {
+            Some(k) => {
+                let _ = crate::vault::write_private(&vault_dir.join("key"), k);
+            }
+            None => {
+                let _ = std::fs::remove_file(vault_dir.join("key"));
+            }
+        }
+    };
+    if let Err(e) = write_vault() {
+        undo();
+        return Err(e.context("write the restored vault"));
+    }
+    if let Err(e) = tx.commit().await {
+        undo();
+        return Err(anyhow::Error::from(e).context("commit the restored log"));
+    }
     Ok((n, last))
 }
 

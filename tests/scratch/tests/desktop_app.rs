@@ -17,6 +17,8 @@
 //!   (`desktop/tests/ease-budgets.json`).
 //! - `desktop/tests/app-looks.mjs`: the four looks, each readable, glass on
 //!   the chrome only.
+//! - `desktop/tests/app-channels.mjs`: the owner's app updates from the
+//!   development channel (pull requests' builds), asking with its session.
 //!
 //! Needs the built app (`cargo tauri build` in desktop/src-tauri, or
 //! MAGNUS_DESKTOP_APP), `tauri-driver`, `WebKitWebDriver`
@@ -230,8 +232,9 @@ async fn the_installed_app_downloads_a_file_from_the_library() {
 #[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
 async fn settings_holds_every_section_and_each_works_in_the_installed_app() {
     let (f, _idp, url, fingerprint) = appliance().await;
-    // The owner is signed in elsewhere too: a second device to sign out.
-    let r = reqwest::Client::new().post(format!("{}/v1/sign-in", f.app.base)).json(&json!({ "person": PERSON, "password": PASSWORD, "client": "app" })).send().await.unwrap();
+    // The owner is signed in elsewhere too (their backup, with a code from
+    // the appliance's machine): a second device to sign out.
+    let r = reqwest::Client::new().post(format!("{}/v1/sign-in", f.app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "person": PERSON, "password": PASSWORD, "machine_code": magnus_scratch::sign_in_code(&f.app), "client": "app" })).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let elsewhere = r.json::<serde_json::Value>().await.unwrap()["token"].as_str().unwrap().to_string();
     let d = Driver::start().await;
@@ -656,4 +659,39 @@ async fn each_of_the_four_looks_keeps_text_readable_and_reading_surfaces_solid_i
     let d = Driver::start().await;
     let (ok, log) = d.script("app-looks.mjs", &url, &fingerprint, &[]).await;
     assert!(ok, "a look failed:\n{log}");
+}
+
+/// Release channels (owner, 2026-10-31): the owner's app, a release (0.7.0
+/// by default), asks with its session and gets development's build.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs two AppImage builds (MAGNUS_UPDATE_BUILDS), tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn the_owners_installed_app_follows_development() {
+    let builds = PathBuf::from(std::env::var("MAGNUS_UPDATE_BUILDS").expect("MAGNUS_UPDATE_BUILDS: old.AppImage, new.AppImage and its .sig, new.version"));
+    let fresh = std::fs::read_to_string(builds.join("new.version")).unwrap().trim().to_string();
+
+    // The appliance has a build only on development.
+    let mut f = Flow::start().await;
+    let updates = f.app.dir.path().join("updates");
+    let path = f.app.dir.path().join("magnus.toml");
+    let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    cfg.insert("updates".into(), toml::Value::Table(toml::toml! { dir = (updates.display().to_string()) }));
+    std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+    let _kc = keycloak(&mut f.app).await;
+    let (url, fingerprint) = f.with_tls().await;
+    let pr = updates.join("desktop/development");
+    std::fs::create_dir_all(&pr).unwrap();
+    let file = format!("Magnus_{fresh}_amd64.AppImage");
+    std::fs::copy(builds.join("new.AppImage"), pr.join(&file)).unwrap();
+    let signature = std::fs::read_to_string(builds.join("new.AppImage.sig")).unwrap();
+    let notes = "Sources in every answer\n\nDevelopment build of pull request #7.";
+    let manifest = json!({ "version": fresh, "notes": notes, "platforms": { "linux-x86_64": { "file": file, "signature": signature } } });
+    std::fs::write(pr.join("latest.json"), manifest.to_string()).unwrap();
+
+    let d = Driver::start_with(&[("APPIMAGE_EXTRACT_AND_RUN", "1")]).await;
+    let app = d.home.path().join("Magnus.AppImage");
+    std::fs::copy(builds.join("old.AppImage"), &app).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (ok, log) = d.script("app-channels.mjs", &url, &fingerprint, &[("MAGNUS_APP", &app.display().to_string()), ("MAGNUS_NEW", &fresh)]).await;
+    assert!(ok, "the owner's app did not follow development:\n{log}");
 }
