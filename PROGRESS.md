@@ -110,7 +110,6 @@
 4. Jailer for the root-run appliance. MCP servers for the person's mail, calendar and files (needs the owner's choice of servers and OAuth apps).
 5. Voice: install whisper.cpp and a model (`MAGNUS_WHISPER`, `MAGNUS_WHISPER_MODEL`).
 6. Agent workspace (deferred until the owner approves the plan): a disposable VM per person and session with Chrome, a shell and a file manager, a live view with hand-off, and a boundary proxy for network and credentials. Plan and open decisions: `docs/proposals/agent-workspace.md`.
-6. Deletion (owner, 2026-10-29; waits for approval of invariant 3's wording): content moves out of the log into a deletable store, a 30-day trash, expiry of tool results, existing content moved out once. Plan: `docs/proposals/deletion.md`.
 
 ## How to resume
 
