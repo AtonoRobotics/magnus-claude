@@ -12,10 +12,8 @@
 //! - `desktop/tests/app-update.mjs`: the app, an AppImage, updates itself
 //!   from the appliance while a task waits there, and restarts as the new
 //!   version (two builds signed with a test key: MAGNUS_UPDATE_BUILDS).
-//! - `desktop/tests/app-channels.mjs`: the owner chooses the release
-//!   channel their apps update from; a pull request's build is offered only
-//!   once they choose its channel, and they release it to testers (the same
-//!   builds).
+//! - `desktop/tests/app-channels.mjs`: the owner's app updates from the
+//!   development channel (pull requests' builds), asking with its session.
 //!
 //! Needs the built app (`cargo tauri build` in desktop/src-tauri, or
 //! MAGNUS_DESKTOP_APP), `tauri-driver`, `WebKitWebDriver`
@@ -569,15 +567,15 @@ async fn the_installed_app_updates_itself_from_the_appliance_while_a_task_waits(
     assert_eq!(stops, ["approval", "review"], "the task was stopped other than for the person's approval and review");
 }
 
-/// Release channels (owner, 2026-10-31): the owner's app gets the channel
-/// the owner chooses in Settings > Updates, and nothing else.
+/// Release channels (owner, 2026-10-31): the owner's app, a release (0.7.0
+/// by default), asks with its session and gets development's build.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs two AppImage builds (MAGNUS_UPDATE_BUILDS), tauri-driver, WebKitWebDriver and xvfb-run"]
-async fn the_owner_chooses_the_release_channel_their_installed_app_follows() {
+async fn the_owners_installed_app_follows_development() {
     let builds = PathBuf::from(std::env::var("MAGNUS_UPDATE_BUILDS").expect("MAGNUS_UPDATE_BUILDS: old.AppImage, new.AppImage and its .sig, new.version"));
     let fresh = std::fs::read_to_string(builds.join("new.version")).unwrap().trim().to_string();
 
-    // The appliance has a build only on pull request 7's channel.
+    // The appliance has a build only on development.
     let mut f = Flow::start().await;
     let updates = f.app.dir.path().join("updates");
     let path = f.app.dir.path().join("magnus.toml");
@@ -586,12 +584,12 @@ async fn the_owner_chooses_the_release_channel_their_installed_app_follows() {
     std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
     let _kc = keycloak(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
-    let pr = updates.join("desktop/pr-7");
+    let pr = updates.join("desktop/development");
     std::fs::create_dir_all(&pr).unwrap();
     let file = format!("Magnus_{fresh}_amd64.AppImage");
     std::fs::copy(builds.join("new.AppImage"), pr.join(&file)).unwrap();
     let signature = std::fs::read_to_string(builds.join("new.AppImage.sig")).unwrap();
-    let notes = "Sources in every answer\n\nReview build of pull request #7.";
+    let notes = "Sources in every answer\n\nDevelopment build of pull request #7.";
     let manifest = json!({ "version": fresh, "notes": notes, "platforms": { "linux-x86_64": { "file": file, "signature": signature } } });
     std::fs::write(pr.join("latest.json"), manifest.to_string()).unwrap();
 
@@ -601,5 +599,5 @@ async fn the_owner_chooses_the_release_channel_their_installed_app_follows() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
     let (ok, log) = d.script("app-channels.mjs", &url, &fingerprint, &[("MAGNUS_APP", &app.display().to_string()), ("MAGNUS_NEW", &fresh)]).await;
-    assert!(ok, "the app did not follow the chosen channel:\n{log}");
+    assert!(ok, "the owner's app did not follow development:\n{log}");
 }

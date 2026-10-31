@@ -330,17 +330,6 @@ pub enum Ev {
         adapter: String,
         model: String,
     },
-    /// The release channel the owner's own apps update from, chosen by the
-    /// owner (DECISIONS.md, "Release channels").
-    UpdateChannelSet {
-        channel: String,
-    },
-    /// The owner released a build to testers: `from` channel's release,
-    /// unchanged, is now the test channel's.
-    TestReleaseApproved {
-        version: String,
-        from: String,
-    },
     /// A tool definition approved for use, pinned by hash (B10).
     ToolPinned {
         tool: String,

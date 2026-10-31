@@ -7,10 +7,10 @@
 #   release/publish.sh appliance VERSION UPDATES_DIR NOTES_FILE PROGRAM...
 #   release/publish.sh desktop   VERSION UPDATES_DIR NOTES_FILE DIST_DIR [CHANNEL]
 #
-# The desktop app's CHANNEL (DECISIONS.md, "Release channels") is stable
-# (the default: tagged releases, in desktop/), preview (master, in
-# desktop/preview/) or pr-<n> (pull request n, in desktop/pr-<n>/); a
-# preview or pull request channel keeps only its latest release's packages.
+# The desktop app's CHANNEL (DECISIONS.md, "Release channels") is
+# production (the default: tagged releases, in desktop/), test (master, in
+# desktop/test/) or development (pull requests, in desktop/development/);
+# test and development keep only their latest packages.
 #
 # Every package is signed with `tauri signer sign --app-version`, so the
 # signature binds the version it was published as. latest.json is written
@@ -61,12 +61,11 @@ EOF
 case $what in
 appliance) dir=$updates/appliance ;;
 desktop)
-  channel=${2:-stable}
+  channel=${2:-production}
   case $channel in
-  stable) dir=$updates/desktop ;;
-  preview) dir=$updates/desktop/preview ;;
-  pr-[0-9]*) [ -z "$(echo "${channel#pr-}" | tr -d 0-9)" ] || { echo "no channel $channel" >&2; exit 2; }; dir=$updates/desktop/$channel ;;
-  *) echo "no channel $channel: stable, preview or pr-<n>" >&2; exit 2 ;;
+  production) dir=$updates/desktop ;;
+  test | development) dir=$updates/desktop/$channel ;;
+  *) echo "no channel $channel: production, test or development" >&2; exit 2 ;;
   esac
   ;;
 *) echo "publish appliance or desktop" >&2; exit 2 ;;
@@ -99,7 +98,7 @@ desktop)
   ;;
 esac
 mv "$dir/latest.json.tmp" "$dir/latest.json"
-if [ "$what" = desktop ] && [ "$channel" != stable ]; then
+if [ "$what" = desktop ] && [ "$channel" != production ]; then
   for f in "$dir"/Magnus_*; do
     case $f in "$dir/$linux" | "$dir/$windows" | "$dir/$linux.sig" | "$dir/$windows.sig") ;; *) rm -f "$f" ;; esac
   done

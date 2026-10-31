@@ -5,11 +5,9 @@
 //! when the person chooses "Restart to update". After the restart the app
 //! shows what changed, in plain words.
 //!
-//! The appliance decides which release channel the app gets (DECISIONS.md,
-//! "Release channels"): the owner's choice for the owner's apps, stable for
-//! everyone else's, so the app asks with its session. It takes whatever it
-//! is offered, older or newer, so the owner choosing a channel moves their
-//! apps to it; within a channel releases only move forward.
+//! The appliance decides which release channel the app gets by who is signed
+//! in (DECISIONS.md, "Release channels"), so the app asks with its session.
+//! It only ever moves forward (the updater's own rule: a newer version).
 //!
 //! On Windows the NSIS installer updates in place; on Linux only the
 //! AppImage updates itself (a .deb is updated with the package manager).
@@ -73,7 +71,6 @@ pub async fn look<R: Runtime>(handle: &AppHandle<R>) -> Result<bool, String> {
     }
     let updater = builder
         .configure_client(move |b| b.tls_backend_preconfigured(tls.clone()))
-        .version_comparator(|current, release| release.version != current)
         .build()
         .map_err(|e| e.to_string())?;
     *ups.looked.lock().unwrap() = Some(chrono_now());
@@ -125,14 +122,6 @@ pub async fn update_look<R: Runtime>(handle: AppHandle<R>) -> Result<Value, Stri
     *handle.state::<Updates>().error.lock().unwrap() = r.clone().err();
     r?;
     update_state(handle).await
-}
-
-/// Look again from scratch, after the owner chose another channel: a
-/// release downloaded from the old one is dropped.
-#[tauri::command]
-pub async fn update_look_again<R: Runtime>(handle: AppHandle<R>) -> Result<Value, String> {
-    *handle.state::<Updates>().ready.lock().unwrap() = None;
-    update_look(handle).await
 }
 
 /// Install the downloaded release and restart into it.

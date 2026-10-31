@@ -1772,45 +1772,14 @@ async function notificationsSection(el) {
   await draw();
 }
 
-// A release channel in words (DECISIONS.md, "Release channels").
-function channelName(c, notes) {
-  if (c === "stable") return "Stable: releases";
-  if (c === "test") return "Test: what testers have";
-  if (c === "preview") return "Preview: master, after each merge";
-  const n = c.slice(3), title = firstLine(notes || "");
-  return `Review: pull request #${n}${title ? `, ${title}` : ""}`;
-}
-// The channel the owner's own apps update from, chosen only by the owner:
-// stable, test and preview always, and each pull request under review; and
-// what testers have, with the build the owner's apps are on to release to
-// them. Testers' apps get test, everyone else's stable; the appliance
-// decides, not the app.
-function channelPicker(ch) {
-  const named = ["stable", "test", "preview", ...ch.channels.map(l => l.channel).filter(c => c.startsWith("pr-"))];
-  if (!named.includes(ch.follows)) named.push(ch.follows);
-  const opts = named.map(c => ch.channels.find(l => l.channel === c) || { channel: c });
-  return `<div class="row" data-channel><label class="small">Your apps get updates from <select id="channel" aria-label="Release channel">${opts.map(l =>
-      `<option value="${esc(l.channel)}"${l.channel === ch.follows ? " selected" : ""}>${esc(channelName(l.channel, l.notes))}${l.version ? ` (${esc(l.version)})` : " (no build)"}</option>`).join("")}</select></label></div>
-    ${testers(ch)}
-    <div class="small muted">Everyone else's apps get stable releases.${ch.served !== ch.follows ? ` <span data-channel-served>${ch.follows.startsWith("pr-") ? `Pull request #${esc(ch.follows.slice(3))} has no build here (closed, or not built yet)` : "This channel has no build here"}; ${ch.served ? `until it does, your apps get ${esc(channelName(ch.served).split(":")[0])}.` : "there is nothing to update to."}</span>` : ""}</div>`;
-}
-
-function testers(ch) {
-  const test = ch.channels.find(l => l.channel === "test"), mine = ch.channels.find(l => l.channel === ch.served);
-  const offer = mine && !["test", "stable"].includes(mine.channel) && mine.version !== test?.version;
-  return `<div class="spread" data-testers><span class="small">Testers (the tester role) have ${test ? `<span class="mono">${esc(test.version)}</span>` : "no test release yet"}.</span>
-    ${offer ? `<button data-act="release-test" data-from="${esc(mine.channel)}" data-version="${esc(mine.version)}">Release ${esc(mine.version)} to testers</button>` : ""}</div>`;
-}
-
 async function updatesSection(el) {
   const draw = async () => {
-    const [st, notes, ver, appl, chans] = await Promise.all([Magnus.updateState().catch(() => null), Magnus.whatsNew(true).catch(() => null),
-      api("GET", "/v1/version"), isOwner() ? api("GET", "/v1/updates").catch(() => null) : null, isOwner() ? api("GET", "/v1/updates/channels").catch(() => null) : null]);
+    const [st, notes, ver, appl] = await Promise.all([Magnus.updateState().catch(() => null), Magnus.whatsNew(true).catch(() => null),
+      api("GET", "/v1/version"), isOwner() ? api("GET", "/v1/updates").catch(() => null) : null]);
     const para = t => esc(t || "Fixes and improvements.").split(/\n+/).map(l => `<p>${l}</p>`).join("");
     paint(el, `<h2>Updates</h2>
       ${st ? `<div class="card" data-app-version><div class="spread"><div><strong>This app</strong> <span class="mono">${esc(st.current)}</span></div>
           ${st.ready ? `<button class="primary" data-act="restart-update">Restart to update</button>` : `<button data-act="look">Check now</button>`}</div>
-        ${chans ? channelPicker(chans) : ""}
         <div class="small muted">${st.ready ? `Magnus ${esc(st.ready.version)} is downloaded and checked.` : st.error ? `The last look failed: ${esc(st.error)}` : st.can_update ? esc(st.can_update) : "Up to date."}</div>
         ${st.ready ? `<h3>What's new in ${esc(st.ready.version)}</h3><div class="notes">${para(st.ready.notes)}</div>` : ""}
         ${notes ? `<h3>What's new in ${esc(notes.version)}</h3><div class="notes">${para(notes.notes)}</div>` : ""}</div>` : ""}
@@ -1819,27 +1788,10 @@ async function updatesSection(el) {
         ${appl ? `<div class="small muted">${appl.automatic ? "Updates install on their own." : "Updates install when you choose."}${appl.previous ? ` Rolls back to ${esc(appl.previous)} if one fails.` : ""}</div>
           ${appl.latest ? `<h3>What's new in ${esc(appl.latest.version)}</h3><div class="notes">${para(appl.latest.notes)}</div>` : ""}` : ""}</div>`);
   };
-  el.onchange = async e => {
-    if (e.target.id !== "channel") return;
-    e.target.disabled = true;
-    try {
-      await api("PUT", "/v1/updates/channel", { channel: e.target.value });
-      await Magnus.updateLookAgain();
-      toast(`Your apps now follow ${channelName(e.target.value).split(":")[0]}.`);
-      await refreshUpdate();
-    } catch (err) { toast(err.message); }
-    el._html = null; await draw();
-  };
   el.onclick = async e => {
     const b = e.target.closest("button[data-act]"); if (!b) return;
     try {
       if (b.dataset.act === "restart-update") return restartToUpdate();
-      if (b.dataset.act === "release-test") {
-        if (!confirm(`Release ${b.dataset.version} to testers? Their apps update to it within the hour.`)) return;
-        b.disabled = true;
-        await api("POST", "/v1/updates/test", { from: b.dataset.from });
-        toast(`Testers get ${b.dataset.version}.`);
-      }
       if (b.dataset.act === "look") { b.disabled = true; await Magnus.updateLook(); await refreshUpdate(); }
       if (b.dataset.act === "install") { b.disabled = true; await api("POST", "/v1/updates/check", {}); toast("Installing; the appliance restarts in a moment."); }
       el._html = null; await draw();

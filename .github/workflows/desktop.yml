@@ -1,9 +1,9 @@
 # The installed desktop app, tested on Linux; installers (Linux and Windows,
 # the same app) are published only when those tests pass (DECISIONS.md).
 # Tested builds are also put in the build box's appliance updates directory,
-# signed, from where the installed apps update themselves, by release
-# channel (DECISIONS.md, "Release channels"): a tag to stable, master to
-# preview, a pull request to its own channel, pr-<n>, removed once it closes.
+# signed, from where the installed apps update themselves (DECISIONS.md,
+# "Release channels"): a pull request to development, master to test, a
+# tag to production.
 # Runs on a self-hosted runner, `magnus-linux`: the build box, with KVM, the
 # guest image and Postgres. One-time setup: desktop/README.md, "Release checks".
 # One job: the steps share the build box's disk, so nothing goes through
@@ -15,7 +15,6 @@ on:
     branches: [master]
     tags: ["desktop-v*"]
   pull_request:
-    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 concurrency:
@@ -24,7 +23,6 @@ concurrency:
 
 permissions:
   contents: write
-  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: never
@@ -34,7 +32,6 @@ env:
 
 jobs:
   release-checks:
-    if: github.event.action != 'closed'
     runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 150
     steps:
@@ -42,18 +39,19 @@ jobs:
       - uses: actions/checkout@v7
         with: { clean: false }
       # The version every step builds, tests and publishes. A tag's is the
-      # app's own; master's and a pull request's are pre-releases of the
-      # next version, numbered by run, which also name their channel:
-      # `<next>-preview.<run>` and `<next>-review.<run>.pr.<n>`.
+      # app's own; any other build is a pre-release of the next version,
+      # numbered by run so each is newer than the one before (apps only move
+      # forward): `<next>-review.<run>.pr.<n>` for pull request n, else
+      # `<next>-test.<run>`.
       - name: Version
         env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
           PR: ${{ github.event.pull_request.number }}
-          MASTER: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
         run: |
           v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
-          if [ -n "$PR" ] || [ "$MASTER" = true ]; then
+          if [ "$TAG" != true ]; then
             git ls-remote --exit-code --tags origin "desktop-v$v" >/dev/null && v="${v%.*}.$(( ${v##*.} + 1 ))"
-            if [ -n "$PR" ]; then v="$v-review.${{ github.run_number }}.pr.$PR"; else v="$v-preview.${{ github.run_number }}"; fi
+            if [ -n "$PR" ]; then v="$v-review.${{ github.run_number }}.pr.$PR"; else v="$v-test.${{ github.run_number }}"; fi
           fi
           echo "MAGNUS_VERSION=$v" >> "$GITHUB_ENV"
       # The updater packages (AppImage, setup.exe) are signed with the release
@@ -130,37 +128,20 @@ jobs:
           git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
           git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG" > "$RUNNER_TEMP/notes"
           release/publish.sh desktop "$v" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist
-      # Master's tested build goes to the preview channel; a pull request
-      # merged into it no longer needs its own, nor does one closed.
-      - name: Preview for the installed apps
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          s=$(git log -1 --format=%s)
-          case $s in "Merge pull request #"*) t=$(git log -1 --format=%b | head -1) ;; *) t=$s ;; esac
-          printf '%s\n\nPreview: master at %s.\n' "$t" "$(git rev-parse --short HEAD)" > "$RUNNER_TEMP/notes"
-          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist preview
-          open=$(gh pr list --state open --limit 1000 --json number --jq '.[] | "pr-\(.number)"')
-          release/retire.sh "${{ vars.MAGNUS_UPDATES_DIR }}" --except $open
-      # A pull request's tested build goes to its own channel, where the
-      # owner's app follows it once they choose it, so every rebuild reaches it.
-      - name: Review build for the installed apps
+      # A pull request's tested build goes to development, the owner's apps;
+      # once merged, master's goes to test, the testers'.
+      - name: Development build for the installed apps
         if: github.event_name == 'pull_request'
         env:
           TITLE: ${{ github.event.pull_request.title }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          printf '%s\n\nReview build of pull request #%s.\n' "$TITLE" "$PR" > "$RUNNER_TEMP/notes"
-          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist "pr-$PR"
-
-  # A pull request closed without merging: its channel goes, and the apps on
-  # it move to preview. (A merged one's goes after the preview that has it.)
-  retire-review-channel:
-    if: github.event.action == 'closed' && !github.event.pull_request.merged
-    runs-on: [self-hosted, linux, magnus-linux]
-    steps:
-      # The pull request's own commits may be gone; the script is master's.
-      - uses: actions/checkout@v7
-        with: { clean: false, ref: master }
-      - run: release/retire.sh "${{ vars.MAGNUS_UPDATES_DIR }}" "pr-${{ github.event.pull_request.number }}"
+          printf '%s\n\nDevelopment build of pull request #%s.\n' "$TITLE" "$PR" > "$RUNNER_TEMP/notes"
+          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist development
+      - name: Test build for the installed apps
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          s=$(git log -1 --format=%s)
+          case $s in "Merge pull request #"*) t=$(git log -1 --format=%b | head -1) ;; *) t=$s ;; esac
+          printf '%s\n\nTest build: master at %s.\n' "$t" "$(git rev-parse --short HEAD)" > "$RUNNER_TEMP/notes"
+          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist test

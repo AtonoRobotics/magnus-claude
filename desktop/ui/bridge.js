@@ -55,7 +55,6 @@ const appBridge = tauri && {
   async updateState() { return this.invoke("update_state"); },
   async updateLook() { return this.invoke("update_look"); },
   async updateInstall() { return this.invoke("update_install"); },
-  async updateLookAgain() { return this.invoke("update_look_again"); },
   // `again`: also after it was shown once (for Settings).
   async whatsNew(again = false) { return this.invoke("whats_new", { again }); },
   onUpdateReady(fn) { tauri.event.listen("update-ready", e => fn(e.payload)); },
@@ -123,7 +122,6 @@ const webBridge = {
   // The appliance serves this page, so it is always the appliance's own version.
   async updateState() { return null; },
   async updateLook() { return null; },
-  async updateLookAgain() { return null; },
   async whatsNew() { return null; },
   onUpdateReady() {},
   async dataUrl(path) {
