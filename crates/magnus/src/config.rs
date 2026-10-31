@@ -136,6 +136,20 @@ pub struct Oidc {
     /// Where it carries their roles (Keycloak realm roles: `/realm_access/roles`).
     #[serde(default)]
     pub roles_claim: Option<String>,
+    /// How long a sign-in in the person's browser may take: finding a
+    /// password or passkey, two-factor. The app waits as long, from what the
+    /// appliance tells it.
+    #[serde(default = "sign_in_minutes")]
+    pub sign_in_minutes: u32,
+    /// A confidential client whose service account may only view users
+    /// (Keycloak: `realm-management` → `view-users`). The appliance asks it
+    /// who uses a code from an authenticator app, since the password grant
+    /// answers the same to a wrong password and a missing code.
+    #[serde(default)]
+    pub status_client: Option<String>,
+    /// The vault secret holding that client's secret.
+    #[serde(default)]
+    pub status_credential: Option<String>,
 }
 
 fn person_claim() -> String {
@@ -146,6 +160,9 @@ fn oidc_scope() -> String {
 }
 fn max_pending() -> usize {
     100
+}
+fn sign_in_minutes() -> u32 {
+    10
 }
 
 fn session_days() -> u32 {
@@ -545,6 +562,16 @@ impl Config {
 
     pub fn person(&self, id: &str) -> Option<&Person> {
         self.people.iter().find(|p| p.id == id)
+    }
+
+    /// Whether a password set on the appliance signs this person in. With an
+    /// identity provider it is the owner's backup alone, so turning someone
+    /// off at the provider shuts them out (owner, 2026-10-30: "The back up
+    /// password is only for me"), and only on the appliance's own machine
+    /// (the API checks where); the owner is read from this file, never from
+    /// the provider. Without one, it is everyone's way in.
+    pub fn may_use_password(&self, id: &str) -> bool {
+        self.person(id).is_some_and(|p| self.sign_in.oidc.is_none() || p.is_owner())
     }
 
     pub fn person_by_token(&self, token: &str) -> Option<&Person> {

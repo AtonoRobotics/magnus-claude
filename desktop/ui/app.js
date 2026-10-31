@@ -429,61 +429,80 @@ async function signInScreen(note) {
       paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p><p class="small muted">Connecting…</p>`);
       try {
         const m = await Magnus.signInMethod();
-        ask(m.method === "oidc" ? "provider" : "password", { ...data, label: m.label });
+        ask("password", { ...data, label: m.method === "oidc" ? m.label : undefined });
       } catch (err) { note = err.message || String(err); ask(Magnus.kind === "app" ? "address" : "password", data); }
-    } else if (stage === "provider") {
-      paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p>
-        ${data.error ? `<p class="small" style="color:var(--bad)" role="alert">${esc(data.error)}</p>` : ""}
-        <p>You sign in to this appliance with your <strong>${esc(data.label)}</strong> account.</p>
-        <div class="row" style="margin-top:16px"><button class="primary" id="go">Sign in with ${esc(data.label)}</button><button type="button" class="link" id="pwd">Use a password instead</button>${Magnus.kind === "app" ? `<button type="button" class="link" id="back">Other appliance</button>` : ""}</div>`);
-      $("#back")?.addEventListener("click", () => ask("address", data));
-      $("#pwd").onclick = () => ask("password", data);
-      $("#go").onclick = async () => {
-        $("#go").disabled = true;
-        let s;
-        try { s = await Magnus.deviceStart(); } catch (err) { return ask("provider", { ...data, error: err.message || String(err) }); }
-        const link = s.verification_uri_complete || s.verification_uri;
-        let stop = false;
+    } else if (stage === "browser") {
+      // The provider's own page in the person's browser: for a passkey, the
+      // first time, or when their account needs finishing there.
+      const back = () => ask("password", { ...data, message: undefined });
+      if (Magnus.providerSignIn) {
         paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p>
-          <p>Approve the sign-in on the ${esc(s.label)} page that just opened.</p>
-          <p class="small">Check that it shows this code:</p><div class="fp" id="code">${esc(s.user_code)}</div>
-          <div class="row" style="margin-top:14px"><button data-url="${esc(link)}" id="open">Open the sign-in page again</button><button class="link" id="cancel">Cancel</button></div>
-          <p class="small muted" id="wait" role="status">Waiting for you to approve…</p>`);
-        $("#open").onclick = () => Magnus.openExternal(link).catch(() => {});
-        $("#cancel").onclick = () => { stop = true; ask("provider", data); };
-        Magnus.openExternal(link).catch(() => {});
-        const until = Date.now() + s.expires_in * 1000;
-        const every = Math.max(1, s.interval) * 1000;
-        while (!stop && Date.now() < until) {
-          await new Promise(r => setTimeout(r, every));
-          if (stop) return;
-          try {
-            const r = await Magnus.devicePoll(s.flow);
-            if (r.pending) continue;
-            App.me = r.person; App.appliance = data.url || location.origin;
-            return boot();
-          } catch (err) { return ask("provider", { ...data, error: err.message || String(err) }); }
-        }
-        if (!stop) ask("provider", { ...data, error: "The sign-in code expired. Start again." });
-      };
+          <p>${esc(data.message || `Sign in on the ${data.label} page that just opened in your browser, then come back here.`)}</p>
+          <p class="small muted" id="wait" role="status">Waiting for you to sign in…</p>
+          <div class="row" style="margin-top:14px"><button class="link" id="cancel">Cancel</button></div>`);
+        // A cancelled sign-in may still finish in the browser; its answer is ignored.
+        let cancelled = false;
+        $("#cancel").onclick = () => { cancelled = true; back(); };
+        try {
+          const r = await Magnus.providerSignIn(data.person);
+          if (cancelled) return;
+          if (data.person) localStorage.setItem("magnus.person", data.person);
+          App.me = r.person; App.appliance = data.url || location.origin;
+          return boot();
+        } catch (err) { if (!cancelled) ask("password", { ...data, message: undefined, error: err.message || String(err) }); return; }
+      }
+      let s;
+      try { s = await Magnus.deviceStart(); } catch (err) { return ask("password", { ...data, error: err.message || String(err) }); }
+      const link = s.verification_uri_complete || s.verification_uri;
+      let stop = false;
+      paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p>
+        <p>${esc(data.message || `Sign in on the ${s.label} page that just opened.`)}</p>
+        <p class="small">Check that it shows this code:</p><div class="fp" id="code">${esc(s.user_code)}</div>
+        <div class="row" style="margin-top:14px"><button data-url="${esc(link)}" id="open">Open the sign-in page again</button><button class="link" id="cancel">Cancel</button></div>
+        <p class="small muted" id="wait" role="status">Waiting for you to approve…</p>`);
+      $("#open").onclick = () => Magnus.openExternal(link).catch(() => {});
+      $("#cancel").onclick = () => { stop = true; back(); };
+      Magnus.openExternal(link).catch(() => {});
+      const until = Date.now() + s.expires_in * 1000;
+      const every = Math.max(1, s.interval) * 1000;
+      while (!stop && Date.now() < until) {
+        await new Promise(r => setTimeout(r, every));
+        if (stop) return;
+        try {
+          const r = await Magnus.devicePoll(s.flow);
+          if (r.pending) continue;
+          App.me = r.person; App.appliance = data.url || location.origin;
+          return boot();
+        } catch (err) { return ask("password", { ...data, message: undefined, error: err.message || String(err) }); }
+      }
+      if (!stop) ask("password", { ...data, message: undefined, error: "The sign-in code expired. Start again." });
     } else {
+      // Username and password, then the code from an authenticator app if
+      // the person uses one. The password stays in this closure only.
+      const coding = stage === "code";
       paint(box, `<form id="f"><p class="small muted">${esc(data.url || location.origin)}</p>
         ${data.error ? `<p class="small" style="color:var(--bad)" role="alert">${esc(data.error)}</p>` : ""}
-        <label for="who">Your name on the appliance</label><input id="who" style="width:100%" autocomplete="username" value="${esc(data.person || localStorage.getItem("magnus.person") || "")}" required>
-        <label for="pw">Password</label><input id="pw" type="password" style="width:100%" autocomplete="current-password" required>
-        <div class="row" style="margin-top:16px"><button class="primary" id="go">Sign in</button>${data.label ? `<button type="button" class="link" id="prov">Sign in with ${esc(data.label)}</button>` : ""}${Magnus.kind === "app" ? `<button type="button" class="link" id="back">Other appliance</button>` : ""}</div></form>`);
+        ${coding
+          ? `<label for="otp">Enter the 6-digit code from your authenticator app</label><input id="otp" style="width:100%" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" required autofocus>`
+          : `<label for="who">Username</label><input id="who" style="width:100%" autocomplete="username" value="${esc(data.person || localStorage.getItem("magnus.person") || "")}" required>
+        <label for="pw">Password</label><input id="pw" type="password" style="width:100%" autocomplete="current-password" required>`}
+        <div class="row" style="margin-top:16px"><button class="primary" id="go">${coding ? "Continue" : "Sign in"}</button>${coding ? `<button type="button" class="link" id="again">Back</button>` : data.label ? `<button type="button" class="link" id="passkey">Use a passkey instead</button>` : ""}${Magnus.kind === "app" && !coding ? `<button type="button" class="link" id="back">Other appliance</button>` : ""}</div></form>`);
       $("#back")?.addEventListener("click", () => ask("address", data));
-      $("#prov")?.addEventListener("click", () => ask("provider", { ...data, error: undefined }));
+      $("#again")?.addEventListener("click", () => ask("password", { ...data, error: undefined, password: undefined }));
+      $("#passkey")?.addEventListener("click", () => ask("browser", { ...data, person: $("#who").value.trim() || undefined, error: undefined }));
       $("#f").onsubmit = async e => {
         e.preventDefault();
-        const person = $("#who").value.trim();
+        const person = coding ? data.person : $("#who").value.trim();
+        const password = coding ? data.password : $("#pw").value;
         $("#go").disabled = true;
         try {
-          const me = await Magnus.signIn(person, $("#pw").value);
+          const r = await Magnus.signIn(person, password, coding ? $("#otp").value.trim() : undefined);
+          if (r?.code_needed) return ask("code", { ...data, person, password, error: coding ? r.error : undefined });
+          if (r?.browser) return ask("browser", { ...data, person, password: undefined, message: r.error });
           localStorage.setItem("magnus.person", person);
-          App.me = me; App.appliance = data.url || location.origin;
+          App.me = r; App.appliance = data.url || location.origin;
           boot();
-        } catch (err) { ask("password", { ...data, person, error: err.message || String(err) }); }
+        } catch (err) { ask("password", { ...data, person, password: undefined, error: err.message || String(err) }); }
       };
     }
   };

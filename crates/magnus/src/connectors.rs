@@ -77,21 +77,21 @@ fn http() -> reqwest::Client {
     reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(30)).build().expect("http client")
 }
 
-fn random() -> String {
+pub(crate) fn random() -> String {
     use rand::RngCore;
     let mut b = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut b);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
-fn challenge(verifier: &str) -> String {
+pub(crate) fn challenge(verifier: &str) -> String {
     use sha2::Digest;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()))
 }
 
 /// RFC 8252 loopback redirects only: the code goes to the person's own
 /// computer, never to another host.
-fn loopback(uri: &str) -> Result<()> {
+pub(crate) fn loopback(uri: &str) -> Result<()> {
     let u = url::Url::parse(uri).context("the redirect address is not a URL")?;
     let host = u.host_str().unwrap_or_default();
     if u.scheme() != "http" || !matches!(host, "127.0.0.1" | "[::1]" | "localhost") || u.port().is_none() {
