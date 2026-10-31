@@ -35,9 +35,11 @@ jobs:
     runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 150
     steps:
-      # Keep target/ between runs: a clean build of everything is long.
+      # Keep target/ between runs: a clean build of everything is long. The
+      # whole history, so publishing can check a release contains the one
+      # before it.
       - uses: actions/checkout@v7
-        with: { clean: false }
+        with: { clean: false, fetch-depth: 0 }
       # The version every step builds, tests and publishes. A tag's is the
       # app's own; any other build is a pre-release of the next version,
       # numbered by run so each is newer than the one before (apps only move
@@ -135,6 +137,7 @@ jobs:
         env:
           TITLE: ${{ github.event.pull_request.title }}
           PR: ${{ github.event.pull_request.number }}
+          MAGNUS_COMMIT: ${{ github.event.pull_request.head.sha }}
         run: |
           printf '%s\n\nDevelopment build of pull request #%s.\n' "$TITLE" "$PR" > "$RUNNER_TEMP/notes"
           release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist development
