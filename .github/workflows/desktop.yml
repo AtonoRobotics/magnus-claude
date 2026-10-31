@@ -98,6 +98,12 @@ jobs:
       # `cargo test` builds only the test package's own.
       - name: Programs the tests launch
         run: cargo build --workspace --bins
+      # Every suite, on every pull request and master build, before its
+      # build can reach an app (DECISIONS.md, "One pull request at a time").
+      - name: Browser sidecar
+        run: npm ci --prefix browser
+      - name: Unit, invariant and scratch tests
+        run: cargo test -p magnus -p magnus-invariants -p magnus-scratch --no-fail-fast
       - name: Installed-app tests
         env:
           MAGNUS_DESKTOP_APP: ${{ runner.temp }}/app/usr/bin/magnus-desktop
