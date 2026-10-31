@@ -24,8 +24,10 @@ jobs:
     runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 120
     steps:
+      # The whole history, so publishing can check a release contains the
+      # one before it.
       - uses: actions/checkout@v7
-        with: { clean: false }
+        with: { clean: false, fetch-depth: 0 }
       # The browser sidecar's packages (some suites drive a browser).
       - name: Browser sidecar
         run: npm ci --prefix browser

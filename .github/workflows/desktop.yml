@@ -1,7 +1,9 @@
 # The installed desktop app, tested on Linux; installers (Linux and Windows,
 # the same app) are published only when those tests pass (DECISIONS.md).
-# A tagged release is also put in the build box's appliance updates
-# directory, signed, from where the installed apps update themselves.
+# Tested builds are also put in the build box's appliance updates directory,
+# signed, from where the installed apps update themselves (DECISIONS.md,
+# "Release channels"): a pull request to development, master to test, a
+# tag to production.
 # Runs on a self-hosted runner, `magnus-linux`: the build box, with KVM, the
 # guest image and Postgres. One-time setup: desktop/README.md, "Release checks".
 # One job: the steps share the build box's disk, so nothing goes through
@@ -33,28 +35,41 @@ jobs:
     runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 150
     steps:
-      # Keep target/ between runs: a clean build of everything is long.
+      # Keep target/ between runs: a clean build of everything is long. The
+      # whole history, so publishing can check a release contains the one
+      # before it.
       - uses: actions/checkout@v7
-        with: { clean: false }
+        with: { clean: false, fetch-depth: 0 }
+      # The version every step builds, tests and publishes. A tag's is the
+      # app's own; any other build is a pre-release of the next version,
+      # numbered by run so each is newer than the one before (apps only move
+      # forward): `<next>-review.<run>.pr.<n>` for pull request n, else
+      # `<next>-test.<run>`.
+      - name: Version
+        env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
+          if [ "$TAG" != true ]; then
+            git ls-remote --exit-code --tags origin "desktop-v$v" >/dev/null && v="${v%.*}.$(( ${v##*.} + 1 ))"
+            if [ -n "$PR" ]; then v="$v-review.${{ github.run_number }}.pr.$PR"; else v="$v-test.${{ github.run_number }}"; fi
+          fi
+          echo "MAGNUS_VERSION=$v" >> "$GITHUB_ENV"
       # The updater packages (AppImage, setup.exe) are signed with the release
       # key, which is on the build box only, bound to the version. A pull
-      # request's build is signed with a key made for the run instead: what
-      # it builds is untested, and nothing it signs could install anywhere.
+      # request's build too: once tested it goes to development, the owner's
+      # apps (DECISIONS.md, "Release channels").
       - name: Installers
         working-directory: desktop/src-tauri
         run: |
-          if [ "${{ github.event_name }}" = pull_request ]; then
-            k="$RUNNER_TEMP/pr-installers" && rm -rf "$k" && mkdir -p "$k"
-            cargo tauri signer generate --ci -p "" -f -w "$k/run.key" >/dev/null
-            export TAURI_SIGNING_PRIVATE_KEY="$k/run.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-          else
-            export TAURI_SIGNING_PRIVATE_KEY="$HOME/.magnus-release/update.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-          fi
-          cargo tauri build --bundles deb,appimage
-          cargo tauri build --runner cargo --target x86_64-pc-windows-gnu --bundles nsis
+          export TAURI_SIGNING_PRIVATE_KEY="$HOME/.magnus-release/update.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          c="{\"version\":\"$MAGNUS_VERSION\"}"
+          cargo tauri build --bundles deb,appimage --config "$c"
+          cargo tauri build --runner cargo --target x86_64-pc-windows-gnu --bundles nsis --config "$c"
       - name: Collect this version's installers
         run: |
-          v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
+          v=$MAGNUS_VERSION
           b=desktop/src-tauri/target
           rm -rf dist && mkdir dist
           cp "$b/release/bundle/deb/Magnus_${v}_amd64.deb" "$b/release/bundle/appimage/Magnus_${v}_amd64.AppImage" \
@@ -65,7 +80,7 @@ jobs:
       - name: Two builds for the update test
         working-directory: desktop/src-tauri
         run: |
-          v=$(node -p "require('./tauri.conf.json').version")
+          v=$MAGNUS_VERSION
           t="$RUNNER_TEMP/update-test" && rm -rf "$t" && mkdir -p "$t"
           cargo tauri signer generate --ci -p "" -f -w "$t/test.key" >/dev/null
           export TAURI_SIGNING_PRIVATE_KEY="$t/test.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
@@ -79,7 +94,7 @@ jobs:
           echo "$next" > "$t/new.version"
       - name: Install the app from its package
         run: |
-          v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
+          v=$MAGNUS_VERSION
           rm -rf "$RUNNER_TEMP/app" && dpkg-deb -x "dist/Magnus_${v}_amd64.deb" "$RUNNER_TEMP/app"
       # The tests launch the appliance and the model adapters as programs;
       # `cargo test` builds only the test package's own.
@@ -103,7 +118,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
+          v=$MAGNUS_VERSION
           [ "$TAG" = "desktop-v$v" ] || { echo "tag $TAG does not match version $v"; exit 1; }
           (cd dist && sha256sum -c SHA256SUMS)
           gh release create "$TAG" --verify-tag --prerelease --title "Desktop $v" --notes-from-tag \
@@ -113,7 +128,25 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
+          v=$MAGNUS_VERSION
           git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
           git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG" > "$RUNNER_TEMP/notes"
           release/publish.sh desktop "$v" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist
+      # A pull request's tested build goes to development, the owner's apps;
+      # once merged, master's goes to test, the testers'.
+      - name: Development build for the installed apps
+        if: github.event_name == 'pull_request'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          PR: ${{ github.event.pull_request.number }}
+          MAGNUS_COMMIT: ${{ github.event.pull_request.head.sha }}
+        run: |
+          printf '%s\n\nDevelopment build of pull request #%s.\n' "$TITLE" "$PR" > "$RUNNER_TEMP/notes"
+          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist development
+      - name: Test build for the installed apps
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          s=$(git log -1 --format=%s)
+          case $s in "Merge pull request #"*) t=$(git log -1 --format=%b | head -1) ;; *) t=$s ;; esac
+          printf '%s\n\nTest build: master at %s.\n' "$t" "$(git rev-parse --short HEAD)" > "$RUNNER_TEMP/notes"
+          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist test

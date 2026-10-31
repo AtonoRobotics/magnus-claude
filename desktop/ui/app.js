@@ -395,10 +395,11 @@ async function go() {
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   const h = location.hash || "#/home";
   paint($("nav.side"), nav());
-  const main = $("#main");
-  main._html = null;
-  // Each view sets its own handlers on main; none outlives its view.
-  main.onclick = main.onchange = main.onsubmit = main.oninput = null;
+  // Each view gets a main of its own: one still loading when the person
+  // moves on (and its handlers) only ever touches the main they left, never
+  // the next view's.
+  const left = $("#main"), main = left.cloneNode(false);
+  left.replaceWith(main);
   for (const [re, view] of App.routes) {
     const m = h.match(re);
     if (m) {
