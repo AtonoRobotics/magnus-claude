@@ -388,6 +388,8 @@ impl Kernel {
                         title: d["title"].as_str().map(String::from),
                         until: serde_json::from_value(d["until"].clone()).ok().flatten(),
                         max_runs: d["max_runs"].as_u64().map(|m| m as u32),
+                        // The person agreed to the card's scope, so each run is told it.
+                        scope: d["scope"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from),
                     },
                 )
                 .await?;

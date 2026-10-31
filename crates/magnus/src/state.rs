@@ -230,6 +230,8 @@ pub struct Task {
     pub title: Option<String>,
     /// The schedule that started it, if any.
     pub schedule: Option<String>,
+    /// The scope the person confirmed for that schedule, which its run is told.
+    pub scope: Option<String>,
     /// Library files the person gave it.
     pub files: Vec<String>,
     /// The project it started in, as it stood then.
@@ -404,6 +406,8 @@ pub struct Schedule {
     pub card: Option<String>,
     pub label: Label,
     pub title: Option<String>,
+    /// What the person confirmed each run does, on the chat card.
+    pub scope: Option<String>,
     /// Firings that could not start a task: when, and why.
     pub failures: Vec<(DateTime<Utc>, String)>,
     pub until: Option<DateTime<Utc>>,
@@ -968,7 +972,7 @@ impl State {
                 self.signed_in_before.insert(person.clone());
             }
             Ev::SignedOut { .. } => {}
-            Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title, until, max_runs } => {
+            Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title, until, max_runs, scope } => {
                 self.schedules.insert(
                     id.clone(),
                     Schedule {
@@ -983,6 +987,7 @@ impl State {
                         card: card.clone(),
                         label: label.unwrap_or_default(),
                         title: title.clone(),
+                        scope: scope.clone(),
                         failures: vec![],
                         until: *until,
                         max_runs: *max_runs,
@@ -1113,7 +1118,7 @@ impl State {
                     (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: false }),
                 );
             }
-            Ev::TaskCreated { task, run, person, text, config, attachments, experiment, chat, label, title, files, project } => {
+            Ev::TaskCreated { task, run, person, text, config, attachments, experiment, chat, label, title, files, project, scope } => {
                 // Playbook items the run starts with carry the taint of the
                 // runs that wrote them (I2, M1), and a task from chat that of
                 // the turn that started it.
@@ -1140,6 +1145,7 @@ impl State {
                         title: title.clone(),
                         // Known from the start, so its first step knows it is scheduled.
                         schedule: e.actor.strip_prefix("schedule:").map(String::from),
+                        scope: scope.clone(),
                         files: files.clone(),
                         project: project.clone(),
                         verdict: None,

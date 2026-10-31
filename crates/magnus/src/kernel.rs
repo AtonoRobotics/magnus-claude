@@ -80,6 +80,8 @@ pub struct NewRun {
     /// Removable modules switched on or off for this run alone, over the
     /// model's settings (an ablation trial).
     pub modules: std::collections::BTreeMap<String, bool>,
+    /// The scope the person confirmed for the schedule starting it.
+    pub scope: Option<String>,
 }
 
 impl Kernel {
@@ -421,6 +423,7 @@ impl Kernel {
                 title: o.title,
                 files: o.files,
                 project,
+                scope: o.scope,
             },
         )
         .await?;
@@ -495,6 +498,7 @@ impl Kernel {
                     budget: sc.budget.as_ref().map(|b| b.within(&self.cfg.budget)),
                     label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label),
                     project: self.read(|s| s.project_of(&sc.id)),
+                    scope: sc.scope.clone(),
                     ..Default::default()
                 };
                 match self.create_run(&format!("schedule:{}", sc.id), &sc.person, sc.text.clone(), vec![], o).await {

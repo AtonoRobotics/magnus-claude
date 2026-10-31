@@ -524,6 +524,43 @@ async fn a_contract_cannot_claim_a_conversation() {
     assert!(t["contract"]["conversation"].is_null(), "a forged conversation is on the contract: {t}");
 }
 
+/// The scope the person confirmed on the card reaches each run, beside the
+/// task's own words (from the closed PR #1, where it was added to the
+/// schedule's text).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirmed_schedule_carries_its_scope() {
+    const SCOPE: &str = "Searches the web; sends nothing.";
+    let m = FakeModel::start(model(
+        |_, turn| match turn {
+            0 => tool("create_schedule", json!({ "text": "Summarise the news.", "every_minutes": 1, "scope": SCOPE })),
+            _ => say("Confirm the card."),
+        },
+        vec![],
+    ))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    // Schedules may repeat every minute, so the first run starts within the test.
+    magnus_scratch::reconfigure(&mut app, |c| {
+        let mut t = toml::Table::new();
+        t.insert("min_every_minutes".into(), 1.into());
+        c.insert("schedules".into(), toml::Value::Table(t));
+    })
+    .await;
+    let alice = app.api("alice");
+    let (thread, turn) = chat(&alice, "Every minute, summarise the news.", None).await;
+    alice.wait_settled(&turn).await;
+    let card = wait_entry(&alice, &thread, |e| e["kind"] == "schedule_card").await;
+    let (st, v) = alice.post(&format!("/v1/chat/cards/{}", card["card"].as_str().unwrap()), json!({ "decision": "confirm" })).await;
+    assert!(st.is_success(), "{v}");
+    let run = eventually("the schedule's first run asks the model", Duration::from_secs(100), || {
+        let m = m.clone();
+        async move { m.requests().into_iter().find(|c| !is_chat(c) && c.turn() == 0 && c.offered_tools().iter().any(|t| t == "task_contract")) }
+    })
+    .await;
+    assert!(run.text().contains("Summarise the news."), "{}", run.text());
+    assert!(run.text().contains(SCOPE), "the scheduled run was not told the card's scope: {}", run.text());
+}
+
 use chrono::Timelike;
 
 /// A person picks the model for a task and for each chat message from what

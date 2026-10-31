@@ -88,7 +88,12 @@ impl Kernel {
             }
             _ => {}
         }
+        let scope = task.as_ref().and_then(|t| t.scope.clone());
         first.push(Block::Text { text: task.map(|t| t.text).unwrap_or_default() });
+        // A schedule's run keeps to the scope the person confirmed for it.
+        if let Some(scope) = scope {
+            first.push(Block::Text { text: format!("The person confirmed this schedule for this scope; keep to it: {scope}") });
+        }
         // The project's instructions are the person's own words, for
         // everything in it; its files are data, read when needed (M2).
         if let Some(p) = &project {

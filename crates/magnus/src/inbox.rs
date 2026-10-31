@@ -274,6 +274,7 @@ impl Kernel {
                         title: None,
                         until: serde_json::from_value(item.details["until"].clone()).ok().flatten(),
                         max_runs: item.details["max_runs"].as_u64().map(|m| m as u32),
+                        scope: None,
                     },
                 )
                 .await?;

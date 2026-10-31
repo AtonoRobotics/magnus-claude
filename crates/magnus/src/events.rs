@@ -281,6 +281,9 @@ pub enum Ev {
         /// No run starts after this many.
         #[serde(default)]
         max_runs: Option<u32>,
+        /// What the person confirmed each run does, on the chat card.
+        #[serde(default)]
+        scope: Option<String>,
     },
     /// A due schedule started no run because its last one is still open:
     /// running, or waiting on someone. The next is due as usual.
@@ -382,6 +385,9 @@ pub enum Ev {
         /// The project it started in.
         #[serde(default)]
         project: Option<ProjectContext>,
+        /// The scope the person confirmed for the schedule that started it.
+        #[serde(default)]
+        scope: Option<String>,
     },
     /// A file the person added: to the library, a project, or a chat
     /// message. Its content is private data, never instructions.
@@ -756,11 +762,11 @@ pub enum Ev {
 /// beside the log in the content store, where it can be deleted; the log
 /// keeps the rest. A dotted name is a field of a field.
 pub const CONTENT: &[(&str, &[&str])] = &[
-    ("task_created", &["text", "attachments", "title", "chat.conversation", "project.name", "project.instructions"]),
+    ("task_created", &["text", "attachments", "title", "chat.conversation", "project.name", "project.instructions", "scope"]),
     ("file_uploaded", &["name", "data_b64"]),
     ("project_set", &["name", "instructions"]),
     ("thread_branched", &["entries", "title"]),
-    ("schedule_set", &["text", "title"]),
+    ("schedule_set", &["text", "title", "scope"]),
     ("model_reply", &["blocks", "state"]),
     ("verifier_reply", &["blocks"]),
     ("memory_pass", &["blocks"]),
