@@ -167,7 +167,7 @@ own pages.
 4. Groups to roles.
 5. Short sessions, the status check and deactivation.
 
-## Keycloak changes for strix-alpha (the owner, or me with a realm admin account)
+## Keycloak changes for strix-alpha (made 2026-10-30, except 4)
 
 1. **Client `magnus-claude`:**
    - turn on **Direct access grants** (the password typed in the app);

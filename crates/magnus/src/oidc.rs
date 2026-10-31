@@ -294,13 +294,19 @@ impl Provider {
                 Ok(Some(true)) => Ok(Polled::NeedsCode),
                 Ok(Some(false)) => Ok(Polled::Refused("The name or password is wrong.".into())),
                 Ok(None) => Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label()))),
+                // Not knowing, the password may be right and only the code
+                // missing: Keycloak's own page asks for whatever it needs.
                 Err(e) => {
-                    tracing::warn!("oidc: cannot tell whether {username} uses a code: {e:#}");
-                    Ok(Polled::Refused("The name or password is wrong.".into()))
+                    tracing::warn!("oidc: cannot tell whether {username} uses a code, so sending them to the browser: {e:#}");
+                    Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label())))
                 }
             },
             "invalid_grant" => Ok(Polled::Refused("The name, password or code is wrong.".into())),
-            "unauthorized_client" => bail!("{} does not let client {} sign in with a password: turn on Direct access grants for it", self.label(), self.cfg.client_id),
+            // Its page still signs the person in; the owner is told what to change.
+            "unauthorized_client" => {
+                tracing::warn!("oidc: {} does not let client {} sign in with a password typed in the app; turn on Direct access grants for it", self.label(), self.cfg.client_id);
+                Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label())))
+            }
             other => bail!("{} refused the sign-in: {}", self.label(), if why.is_empty() { if other.is_empty() { status.as_str() } else { other } } else { why }),
         }
     }

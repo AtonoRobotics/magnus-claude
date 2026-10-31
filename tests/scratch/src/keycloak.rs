@@ -230,6 +230,15 @@ impl Keycloak {
         self.admin(reqwest::Method::POST, "/clients", Some(body)).await;
     }
 
+    /// Allow or refuse a password typed in the app ("Direct access grants")
+    /// for the appliance's client.
+    pub async fn set_direct_grants(&self, on: bool) {
+        let mut c = self.admin(reqwest::Method::GET, &format!("/clients?clientId={IDP_CLIENT}"), None).await[0].clone();
+        c["directAccessGrantsEnabled"] = json!(on);
+        let id = c["id"].as_str().unwrap().to_string();
+        self.admin(reqwest::Method::PUT, &format!("/clients/{id}"), Some(c)).await;
+    }
+
     /// Remove the person from Keycloak altogether.
     pub async fn delete(&self, username: &str) {
         let id = self.user_id(username).await;
