@@ -39,7 +39,8 @@ pub fn may_respond(p: &Person, i: &Item) -> bool {
         "tool_change" | "tool_review" | "deletion_request" => p.is_owner(),
         // Only someone with the role who may read the entry makes it a company fact.
         "endorsement" => crate::knowledge::may_endorse(p) && crate::knowledge::can_read(p, &serde_json::from_value::<Vec<Vec<String>>>(i.details["readers"].clone()).unwrap_or_else(|_| vec![vec![]])),
-        _ => i.person == p.id || p.is_owner(),
+        // A task's questions, reviews and notices are its person's alone.
+        _ => i.person == p.id,
     }
 }
 

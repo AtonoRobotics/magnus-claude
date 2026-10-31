@@ -535,8 +535,11 @@ pub(crate) async fn chosen_model(k: &Kernel, b: &Value) -> Result<Option<(String
     }
 }
 
+/// Each person's tasks are their own, the owner's too (owner, 2026-10-30:
+/// "Individual users should have their own accounts with their own tasks,
+/// conversations, schedules, memory").
 fn visible_task(p: &Person, t: &crate::state::Task) -> bool {
-    t.person == p.id || p.is_owner()
+    t.person == p.id
 }
 
 async fn list_tasks(State(k): K, h: HeaderMap) -> Response {
@@ -1222,7 +1225,7 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
     let list: Vec<Value> = k.read(|s| {
         s.schedules
             .values()
-            .filter(|x| x.person == p.id || p.is_owner())
+            .filter(|x| x.person == p.id)
             .map(|x| {
                 // Its runs, newest first; the last result is the newest that ended.
                 let mut runs: Vec<(&crate::state::Task, &Run)> =
@@ -1293,7 +1296,7 @@ async fn remove_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
         Err(r) => return r,
     };
     let Some(owner_id) = k.read(|s| s.schedules.get(&id).map(|x| x.person.clone())) else { return err(StatusCode::NOT_FOUND, "no such schedule") };
-    if owner_id != p.id && !p.is_owner() {
+    if owner_id != p.id {
         return err(StatusCode::NOT_FOUND, "no such schedule");
     }
     match k.emit(&format!("person:{}", p.id), Ev::ScheduleRemoved { id }).await {
