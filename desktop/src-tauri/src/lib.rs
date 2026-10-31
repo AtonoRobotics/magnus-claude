@@ -137,15 +137,19 @@ async fn trust(app: State<'_, App>, url: String, fingerprint: String) -> Res<()>
 }
 
 #[tauri::command]
-async fn sign_in(app: State<'_, App>, person: String, password: String) -> Res<Value> {
+async fn sign_in(app: State<'_, App>, person: String, password: String, code: Option<String>) -> Res<Value> {
     let (url, c) = app.conn()?;
     let r = c
         .post(format!("{url}/v1/sign-in"))
-        .json(&json!({ "person": person, "password": password, "client": "app" }))
+        .json(&json!({ "person": person, "password": password, "code": code, "client": "app" }))
         .send()
         .await
         .map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
     let (status, body) = body_of(r).await;
+    // Not refusals: the page asks for the code, or opens the browser.
+    if body["code_needed"] == true || body["browser"] == true {
+        return Ok(body);
+    }
     if status >= 400 {
         return Err(message(&body, status));
     }
@@ -164,40 +168,6 @@ async fn sign_in_method(app: State<'_, App>) -> Res<Value> {
         return Err(message(&body, status));
     }
     Ok(body)
-}
-
-/// Start a sign-in through the appliance's identity provider. The page gets
-/// the code and the provider's page to show; the appliance holds the rest.
-#[tauri::command]
-async fn device_start(app: State<'_, App>) -> Res<Value> {
-    let (url, c) = app.conn()?;
-    let r = c.post(format!("{url}/v1/sign-in/device")).json(&json!({ "client": "app" })).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
-    let (status, body) = body_of(r).await;
-    if status >= 400 {
-        return Err(message(&body, status));
-    }
-    Ok(body)
-}
-
-/// Ask whether the person approved. On approval the session goes to the
-/// keyring and the page gets only who signed in.
-#[tauri::command]
-async fn device_poll(app: State<'_, App>, flow: String) -> Res<Value> {
-    if flow.is_empty() || !flow.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err("not a sign-in".into());
-    }
-    let (url, c) = app.conn()?;
-    let r = c.post(format!("{url}/v1/sign-in/device/{flow}")).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
-    let (status, body) = body_of(r).await;
-    if status == 202 {
-        return Ok(json!({ "pending": true }));
-    }
-    if status >= 400 {
-        return Err(message(&body, status));
-    }
-    let token = body["token"].as_str().ok_or("the appliance sent no session")?;
-    app.store.set_token(&url, token)?;
-    Ok(json!({ "person": body["person"] }))
 }
 
 #[tauri::command]
@@ -385,9 +355,17 @@ const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60
 /// Wait for the sign-in page's redirect: its code and state, or its error.
 #[tauri::command]
 async fn loopback_wait(app: State<'_, App>) -> Res<Value> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let l = app.loopback.lock().unwrap().take().ok_or("no sign-in is waiting")?;
-    let wait = async {
+    let q = redirected(l, SIGN_IN_WAIT).await?;
+    Ok(json!({ "code": q["code"], "state": q["state"] }))
+}
+
+/// The query of the first redirect to `/callback` on this listener: it has
+/// a code and state, or the sign-in page's error. The browser is told to
+/// return to Magnus either way.
+async fn redirected(l: tokio::net::TcpListener, wait: std::time::Duration) -> Res<HashMap<String, String>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let wait_for = async {
         loop {
             let (mut s, _) = l.accept().await.map_err(|e| e.to_string())?;
             let mut buf = vec![0u8; 8192];
@@ -411,16 +389,55 @@ async fn loopback_wait(app: State<'_, App>) -> Res<Value> {
             }
             let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
             let (title, result) = match (q.get("code"), q.get("state"), q.get("error")) {
-                (Some(code), Some(state), _) => ("Signed in. You can close this page and return to Magnus.", Ok(json!({ "code": code, "state": state }))),
-                (_, _, Some(e)) => ("The sign-in did not finish. Return to Magnus.", Err(format!("the app's sign-in page said: {}", q.get("error_description").unwrap_or(e)))),
-                _ => ("The sign-in did not finish. Return to Magnus.", Err("the app's sign-in page sent no code".to_string())),
+                (Some(_), Some(_), _) => ("Signed in. You can close this page and return to Magnus.", Ok(q.clone())),
+                (_, _, Some(e)) => ("The sign-in did not finish. Return to Magnus.", Err(format!("the sign-in page said: {}", q.get("error_description").unwrap_or(e)))),
+                _ => ("The sign-in did not finish. Return to Magnus.", Err("the sign-in page sent no code".to_string())),
             };
             let body = format!("<!doctype html><meta charset=utf-8><title>Magnus</title><p style=\"font:16px system-ui;margin:40px\">{title}</p>");
             let _ = s.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
             return result;
         }
     };
-    tokio::time::timeout(SIGN_IN_WAIT, wait).await.map_err(|_| "the sign-in took too long; start again".to_string())?
+    tokio::time::timeout(wait, wait_for).await.map_err(|_| "the sign-in took too long; start again".to_string())?
+}
+
+/// Sign in through the appliance's identity provider in the person's own
+/// browser (RFC 8252): the browser comes back to a loopback address here
+/// with a code, which only the appliance can exchange (it holds the PKCE
+/// verifier). Everything goes over the pinned connection to the appliance;
+/// the session goes to the keyring and the page gets only who signed in.
+#[tauri::command]
+async fn provider_sign_in(handle: AppHandle, app: State<'_, App>, login_hint: Option<String>) -> Res<Value> {
+    let (url, c) = app.conn()?;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| format!("cannot listen on this computer: {e}"))?;
+    let port = l.local_addr().map_err(|e| e.to_string())?.port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let r = c.post(format!("{url}/v1/sign-in/browser")).json(&json!({ "redirect_uri": redirect_uri, "login_hint": login_hint, "client": "app" })).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
+    let (status, begun) = body_of(r).await;
+    if status >= 400 {
+        return Err(message(&begun, status));
+    }
+    let (Some(state), Some(page)) = (begun["state"].as_str(), begun["authorize_url"].as_str()) else { return Err("the appliance sent no sign-in page".into()) };
+    let page = url::Url::parse(page).map_err(|_| "the appliance sent a sign-in page that is not a link")?;
+    if page.scheme() != "https" && page.scheme() != "http" {
+        return Err("the appliance sent a sign-in page that is not a web link".into());
+    }
+    handle.opener().open_url(page.as_str(), None::<&str>).map_err(|e| format!("cannot open the browser: {e}"))?;
+    // As long as the appliance keeps the sign-in open.
+    let wait = std::time::Duration::from_secs(begun["expires_in"].as_u64().unwrap_or(SIGN_IN_WAIT.as_secs()));
+    let q = redirected(l, wait).await?;
+    if q.get("state").map(String::as_str) != Some(state) {
+        return Err("the browser came back from a different sign-in; start again".into());
+    }
+    let finish = json!({ "state": state, "code": q["code"], "iss": q.get("iss") });
+    let r = c.post(format!("{url}/v1/sign-in/browser/finish")).json(&finish).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
+    let (status, body) = body_of(r).await;
+    if status >= 400 {
+        return Err(message(&body, status));
+    }
+    let token = body["token"].as_str().ok_or("the appliance sent no session")?;
+    app.store.set_token(&url, token)?;
+    Ok(json!({ "person": body["person"] }))
 }
 
 pub fn run() {
@@ -436,7 +453,7 @@ pub fn run() {
             Ok(())
         })
         .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default(), loopback: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, device_start, device_poll, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait, app_info, update::update_state, update::update_look, update::update_install, update::whats_new, look::set_material, look::system_look])
+        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, provider_sign_in, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait, app_info, update::update_state, update::update_look, update::update_install, update::whats_new, look::set_material, look::system_look])
         .run(tauri::generate_context!())
         .expect("start the Magnus app");
 }

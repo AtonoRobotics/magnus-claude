@@ -1,5 +1,5 @@
 //! The desktop app's frontend, driven in a real browser against a real
-//! appliance: sign in (with a password, or through an identity provider),
+//! appliance: sign in (with a password, or through a real Keycloak),
 //! connect Claude, type a task, approve in the inbox,
 //! see the outcome with its evidence (`desktop/tests/flow.mjs`).
 
@@ -15,15 +15,22 @@ enum Sign {
 
 async fn run(how: Sign) {
     let mut f = Flow::start().await;
-    let idp = FakeIdp::start(PERSON).await;
+    let kc = Keycloak::start().await;
+    kc.add_person(PERSON).await;
     let mut cmd = tokio::process::Command::new("node");
     match how {
         Sign::Password => {
             cmd.env("MAGNUS_PASSWORD", PASSWORD);
         }
         Sign::Provider => {
-            idp.configure(&mut f.app).await;
-            cmd.env("MAGNUS_PROVIDER", IDP_LABEL);
+            // Someone with only a Keycloak account: no password set on the
+            // appliance, so their first sign-in goes to Keycloak's page.
+            let passwords = f.app.state_dir.join("accounts/passwords.json");
+            let mut all: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&std::fs::read(&passwords).unwrap()).unwrap();
+            all.remove(PERSON);
+            std::fs::write(&passwords, serde_json::to_vec(&all).unwrap()).unwrap();
+            kc.configure(&mut f.app).await;
+            cmd.env("MAGNUS_PROVIDER", IDP_LABEL).env("MAGNUS_PROVIDER_PASSWORD", password_of(PERSON));
         }
     }
     let key = canary("anthropic-key");

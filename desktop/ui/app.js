@@ -420,61 +420,80 @@ async function signInScreen(note) {
       paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p><p class="small muted">Connecting…</p>`);
       try {
         const m = await Magnus.signInMethod();
-        ask(m.method === "oidc" ? "provider" : "password", { ...data, label: m.label });
+        ask("password", { ...data, label: m.method === "oidc" ? m.label : undefined });
       } catch (err) { note = err.message || String(err); ask(Magnus.kind === "app" ? "address" : "password", data); }
-    } else if (stage === "provider") {
-      paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p>
-        ${data.error ? `<p class="small" style="color:var(--bad)" role="alert">${esc(data.error)}</p>` : ""}
-        <p>You sign in to this appliance with your <strong>${esc(data.label)}</strong> account.</p>
-        <div class="row" style="margin-top:16px"><button class="primary" id="go">Sign in with ${esc(data.label)}</button><button type="button" class="link" id="pwd">Use a password instead</button>${Magnus.kind === "app" ? `<button type="button" class="link" id="back">Other appliance</button>` : ""}</div>`);
-      $("#back")?.addEventListener("click", () => ask("address", data));
-      $("#pwd").onclick = () => ask("password", data);
-      $("#go").onclick = async () => {
-        $("#go").disabled = true;
-        let s;
-        try { s = await Magnus.deviceStart(); } catch (err) { return ask("provider", { ...data, error: err.message || String(err) }); }
-        const link = s.verification_uri_complete || s.verification_uri;
-        let stop = false;
+    } else if (stage === "browser") {
+      // The provider's own page in the person's browser: for a passkey, the
+      // first time, or when their account needs finishing there.
+      const back = () => ask("password", { ...data, message: undefined });
+      if (Magnus.providerSignIn) {
         paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p>
-          <p>Approve the sign-in on the ${esc(s.label)} page that just opened.</p>
-          <p class="small">Check that it shows this code:</p><div class="fp" id="code">${esc(s.user_code)}</div>
-          <div class="row" style="margin-top:14px"><button data-url="${esc(link)}" id="open">Open the sign-in page again</button><button class="link" id="cancel">Cancel</button></div>
-          <p class="small muted" id="wait" role="status">Waiting for you to approve…</p>`);
-        $("#open").onclick = () => Magnus.openExternal(link).catch(() => {});
-        $("#cancel").onclick = () => { stop = true; ask("provider", data); };
-        Magnus.openExternal(link).catch(() => {});
-        const until = Date.now() + s.expires_in * 1000;
-        const every = Math.max(1, s.interval) * 1000;
-        while (!stop && Date.now() < until) {
-          await new Promise(r => setTimeout(r, every));
-          if (stop) return;
-          try {
-            const r = await Magnus.devicePoll(s.flow);
-            if (r.pending) continue;
-            App.me = r.person; App.appliance = data.url || location.origin;
-            return boot();
-          } catch (err) { return ask("provider", { ...data, error: err.message || String(err) }); }
-        }
-        if (!stop) ask("provider", { ...data, error: "The sign-in code expired. Start again." });
-      };
+          <p>${esc(data.message || `Sign in on the ${data.label} page that just opened in your browser, then come back here.`)}</p>
+          <p class="small muted" id="wait" role="status">Waiting for you to sign in…</p>
+          <div class="row" style="margin-top:14px"><button class="link" id="cancel">Cancel</button></div>`);
+        // A cancelled sign-in may still finish in the browser; its answer is ignored.
+        let cancelled = false;
+        $("#cancel").onclick = () => { cancelled = true; back(); };
+        try {
+          const r = await Magnus.providerSignIn(data.person);
+          if (cancelled) return;
+          if (data.person) localStorage.setItem("magnus.person", data.person);
+          App.me = r.person; App.appliance = data.url || location.origin;
+          return boot();
+        } catch (err) { if (!cancelled) ask("password", { ...data, message: undefined, error: err.message || String(err) }); return; }
+      }
+      let s;
+      try { s = await Magnus.deviceStart(); } catch (err) { return ask("password", { ...data, error: err.message || String(err) }); }
+      const link = s.verification_uri_complete || s.verification_uri;
+      let stop = false;
+      paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p>
+        <p>${esc(data.message || `Sign in on the ${s.label} page that just opened.`)}</p>
+        <p class="small">Check that it shows this code:</p><div class="fp" id="code">${esc(s.user_code)}</div>
+        <div class="row" style="margin-top:14px"><button data-url="${esc(link)}" id="open">Open the sign-in page again</button><button class="link" id="cancel">Cancel</button></div>
+        <p class="small muted" id="wait" role="status">Waiting for you to approve…</p>`);
+      $("#open").onclick = () => Magnus.openExternal(link).catch(() => {});
+      $("#cancel").onclick = () => { stop = true; back(); };
+      Magnus.openExternal(link).catch(() => {});
+      const until = Date.now() + s.expires_in * 1000;
+      const every = Math.max(1, s.interval) * 1000;
+      while (!stop && Date.now() < until) {
+        await new Promise(r => setTimeout(r, every));
+        if (stop) return;
+        try {
+          const r = await Magnus.devicePoll(s.flow);
+          if (r.pending) continue;
+          App.me = r.person; App.appliance = data.url || location.origin;
+          return boot();
+        } catch (err) { return ask("password", { ...data, message: undefined, error: err.message || String(err) }); }
+      }
+      if (!stop) ask("password", { ...data, message: undefined, error: "The sign-in code expired. Start again." });
     } else {
+      // Username and password, then the code from an authenticator app if
+      // the person uses one. The password stays in this closure only.
+      const coding = stage === "code";
       paint(box, `<form id="f"><p class="small muted">${esc(data.url || location.origin)}</p>
         ${data.error ? `<p class="small" style="color:var(--bad)" role="alert">${esc(data.error)}</p>` : ""}
-        <label for="who">Your name on the appliance</label><input id="who" style="width:100%" autocomplete="username" value="${esc(data.person || localStorage.getItem("magnus.person") || "")}" required>
-        <label for="pw">Password</label><input id="pw" type="password" style="width:100%" autocomplete="current-password" required>
-        <div class="row" style="margin-top:16px"><button class="primary" id="go">Sign in</button>${data.label ? `<button type="button" class="link" id="prov">Sign in with ${esc(data.label)}</button>` : ""}${Magnus.kind === "app" ? `<button type="button" class="link" id="back">Other appliance</button>` : ""}</div></form>`);
+        ${coding
+          ? `<label for="otp">Enter the 6-digit code from your authenticator app</label><input id="otp" style="width:100%" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" required autofocus>`
+          : `<label for="who">Username</label><input id="who" style="width:100%" autocomplete="username" value="${esc(data.person || localStorage.getItem("magnus.person") || "")}" required>
+        <label for="pw">Password</label><input id="pw" type="password" style="width:100%" autocomplete="current-password" required>`}
+        <div class="row" style="margin-top:16px"><button class="primary" id="go">${coding ? "Continue" : "Sign in"}</button>${coding ? `<button type="button" class="link" id="again">Back</button>` : data.label ? `<button type="button" class="link" id="passkey">Use a passkey instead</button>` : ""}${Magnus.kind === "app" && !coding ? `<button type="button" class="link" id="back">Other appliance</button>` : ""}</div></form>`);
       $("#back")?.addEventListener("click", () => ask("address", data));
-      $("#prov")?.addEventListener("click", () => ask("provider", { ...data, error: undefined }));
+      $("#again")?.addEventListener("click", () => ask("password", { ...data, error: undefined, password: undefined }));
+      $("#passkey")?.addEventListener("click", () => ask("browser", { ...data, person: $("#who").value.trim() || undefined, error: undefined }));
       $("#f").onsubmit = async e => {
         e.preventDefault();
-        const person = $("#who").value.trim();
+        const person = coding ? data.person : $("#who").value.trim();
+        const password = coding ? data.password : $("#pw").value;
         $("#go").disabled = true;
         try {
-          const me = await Magnus.signIn(person, $("#pw").value);
+          const r = await Magnus.signIn(person, password, coding ? $("#otp").value.trim() : undefined);
+          if (r?.code_needed) return ask("code", { ...data, person, password, error: coding ? r.error : undefined });
+          if (r?.browser) return ask("browser", { ...data, person, password: undefined, message: r.error });
           localStorage.setItem("magnus.person", person);
-          App.me = me; App.appliance = data.url || location.origin;
+          App.me = r; App.appliance = data.url || location.origin;
           boot();
-        } catch (err) { ask("password", { ...data, person, error: err.message || String(err) }); }
+        } catch (err) { ask("password", { ...data, person, password: undefined, error: err.message || String(err) }); }
       };
     }
   };
@@ -651,15 +670,29 @@ function tasksView() {
 // A schedule's next run and its last result, in one line.
 function scheduleState(sc) {
   const last = sc.last;
-  return `Next run ${esc(until(sc.next))} · ${sc.last_failed ? `Last firing <span class="chip bad">could not start</span> ${esc(sc.last_failed.error)} <span class="faint">${esc(when(sc.last_failed.at))}</span>`
+  return `${sc.paused ? "" : `Next run ${esc(until(sc.next))} · `}${sc.last_failed ? `Last firing <span class="chip bad">could not start</span> ${esc(sc.last_failed.error)} <span class="faint">${esc(when(sc.last_failed.at))}</span>`
     : last ? `Last result: ${chip(last.status)} <a href="#/task/${enc(last.task_id)}" data-open="task:${esc(last.task_id)}">${esc(firstLine(last.summary) || last.title)}</a> <span class="faint">${esc(when(last.ended_at || last.created_at))}</span>` : "No results yet"}`;
+}
+
+// When a schedule ends, what it may spend a run, and why it is paused or
+// skipped a run: the same lines in the list and in the schedule itself.
+function scheduleFacts(sc) {
+  return `<div class="small muted" data-ends>${sc.until || sc.max_runs ? `Ends: ${esc(ends(sc))}` : "Runs until you stop it"}${sc.max_runs ? ` · ${esc(sc.started)} of ${esc(sc.max_runs)} runs so far` : ""}${sc.budget ? ` · up to $${esc(sc.budget.max_usd)} a run` : ""}</div>
+    ${sc.paused ? `<div class="small" data-paused><span class="chip bad">Paused</span> ${esc(sc.paused)}. ${sc.paused_on ? `It goes on once you answer that run (<a href="#/task/${enc(sc.paused_on)}" data-open="task:${esc(sc.paused_on)}">open it</a>).` : "Nothing runs until you resume it."}</div>` : ""}
+    ${sc.skipped ? `<div class="small muted" data-skipped>Skipped a run ${esc(when(sc.skipped.at))}: ${esc(sc.skipped.why)} (<a href="#/task/${enc(sc.skipped.task)}" data-open="task:${esc(sc.skipped.task)}">open it</a>)</div>` : ""}`;
+}
+// Resume, for a schedule paused until the person says so (one paused on a
+// run waiting for them goes on once they answer it), and Stop schedule.
+function scheduleButtons(sc, stop = "Stop schedule") {
+  return `${sc.paused && !sc.paused_on ? `<button data-act="resume-schedule" data-id="${esc(sc.id)}">Resume</button>` : ""}<button data-act="stop-schedule" data-id="${esc(sc.id)}">${stop}</button>`;
 }
 
 // Schedules, soonest first: each opens beside the conversation.
 function schedulesView() {
   const list = [...App.schedules].sort((a, b) => (a.next || "").localeCompare(b.next || ""));
   return list.length ? list.map(sc => `<div class="card flat sched" data-schedule="${esc(sc.id)}">
-      <div class="spread"><a class="ttl" href="#/schedules" data-open="schedule:${esc(sc.id)}" title="${esc(sc.text)}">${esc(sc.title)}</a><span class="small muted">${esc(rule(sc))}</span></div>
+      <div class="spread"><a class="ttl" href="#/schedules" data-open="schedule:${esc(sc.id)}" title="${esc(sc.text)}">${esc(sc.title)}</a><span class="small muted">${esc(rule(sc))} ${scheduleButtons(sc)}</span></div>
+      ${scheduleFacts(sc)}
       <div class="small muted" data-last>${scheduleState(sc)}</div>
       ${sc.runs.some(r => r.needs_you) ? `<ul class="tlist">${sc.runs.filter(r => r.needs_you).map(taskRow).join("")}</ul>` : ""}</div>`).join("")
     : `<p class="empty">No schedules yet. Ask in a conversation for something done every day or every week.</p>`;
@@ -670,8 +703,8 @@ function scheduleView(id) {
   const sc = App.schedules.find(x => x.id === id);
   if (!sc) return `<p class="empty">This schedule was stopped.</p>`;
   return `<h2 class="ptitle">${esc(sc.title)}</h2><p class="small muted">${esc(rule(sc))}</p>
-    <div class="card flat sched" data-schedule="${esc(sc.id)}"><p>${esc(sc.text)}</p><div class="small" data-last>${scheduleState(sc)}</div></div>
-    <div class="row">${moveControl(sc.id, sc.project, App.projects)}<button data-act="stop-schedule" data-id="${esc(sc.id)}">Stop this schedule</button></div>
+    <div class="card flat sched" data-schedule="${esc(sc.id)}"><p>${esc(sc.text)}</p>${scheduleFacts(sc)}<div class="small" data-last>${scheduleState(sc)}</div></div>
+    <div class="row">${moveControl(sc.id, sc.project, App.projects)}${scheduleButtons(sc, "Stop this schedule")}</div>
     <h3>Runs</h3>${sc.runs.length ? `<ul class="tlist">${sc.runs.map(taskRow).join("")}</ul>` : `<p class="empty">None yet.</p>`}
     ${sc.failures?.length ? `<h3>Firings that could not start</h3><ul class="small">${sc.failures.map(f => `<li>${esc(when(f.at))}: ${esc(f.error)}</li>`).join("")}</ul>` : ""}`;
 }
@@ -935,6 +968,13 @@ function waitingCard(id, ui) {
   const i = id && App.inbox.find(x => x.id === id && x.status === "open");
   return i ? card(i, ui.composed || []) : "";
 }
+// When a schedule stops: a time, a number of runs, both, or never.
+function ends(e) {
+  const parts = [];
+  if (e.until) parts.push(`no run after ${new Date(e.until).toLocaleString()}`);
+  if (e.max_runs) parts.push(`at most ${e.max_runs} run${e.max_runs === 1 ? "" : "s"}`);
+  return parts.length ? parts.join(", ") : "until you stop it";
+}
 // Where a task stands, as the design draws it: an icon and a pill. A task
 // waiting on a decision the person can make needs them.
 const needsYou = t => !!t.waiting_item && App.inbox.some(i => i.id === t.waiting_item && i.status === "open" && i.can_respond);
@@ -954,7 +994,7 @@ function taskCard(t) {
 // next and how its last run went.
 function scheduleText(sc) {
   const last = sc.last;
-  return `Next run ${until(sc.next)} · ${sc.last_failed ? `Last firing could not start: ${sc.last_failed.error}` : last ? `Last result: ${(STATUS[last.status] || ["", last.status])[1]}, ${when(last.ended_at || last.created_at)}` : "No results yet"}`;
+  return `${sc.paused ? `Paused: ${sc.paused}` : `Next run ${until(sc.next)}`} · ${sc.last_failed ? `Last firing could not start: ${sc.last_failed.error}` : last ? `Last result: ${(STATUS[last.status] || ["", last.status])[1]}, ${when(last.ended_at || last.created_at)}` : "No results yet"}`;
 }
 function scheduleLine(e) {
   if (e.state === "declined") return `<p class="small"><span class="chip">Declined</span></p>`;
@@ -1094,7 +1134,7 @@ function entry(e, ui = {}) {
       if (e.state !== "open") return `<div data-card="${esc(e.card)}">${scheduleLine(e)}</div>`;
       return `<div class="confirm chatcard" data-card="${esc(e.card)}"><div class="cc-head"><span class="st sch">${icon("calendar")}</span><strong>Start this schedule?</strong></div>
         <p class="cc-text">${esc(e.text)}</p>
-        <div class="tiles"><div><span>When</span><strong>${esc(rule(e))}</strong></div><div><span>What</span><strong>${esc(e.scope || "")}</strong></div>
+        <div class="tiles"><div><span>When</span><strong>${esc(rule(e))}</strong></div><div><span>What</span><strong>${esc(e.scope || "")}</strong></div><div><span>Ends</span><strong>${esc(ends(e))}</strong></div>
           <div><span>Budget</span><strong class="num">Up to $${esc(b.max_usd)} a run</strong><span class="small">${esc(b.max_model_calls)} model calls, ${esc(b.max_actions)} actions</span></div></div>
         <p class="small muted">It acts for you (${esc(e.acts_for)}), with your access; what it needs from you shows under Needs you.</p>${taintNote(e.taint)}
         <div class="row cc-act"><button class="primary" data-decide="confirm">Start schedule</button><button data-act="change-schedule">Change</button><button class="link" data-decide="decline">Not now</button></div></div>`;
@@ -1240,7 +1280,8 @@ function card(i, composed) {
       break;
     case "schedule_proposal":
       body = `<div class="what"><div class="field"><span>Task</span><span>${esc(d.text)}</span></div>
-        <div class="field"><span>When</span><span>${d.every_minutes ? `every ${esc(d.every_minutes)} minutes` : `daily at ${esc(d.daily_at)}`}</span></div></div>${taintNote(d.taint)}
+        <div class="field"><span>When</span><span>${d.every_minutes ? `every ${esc(d.every_minutes)} minutes` : `daily at ${esc(d.daily_at)}`}</span></div>
+        <div class="field"><span>Ends</span><span>${esc(ends(d))}</span></div></div>${taintNote(d.taint)}
         ${buttons(i, [["accept", "Schedule it", "primary"], ["reject", "Reject"]])}`;
       break;
     case "message":
@@ -1656,8 +1697,9 @@ function wirePanel() {
           await api("POST", `/v1/tasks/${enc(id)}/cancel`, {}); break;
         case "resume": await api("POST", `/v1/tasks/${enc(id)}/resume`, {}); break;
         case "stop-schedule":
-          if (!confirm("Stop this schedule? It runs no more; what it already did stays.")) return;
+          if (!confirm("Stop this schedule? No more of its runs start. Runs already started go on, and stay in Tasks.")) return;
           await api("DELETE", `/v1/schedules/${enc(id)}`); toast("The schedule is stopped."); break;
+        case "resume-schedule": await api("POST", `/v1/schedules/${enc(id)}/resume`, {}); toast("Schedule resumed."); break;
         case "save-ins":
           await api("PUT", `/v1/projects/${enc(id)}`, { instructions: $("#pin", el).value }); delete drafts[`pin-${id}`];
           toast("Instructions saved. New tasks here use them."); break;

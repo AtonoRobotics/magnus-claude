@@ -1,6 +1,7 @@
 //! The installed desktop app, driven through tauri-driver against a real
 //! appliance over HTTPS. Each test pins the certificate and signs in through
-//! the identity provider, then does what crosses into the desktop shell:
+//! a real Keycloak in the computer's default browser, then does what crosses
+//! into the desktop shell:
 //! - `desktop/tests/app.mjs`: connect Claude, type a task, approve in the
 //!   inbox, see the outcome with its evidence, download the delivered file.
 //! - `desktop/tests/app-library.mjs`: download a file from the library.
@@ -69,6 +70,15 @@ impl Driver {
         std::fs::create_dir_all(&config).unwrap();
         std::fs::create_dir_all(&downloads).unwrap();
         std::fs::write(config.join("user-dirs.dirs"), format!("XDG_DOWNLOAD_DIR=\"{}\"\n", downloads.display())).unwrap();
+        // The computer's default browser, as a person sets one: the real
+        // Chromium, signing in at the provider as whoever the test names in
+        // the sign-in-as file (tests/scratch/sign-in-browser.mjs).
+        let apps = home.path().join(".local/share/applications");
+        std::fs::create_dir_all(&apps).unwrap();
+        let node = which("node").expect("node");
+        let browser = workspace_root().join("tests/scratch/sign-in-browser.mjs");
+        std::fs::write(apps.join("magnus-test-browser.desktop"), format!("[Desktop Entry]\nType=Application\nName=Test browser\nExec={} {} %u\nMimeType=x-scheme-handler/http;x-scheme-handler/https;\n", node.display(), browser.display())).unwrap();
+        std::fs::write(config.join("mimeapps.list"), "[Default Applications]\nx-scheme-handler/http=magnus-test-browser.desktop\nx-scheme-handler/https=magnus-test-browser.desktop\n").unwrap();
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let native_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let child = tokio::process::Command::new("xvfb-run")
@@ -79,6 +89,8 @@ impl Driver {
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", &config)
             .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+            .env("MAGNUS_SIGN_IN_AS", home.path().join("sign-in-as"))
+            .env("MAGNUS_CHROMIUM", chromium())
             .env("NO_AT_BRIDGE", "1")
             .envs(envs.iter().copied())
             .stdout(Stdio::null())
@@ -143,6 +155,8 @@ impl Driver {
             .env("MAGNUS_FINGERPRINT", fingerprint)
             .env("MAGNUS_PERSON", PERSON)
             .env("MAGNUS_PROVIDER", IDP_LABEL)
+            .env("MAGNUS_SIGN_IN_AS", self.home.path().join("sign-in-as"))
+            .env("MAGNUS_PASSWORDS", json!(REALM_PEOPLE.iter().map(|p| (p.to_string(), password_of(p))).collect::<std::collections::BTreeMap<_, _>>()).to_string())
             .envs(envs.iter().copied())
             .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
             .output()
@@ -152,13 +166,25 @@ impl Driver {
     }
 }
 
-/// An appliance serving HTTPS with sign-in through the identity provider.
-async fn appliance() -> (Flow, FakeIdp, String, String) {
+/// The people who can sign in at the test Keycloak.
+const REALM_PEOPLE: [&str; 2] = [PERSON, "carol"];
+
+/// A Keycloak realm with the test's people, which the appliance signs in through.
+async fn keycloak(app: &mut magnus_invariants::Appliance) -> Keycloak {
+    let kc = Keycloak::start().await;
+    for p in REALM_PEOPLE {
+        kc.add_person(p).await;
+    }
+    kc.configure(app).await;
+    kc
+}
+
+/// An appliance serving HTTPS with sign-in through Keycloak.
+async fn appliance() -> (Flow, Keycloak, String, String) {
     let mut f = Flow::start().await;
-    let idp = FakeIdp::start(PERSON).await;
-    idp.configure(&mut f.app).await;
+    let kc = keycloak(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
-    (f, idp, url, fingerprint)
+    (f, kc, url, fingerprint)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -244,8 +270,7 @@ async fn every_message_action_works_in_the_installed_app() {
         }
     });
     let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
-    let idp = FakeIdp::start(PERSON).await;
-    idp.configure(&mut f.app).await;
+    let _kc = keycloak(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
     let d = Driver::start().await;
     let (display, xauth) = d.display();
@@ -283,8 +308,7 @@ async fn a_conversation_goes_to_the_trash_comes_back_and_is_removed_in_the_insta
         }
     });
     let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
-    let idp = FakeIdp::start(PERSON).await;
-    idp.configure(&mut f.app).await;
+    let _kc = keycloak(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
     let d = Driver::start().await;
     let (ok, log) = d.script("app-trash.mjs", &url, &fingerprint, &[]).await;
@@ -343,8 +367,7 @@ async fn composed_answers_stream_text_first_and_reach_no_network_in_the_installe
         }
     });
     let mut f = Flow::start_with(FakeWeb::start(&[]).await, s).await;
-    let idp = FakeIdp::start(PERSON).await;
-    idp.configure(&mut f.app).await;
+    let _kc = keycloak(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
     let d = Driver::start().await;
     let (ok, log) = d
@@ -394,8 +417,7 @@ async fn the_installed_app_reads_aloud_in_the_appliances_voice() {
         c.insert("read_aloud".into(), r.into());
     })
     .await;
-    let idp = FakeIdp::start(PERSON).await;
-    idp.configure(&mut f.app).await;
+    let _kc = keycloak(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
     let d = Driver::start().await;
     let sentences = SCRIPT.split(". ").count().to_string();
@@ -494,8 +516,7 @@ async fn the_installed_app_updates_itself_from_the_appliance_while_a_task_waits(
     let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
     cfg.insert("updates".into(), toml::Value::Table(toml::toml! { dir = (updates.display().to_string()) }));
     std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
-    let idp = FakeIdp::start(PERSON).await;
-    idp.configure(&mut f.app).await;
+    let _kc = keycloak(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
     let desktop = updates.join("desktop");
     std::fs::create_dir_all(&desktop).unwrap();

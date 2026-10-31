@@ -20,6 +20,8 @@ pub struct Config {
     #[serde(default)]
     pub trash: Trash,
     #[serde(default)]
+    pub schedules: Schedules,
+    #[serde(default)]
     pub updates: Updates,
     /// The file this was read from: a new release is checked against it.
     #[serde(skip)]
@@ -136,6 +138,29 @@ pub struct Oidc {
     /// Where it carries their roles (Keycloak realm roles: `/realm_access/roles`).
     #[serde(default)]
     pub roles_claim: Option<String>,
+    /// How long a sign-in in the person's browser may take: finding a
+    /// password or passkey, two-factor. The app waits as long, from what the
+    /// appliance tells it.
+    #[serde(default = "sign_in_minutes")]
+    pub sign_in_minutes: u32,
+    /// A confidential client whose service account may only view users
+    /// (Keycloak: `realm-management` → `view-users`). The appliance asks it
+    /// who uses a code from an authenticator app, since the password grant
+    /// answers the same to a wrong password and a missing code.
+    #[serde(default)]
+    pub status_client: Option<String>,
+    /// The vault secret holding that client's secret.
+    #[serde(default)]
+    pub status_credential: Option<String>,
+    /// Where Keycloak's admin API answers, when not at the issuer's host: a
+    /// server can keep it on an address of its own (`hostname-admin`), such
+    /// as `https://127.0.0.1:19446`. Unset: the issuer's host.
+    #[serde(default)]
+    pub status_admin_url: Option<String>,
+    /// A PEM certificate authority to trust for that address, when a
+    /// private one issued its certificate.
+    #[serde(default)]
+    pub status_admin_ca: Option<std::path::PathBuf>,
 }
 
 fn person_claim() -> String {
@@ -146,6 +171,9 @@ fn oidc_scope() -> String {
 }
 fn max_pending() -> usize {
     100
+}
+fn sign_in_minutes() -> u32 {
+    10
 }
 
 fn session_days() -> u32 {
@@ -257,6 +285,33 @@ impl Default for Trash {
     fn default() -> Self {
         Trash { keep_days: keep_days() }
     }
+}
+
+/// Recurring tasks.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Schedules {
+    /// A schedule pauses itself, and tells its person, after this many of
+    /// its runs fail in a row (or cannot start), so a broken one stops
+    /// spending until someone looks.
+    #[serde(default = "pause_after_failures")]
+    pub pause_after_failures: u32,
+    /// The shortest interval a schedule may repeat at.
+    #[serde(default = "min_every_minutes")]
+    pub min_every_minutes: u32,
+}
+
+impl Default for Schedules {
+    fn default() -> Self {
+        Schedules { pause_after_failures: pause_after_failures(), min_every_minutes: min_every_minutes() }
+    }
+}
+
+fn pause_after_failures() -> u32 {
+    3
+}
+
+fn min_every_minutes() -> u32 {
+    5
 }
 
 /// Signed updates of the appliance and of the desktop app (gate item 5).
@@ -545,6 +600,16 @@ impl Config {
 
     pub fn person(&self, id: &str) -> Option<&Person> {
         self.people.iter().find(|p| p.id == id)
+    }
+
+    /// Whether a password set on the appliance signs this person in. With an
+    /// identity provider it is the owner's backup alone, so turning someone
+    /// off at the provider shuts them out (owner, 2026-10-30: "The back up
+    /// password is only for me"), and only on the appliance's own machine
+    /// (the API checks where); the owner is read from this file, never from
+    /// the provider. Without one, it is everyone's way in.
+    pub fn may_use_password(&self, id: &str) -> bool {
+        self.person(id).is_some_and(|p| self.sign_in.oidc.is_none() || p.is_owner())
     }
 
     pub fn person_by_token(&self, token: &str) -> Option<&Person> {

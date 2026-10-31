@@ -100,7 +100,7 @@ impl Kernel {
             vault.seal();
         }
         let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
-        let oidc = cfg.sign_in.oidc.clone().map(crate::oidc::Provider::new).transpose()?;
+        let oidc = cfg.sign_in.oidc.clone().map(|o| crate::oidc::Provider::new(o, vault.clone())).transpose()?;
         let adapters = Adapters::new(&cfg.appliance.state_dir, vault.clone(), &cfg.adapters);
         let live_text = Arc::new(Live { tx: tokio::sync::broadcast::channel(1024).0, so_far: Mutex::new(HashMap::new()) });
         let k = Arc::new(Kernel {
@@ -204,6 +204,11 @@ impl Kernel {
     /// in place of the config's (E2).
     /// A person's rights: the identity provider's where it names them, else
     /// the roles the owner set in Settings, else the config's.
+    /// The identity provider people sign in through, if the appliance has one.
+    pub fn identity(&self) -> Option<&dyn crate::identity::Identity> {
+        self.oidc.as_ref().map(|o| o as &dyn crate::identity::Identity)
+    }
+
     pub fn person(&self, id: &str) -> Option<Person> {
         let mut p = self.cfg.person(id)?.clone();
         if let Some(r) = self.read(|s| s.roles_set.get(id).cloned()) {
@@ -391,9 +396,60 @@ impl Kernel {
     pub async fn sweep(self: Arc<Self>) {
         loop {
             let now = chrono::Utc::now();
+            // A schedule past its end or out of runs is over: it goes, and
+            // its person is told.
+            let finished: Vec<(crate::state::Schedule, String)> =
+                self.read(|s| s.schedules.values().filter_map(|x| x.finished(now).map(|why| (x.clone(), why))).collect());
+            for (sc, why) in finished {
+                if self.emit("kernel", Ev::ScheduleEnded { id: sc.id.clone(), reason: why.clone() }).await.is_ok() {
+                    let _ = self.post_notice(None, None, sc.person.clone(), format!("A schedule ended: {}", sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect())), serde_json::json!({ "reason": "schedule_ended", "evidence": { "schedule": sc.id, "why": why } })).await;
+                }
+            }
+            // A schedule whose run waits on a person pauses until that person
+            // answers (owner, 2026-10-30: without it, it acts without the
+            // authority or the information it needs), then goes on by itself.
+            let (hold, release): (Vec<(crate::state::Schedule, String, String)>, Vec<String>) = self.read(|s| {
+                let mut hold = vec![];
+                let mut release = vec![];
+                for x in s.schedules.values() {
+                    match (s.held_by_person(&x.id), &x.paused_on) {
+                        (Some((task, why)), None) if x.paused.is_none() => hold.push((x.clone(), task, why)),
+                        (None, Some(_)) => release.push(x.id.clone()),
+                        _ => {}
+                    }
+                }
+                (hold, release)
+            });
+            for (sc, task, why) in hold {
+                if self.emit("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why.clone(), task: Some(task.clone()) }).await.is_ok() {
+                    let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                    let _ = self.post_notice(Some(task.clone()), None, sc.person.clone(), format!("A schedule paused until you answer its run: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why, "task": task } })).await;
+                }
+            }
+            for id in release {
+                let _ = self.emit("kernel", Ev::ScheduleResumed { id }).await;
+            }
             let due_schedules: Vec<crate::state::Schedule> =
                 self.read(|s| if s.kill_switch { vec![] } else { s.schedules.values().filter(|x| x.next_due().is_some_and(|t| t <= now)).cloned().collect() });
             for sc in due_schedules {
+                let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                // Not while its last run is open: running, or waiting on
+                // someone. Runs that pile up waiting flood the inbox
+                // (2026-10-30: 75 runs of one test schedule).
+                if let Some((task, why)) = self.read(|s| s.open_run_of(&sc.id)) {
+                    let _ = self.emit("kernel", Ev::ScheduleSkipped { id: sc.id.clone(), task, reason: why }).await;
+                    continue;
+                }
+                // Too many failures in a row: it stops spending until its
+                // person looks.
+                let n = self.cfg.schedules.pause_after_failures;
+                if n > 0 && self.read(|s| s.failures_in_a_row(&sc.id)) >= n {
+                    let why = format!("its last {n} runs failed");
+                    if self.emit("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why.clone(), task: None }).await.is_ok() {
+                        let _ = self.post_notice(None, None, sc.person.clone(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why } })).await;
+                    }
+                    continue;
+                }
                 // A scheduled task acts for the person who set it up (K54),
                 // within the schedule's budget.
                 // Its runs start in the project the schedule is in now.
@@ -410,9 +466,7 @@ impl Kernel {
                     Err(e) => {
                         tracing::error!("schedule {}: {e:#}", sc.id);
                         let _ = self.emit("kernel", Ev::ScheduleFailed { id: sc.id.clone(), reason: format!("{e:#}") }).await;
-                        let _ = self
-                            .post_notice(None, None, sc.person.clone(), format!("A schedule could not start: {}", sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect())), serde_json::json!({ "reason": "schedule_failed", "evidence": { "schedule": sc.id, "error": format!("{e:#}") } }))
-                            .await;
+                        let _ = self.post_notice(None, None, sc.person.clone(), format!("A schedule could not start: {title}"), serde_json::json!({ "reason": "schedule_failed", "evidence": { "schedule": sc.id, "error": format!("{e:#}") } })).await;
                     }
                 }
             }

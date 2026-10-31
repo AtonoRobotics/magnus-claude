@@ -292,7 +292,7 @@ impl Kernel {
         if text.is_empty() || scope.is_empty() {
             return ("create_schedule needs text and scope. A retry without them will not help.".into(), true, None);
         }
-        let (every, daily) = match crate::api::rule_for(&a.input) {
+        let (every, daily) = match crate::api::rule_for(&a.input, self.cfg.schedules.min_every_minutes) {
             Ok(r) => r,
             Err(m) => return (format!("{m}. A retry with the same values will not help."), true, None),
         };
@@ -300,9 +300,13 @@ impl Kernel {
             Ok(b) => b,
             Err(m) => return (format!("{m}. A retry with the same budget will not help."), true, None),
         };
+        let (until, max_runs) = match crate::api::end_for(&a.input) {
+            Ok(r) => r,
+            Err(m) => return (format!("{m}. A retry with the same values will not help."), true, None),
+        };
         let card = derived("card", key);
         let title = a.input["title"].as_str().map(str::trim).filter(|t| !t.is_empty());
-        let data = json!({ "card": card, "text": text, "title": title, "every_minutes": every, "daily_at": daily, "scope": scope, "budget": budget });
+        let data = json!({ "card": card, "text": text, "title": title, "every_minutes": every, "daily_at": daily, "until": until, "max_runs": max_runs, "scope": scope, "budget": budget });
         (format!("A card for this schedule ({card}) is in the thread. Nothing is scheduled until the person confirms it."), false, Some(data))
     }
 
@@ -362,6 +366,8 @@ impl Kernel {
                         card: Some(card.into()),
                         label: Some(Label { untrusted: run.untrusted, private: run.private }),
                         title: d["title"].as_str().map(String::from),
+                        until: serde_json::from_value(d["until"].clone()).ok().flatten(),
+                        max_runs: d["max_runs"].as_u64().map(|m| m as u32),
                     },
                 )
                 .await?;

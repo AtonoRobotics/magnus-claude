@@ -6,8 +6,10 @@
 // MAGNUS_URL       the appliance (its own page, or a page that loads ../ui)
 // MAGNUS_PERSON    the person signing in, with either
 //   MAGNUS_PASSWORD  their password, or
-//   MAGNUS_PROVIDER  the identity provider's name on the sign-in button
-//                    (the person approves on the provider's page)
+//   MAGNUS_PROVIDER  the identity provider's name, and
+//   MAGNUS_PROVIDER_PASSWORD  their password at the provider (Keycloak): typed
+//                    in the page, then, the first time, on the provider's own
+//                    page, where they also grant access
 // MAGNUS_API_KEY   the key to paste when connecting Claude
 // MAGNUS_TASK      the work to ask for in a conversation
 // MAGNUS_CHAT_QUESTION, MAGNUS_CHAT_ANSWER  optionally, a question to ask in
@@ -24,6 +26,7 @@ const env = k => { const v = process.env[k]; if (!v) { console.error(`${k} is no
 const [base, person, apiKey, task] = ["MAGNUS_URL", "MAGNUS_PERSON", "MAGNUS_API_KEY", "MAGNUS_TASK"].map(env);
 const provider = process.env.MAGNUS_PROVIDER;
 const password = provider ? null : env("MAGNUS_PASSWORD");
+const providerPassword = provider ? env("MAGNUS_PROVIDER_PASSWORD") : null;
 const shots = process.env.MAGNUS_SHOTS;
 if (shots) mkdirSync(shots, { recursive: true });
 
@@ -46,13 +49,22 @@ const conversations = () => page.locator('#side a[href^="#/chat/"]').count();
 if (provider) await step(`sign in with ${provider}`, async () => {
   await page.goto(base);
   const popup = page.waitForEvent("popup", { timeout: T });
-  await page.getByRole("button", { name: `Sign in with ${provider}` }).click();
-  // The provider's page opens with the code; the person approves there.
+  await page.getByLabel("Username").fill(person);
+  await page.getByLabel("Password").fill(providerPassword);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  // The first time, the provider's page opens with the code; the person
+  // signs in there and grants access.
   const idp = await popup;
   await idp.waitForLoadState();
+  // Magnus opened the provider's page for the code it shows (Keycloak then
+  // moves on to its own sign-in page).
   const code = (await page.locator("#code").innerText()).trim();
-  if (!idp.url().includes(code)) throw new Error(`the provider's page ${idp.url()} is not for code ${code}`);
-  await idp.getByText(`Signed in as ${person}`).waitFor({ timeout: T });
+  const opened = await page.locator("#open").getAttribute("data-url");
+  if (!opened.includes(code)) throw new Error(`Magnus opened ${opened}, which is not for code ${code}`);
+  await idp.fill("#username", person);
+  await idp.fill("#password", providerPassword);
+  await idp.click("#kc-login");
+  await idp.locator("input[name=accept], button[name=accept]").first().click({ timeout: T });
   await home();
   const page_kept = await page.evaluate(() => JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie);
   if (page_kept.includes("mgs_")) throw new Error("the session token reached the page");
@@ -60,7 +72,7 @@ if (provider) await step(`sign in with ${provider}`, async () => {
 
 if (!provider) await step("sign in", async () => {
   await page.goto(base);
-  await page.getByLabel("Your name on the appliance").fill(person);
+  await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill("not the password");
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.getByRole("alert").filter({ hasText: "wrong" }).waitFor({ timeout: T });

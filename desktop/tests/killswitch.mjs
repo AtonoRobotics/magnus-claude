@@ -32,7 +32,7 @@ const step = async (name, f) => {
 
 await step("sign in", async () => {
   await page.goto(base);
-  await page.getByLabel("Your name on the appliance").fill(person);
+  await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   // Signed in: the workspace, with Needs you in the sidebar.
