@@ -33,7 +33,7 @@ const card = () => page.locator(`[data-schedule="${id}"]`);
 
 await step("sign in", async () => {
   await page.goto(base);
-  await page.getByLabel("Your name on the appliance").fill(person);
+  await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.getByRole("heading", { name: "Home" }).waitFor({ timeout: T });
