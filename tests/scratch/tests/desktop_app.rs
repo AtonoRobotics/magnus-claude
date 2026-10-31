@@ -55,14 +55,17 @@ fn listener(port: u16) -> String {
 }
 
 /// Whether the process listening on loopback `port` descends from `root`;
-/// None while nothing listens there.
+/// None while nothing listens there, or while `ss` does not yet name its
+/// owner: it reads the processes' open files before it lists the sockets, so
+/// a socket bound in between is listed without one (as this driver's own
+/// were, three times in a row, in CI on 2026-10-31). A driver that cannot
+/// bind its port exits, which the caller sees.
 fn held_by(port: u16, root: u32) -> Option<bool> {
     let text = listener(port);
-    if text.is_empty() {
+    let pids: Vec<u32> = text.split("pid=").skip(1).filter_map(|s| s.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).collect();
+    if pids.is_empty() {
         return None;
     }
-    let pids: Vec<u32> = text.split("pid=").skip(1).filter_map(|s| s.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).collect();
-    // A listener whose owner `ss` cannot name is not ours.
     Some(pids.iter().any(|&p| {
         let mut p = p;
         while p > 1 {
