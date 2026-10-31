@@ -27,10 +27,16 @@ suggest/interrupt/act permissions, and judge-scored behavior evals.
 
 ## Steps
 
+Each step ships with the eval suites that gate it (the spec's seven, in
+`eval/behavior/`): what a step offers people reaches them only once its
+suites pass. A judge model scores what needs judging, and a person
+spot-checks each run. A character or a provider is offered only after it
+passes.
+
 1. **Identity and the character module.**
-   - The functional personality (the spec's eight traits) becomes Magnus's
-     identity, in both prompts (`instructions/chat.md`, `agent.md`), the same
-     for every provider.
+   - The functional personality (the spec's eight traits) is written into
+     both prompts (`instructions/chat.md`, `agent.md`) as a description of
+     who Magnus is, not as a list of commands, the same for every provider.
    - A character is a versioned package, `characters/<id>/`: `bible.md` (the
      spec's eight sections) and `character.toml` (id, version, voice). The
      default is the spec's appendix, the chief of staff.
@@ -42,6 +48,8 @@ suggest/interrupt/act permissions, and judge-scored behavior evals.
    - Tests: the character's id and version are on every logged call; a
      person's choice holds across a restart and applies only to them; an org
      lock refuses another choice.
+   - Gated by the suites: substance invariance, character consistency,
+     pushback, recession, long-session wear.
 2. **Relationship memory and reactions.**
    - The person's tone instructions ("fewer jokes"), what they delegated and
      standing decisions are kept as relationship memory, always in context
@@ -55,13 +63,16 @@ suggest/interrupt/act permissions, and judge-scored behavior evals.
 3. **Suggestions and observations.**
    - One schema-validated card: title, plan, evidence, permissions, and
      Accept / Not now / Decline with a reason. The validator refuses a card
-     whose evidence does not point at something real in the log (a task, a
-     message, a connector item).
+     whose evidence does not point at something real: an event in the log (a
+     task, a message), or an item in a connected app that Magnus actually
+     read (recorded when read). A cold-start card's evidence is the second
+     kind.
    - Accept creates the task or schedule. Schedule cards become this card.
    - Every card and its answer go in a ledger the model reads before it
      suggests again.
    - At cold start, and for each newly connected app, Magnus looks at what it
      may see and proposes two or three things it could take over.
+   - Gated by the suite: suggestion grounding.
 4. **The proactive loop.**
    - The kernel wakes a review run for each person every 60 minutes in their
      working hours and once overnight, and on events: a task done or failed,
@@ -71,28 +82,25 @@ suggest/interrupt/act permissions, and judge-scored behavior evals.
      next session, interrupt now, propose an automation, or act.
    - Cedar gets three actions per resource: suggest, interrupt, act. Acting
      without a grant becomes an approval request.
-   - Interruptions: at most 3 per working day by default (each person can
-     change it). Over-budget items wait for the next session. None outside
-     working hours. The kill switch stops the loop.
+   - Interruptions: at most 3 per working day by default, a setting each
+     person can change. Over-budget items wait for the next session. None
+     outside working hours. The kill switch stops the loop.
    - Opening the app shows what changed and the queued observations.
-5. **Behavior evals.**
-   - The spec's seven suites in `eval/behavior/`: substance invariance,
-     character consistency, pushback, recession, long-session wear, proactive
-     precision, suggestion grounding.
-   - A judge model scores what needs judging, and a person spot-checks each
-     run.
-   - A character or a provider is offered to people only after it passes.
-
-Each step lands as its own pull request, with its tests, in this order:
-step 1 is what every later step speaks through, and step 4 needs step 3's
-cards.
+   - Gated by the suite: proactive precision.
+Each step lands as its own pull request, with its tests and its suites, in
+this order: step 1 is what every later step speaks through, and step 4
+needs step 3's cards.
 
 ## Open
 
 - The default character. The spec recommends the chief-of-staff draft in its
-  appendix and leaves the choice to the owner. Step 1 ships that draft unless
-  the owner replaces it.
+  appendix and leaves the choice to the owner. Step 1 ships that draft; alpha
+  feedback will show whether it lands.
 - The org-wide character lock needs an org admin. PR #34 (the admin console
   plan) proposes the `admin` role. Until then, the owner sets the lock.
 - Cost: the review loop makes about 10 model calls per person per working
   day, plus one per event that wakes it.
+- Review (2026-10-31): each step ships with its own suites; card evidence
+  may be a connected-app item Magnus read; the interruption cap is per
+  working day and each person's to change; the traits are written as
+  identity, not commands.
