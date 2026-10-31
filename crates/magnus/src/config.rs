@@ -230,6 +230,13 @@ pub struct Budget {
     pub max_usd: f64,
 }
 
+impl Budget {
+    /// Each limit the lower of the two.
+    pub fn within(&self, cap: &Budget) -> Budget {
+        Budget { max_model_calls: self.max_model_calls.min(cap.max_model_calls), max_actions: self.max_actions.min(cap.max_actions), max_usd: self.max_usd.min(cap.max_usd) }
+    }
+}
+
 impl Default for Budget {
     fn default() -> Self {
         Budget { max_model_calls: 300, max_actions: 500, max_usd: 50.0 }

@@ -25,6 +25,7 @@ pub fn main() {
             Some("serve") => serve(&args).await,
             Some("conformance") => conformance(&args).await,
             Some("password") => password(&args),
+            Some("sign-in-code") => sign_in_code(&args),
             Some("restore") => restore(&args).await,
             Some("check") => check(&args).await,
             Some("version") => {
@@ -113,6 +114,7 @@ async fn run(cfg: Config) -> Result<()> {
     k.after_start().await?;
     crate::backup::schedule(k.clone());
     crate::trash::schedule(k.clone());
+    k.watch_sessions();
     crate::update::schedule(k.clone());
     tokio::spawn(k.clone().sweep());
     tracing::info!("magnus {} listening on http://{bound}", crate::update::version());
@@ -142,6 +144,16 @@ fn password(args: &[String]) -> Result<()> {
     let pw = line.trim_end_matches(['\r', '\n']);
     crate::accounts::set_password(&cfg.appliance.state_dir, &cfg.sign_in, &person, pw)?;
     eprintln!("password set for {person}");
+    Ok(())
+}
+
+/// A one-time code for the owner's backup password, printed on the
+/// appliance's own machine: with it, the backup works when the identity
+/// provider is down.
+fn sign_in_code(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    println!("{}", crate::accounts::new_machine_code(&cfg.appliance.state_dir)?);
+    eprintln!("good for one sign-in in the next 10 minutes");
     Ok(())
 }
 

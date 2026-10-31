@@ -63,6 +63,24 @@ pub fn dir(state_dir: &Path) -> PathBuf {
     state_dir.join("accounts")
 }
 
+/// A one-time code for the owner's backup password, valid ten minutes. Only
+/// someone with a shell on the appliance's machine (as its user) can make
+/// one, so a relay or tunnel that delivers remote connections from loopback
+/// cannot carry the backup.
+pub fn new_machine_code(state_dir: &Path) -> Result<String> {
+    use rand::Rng;
+    let d = dir(state_dir);
+    std::fs::create_dir_all(&d)?;
+    let path = d.join("machine-codes.json");
+    let mut all: BTreeMap<String, DateTime<Utc>> = read_json(&path)?;
+    let now = Utc::now();
+    all.retain(|_, until| *until > now);
+    let code: String = (0..10).map(|_| char::from(b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[rand::rngs::OsRng.gen_range(0..32)])).collect();
+    all.insert(token_hash(&code), now + Duration::minutes(10));
+    crate::vault::write_private(&path, &serde_json::to_vec(&all)?)?;
+    Ok(code)
+}
+
 /// Set a person's password. Used by the CLI on the appliance itself.
 pub fn set_password(state_dir: &Path, cfg: &SignIn, person: &str, password: &str) -> Result<()> {
     anyhow::ensure!(
@@ -127,9 +145,61 @@ impl Accounts {
         self.failures.lock().unwrap().remove(person);
     }
 
+    /// Take back one counted attempt: one counted before its answer came,
+    /// whose answer said nothing about the password (the provider was down).
+    pub fn forgive(&self, person: &str) {
+        let mut f = self.failures.lock().unwrap();
+        if let Some(e) = f.get_mut(person) {
+            e.0 = e.0.saturating_sub(1);
+        }
+    }
+
+    /// The counter that guards the owner's backup password: its own, so
+    /// wrong passwords sent to the identity provider from anywhere cannot
+    /// lock the owner out of the backup on the appliance's machine.
+    pub fn backup_counter(person: &str) -> String {
+        format!("backup:{person}")
+    }
+
+    /// End every session of a person (the provider turned them off).
+    pub fn end_all(&self, person: &str) -> Result<usize> {
+        let mut s = self.sessions.lock().unwrap();
+        let before = s.len();
+        s.retain(|_, x| x.person != person);
+        let n = before - s.len();
+        if n > 0 {
+            self.save(&s)?;
+        }
+        Ok(n)
+    }
+
+    /// The people with a live session.
+    pub fn signed_in(&self) -> std::collections::BTreeSet<String> {
+        let now = Utc::now();
+        self.sessions.lock().unwrap().values().filter(|x| x.expires > now).map(|x| x.person.clone()).collect()
+    }
+
+    /// Take a one-time code printed on the appliance's machine
+    /// (`magnus sign-in-code`): true once, if it is current.
+    pub fn take_machine_code(&self, code: &str) -> Result<bool> {
+        let _g = self.sessions.lock().unwrap();
+        let path = self.dir.join("machine-codes.json");
+        let mut all: BTreeMap<String, DateTime<Utc>> = read_json(&path)?;
+        let now = Utc::now();
+        all.retain(|_, until| *until > now);
+        let found = all.remove(&token_hash(code.trim())).is_some();
+        crate::vault::write_private(&path, &serde_json::to_vec(&all)?)?;
+        Ok(found)
+    }
+
     /// Check a password. The caller opens the session.
     pub fn sign_in(&self, person: &str, password: &str) -> Result<std::result::Result<(), SignInError>> {
-        if let Some(until) = self.locked(person) {
+        self.sign_in_counted(person, password, person)
+    }
+
+    /// Check a password, counting wrong ones on `counter`.
+    pub fn sign_in_counted(&self, person: &str, password: &str, counter: &str) -> Result<std::result::Result<(), SignInError>> {
+        if let Some(until) = self.locked(counter) {
             return Ok(Err(SignInError::Locked(until)));
         }
         let all: BTreeMap<String, String> = read_json(&self.dir.join("passwords.json"))?;
@@ -144,11 +214,11 @@ impl Accounts {
         let ok = PasswordHash::new(phc).map(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok()).unwrap_or(false) && all.contains_key(person);
         if !ok {
             if all.contains_key(person) {
-                self.failed(person);
+                self.failed(counter);
             }
             return Ok(Err(SignInError::Rejected));
         }
-        self.succeeded(person);
+        self.succeeded(counter);
         Ok(Ok(()))
     }
 

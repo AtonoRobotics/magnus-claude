@@ -24,8 +24,9 @@ const appBridge = tauri && {
   async connect(url) { return this.invoke("connect", { url }); },
   async trust(url, fingerprint) { return this.invoke("trust", { url, fingerprint }); },
   async signInMethod() { return this.invoke("sign_in_method"); },
-  // Resolves with who signed in, or { code_needed } or { browser }.
-  async signIn(person, password, code) { return this.invoke("sign_in", { person, password, code: code || null }); },
+  // Resolves with who signed in, or { code_needed }, { browser } or
+  // { machine_code_needed } (the owner's backup while the provider is down).
+  async signIn(person, password, code, machineCode) { return this.invoke("sign_in", { person, password, code: code || null, machineCode: machineCode || null }); },
   // Sign in through the identity provider in the person's own browser,
   // which comes back to this computer; resolves with who signed in.
   async providerSignIn(loginHint) { return this.invoke("provider_sign_in", { loginHint: loginHint || null }); },
@@ -70,11 +71,11 @@ const webBridge = {
   async connect() { return { status: "trusted", url: location.origin }; },
   async trust() {},
   async signInMethod() { return this.api("GET", "/v1/sign-in"); },
-  async signIn(person, password, code) {
+  async signIn(person, password, code, machineCode) {
     try {
-      return (await this.api("POST", "/v1/sign-in", { person, password, code: code || undefined })).person;
+      return (await this.api("POST", "/v1/sign-in", { person, password, code: code || undefined, machine_code: machineCode || undefined })).person;
     } catch (e) {
-      if (e.body?.code_needed || e.body?.browser) return e.body;
+      if (e.body?.code_needed || e.body?.browser || e.body?.machine_code_needed) return e.body;
       throw e;
     }
   },

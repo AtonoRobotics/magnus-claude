@@ -131,6 +131,31 @@ fn person(c: &Value, issuer: &str, client_id: &str, claim: &str, now: DateTime<U
     Ok(who.trim().to_lowercase())
 }
 
+/// What the provider's admin API says of a person's account, for the
+/// password typed in the app.
+#[derive(Debug, PartialEq)]
+pub struct Account {
+    pub enabled: bool,
+    /// A code from an authenticator app, which the password grant checks.
+    pub otp: bool,
+    /// A second factor or a step only the provider's own page handles: a
+    /// security key or passkey, or a required action (a new password,
+    /// setting up the authenticator app). Keycloak's password grant skips
+    /// both, so the app's password alone must not sign such a person in.
+    pub browser_only: bool,
+}
+
+impl Account {
+    pub fn of(user: &Value, creds: &[Value]) -> Account {
+        let kinds: Vec<&str> = creds.iter().filter_map(|c| c["type"].as_str()).collect();
+        Account {
+            enabled: user["enabled"].as_bool().unwrap_or(false),
+            otp: kinds.contains(&"otp"),
+            browser_only: kinds.iter().any(|k| k.starts_with("webauthn")) || user["requiredActions"].as_array().is_some_and(|a| !a.is_empty()),
+        }
+    }
+}
+
 impl Provider {
     pub fn new(cfg: Cfg, vault: Arc<crate::vault::Vault>) -> Result<Provider> {
         checked(&cfg.issuer)?;
@@ -269,6 +294,13 @@ impl Provider {
 
     /// Check a username and password with the provider's password grant,
     /// with the code from the person's authenticator app if they gave one.
+    /// Whether the provider still has this person, turned on: Some(false)
+    /// when it has them turned off or no longer knows them.
+    pub async fn active(&self, username: &str) -> Result<bool> {
+        let d = self.discovery().await?;
+        Ok(self.account(d, username).await?.is_some_and(|a| a.enabled))
+    }
+
     pub async fn password(&self, username: &str, password: &str, code: Option<&str>, app: bool) -> Result<Polled> {
         let now = Utc::now();
         let d = self.discovery().await?;
@@ -286,6 +318,19 @@ impl Provider {
         let status = r.status();
         let b: Value = r.json().await.unwrap_or_default();
         if status.is_success() {
+            // The password grant checks the password and an authenticator
+            // code, nothing more: a person with a security key, or a step
+            // still to do, signs in on the provider's page. Not knowing, the
+            // page too.
+            let to_page = || Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label()));
+            match self.account(d, username).await {
+                Ok(Some(a)) if a.enabled && !a.browser_only => {}
+                Ok(_) => return Ok(to_page()),
+                Err(e) => {
+                    tracing::warn!("oidc: cannot tell whether {username} needs the provider's page (a security key, a step to do), so sending them there: {e:#}");
+                    return Ok(to_page());
+                }
+            }
             return match self.signed_in(d, &b, None, now) {
                 Ok((person, rights)) => Ok(Polled::Done { person, app, rights }),
                 Err(e) => {
@@ -301,9 +346,10 @@ impl Provider {
             "invalid_grant" if why == "Account is not fully set up" => {
                 Ok(Polled::UseBrowser(format!("Your {} account needs finishing. Do that on the page that just opened in your browser.", self.label())))
             }
-            "invalid_grant" if code.is_none() => match self.uses_code(d, username).await {
-                Ok(Some(true)) => Ok(Polled::NeedsCode),
-                Ok(Some(false)) => Ok(Polled::Refused("The name or password is wrong.".into())),
+            "invalid_grant" if code.is_none() => match self.account(d, username).await {
+                Ok(Some(a)) if a.browser_only => Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label()))),
+                Ok(Some(a)) if a.otp => Ok(Polled::NeedsCode),
+                Ok(Some(_)) => Ok(Polled::Refused("The name or password is wrong.".into())),
                 Ok(None) => Ok(Polled::UseBrowser(format!("Sign in on the {} page that just opened in your browser.", self.label()))),
                 // Not knowing, the password may be right and only the code
                 // missing: Keycloak's own page asks for whatever it needs.
@@ -326,7 +372,7 @@ impl Provider {
     /// authenticator app, asked as the status client; None when the
     /// provider has no such username. Keycloak's admin API is at the issuer
     /// with `/admin` before `/realms/`.
-    async fn uses_code(&self, d: &Discovery, username: &str) -> Result<Option<bool>> {
+    async fn account(&self, d: &Discovery, username: &str) -> Result<Option<Account>> {
         let (Some(client), Some(credential)) = (&self.cfg.status_client, &self.cfg.status_credential) else {
             bail!("no status_client is set, so people who use a code can only sign in in the browser")
         };
@@ -345,9 +391,10 @@ impl Provider {
         let mut u = url::Url::parse(&format!("{admin}/users"))?;
         u.query_pairs_mut().append_pair("username", username).append_pair("exact", "true");
         let users: Vec<Value> = self.admin_http.get(u).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
-        let Some(id) = users.first().and_then(|x| x["id"].as_str()) else { return Ok(None) };
+        let Some(user) = users.first() else { return Ok(None) };
+        let Some(id) = user["id"].as_str() else { return Ok(None) };
         let creds: Vec<Value> = self.admin_http.get(format!("{admin}/users/{id}/credentials")).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
-        Ok(Some(creds.iter().any(|c| c["type"] == "otp")))
+        Ok(Some(Account::of(user, &creds)))
     }
 
     pub async fn start(&self, app: bool) -> Result<Started> {
@@ -472,12 +519,28 @@ impl crate::identity::Identity for Provider {
     async fn password(&self, username: &str, password: &str, code: Option<&str>, app: bool) -> Result<Polled> {
         Provider::password(self, username, password, code, app).await
     }
+    async fn active(&self, username: &str) -> Result<bool> {
+        Provider::active(self, username).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_security_key_or_a_step_to_do_sends_the_person_to_the_page() {
+        let user = json!({ "id": "u1", "enabled": true, "requiredActions": [] });
+        assert_eq!(Account::of(&user, &[json!({ "type": "password" })]), Account { enabled: true, otp: false, browser_only: false });
+        assert!(Account::of(&user, &[json!({ "type": "otp" })]).otp);
+        for key in ["webauthn", "webauthn-passwordless"] {
+            assert!(Account::of(&user, &[json!({ "type": "password" }), json!({ "type": key })]).browser_only, "{key}");
+        }
+        let todo = json!({ "id": "u1", "enabled": true, "requiredActions": ["CONFIGURE_TOTP"] });
+        assert!(Account::of(&todo, &[]).browser_only);
+        assert!(!Account::of(&json!({ "id": "u1", "enabled": false }), &[]).enabled);
+    }
 
     #[test]
     fn an_id_token_must_be_ours_current_and_name_someone() {

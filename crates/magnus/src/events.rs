@@ -293,7 +293,13 @@ pub enum Ev {
     /// its own runs ended it.
     ScheduleEnded {
         id: String,
+        /// Why: the kernel's words, or what the run that ended it wrote
+        /// (content, removed with that run).
+        #[serde(default)]
         reason: String,
+        /// The run that ended it, when one did.
+        #[serde(default)]
+        run: Option<String>,
     },
     /// A schedule stopped starting runs after too many failed in a row,
     /// until its person resumes it.
@@ -775,6 +781,7 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("knowledge_added", &["title", "text", "source", "verification", "value"]),
     ("knowledge_extraction", &["reply"]),
     ("spoken_written", &["script"]),
+    ("schedule_ended", &["reason"]),
 ];
 
 /// The content fields of one kind of event; none for most.
@@ -817,7 +824,7 @@ impl Ev {
             | SpokenWritten { run, .. }
             | KnowledgeExtraction { run, .. }
             | Output { run, .. } => Some(run),
-            Item { run, .. } => run.as_deref(),
+            Item { run, .. } | ScheduleEnded { run, .. } => run.as_deref(),
             _ => None,
         }
     }

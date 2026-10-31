@@ -85,6 +85,7 @@ pub fn render(s: &State, p: &Person, i: &Item) -> Value {
         "kind": i.kind,
         "task_id": i.task,
         "run_id": i.run,
+        "person": i.person,
         "summary": i.summary,
         "details": i.details,
         "created_at": i.created_at,
@@ -260,7 +261,9 @@ impl Kernel {
                         text: item.details["text"].as_str().unwrap_or_default().into(),
                         every_minutes: item.details["every_minutes"].as_u64().map(|m| m as u32),
                         daily_at: item.details["daily_at"].as_str().map(String::from),
-                        budget: from.as_ref().map(|f| f.0.clone()),
+                        // Never more than the appliance gives a run: an
+                        // extension the person gave that one run stays its own.
+                        budget: from.as_ref().map(|f| f.0.within(&self.cfg.budget)),
                         card: None,
                         label: from.map(|f| f.1),
                         title: None,
@@ -293,8 +296,24 @@ impl Kernel {
             }
             // Only the kernel's own notices (which name a reason) can continue a
             // run; a message the agent wrote cannot.
-            ("notice", "extend") | ("notice", "resume") if item.details["reason"].is_string() && (decision != "extend" || item.details["reason"] == "budget") => {
+            // A schedule's own notices (paused, ended) stand for no run to go
+            // on: the schedule's Resume does that, and nothing ends twice.
+            ("notice", "extend") | ("notice", "resume")
+                if item.details["reason"].is_string() && !item.details["reason"].as_str().unwrap_or_default().starts_with("schedule_") && item.run.is_some() && (decision != "extend" || item.details["reason"] == "budget") =>
+            {
+                // The kill switch's notice is the person's own Continue for
+                // the run it stopped, as the task's Resume is (K53: nothing
+                // else resumes it), and never while the switch is on again.
+                let stopped = item.details["reason"] == "kill_switch" && self.read(|s| s.runs.get(&run).is_some_and(|r| r.status == Status::Suspended && r.reason.as_deref() == Some("kill_switch")));
+                if stopped && self.read(|s| s.kill_switch) {
+                    return Ok(Answer::Conflict("the kill switch is engaged"));
+                }
                 self.emit(&actor, resolve(None)).await?;
+                if stopped {
+                    self.emit(&actor, Ev::Resumed { run: run.clone() }).await?;
+                    self.wake(&run);
+                    return Ok(Answer::Ok);
+                }
                 if decision == "extend" {
                     if let Some(mut b) = self.read(|s| s.runs.get(&run).map(|r| r.config.budget.clone())) {
                         b.max_model_calls *= 2;

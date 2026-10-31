@@ -136,17 +136,17 @@ async fn trust(app: State<'_, App>, url: String, fingerprint: String) -> Res<()>
 }
 
 #[tauri::command]
-async fn sign_in(app: State<'_, App>, person: String, password: String, code: Option<String>) -> Res<Value> {
+async fn sign_in(app: State<'_, App>, person: String, password: String, code: Option<String>, machine_code: Option<String>) -> Res<Value> {
     let (url, c) = app.conn()?;
     let r = c
         .post(format!("{url}/v1/sign-in"))
-        .json(&json!({ "person": person, "password": password, "code": code, "client": "app" }))
+        .json(&json!({ "person": person, "password": password, "code": code, "machine_code": machine_code, "client": "app" }))
         .send()
         .await
         .map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
     let (status, body) = body_of(r).await;
     // Not refusals: the page asks for the code, or opens the browser.
-    if body["code_needed"] == true || body["browser"] == true {
+    if body["code_needed"] == true || body["browser"] == true || body["machine_code_needed"] == true {
         return Ok(body);
     }
     if status >= 400 {

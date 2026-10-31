@@ -211,6 +211,30 @@ async fn sign_in_method(State(k): K) -> Response {
     }
 }
 
+/// Sign-ins begun from one address in the last ten minutes: at most a
+/// quarter of the provider's waiting ones (`max_pending`), which everyone
+/// shares, so no one address can fill them and stop every first sign-in.
+fn may_begin(k: &Kernel, peer: SocketAddr) -> bool {
+    let most = k.cfg.sign_in.oidc.as_ref().map_or(25, |o| (o.max_pending / 4).max(5));
+    static BEGUN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, Vec<std::time::Instant>>>> = std::sync::OnceLock::new();
+    let mut m = BEGUN.get_or_init(Default::default).lock().unwrap();
+    let window = std::time::Duration::from_secs(600);
+    m.retain(|_, v| {
+        v.retain(|t| t.elapsed() < window);
+        !v.is_empty()
+    });
+    let v = m.entry(peer.ip().to_canonical()).or_default();
+    if v.len() >= most {
+        return false;
+    }
+    v.push(std::time::Instant::now());
+    true
+}
+
+fn too_many_begins() -> Response {
+    err(StatusCode::TOO_MANY_REQUESTS, "Too many sign-ins were started from here; finish one, or try again in a few minutes.")
+}
+
 /// A request made on the appliance's own machine: from a loopback address,
 /// and not passed on by a proxy or tunnel there, which connects from
 /// loopback for callers anywhere and says so in one of these headers.
@@ -243,15 +267,46 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
             .into_response()
     };
     if let Some(id) = k.identity() {
+        // The owner's backup: their password set on the appliance and a
+        // one-time code printed on its machine (`magnus sign-in-code`),
+        // which no relay or tunnel can carry. Counted apart, so wrong
+        // passwords sent to the provider cannot lock the owner out of it.
+        if let Some(machine) = b["machine_code"].as_str().map(str::trim).filter(|c| !c.is_empty()) {
+            let counter = crate::accounts::Accounts::backup_counter(&person);
+            if !(k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h)) {
+                return err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong.");
+            }
+            if let Some(until) = k.accounts.locked(&counter) {
+                return locked(until);
+            }
+            match k.accounts.take_machine_code(machine) {
+                Ok(true) => {}
+                Ok(false) => {
+                    k.accounts.failed(&counter);
+                    return err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong.");
+                }
+                Err(e) => return internal(e),
+            }
+            return match k.accounts.sign_in_counted(&person, password, &counter) {
+                Ok(Ok(_)) => issue(&k, t, &person, app).await,
+                Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong."),
+                Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
+                Err(e) => internal(e),
+            };
+        }
         if let Some(until) = k.accounts.locked(&person) {
             return locked(until);
         }
-        let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h);
         // The first time, the provider's own page signs them in: it can walk
-        // them through what a new account needs. The owner's backup password
-        // needs nothing from the provider.
-        if !k.read(|s| s.signed_in_before.contains(&person)) && !backup {
+        // them through what a new account needs.
+        if !k.read(|s| s.signed_in_before.contains(&person)) {
             return provider_answered(&k, t, id.label(), crate::identity::Polled::UseBrowser(format!("The first time, sign in on the {} page that just opened in your browser.", id.label()))).await;
+        }
+        // Counted before the provider answers, so requests sent at once
+        // cannot all pass the lockout first; a right answer clears it.
+        let ours = k.cfg.person(&person).is_some();
+        if ours {
+            k.accounts.failed(&person);
         }
         let answer = match id.password(&person, password, code, app).await {
             Ok(polled @ crate::identity::Polled::Done { .. }) => {
@@ -264,24 +319,23 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
                 None
             }
         };
-        if !backup {
-            if matches!(answer, Some(crate::identity::Polled::Refused(_))) && k.cfg.person(&person).is_some() {
-                k.accounts.failed(&person);
+        return match answer {
+            Some(polled) => provider_answered(&k, t, id.label(), polled).await,
+            None => {
+                // Down: the attempt said nothing about the password.
+                if ours {
+                    k.accounts.forgive(&person);
+                }
+                let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h);
+                if backup {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({ "machine_code_needed": true, "error": format!("{} is not answering. On the appliance, run `magnus sign-in-code` and enter the code it prints, with your password.", id.label()) })),
+                    )
+                        .into_response();
+                }
+                err(StatusCode::BAD_GATEWAY, format!("{} is not answering. Try again in a few minutes.", id.label()))
             }
-            return match answer {
-                Some(polled) => provider_answered(&k, t, id.label(), polled).await,
-                None => err(StatusCode::BAD_GATEWAY, format!("{} is not answering. Try again in a few minutes.", id.label())),
-            };
-        }
-        // The owner's backup, before whatever else the provider said.
-        return match k.accounts.sign_in(&person, password) {
-            Ok(Ok(_)) => issue(&k, t, &person, app).await,
-            Ok(Err(crate::accounts::SignInError::Rejected)) => match answer {
-                Some(polled) => provider_answered(&k, t, id.label(), polled).await,
-                None => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
-            },
-            Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
-            Err(e) => internal(e),
         };
     }
     if k.cfg.person(&person).is_none() {
@@ -307,6 +361,9 @@ async fn device_start(State(k): K, Extension(t): Extension<Transport>, ConnectIn
         return r;
     }
     let Some(o) = &k.oidc else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
+    if !may_begin(&k, peer) {
+        return too_many_begins();
+    }
     match o.start(b["client"].as_str() == Some("app")).await {
         Ok(s) => Json(json!({
             "flow": s.flow,
@@ -375,6 +432,9 @@ async fn browser_begin(State(k): K, Extension(t): Extension<Transport>, ConnectI
     }
     let Some(id) = k.identity() else { return err(StatusCode::NOT_FOUND, "this appliance signs in with a password") };
     let Some(redirect_uri) = b["redirect_uri"].as_str() else { return err(StatusCode::BAD_REQUEST, "name the redirect address") };
+    if !may_begin(&k, peer) {
+        return too_many_begins();
+    }
     if let Err(e) = crate::connectors::loopback(redirect_uri) {
         return err(StatusCode::BAD_REQUEST, format!("{e:#}"));
     }
@@ -1019,9 +1079,17 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
             return internal(e);
         }
         // Released: the vault takes secrets again, but holds none; nothing
-        // resumes by itself (K53).
+        // resumes by itself (K53). Each person's tasks are their own: each
+        // is told which of theirs the switch stopped, and continues them.
         k.vault.unseal();
-        return Json(json!({ "engaged": false })).into_response();
+        let stopped: Vec<crate::state::Run> = k.read(|s| s.runs.values().filter(|r| r.status == Status::Suspended && r.reason.as_deref() == Some("kill_switch")).cloned().collect());
+        for r in &stopped {
+            let summary = format!("Stopped by the kill switch: {}", k.title_of(r));
+            if let Err(e) = k.notice(r, summary, json!({ "reason": "kill_switch", "evidence": { "why": "the owner engaged the kill switch, and has released it; Continue goes on from where it stopped" } })).await {
+                return internal(e);
+            }
+        }
+        return Json(json!({ "engaged": false, "told": stopped.len() })).into_response();
     }
     // One control (B11). The vault is sealed first, and each OAuth sign-in
     // taken out of it and revoked at its provider, whatever happens to the
@@ -1469,7 +1537,7 @@ async fn resume_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
         return err(StatusCode::CONFLICT, "the schedule is not paused");
     }
     if on.is_some() {
-        return err(StatusCode::CONFLICT, "its run is waiting on you; it goes on once you answer that run");
+        return err(StatusCode::CONFLICT, "its run is waiting on you: answer it, or resume or cancel that task, and the schedule goes on");
     }
     match k.emit(&format!("person:{}", p.id), Ev::ScheduleResumed { id }).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),

@@ -494,10 +494,13 @@ async function signInScreen(note) {
     } else {
       // Username and password, then the code from an authenticator app if
       // the person uses one. The password stays in this closure only.
-      const coding = stage === "code";
+      const coding = stage === "code" || stage === "machine";
+      const machine = stage === "machine";
       paint(box, `<form id="f"><p class="small muted">${esc(data.url || location.origin)}</p>
         ${data.error ? `<p class="small" style="color:var(--bad)" role="alert">${esc(data.error)}</p>` : ""}
-        ${coding
+        ${machine
+          ? `<label for="otp">Enter the code \`magnus sign-in-code\` printed on the appliance</label><input id="otp" style="width:100%" autocomplete="one-time-code" maxlength="16" required autofocus>`
+          : coding
           ? `<label for="otp">Enter the 6-digit code from your authenticator app</label><input id="otp" style="width:100%" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" required autofocus>`
           : `<label for="who">Username</label><input id="who" style="width:100%" autocomplete="username" value="${esc(data.person || localStorage.getItem("magnus.person") || "")}" required>
         <label for="pw">Password</label><input id="pw" type="password" style="width:100%" autocomplete="current-password" required>`}
@@ -511,7 +514,9 @@ async function signInScreen(note) {
         const password = coding ? data.password : $("#pw").value;
         $("#go").disabled = true;
         try {
-          const r = await Magnus.signIn(person, password, coding ? $("#otp").value.trim() : undefined);
+          const typed = coding ? $("#otp").value.trim() : undefined;
+          const r = await Magnus.signIn(person, password, machine ? undefined : typed, machine ? typed : undefined);
+          if (r?.machine_code_needed) return ask("machine", { ...data, person, password, error: r.error });
           if (r?.code_needed) return ask("code", { ...data, person, password, error: coding ? r.error : undefined });
           if (r?.browser) return ask("browser", { ...data, person, password: undefined, message: r.error });
           localStorage.setItem("magnus.person", person);
@@ -1195,7 +1200,7 @@ function card(i, composed) {
   const d = i.details || {};
   const tier = i.kind === "approval" ? (i.tier || d.risk) : "";
   const head = `<div class="spread"><span class="kind">${esc(KIND[i.kind] || i.kind)}${tier ? ` · ${esc(TIER[tier] || tier)}` : ""}</span>
-    <span class="small faint">${i.blocking ? `<strong style="color:var(--fg)">A task is waiting</strong> · ` : ""}${esc(when(i.created_at))}${i.task_id ? ` · <a href="#/task/${enc(i.task_id)}">task</a>` : ""}</span></div>`;
+    <span class="small faint">${i.blocking ? `<strong style="color:var(--fg)">A task is waiting</strong> · ` : ""}${esc(when(i.created_at))}${i.task_id && i.person === App.me?.id ? ` · <a href="#/task/${enc(i.task_id)}">task</a>` : ""}</span></div>`;
   let body = "";
   if (i.status !== "open") {
     const r = i.resolution || {};
@@ -1247,7 +1252,8 @@ function card(i, composed) {
     case "notice": {
       const ev = d.evidence;
       const list = [];
-      if (typeof d.reason === "string") list.push(["resume", "Continue", "primary"]);
+      // A schedule's own notice stands for no run to continue: its Resume does that.
+      if (typeof d.reason === "string" && !d.reason.startsWith("schedule_") && i.run_id) list.push(["resume", "Continue", "primary"]);
       if (d.reason === "budget") list.push(["extend", "Double the budget and continue"]);
       list.push(["dismiss", "Dismiss"]);
       body = `<p class="small"><span class="muted">Why it stopped:</span> ${esc(d.reason)}</p>

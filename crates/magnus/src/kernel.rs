@@ -205,6 +205,39 @@ impl Kernel {
     /// A person's rights: the identity provider's where it names them, else
     /// the roles the owner set in Settings, else the config's.
     /// The identity provider people sign in through, if the appliance has one.
+    /// End the sessions of people the identity provider has turned off or
+    /// no longer knows: once now, then every ten minutes. A provider that
+    /// cannot be asked ends nothing.
+    pub fn watch_sessions(self: &Arc<Self>) {
+        let k = self.clone();
+        tokio::spawn(async move {
+            let mut t = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                t.tick().await;
+                k.end_turned_off().await;
+            }
+        });
+    }
+
+    pub async fn end_turned_off(&self) -> usize {
+        let Some(id) = self.identity() else { return 0 };
+        let mut ended = 0;
+        for person in self.accounts.signed_in() {
+            match id.active(&person).await {
+                Ok(true) => {}
+                Ok(false) => match self.accounts.end_all(&person) {
+                    Ok(n) => {
+                        tracing::warn!("{} has {person} turned off or no longer knows them: their {n} sessions here are ended", id.label());
+                        ended += n;
+                    }
+                    Err(e) => tracing::error!("ending {person}'s sessions: {e:#}"),
+                },
+                Err(e) => tracing::debug!("cannot ask whether {person} is still on: {e:#}"),
+            }
+        }
+        ended
+    }
+
     pub fn identity(&self) -> Option<&dyn crate::identity::Identity> {
         self.oidc.as_ref().map(|o| o as &dyn crate::identity::Identity)
     }
@@ -401,7 +434,7 @@ impl Kernel {
             let finished: Vec<(crate::state::Schedule, String)> =
                 self.read(|s| s.schedules.values().filter_map(|x| x.finished(now).map(|why| (x.clone(), why))).collect());
             for (sc, why) in finished {
-                if self.emit("kernel", Ev::ScheduleEnded { id: sc.id.clone(), reason: why.clone() }).await.is_ok() {
+                if self.emit("kernel", Ev::ScheduleEnded { id: sc.id.clone(), reason: why.clone(), run: None }).await.is_ok() {
                     let _ = self.post_notice(None, None, sc.person.clone(), format!("A schedule ended: {}", sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect())), serde_json::json!({ "reason": "schedule_ended", "evidence": { "schedule": sc.id, "why": why } })).await;
                 }
             }
@@ -454,7 +487,8 @@ impl Kernel {
                 // within the schedule's budget.
                 // Its runs start in the project the schedule is in now.
                 let o = NewRun {
-                    budget: sc.budget.clone(),
+                    // A schedule's own limits, within the appliance's today.
+                    budget: sc.budget.as_ref().map(|b| b.within(&self.cfg.budget)),
                     label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label),
                     project: self.read(|s| s.project_of(&sc.id)),
                     ..Default::default()
