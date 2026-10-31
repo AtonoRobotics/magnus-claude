@@ -383,17 +383,13 @@ fn channel_release(cfg: &Config, c: &str) -> Option<Value> {
 }
 
 /// The desktop app's release manifest for an app on `channel`: the
-/// channel's build, or production's when that is newer (no app is ever
-/// behind production), with each package's address on this appliance
-/// (`origin` is the address the app used).
+/// channel's build, or production's while the channel has none, with each
+/// package's address on this appliance (`origin` is the address the app
+/// used).
 pub fn desktop_manifest(cfg: &Config, origin: &str, channel: &str) -> Option<Value> {
-    let version = |m: &Value| m["version"].as_str().unwrap_or_default().to_string();
-    let channel = match (channel_release(cfg, channel), channel_release(cfg, "production")) {
-        (Some(c), Some(p)) if !newer(&version(&p), &version(&c)) => channel,
-        (None, None) => return None,
-        (Some(_), None) => channel,
-        _ => "production",
-    };
+    // Not production's when it is newer: it need not hold the channel's work
+    // (a pull request not yet merged), and an app never loses what it has.
+    let channel = if channel_release(cfg, channel).is_some() { channel } else { "production" };
     let mut m = channel_release(cfg, channel)?;
     let files = if channel == "production" { "files".to_string() } else { format!("{channel}/files") };
     if let Some(platforms) = m["platforms"].as_object_mut() {

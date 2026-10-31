@@ -1,9 +1,10 @@
 //! Release channels of the desktop app (DECISIONS.md, "Release channels"),
 //! from publishing to serving: `release/publish.sh` puts a pull request's
 //! build in development, master's in test and a tag in production, and
-//! never moves a channel backwards; the appliance decides which channel each
-//! app gets, never the app: the owner's apps development, testers' test,
-//! everyone else's production.
+//! never moves a channel backwards, in version or in content (a build
+//! without the work of the one before is refused); the appliance decides
+//! which channel each app gets, never the app: the owner's apps
+//! development, testers' test, everyone else's production.
 
 use magnus_invariants::*;
 use reqwest::StatusCode;
@@ -24,8 +25,15 @@ fn build(dist: &Path, version: &str) {
     }
 }
 
-/// `release/publish.sh desktop` as CI runs it; its exit code.
+/// `release/publish.sh desktop` as CI runs it, in this repository's
+/// checkout; its exit code.
 fn publish(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: &str) -> i32 {
+    publish_from(key, updates, tmp, version, channel, Path::new(env!("CARGO_MANIFEST_DIR")), None)
+}
+
+/// The same, built from the checkout `repo`; `head` is a pull request's
+/// head commit when the checkout is its merge with master.
+fn publish_from(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: &str, repo: &Path, head: Option<&str>) -> i32 {
     let (dist, notes) = (tmp.join("dist"), tmp.join("notes"));
     build(&dist, version);
     std::fs::write(&notes, format!("Build {version}.\n")).unwrap();
@@ -34,6 +42,9 @@ fn publish(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: &str)
         .args([updates, &notes, &dist])
         .arg(channel)
         .env("MAGNUS_RELEASE_KEY", key)
+        .env_remove("MAGNUS_COMMIT")
+        .envs(head.map(|h| ("MAGNUS_COMMIT", h)))
+        .current_dir(repo)
         .output()
         .unwrap();
     assert!(out.status.code() != Some(1), "publish {version} to {channel}: {}", String::from_utf8_lossy(&out.stderr));
@@ -114,12 +125,13 @@ async fn the_owner_gets_development_testers_get_test_and_everyone_else_productio
         assert_eq!(publish(&key, &updates, &w, "0.7.1-review.15.pr.7", c), 2, "{c}");
     }
 
-    // A tag newer than a channel's build reaches its apps too: no app is
-    // behind production. The channel's next build takes over again.
+    // A tag does not take an app off its channel's build, newer or not: it
+    // need not hold that build's work (a pull request not yet merged). The
+    // channel's next build moves it forward.
     assert_eq!(publish(&key, &updates, &w, "0.7.1", "production"), 0);
-    for who in ["alice", "carol", "bob"] {
-        assert_eq!(offers(who).await.as_deref(), Some("0.7.1"), "{who}");
-    }
+    assert_eq!(offers("alice").await.as_deref(), Some("0.7.1-review.13.pr.8"));
+    assert_eq!(offers("carol").await.as_deref(), Some("0.7.1-test.14"));
+    assert_eq!(offers("bob").await.as_deref(), Some("0.7.1"));
     assert_eq!(publish(&key, &updates, &w, "0.7.2-review.16.pr.9", "development"), 0);
     assert_eq!(publish(&key, &updates, &w, "0.7.2-test.17", "test"), 0);
     assert_eq!(offers("alice").await.as_deref(), Some("0.7.2-review.16.pr.9"));
@@ -156,6 +168,78 @@ async fn the_owner_gets_development_testers_get_test_and_everyone_else_productio
         let st = reqwest::get(format!("{}{p}", app.base)).await.unwrap().status();
         assert_eq!(st, StatusCode::NOT_FOUND, "{p}");
     }
+}
+
+/// git in `repo`; its output.
+fn git(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git").args(["-c", "user.name=Test", "-c", "user.email=test@example.com"]).args(args).current_dir(repo).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// A commit on the current branch of `repo`; its id.
+fn commit(repo: &Path, file: &str) -> String {
+    std::fs::write(repo.join(file), file).unwrap();
+    git(repo, &["add", file]);
+    git(repo, &["commit", "-qm", file]);
+    git(repo, &["rev-parse", "HEAD"])
+}
+
+/// What the owner saw (2026-10-31): their app ran pull request A's build,
+/// then got pull request B's, numbered later but built without A's work.
+/// A channel's next build must hold the work of the one there; one that
+/// does not is refused, whatever its version.
+#[test]
+fn a_build_without_the_work_already_in_its_channel_is_never_published() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key = tmp.path().join("test.key");
+    let made = Command::new("cargo").args(["tauri", "signer", "generate", "--ci", "-p", "", "-f", "-w"]).arg(&key).output().unwrap();
+    assert!(made.status.success(), "a test release key: {}", String::from_utf8_lossy(&made.stderr));
+    let (updates, w, repo) = (tmp.path().join("updates"), tmp.path().join("work"), tmp.path().join("repo"));
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "master"]);
+    let base = commit(&repo, "base");
+    git(&repo, &["checkout", "-q", "-b", "a"]);
+    let a = commit(&repo, "a");
+    git(&repo, &["checkout", "-q", "-b", "b", &base]);
+    let b = commit(&repo, "b");
+    let channel = |c: &str| -> (String, String) {
+        let dir = if c == "production" { updates.join("desktop") } else { updates.join("desktop").join(c) };
+        let m: Value = serde_json::from_slice(&std::fs::read(dir.join("latest.json")).unwrap()).unwrap();
+        (m["version"].as_str().unwrap().into(), m["commit"].as_str().unwrap().into())
+    };
+
+    // A's build is in development; B's, later but without A's work, is not.
+    git(&repo, &["checkout", "-q", &a]);
+    assert_eq!(publish_from(&key, &updates, &w, "0.7.1-review.20.pr.1", "development", &repo, None), 0);
+    git(&repo, &["checkout", "-q", &b]);
+    assert_eq!(publish_from(&key, &updates, &w, "0.7.1-review.21.pr.2", "development", &repo, None), 3);
+    assert_eq!(channel("development"), ("0.7.1-review.20.pr.1".into(), a.clone()));
+
+    // A merges. B, built as CI builds a pull request (its merge with
+    // master), holds A's work and goes out, recorded by its own head.
+    git(&repo, &["checkout", "-q", "master"]);
+    git(&repo, &["merge", "-q", "--no-ff", "--no-edit", "a"]);
+    let merged = git(&repo, &["rev-parse", "HEAD"]);
+    assert_eq!(publish_from(&key, &updates, &w, "0.7.1-test.22", "test", &repo, None), 0);
+    git(&repo, &["checkout", "-q", "--detach", "master"]);
+    git(&repo, &["merge", "-q", "--no-ff", "--no-edit", "b"]);
+    assert_eq!(publish_from(&key, &updates, &w, "0.7.1-review.23.pr.2", "development", &repo, Some(&b)), 0);
+    assert_eq!(channel("development"), ("0.7.1-review.23.pr.2".into(), b.clone()));
+
+    // A's old branch, rebuilt later, lacks B: refused. So is a test build
+    // or a tag of a commit older than the one its channel holds.
+    git(&repo, &["checkout", "-q", &a]);
+    assert_eq!(publish_from(&key, &updates, &w, "0.7.1-review.24.pr.1", "development", &repo, None), 3);
+    git(&repo, &["checkout", "-q", &base]);
+    assert_eq!(publish_from(&key, &updates, &w, "0.7.1-test.25", "test", &repo, None), 3);
+    assert_eq!(channel("test"), ("0.7.1-test.22".into(), merged.clone()));
+    git(&repo, &["checkout", "-q", &merged]);
+    assert_eq!(publish_from(&key, &updates, &w, "0.7.1", "production", &repo, None), 0);
+    git(&repo, &["checkout", "-q", &base]);
+    assert_eq!(publish_from(&key, &updates, &w, "0.7.2", "production", &repo, None), 3);
+    assert_eq!(channel("production"), ("0.7.1".into(), merged));
+    assert_eq!(channel("development"), ("0.7.1-review.23.pr.2".into(), b));
 }
 
 fn base64_decode(s: &str) -> Vec<u8> {
