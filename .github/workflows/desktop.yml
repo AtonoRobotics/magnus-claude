@@ -23,6 +23,7 @@ concurrency:
 
 permissions:
   contents: write
+  checks: read
   # Whether the pull request whose build is in development was closed.
   pull-requests: read
 
@@ -57,6 +58,21 @@ jobs:
           echo "MAGNUS_VERSION=$v" >> "$GITHUB_ENV"
       # The updater packages (AppImage, setup.exe) are signed with the release
       # key, which is on the build box only, bound to the version.
+      # Tested once (DECISIONS.md, "One pull request at a time"): a merge
+      # to master whose files are exactly its pull request's, which passed
+      # these checks, is built and published, not tested again.
+      - name: Tested already
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(git rev-parse --verify -q HEAD^2) || exit 0
+          [ "$(git rev-parse HEAD^{tree})" = "$(git rev-parse "$head^{tree}")" ] || exit 0
+          passed=$(gh api "repos/${{ github.repository }}/commits/$head/check-runs?check_name=release-checks" --jq '[.check_runs[] | select(.conclusion == "success")] | length')
+          if [ "$passed" -gt 0 ]; then
+            echo "MAGNUS_TESTED=1" >> "$GITHUB_ENV"
+            echo "the merged files are $head's, which passed release-checks: not testing again"
+          fi
       - name: Installers
         working-directory: desktop/src-tauri
         run: |
@@ -75,6 +91,7 @@ jobs:
       # The update test's two AppImages: this version and the next, with a
       # key made for the run, so nothing it signs could install anywhere.
       - name: Two builds for the update test
+        if: env.MAGNUS_TESTED != '1'
         working-directory: desktop/src-tauri
         run: |
           v=$MAGNUS_VERSION
@@ -90,15 +107,18 @@ jobs:
           done
           echo "$next" > "$t/new.version"
       - name: Install the app from its package
+        if: env.MAGNUS_TESTED != '1'
         run: |
           v=$MAGNUS_VERSION
           rm -rf "$RUNNER_TEMP/app" && dpkg-deb -x "dist/Magnus_${v}_amd64.deb" "$RUNNER_TEMP/app"
       # The tests launch the appliance and the model adapters as programs;
       # `cargo test` builds only the test package's own.
       - name: Programs the tests launch
+        if: env.MAGNUS_TESTED != '1'
         run: cargo build --workspace --bins
       # The sandbox guest built from this commit (sandbox/image.sh).
       - name: Sandbox image
+        if: env.MAGNUS_TESTED != '1'
         run: |
           d=$(sandbox/image.sh)
           echo "MAGNUS_GUEST_KERNEL=$d/vmlinux" >> "$GITHUB_ENV"
@@ -106,10 +126,13 @@ jobs:
       # Every suite, on every pull request and master build, before its
       # build can reach an app (DECISIONS.md, "One pull request at a time").
       - name: Browser sidecar
+        if: env.MAGNUS_TESTED != '1'
         run: npm ci --prefix browser
       - name: Unit, invariant and scratch tests
+        if: env.MAGNUS_TESTED != '1'
         run: cargo test -p magnus -p magnus-invariants -p magnus-scratch --no-fail-fast
       - name: Installed-app tests
+        if: env.MAGNUS_TESTED != '1'
         env:
           MAGNUS_DESKTOP_APP: ${{ runner.temp }}/app/usr/bin/magnus-desktop
           MAGNUS_SHOTS: ${{ runner.temp }}/shots
@@ -169,3 +192,13 @@ jobs:
           case $s in "Merge pull request #"*) t=$(git log -1 --format=%b | head -1) ;; *) t=$s ;; esac
           printf '%s\n\nTest build: master at %s.\n' "$t" "$(git rev-parse --short HEAD)" > "$RUNNER_TEMP/notes"
           release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist test
+      # Master also runs on the build box's own appliance, which installs
+      # it by itself (DECISIONS.md, "Master runs on the build box's
+      # appliance"): `<next>-test.<run>`, numbered like the app's.
+      - name: Master on the build box's appliance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 | python3 -I -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='magnus'))")
+          git ls-remote --exit-code --tags origin "appliance-v$v" >/dev/null && v="${v%.*}.$(( ${v##*.} + 1 ))"
+          cargo build --release --workspace --bins
+          release/to-appliance.sh "${{ vars.MAGNUS_APPLIANCE_CONFIG }}" "$v-test.${{ github.run_number }}" "$RUNNER_TEMP/notes"

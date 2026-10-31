@@ -179,27 +179,10 @@ pub struct Log {
 
 /// One kernel per log: a second one would break the single-writer rule.
 pub(crate) async fn hold(client: &Client) -> Result<()> {
-    hold_within(client, std::time::Duration::ZERO).await
+    let got: bool = client.query_one("SELECT pg_try_advisory_lock(7239001)", &[]).await?.get(0);
+    anyhow::ensure!(got, "another kernel holds this event log");
+    Ok(())
 }
-
-/// The same, waiting up to `patience` for the lock: a kernel just killed
-/// (a crash, a restart) holds it until Postgres ends its session, a moment
-/// later, and the kernel started in its place must not give up on it. A
-/// kernel that is really running holds it past that, and is refused.
-pub(crate) async fn hold_within(client: &Client, patience: std::time::Duration) -> Result<()> {
-    let until = std::time::Instant::now() + patience;
-    loop {
-        let got: bool = client.query_one("SELECT pg_try_advisory_lock(7239001)", &[]).await?.get(0);
-        if got {
-            return Ok(());
-        }
-        anyhow::ensure!(std::time::Instant::now() < until, "another kernel holds this event log");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-}
-
-/// How long a kernel starting (or reconnecting) waits for the lock.
-const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Log {
     async fn new(url: &str, writer: bool, client: Client) -> Result<Log> {
@@ -212,7 +195,7 @@ impl Log {
 
     pub async fn open(url: &str) -> Result<Log> {
         let client = connect(url).await?;
-        hold_within(&client, LOCK_PATIENCE).await?;
+        hold(&client).await?;
         Log::new(url, true, client).await
     }
 
@@ -246,7 +229,7 @@ impl Log {
         if w.is_closed() {
             let c = connect(&self.url).await?;
             if self.writer {
-                hold_within(&c, LOCK_PATIENCE).await?;
+                hold(&c).await?;
                 // An append whose answer was lost may be in the log but not
                 // in this process's state: start again from the log.
                 let max: i64 = c.query_one("SELECT coalesce(max(seq), 0) FROM public.events", &[]).await?.get(0);

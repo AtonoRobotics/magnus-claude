@@ -46,3 +46,28 @@ async fn a_lost_log_connection_opens_again_and_health_tells_the_truth_meanwhile(
     let n: i64 = admin.query_one("SELECT count(*) FROM public.events WHERE kind = 'failed'", &[]).await.unwrap().get(0);
     assert_eq!(n, 2, "a task's end is missing from the log");
 }
+
+/// Found in CI (2026-10-31, the crash invariant): a kernel started right
+/// after one was killed exited with "another kernel holds this event log",
+/// because Postgres lets go of a lock only once it sees the old connection
+/// closed. A start waits for the log, as a switch of releases does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_waits_for_the_kernel_before_it_to_let_go_of_the_log() {
+    let m = FakeModel::start(steps(vec![fail("nothing to do")])).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    app.kill().await;
+
+    // The killed kernel's lock, still held for a moment after it is gone.
+    let admin = app.db.admin().await;
+    admin.query_one("SELECT pg_advisory_lock(7239001)", &[]).await.unwrap();
+    let let_go = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        admin.query_one("SELECT pg_advisory_unlock(7239001)", &[]).await.unwrap();
+    });
+    app.restart().await;
+    let_go.await.unwrap();
+
+    let alice = app.api("alice");
+    let t = alice.submit("Say hello.").await;
+    assert_eq!(alice.wait_settled(&t).await["status"], "failed");
+}
