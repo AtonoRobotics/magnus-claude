@@ -145,8 +145,12 @@ pub fn join(mut body: Value, content: Option<Value>) -> Value {
 }
 
 /// Which events hold one item's own content: those of `runs` except the
-/// kinds in `except` (what the runs made that is an item of its own), and
-/// those of `kinds` whose `field` is `id`.
+/// kinds in `except` (what the runs made that is an item of its own); those
+/// of `kinds` whose `field` is `id`; each `(kind, field, value)` of
+/// `matches` (what belongs to the item but carries no run: its verdict, the
+/// answers to its cards); and each `(kind, run, text)` of `containing`, the
+/// events of that kind in that run whose content holds the text (where a
+/// memory was written).
 #[derive(Debug, Default)]
 pub struct Holding {
     pub runs: Vec<String>,
@@ -154,6 +158,8 @@ pub struct Holding {
     pub kinds: Vec<&'static str>,
     pub field: &'static str,
     pub id: String,
+    pub matches: Vec<(&'static str, &'static str, String)>,
+    pub containing: Vec<(&'static str, String, String)>,
 }
 
 /// The event log. A lost connection (Postgres restarting) is opened again
@@ -172,7 +178,7 @@ pub struct Log {
 }
 
 /// One kernel per log: a second one would break the single-writer rule.
-async fn hold(client: &Client) -> Result<()> {
+pub(crate) async fn hold(client: &Client) -> Result<()> {
     let got: bool = client.query_one("SELECT pg_try_advisory_lock(7239001)", &[]).await?.get(0);
     anyhow::ensure!(got, "another kernel holds this event log");
     Ok(())
@@ -239,6 +245,26 @@ impl Log {
         Ok(w.downgrade())
     }
 
+    /// The writer's appends are serialized, so the first seq of a new
+    /// append follows the last one this process applied. A gap that holds
+    /// events means an append committed whose caller never applied it (its
+    /// future was dropped mid-statement): start again from the log. A gap
+    /// without events is only the sequence skipping a failed insert.
+    async fn check_contiguous(&self, first: i64) -> Result<()> {
+        let last = self.last.load(std::sync::atomic::Ordering::SeqCst);
+        if !self.writer || first <= last + 1 {
+            return Ok(());
+        }
+        let c = self.client().await?;
+        let missed: i64 = c.query_one("SELECT count(*) FROM public.events WHERE seq > $1 AND seq < $2", &[&last, &first]).await?.get(0);
+        if missed > 0 {
+            tracing::error!("the log has {missed} events this process did not apply; restarting from the log");
+            c.batch_execute("SELECT pg_advisory_unlock_all()").await?;
+            crate::update::restart_in_place();
+        }
+        Ok(())
+    }
+
     fn saw(&self, seq: i64) {
         self.last.fetch_max(seq, std::sync::atomic::Ordering::SeqCst);
     }
@@ -285,6 +311,7 @@ impl Log {
             .await,
         }
         .context("append to the event log")?;
+        self.check_contiguous(row.get(0)).await?;
         self.saw(row.get(0));
         Ok(Event { seq: row.get(0), at: row.get(1), actor: actor.into(), ev: ev.clone() })
     }
@@ -321,6 +348,9 @@ impl Log {
         .context("append to the event log")?;
         let mut at: Vec<(i64, chrono::DateTime<chrono::Utc>)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
         at.sort_by_key(|(seq, _)| *seq);
+        if let Some((seq, _)) = at.first() {
+            self.check_contiguous(*seq).await?;
+        }
         if let Some((seq, _)) = at.last() {
             self.saw(*seq);
         }
@@ -345,14 +375,28 @@ impl Log {
         }
         let except: Vec<&str> = h.except.clone();
         let kinds: Vec<&str> = h.kinds.clone();
+        let (mk, mf, mv): (Vec<&str>, Vec<&str>, Vec<&str>) = h.matches.iter().map(|(k, f, v)| (*k, *f, v.as_str())).fold((vec![], vec![], vec![]), |mut a, (k, f, v)| {
+            a.0.push(k);
+            a.1.push(f);
+            a.2.push(v);
+            a
+        });
+        let (ck, cr, ct): (Vec<&str>, Vec<&str>, Vec<&str>) = h.containing.iter().fold((vec![], vec![], vec![]), |mut a, (k, r, t)| {
+            a.0.push(k);
+            a.1.push(r.as_str());
+            a.2.push(t.as_str());
+            a
+        });
         let rows = self
             .client()
             .await?
             .query(
                 "SELECT e.seq FROM public.events e JOIN public.content c USING (seq)
                  WHERE (e.run_id = ANY($1) AND e.kind <> ALL($2)) OR (e.kind = ANY($3) AND e.body->>$4 = $5)
+                    OR EXISTS (SELECT 1 FROM unnest($6::text[], $7::text[], $8::text[]) AS m(k, f, v) WHERE e.kind = m.k AND e.body->>m.f = m.v)
+                    OR EXISTS (SELECT 1 FROM unnest($9::text[], $10::text[], $11::text[]) AS x(k, r, t) WHERE e.kind = x.k AND e.run_id = x.r AND strpos(c.body::text, x.t) > 0)
                  ORDER BY e.seq",
-                &[&h.runs, &except, &kinds, &h.field, &h.id],
+                &[&h.runs, &except, &kinds, &h.field, &h.id, &mk, &mf, &mv, &ck, &cr, &ct],
             )
             .await?;
         Ok(rows.iter().map(|r| r.get(0)).collect())
@@ -364,6 +408,13 @@ impl Log {
             return Ok(0);
         }
         Ok(self.client().await?.execute("DELETE FROM public.content WHERE seq = ANY($1)", &[&seqs]).await.context("delete content")?)
+    }
+
+    /// Every removal so far: the seq of its `removed` event and the events
+    /// whose content it deleted, oldest first.
+    pub async fn removals(&self) -> Result<Vec<(i64, Vec<i64>)>> {
+        let rows = self.client().await?.query("SELECT seq, body->'seqs' FROM public.events WHERE kind = 'removed' ORDER BY seq", &[]).await?;
+        Ok(rows.iter().map(|r| (r.get::<_, i64>(0), serde_json::from_value(r.get::<_, Value>(1)).unwrap_or_default())).collect())
     }
 
     /// Finish removals that stopped after their record: delete the content
@@ -410,19 +461,50 @@ impl Log {
             let body = join(r.get(3), r.get(4));
             let seq: i64 = r.get(0);
             self.saw(seq);
-            let ev: Ev = match serde_json::from_value(body.clone()) {
-                Ok(ev) => ev,
-                // Written by a later release this one was rolled back from:
-                // a kind of event it does not know, so nothing it acts on.
-                Err(e) if e.to_string().starts_with("unknown variant") => {
-                    tracing::warn!("event {seq} is a kind this release does not know ({}); skipped", body["kind"]);
-                    continue;
-                }
-                Err(e) => return Err(anyhow::Error::from(e).context(format!("event {seq} does not parse"))),
+            let Some(ev) = parse_event(&body).with_context(|| format!("event {seq} does not parse"))? else {
+                tracing::warn!("event {seq} is a kind this release does not know ({}); skipped", body["kind"]);
+                continue;
             };
             out.push(Event { seq, at: r.get(1), actor: r.get(2), ev });
         }
         Ok(out)
+    }
+}
+
+/// An event from the log: `None` when its kind is one this release does not
+/// know (written by a later release it was rolled back from, so nothing it
+/// acts on). Any other failure is an error, an unknown value inside a known
+/// kind included: serde words both "unknown variant", and skipping the
+/// second would drop part of a run's history.
+pub fn parse_event(body: &Value) -> Result<Option<Ev>> {
+    match serde_json::from_value::<Ev>(body.clone()) {
+        Ok(ev) => Ok(Some(ev)),
+        Err(e) => {
+            let kind_unknown = serde_json::from_value::<Ev>(serde_json::json!({ "kind": body["kind"] })).err().is_some_and(|k| k.to_string().starts_with("unknown variant"));
+            if kind_unknown {
+                Ok(None)
+            } else {
+                Err(e.into())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn only_an_unknown_kind_is_skipped() {
+        let known = serde_json::to_value(Ev::MemoryForgotten { id: "m1".into() }).unwrap();
+        assert!(matches!(parse_event(&known), Ok(Some(_))));
+        assert!(matches!(parse_event(&serde_json::json!({ "kind": "from_a_later_release", "x": 1 })), Ok(None)));
+        // A known kind holding a value this release does not know (a block
+        // type from a later release) stops the boot; serde words it the same.
+        let nested = serde_json::json!({ "kind": "memory_pass", "run": "r", "model": "m", "blocks": [{ "type": "thinking_v9", "text": "x" }], "usage": {} });
+        let err = serde_json::from_value::<Ev>(nested.clone()).unwrap_err().to_string();
+        assert!(err.starts_with("unknown variant"), "{err}");
+        assert!(parse_event(&nested).is_err());
     }
 }
 
@@ -447,6 +529,11 @@ mod tests {
         let (record, content) = split(nested.clone());
         assert_eq!(record["chat"], serde_json::json!({ "thread": "t1", "turn": false }));
         assert_eq!(join(record, content.map(|c| c.body)), nested);
+
+        // Research keeps its sources' quotes: content, deleted with the entry.
+        let kb = serde_json::json!({ "kind": "knowledge_added", "id": "kb1", "title": "Headcount", "text": "120 staff.", "source": { "kind": "research", "citations": [{ "source": "https://a.example/", "quote": "QUOTE-120-staff" }] } });
+        let (record, _) = split(kb);
+        assert!(!record.to_string().contains("QUOTE-120-staff"), "a citation's quote stayed in the log: {record}");
 
         let plain = serde_json::json!({ "kind": "resumed", "run": "r1" });
         assert!(matches!(split(plain.clone()), (r, None) if r == plain), "an event without content is stored whole");

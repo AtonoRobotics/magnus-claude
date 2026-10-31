@@ -264,14 +264,19 @@ impl Keycloak {
     }
 
     async fn browse(&self, url: &str, username: &str, deny: bool) -> Result<String, String> {
-        let out = tokio::process::Command::new("node")
+        // A browser that hangs fails the test in two minutes, named, never
+        // holds the run.
+        let run = tokio::process::Command::new("node")
             .arg(workspace_root().join("tests/scratch/sign-in-browser.mjs"))
             .args([url, &username.to_lowercase(), &password_of(username)])
             .args(deny.then_some("deny"))
             .env("MAGNUS_CHROMIUM", crate::chromium())
-            .output()
-            .await
-            .expect("run node");
+            .kill_on_drop(true)
+            .output();
+        let Ok(out) = tokio::time::timeout(std::time::Duration::from_secs(120), run).await else {
+            return Err(format!("the browser signing in at {url} did not finish in two minutes"));
+        };
+        let out = out.expect("run node");
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
         } else {
@@ -286,7 +291,7 @@ impl Keycloak {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let redirect = format!("http://127.0.0.1:{}/callback", l.local_addr().unwrap().port());
         let http = reqwest::Client::new();
-        let begun: Value = http.post(format!("{}/v1/sign-in/browser", app.base)).json(&json!({ "redirect_uri": redirect, "client": "app" })).send().await.unwrap().json().await.unwrap();
+        let begun: Value = http.post(format!("{}/v1/sign-in/browser", app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "redirect_uri": redirect, "client": "app" })).send().await.unwrap().json().await.unwrap();
         let page = begun["authorize_url"].as_str().unwrap_or_else(|| panic!("no sign-in page: {begun}")).to_string();
         let (back, browsed) = tokio::join!(loopback_once(l), self.browser(&page, username));
         browsed.unwrap_or_else(|e| panic!("the browser did not sign in: {e}"));
@@ -306,6 +311,7 @@ impl Keycloak {
     pub async fn app_password(&self, app: &Appliance, username: &str, password: &str, code: Option<&str>) -> (u16, Value) {
         let r = reqwest::Client::new()
             .post(format!("{}/v1/sign-in", app.base))
+            .header("x-magnus-app", "0.5.0")
             .json(&json!({ "person": username, "password": password, "code": code, "client": "app" }))
             .send()
             .await

@@ -24,8 +24,9 @@ const appBridge = tauri && {
   async connect(url) { return this.invoke("connect", { url }); },
   async trust(url, fingerprint) { return this.invoke("trust", { url, fingerprint }); },
   async signInMethod() { return this.invoke("sign_in_method"); },
-  // Resolves with who signed in, or { code_needed } or { browser }.
-  async signIn(person, password, code) { return this.invoke("sign_in", { person, password, code: code || null }); },
+  // Resolves with who signed in, or { code_needed }, { browser } or
+  // { machine_code_needed } (the owner's backup while the provider is down).
+  async signIn(person, password, code, machineCode) { return this.invoke("sign_in", { person, password, code: code || null, machineCode: machineCode || null }); },
   // Sign in through the identity provider in the person's own browser,
   // which comes back to this computer; resolves with who signed in.
   async providerSignIn(loginHint) { return this.invoke("provider_sign_in", { loginHint: loginHint || null }); },
@@ -58,6 +59,9 @@ const appBridge = tauri && {
   // `again`: also after it was shown once (for Settings).
   async whatsNew(again = false) { return this.invoke("whats_new", { again }); },
   onUpdateReady(fn) { tauri.event.listen("update-ready", e => fn(e.payload)); },
+  // Glass from the system's own window material where it has one.
+  async setMaterial(glass, dark, tint) { return this.invoke("set_material", { glass, dark, tint }).catch(() => ({ native: false })); },
+  async systemLook() { return this.invoke("system_look").catch(() => ({ reduce_transparency: false })); },
 };
 
 const webBridge = {
@@ -70,11 +74,11 @@ const webBridge = {
   async connect() { return { status: "trusted", url: location.origin }; },
   async trust() {},
   async signInMethod() { return this.api("GET", "/v1/sign-in"); },
-  async signIn(person, password, code) {
+  async signIn(person, password, code, machineCode) {
     try {
-      return (await this.api("POST", "/v1/sign-in", { person, password, code: code || undefined })).person;
+      return (await this.api("POST", "/v1/sign-in", { person, password, code: code || undefined, machine_code: machineCode || undefined })).person;
     } catch (e) {
-      if (e.body?.code_needed || e.body?.browser) return e.body;
+      if (e.body?.code_needed || e.body?.browser || e.body?.machine_code_needed) return e.body;
       throw e;
     }
   },
@@ -124,6 +128,9 @@ const webBridge = {
   async updateLook() { return null; },
   async whatsNew() { return null; },
   onUpdateReady() {},
+  // A browser has no window material: the page draws its backdrop.
+  async setMaterial() { return { native: false }; },
+  async systemLook() { return { reduce_transparency: false }; },
   async dataUrl(path) {
     const r = await fetch(path, { credentials: "same-origin" });
     if (!r.ok) throw errorOf(r.status, await r.text());

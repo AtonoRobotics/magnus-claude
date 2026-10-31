@@ -101,7 +101,8 @@ async fn start() -> Kb {
     .await;
     let other = FakeWeb::start(&[("/b", "<p>We are 120 staff across two offices.</p>")]).await;
     let crm = mcp::crm().start().await;
-    let m = FakeModel::start(model(web.url("/evil"), web.url("/a"), other.url("/b"))).await;
+    // The second source is another host (two ports of one host are one source).
+    let m = FakeModel::start(model(web.url("/evil"), web.url("/a"), other.url("/b").replace("127.0.0.1", "localhost"))).await;
     let spec = Spec::default().app("crm", &crm, "internal", "private", &[("get_record", "read"), ("update_record", "reversible_write")]).access("crm", &["finance"]);
     let app = Appliance::start(spec, &m).await;
     Kb { app, m, crm, web, other }
@@ -234,7 +235,7 @@ async fn verified_is_reliable_and_grants_nothing() {
     let e = search(&alice, "headcount").await;
     assert_eq!((e[0]["integrity"].clone(), e[0]["verification"]["how"].clone()), (json!("verified"), json!("corroborated")), "{:?}", e[0]);
     let found: Vec<Value> = e[0]["verification"]["evidence"].as_array().unwrap().iter().map(|x| json!([x["from"], x["found"]])).collect();
-    let (a, b) = (k.web.base.trim_start_matches("http://").to_string(), k.other.base.trim_start_matches("http://").to_string());
+    let (a, b) = ("127.0.0.1".to_string(), "localhost".to_string());
     assert_eq!(found, vec![json!([format!("web:{a}"), true]), json!([format!("web:{b}"), true]), json!([format!("web:{b}"), false])], "{:?}", e[0]);
 
     let t = run(&alice, &format!("{USE_IT} headcount")).await;

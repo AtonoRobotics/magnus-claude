@@ -15,7 +15,9 @@ export async function open(wd, app, shots, prefix) {
   if (shots) mkdirSync(shots, { recursive: true });
   async function call(method, path, body) {
     const r = await fetch(`${wd}${path}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-    const j = await r.json();
+    const text = await r.text();
+    let j;
+    try { j = JSON.parse(text); } catch { throw new Error(`${method} ${path}: HTTP ${r.status}, not WebDriver's answer: ${text.slice(0, 200) || "(empty)"}`); }
     if (!r.ok || (j.value && j.value.error)) throw new Error(`${method} ${path}: ${JSON.stringify(j.value)}`);
     return j.value;
   }
@@ -97,7 +99,8 @@ export async function signIn(d, { provider, person, as, browser = true }) {
     await d.type(d.css("#who"), who);
     await d.type(d.css("#pw"), passwords[who]);
     await d.click(d.button("Sign in"));
-    await d.xpath("//h1[normalize-space()='Home']");
+    // The conversation is home: the workspace shows, with Needs you.
+    await d.xpath("//nav//button[starts-with(normalize-space(),'Needs you')]");
     const page = await d.run("return JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie");
     if (page.includes("mgs_")) throw new Error("the session token reached the page");
     if (page.includes(passwords[who])) throw new Error("the password stayed in the page's storage");

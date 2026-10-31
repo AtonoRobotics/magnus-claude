@@ -34,7 +34,7 @@ const inFrame = (text, js, ...args) => d.run(`
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await d.step("a data question: the text streams first, then a chart and a table", async () => {
-  await d.click(d.xpath("//nav//a[normalize-space()='Chat']"));
+  // The conversation is home: signing in opens a new one.
   await send(question);
   // While the model is still writing, the text shows and nothing else.
   await d.until("the answer's text streaming", () => d.run(

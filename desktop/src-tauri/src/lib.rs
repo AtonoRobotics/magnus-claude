@@ -3,6 +3,7 @@
 //! request itself, so the page never sees the token. It holds no provider
 //! or tool credentials; approvals are made here, outside the agent's context.
 
+mod look;
 mod pin;
 mod speech;
 mod store;
@@ -136,17 +137,17 @@ async fn trust(app: State<'_, App>, url: String, fingerprint: String) -> Res<()>
 }
 
 #[tauri::command]
-async fn sign_in(app: State<'_, App>, person: String, password: String, code: Option<String>) -> Res<Value> {
+async fn sign_in(app: State<'_, App>, person: String, password: String, code: Option<String>, machine_code: Option<String>) -> Res<Value> {
     let (url, c) = app.conn()?;
     let r = c
         .post(format!("{url}/v1/sign-in"))
-        .json(&json!({ "person": person, "password": password, "code": code, "client": "app" }))
+        .json(&json!({ "person": person, "password": password, "code": code, "machine_code": machine_code, "client": "app" }))
         .send()
         .await
         .map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
     let (status, body) = body_of(r).await;
     // Not refusals: the page asks for the code, or opens the browser.
-    if body["code_needed"] == true || body["browser"] == true {
+    if body["code_needed"] == true || body["browser"] == true || body["machine_code_needed"] == true {
         return Ok(body);
     }
     if status >= 400 {
@@ -452,7 +453,7 @@ pub fn run() {
             Ok(())
         })
         .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default(), loopback: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, provider_sign_in, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait, app_info, update::update_state, update::update_look, update::update_install, update::whats_new])
+        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, provider_sign_in, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait, app_info, update::update_state, update::update_look, update::update_install, update::whats_new, look::set_material, look::system_look])
         .run(tauri::generate_context!())
         .expect("start the Magnus app");
 }

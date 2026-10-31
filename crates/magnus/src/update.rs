@@ -57,6 +57,25 @@ pub fn install_dir() -> Result<PathBuf> {
     D.get_or_init(|| std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf))).clone().context("the program has no directory")
 }
 
+/// The install directory, when it is one an installer made: its own, with
+/// the release's VERSION. Updates move the whole directory aside, so they
+/// never run from a shared one (/usr/local/bin, a build tree).
+fn installed_dir() -> Result<PathBuf> {
+    let dir = install_dir()?;
+    anyhow::ensure!(dir.join("VERSION").is_file(), "{} is not an installed release (no VERSION beside the programs); updates are installed by hand here", dir.display());
+    Ok(dir)
+}
+
+/// Exchange the running programs with the kept release (both ways: a
+/// rollback, or undoing a switch).
+fn swap_with_prev(dir: &Path) -> Result<()> {
+    let prev = sibling(dir, ".prev");
+    let tmp = sibling(dir, ".swap");
+    swap(dir, &prev, &tmp)?;
+    std::fs::rename(&tmp, &prev)?;
+    Ok(())
+}
+
 fn sibling(dir: &Path, suffix: &str) -> PathBuf {
     let mut s = dir.as_os_str().to_owned();
     s.push(suffix);
@@ -183,7 +202,7 @@ pub fn on_start(cfg: &Config) -> Result<()> {
 
 /// The release just switched to failed to start: go back and run the old one.
 pub fn roll_back_now(cfg: &Config, p: &Value, reason: &str) -> Result<()> {
-    if p["rollback"].as_bool() == Some(true) {
+    if p["rollback"].as_bool() == Some(true) && p["owner"].as_bool() != Some(true) {
         // The release we went back to failed too: stay down for a person.
         let _ = std::fs::remove_file(pending_path(cfg));
         bail!("the release rolled back to did not start either: {reason}");
@@ -263,20 +282,24 @@ impl Kernel {
         self.switch(actor, &current, &to, false, |dir| swap(dir, &new, &sibling(dir, ".prev"))).await
     }
 
-    /// Go back one release: the one kept beside the running programs.
+    /// Go back one release: the one kept beside the running programs. It
+    /// proves it can read this appliance first, as an update does; if it
+    /// still does not start, the appliance comes back to this release.
     pub async fn roll_back(self: &Arc<Self>, actor: &str) -> Result<Value> {
         let _one = updating().lock().await;
-        let dir = install_dir()?;
+        let dir = installed_dir()?;
         let prev = sibling(&dir, ".prev");
         let to = std::fs::read_to_string(prev.join("VERSION")).map(|v| v.trim().to_string()).context("no earlier release is kept")?;
         let current = version();
-        self.switch(actor, &current, &to, true, |dir| {
-            let tmp = sibling(dir, ".swap");
-            swap(dir, &prev, &tmp)?;
-            std::fs::rename(&tmp, &prev)?;
-            Ok(())
-        })
-        .await
+        let exe = std::env::current_exe()?;
+        let prog = prev.join(exe.file_name().context("program name")?);
+        let out = tokio::process::Command::new(&prog).args(["check", "--config"]).arg(&self.cfg.path).output().await.context("run the earlier release's check")?;
+        if !out.status.success() {
+            let reason = format!("the earlier release cannot read this appliance: {}", String::from_utf8_lossy(&out.stderr).trim());
+            self.emit(actor, Ev::UpdateFailed { to: to.clone(), reason: reason.clone() }).await?;
+            return Ok(json!({ "status": "failed", "version": current, "latest": to, "reason": reason }));
+        }
+        self.switch(actor, &current, &to, true, swap_with_prev).await
     }
 
     /// Verify, unpack and check a release; its programs' directory.
@@ -285,7 +308,7 @@ impl Kernel {
         anyhow::ensure!(!file.contains('/') && !file.contains(".."), "not a release file name");
         let bytes = std::fs::read(self.cfg.updates_dir().join("appliance").join(file)).with_context(|| format!("read {file}"))?;
         verify(&bytes, m["signature"].as_str().unwrap_or_default(), &self.cfg.updates.public_key, to)?;
-        let dir = install_dir()?;
+        let dir = installed_dir()?;
         let new = sibling(&dir, ".new");
         if new.exists() {
             std::fs::remove_dir_all(&new)?;
@@ -313,7 +336,7 @@ impl Kernel {
         }
         let dir = install_dir()?;
         let r = started_as().and_then(|how| {
-            write_pending(&self.cfg, &json!({ "from": from, "to": to, "rollback": rollback, "reason": if rollback { "the owner went back one release" } else { "" }, "started_as": how }))?;
+            write_pending(&self.cfg, &json!({ "from": from, "to": to, "rollback": rollback, "owner": rollback, "reason": if rollback { "the owner went back one release" } else { "" }, "started_as": how }))?;
             put(&dir)?;
             Ok(how)
         });
@@ -328,8 +351,14 @@ impl Kernel {
             }
         };
         tracing::info!("switching from {from} to {to}");
-        exec_installed(&how)?;
-        unreachable!()
+        let e = exec_installed(&how).unwrap_err();
+        // Still this release, running: put its programs back, and say so.
+        let _ = std::fs::remove_file(pending_path(&self.cfg));
+        let undone = swap_with_prev(&dir);
+        let reason = format!("{e:#}{}", undone.err().map(|u| format!("; putting this release back failed too: {u:#}")).unwrap_or_default());
+        self.emit("kernel", Ev::UpdateFailed { to: to.into(), reason: reason.clone() }).await?;
+        self.resume_updated().await?;
+        Ok(json!({ "status": "failed", "version": from, "latest": to, "reason": reason }))
     }
 
     /// Every running task waits for the switch.
@@ -464,6 +493,22 @@ pub async fn app_version(req: Request, next: Next) -> Response {
         r.headers_mut().insert("x-magnus-appliance", v);
     }
     r
+}
+
+/// An app signing in without naming its version is older than 0.5.0 (the
+/// first that says it): told to update instead of given a session it would
+/// use with an API it gets wrong.
+pub fn unversioned_app(h: &HeaderMap) -> Option<Response> {
+    if h.contains_key("x-magnus-app") {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::UPGRADE_REQUIRED,
+            Json(json!({ "error": format!("This app is older than this appliance accepts. Update the app to {MIN_APP} or later."), "update_required": true, "min_app": MIN_APP, "version": version() })),
+        )
+            .into_response(),
+    )
 }
 
 async fn status(AxState(k): K, h: HeaderMap) -> Response {

@@ -36,7 +36,8 @@ await step("sign in", async () => {
   await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("heading", { name: "Home" }).waitFor({ timeout: T });
+  // The conversation is home: the workspace shows, with Needs you.
+  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
 await step("the paused schedule says so, with its end and budget", async () => {

@@ -125,9 +125,39 @@ async fn resend(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, 
         let model = t.and_then(|t| s.runs.get(&t.run_id)).map(|r| (r.config.adapter.clone(), r.config.model.clone()));
         (files, model)
     });
-    let gone: Vec<String> = entries[message..].iter().filter_map(|e| e["id"].as_str().map(String::from)).collect();
+    // The message and what came of it: its turns, and what those turns
+    // started. An earlier turn's task result that happens to end later
+    // stays: it answers a message still shown.
+    let later = &entries[message..];
+    let turns: std::collections::HashSet<String> = later.iter().filter(|e| matches!(e["kind"].as_str(), Some("message" | "answer" | "turn" | "schedule_card"))).filter_map(|e| e["task_id"].as_str().map(String::from)).collect();
+    let gone: Vec<String> = later
+        .iter()
+        .filter(|e| match k.origin_turn(e) {
+            Some(t) => turns.contains(&t),
+            None => true,
+        })
+        .filter_map(|e| e["id"].as_str().map(String::from))
+        .collect();
     if let Err(e) = hide(&k, &p.id, &thread, gone).await {
         return internal(e);
+    }
+    // Superseded work stops: a turn still running or waiting, and the tasks
+    // it started, would otherwise act on a message no longer shown, and the
+    // new turn may start them again.
+    let stop: Vec<String> = k.read(|s| {
+        s.tasks
+            .values()
+            .filter(|t| turns.contains(&t.task_id) || t.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|r| s.runs.get(r)).is_some_and(|r| turns.contains(&r.task)))
+            .filter_map(|t| s.runs.get(&t.run_id))
+            .filter(|r| !r.status.terminal())
+            .map(|r| r.id.clone())
+            .collect()
+    });
+    for run in stop {
+        if let Err(e) = k.emit(&format!("person:{}", p.id), Ev::Cancelled { run: run.clone() }).await {
+            return internal(e);
+        }
+        k.on_stop(&run, true).await;
     }
     let project = k.read(|s| s.project_of(&thread));
     match k.chat_say(&p.id, text, Some(thread.clone()), model, None, files, project).await {
@@ -174,9 +204,30 @@ async fn share(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, S
     let e = &entries[at];
     let to_id = b["person"].as_str().unwrap_or_default();
     let Some(to) = k.person(to_id).filter(|x| x.id != p.id) else { return err(StatusCode::NOT_FOUND, "no such person") };
-    let task = e["task_id"].as_str().unwrap_or_default();
-    let tools: Vec<String> = k.read(|s| s.tasks.get(task).and_then(|t| s.runs.get(&t.run_id)).map(|r| r.intents.values().map(|i| i.tool.clone()).collect()).unwrap_or_default());
-    let barred: Vec<String> = tools.iter().filter_map(|t| crate::boundary::facts(&k, t)).filter(|f| !crate::boundary::has_rights(&to, f)).map(|f| f.app).collect();
+    // Every run whose words reach this entry: the turns before it (their
+    // answers are in its conversation) and the tasks they started, as for
+    // its taint.
+    let tasks: Vec<String> = entries[..=at]
+        .iter()
+        .flat_map(|x| match x["kind"].as_str() {
+            Some("tasks") => x["tasks"].as_array().into_iter().flatten().filter_map(|t| t["task_id"].as_str().map(String::from)).collect::<Vec<_>>(),
+            _ => x["task_id"].as_str().map(String::from).into_iter().collect(),
+        })
+        .collect();
+    let (tools, private_knowledge): (Vec<String>, bool) = k.read(|s| {
+        let runs: Vec<&crate::state::Run> = tasks.iter().filter_map(|t| s.tasks.get(t)).filter_map(|t| s.runs.get(&t.run_id)).collect();
+        let tools = runs.iter().flat_map(|r| r.intents.values().map(|i| i.tool.clone())).collect();
+        // A knowledge search is private when an entry it returned is not for
+        // everyone: whose it was is not kept, so it is not shared on.
+        let private = runs.iter().any(|r| r.intents.values().any(|i| i.tool == "knowledge_search" && r.private_from.contains("knowledge")));
+        (tools, private)
+    });
+    let mut barred: Vec<String> = tools.iter().filter_map(|t| crate::boundary::facts(&k, t)).filter(|f| !crate::boundary::has_rights(&to, f)).map(|f| f.app).collect();
+    if private_knowledge {
+        barred.push("knowledge entries not everyone may read".into());
+    }
+    barred.sort();
+    barred.dedup();
     if !barred.is_empty() {
         return err(StatusCode::FORBIDDEN, format!("{} may not use {}, which this message comes from", to.name, barred.join(", ")));
     }
@@ -253,8 +304,11 @@ async fn task(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, St
     }
     let label = k.thread_label(&p.id, &thread, Some(&entry));
     let from_run = k.read(|s| e["task_id"].as_str().and_then(|t| s.tasks.get(t)).map(|t| t.run_id.clone()));
+    // The files the message came with go with the task made from it.
+    let files = k.read(|s| e["task_id"].as_str().and_then(|t| s.tasks.get(t)).filter(|_| e["kind"] == "message").map(|t| t.files.clone()).unwrap_or_default());
     let o = NewRun {
         chat: Some(ChatOrigin { thread: thread.clone(), turn: false, from_run, conversation: Kernel::transcript_of(entries[..=at].to_vec()) }),
+        files,
         label: (label != Label::PRINCIPAL).then_some(label),
         project: k.read(|s| s.project_of(&thread)),
         title: Some(text.lines().next().unwrap_or_default().chars().take(80).collect()),
@@ -281,9 +335,16 @@ async fn spoken(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, 
     if let Some(script) = e["spoken"].as_str() {
         return Json(json!({ "script": script })).into_response();
     }
+    // One script per answer: a branch's copy reads its run's, and two
+    // requests at once write it once.
+    static WRITING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = WRITING.lock().await;
     let Some(run) = k.read(|s| s.tasks.get(e["task_id"].as_str().unwrap_or_default()).and_then(|t| s.runs.get(&t.run_id).cloned())) else {
         return err(StatusCode::NOT_FOUND, "no such answer");
     };
+    if let Some(script) = &run.spoken {
+        return Json(json!({ "script": script })).into_response();
+    }
     match k.write_spoken(&run, e).await {
         Ok(script) => Json(json!({ "script": script })).into_response(),
         Err(e) => internal(e),

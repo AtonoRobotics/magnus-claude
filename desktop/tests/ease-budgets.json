@@ -1,0 +1,10 @@
+{
+  "why": "Ease of use is a first-class requirement (DECISIONS.md): each everyday flow's steps and navigations, as app-workspace.mjs counts them in the installed app. A step is one click, one typed entry or one key press; a navigation is a page load, a change of address or a history step. Each budget is what the flow takes in the one-workspace design; a flow over its budget fails the test, and the release with it. Lower a budget when a flow gets easier; raising one is a decision for the owner.",
+  "flows": {
+    "start work": { "steps": 2, "navigations": 0, "how": "type the request, Send" },
+    "approve": { "steps": 1, "navigations": 0, "how": "Approve once, on the card in the conversation" },
+    "read a result": { "steps": 1, "navigations": 0, "how": "See the outcome: the deliverable opens beside the conversation (its glimpse is already in the thread)" },
+    "find a file": { "steps": 3, "navigations": 0, "how": "type its name in search, Enter, open it from the results" },
+    "create a schedule": { "steps": 3, "navigations": 0, "how": "type the request, Send, Start schedule" }
+  }
+}

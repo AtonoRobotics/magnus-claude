@@ -16,8 +16,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: never
-  MAGNUS_GUEST_KERNEL: ${{ vars.MAGNUS_SANDBOX_OUT }}/vmlinux
-  MAGNUS_GUEST_ROOTFS: ${{ vars.MAGNUS_SANDBOX_OUT }}/rootfs.ext4
 
 jobs:
   release:
@@ -29,6 +27,12 @@ jobs:
       - uses: actions/checkout@v7
         with: { clean: false, fetch-depth: 0 }
       # The browser sidecar's packages (some suites drive a browser).
+      # The sandbox guest built from this commit (sandbox/image.sh).
+      - name: Sandbox image
+        run: |
+          d=$(sandbox/image.sh)
+          echo "MAGNUS_GUEST_KERNEL=$d/vmlinux" >> "$GITHUB_ENV"
+          echo "MAGNUS_GUEST_ROOTFS=$d/rootfs.ext4" >> "$GITHUB_ENV"
       - name: Browser sidecar
         run: npm ci --prefix browser
       - name: Programs the tests launch

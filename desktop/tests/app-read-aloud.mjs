@@ -24,7 +24,7 @@ const busy = async () => (await d.attr(listen(), "disabled")) !== null;
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await d.step("an answer", async () => {
-  await d.click(d.xpath("//nav//a[normalize-space()='Chat']"));
+  // The conversation is home: signing in opens a new one.
   await d.type(d.css("#msg"), "How did revenue go?");
   await d.click(d.css("#send"));
   await d.xpath("//div[@data-kind='answer']");

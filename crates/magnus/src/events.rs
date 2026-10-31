@@ -281,6 +281,9 @@ pub enum Ev {
         /// No run starts after this many.
         #[serde(default)]
         max_runs: Option<u32>,
+        /// What the person confirmed each run does, on the chat card.
+        #[serde(default)]
+        scope: Option<String>,
     },
     /// A due schedule started no run because its last one is still open:
     /// running, or waiting on someone. The next is due as usual.
@@ -293,7 +296,13 @@ pub enum Ev {
     /// its own runs ended it.
     ScheduleEnded {
         id: String,
+        /// Why: the kernel's words, or what the run that ended it wrote
+        /// (content, removed with that run).
+        #[serde(default)]
         reason: String,
+        /// The run that ended it, when one did.
+        #[serde(default)]
+        run: Option<String>,
     },
     /// A schedule stopped starting runs after too many failed in a row,
     /// until its person resumes it.
@@ -376,6 +385,9 @@ pub enum Ev {
         /// The project it started in.
         #[serde(default)]
         project: Option<ProjectContext>,
+        /// The scope the person confirmed for the schedule that started it.
+        #[serde(default)]
+        scope: Option<String>,
     },
     /// A file the person added: to the library, a project, or a chat
     /// message. Its content is private data, never instructions.
@@ -686,6 +698,8 @@ pub enum Ev {
         text: String,
         readers: Vec<Vec<String>>,
         integrity: String,
+        /// What it came from, with its citations' quotes: content.
+        #[serde(default)]
         source: Value,
         author: String,
         run: Option<String>,
@@ -748,11 +762,11 @@ pub enum Ev {
 /// beside the log in the content store, where it can be deleted; the log
 /// keeps the rest. A dotted name is a field of a field.
 pub const CONTENT: &[(&str, &[&str])] = &[
-    ("task_created", &["text", "attachments", "title", "chat.conversation", "project.name", "project.instructions"]),
+    ("task_created", &["text", "attachments", "title", "chat.conversation", "project.name", "project.instructions", "scope"]),
     ("file_uploaded", &["name", "data_b64"]),
     ("project_set", &["name", "instructions"]),
     ("thread_branched", &["entries", "title"]),
-    ("schedule_set", &["text", "title"]),
+    ("schedule_set", &["text", "title", "scope"]),
     ("model_reply", &["blocks", "state"]),
     ("verifier_reply", &["blocks"]),
     ("memory_pass", &["blocks"]),
@@ -770,9 +784,10 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("verdict", &["note"]),
     ("graded", &["details"]),
     ("memory", &["fact", "topic"]),
-    ("knowledge_added", &["title", "text", "verification", "value"]),
+    ("knowledge_added", &["title", "text", "source", "verification", "value"]),
     ("knowledge_extraction", &["reply"]),
     ("spoken_written", &["script"]),
+    ("schedule_ended", &["reason"]),
 ];
 
 /// The content fields of one kind of event; none for most.
@@ -815,7 +830,7 @@ impl Ev {
             | SpokenWritten { run, .. }
             | KnowledgeExtraction { run, .. }
             | Output { run, .. } => Some(run),
-            Item { run, .. } => run.as_deref(),
+            Item { run, .. } | ScheduleEnded { run, .. } => run.as_deref(),
             _ => None,
         }
     }

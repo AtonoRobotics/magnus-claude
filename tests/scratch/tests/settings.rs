@@ -25,7 +25,7 @@ fn set_password(app: &Appliance, person: &str) {
 
 /// Sign in from an app; an API client acting with that session.
 async fn signed_in(app: &Appliance, person: &str) -> Api {
-    let r = reqwest::Client::new().post(format!("{}/v1/sign-in", app.base)).json(&json!({ "person": person, "password": PASSWORD, "client": "app" })).send().await.unwrap();
+    let r = reqwest::Client::new().post(format!("{}/v1/sign-in", app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "person": person, "password": PASSWORD, "client": "app" })).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let body: Value = r.json().await.unwrap();
     let mut a = app.api(person);

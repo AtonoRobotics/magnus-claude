@@ -88,7 +88,12 @@ impl Kernel {
             }
             _ => {}
         }
+        let scope = task.as_ref().and_then(|t| t.scope.clone());
         first.push(Block::Text { text: task.map(|t| t.text).unwrap_or_default() });
+        // A schedule's run keeps to the scope the person confirmed for it.
+        if let Some(scope) = scope {
+            first.push(Block::Text { text: format!("The person confirmed this schedule for this scope; keep to it: {scope}") });
+        }
         // The project's instructions are the person's own words, for
         // everything in it; its files are data, read when needed (M2).
         if let Some(p) = &project {
@@ -143,6 +148,15 @@ impl Kernel {
         msgs.push(Message { role: Role::User, content: first, state: None });
         for (i, reply) in run.replies.iter().enumerate() {
             if cut(i) {
+                // A later reset can start inside an earlier one's cut: its
+                // note (and any notice there) goes where the context resumes.
+                let after: Vec<Block> = run.notices.iter().filter(|(s, _, _)| *s as usize == i + 1).map(|(_, _, t)| Block::Text { text: t.clone() }).chain(notes(i + 1)).collect();
+                if !after.is_empty() {
+                    match msgs.last_mut() {
+                        Some(m) if m.role == Role::User => m.content.extend(after),
+                        _ => msgs.push(Message { role: Role::User, content: after, state: None }),
+                    }
+                }
                 continue;
             }
             msgs.push(Message { role: Role::Assistant, content: reply.blocks.clone(), state: reply.state.clone() });
@@ -169,10 +183,16 @@ impl Kernel {
     }
 
     /// A task from chat keeps the conversation it came from with its
-    /// contract, for the person to see beside it.
+    /// contract, for the person to see beside it. The kernel writes that
+    /// field: whatever the model sent there is dropped, so a contract can
+    /// never show the person words they did not say.
     fn with_conversation(&self, run: &Run, mut contract: Value) -> Value {
-        if let Some(c) = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.clone())).filter(|c| !c.turn) {
-            contract["conversation"] = json!(c.conversation);
+        let chat = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.clone())).filter(|c| !c.turn);
+        if let Some(m) = contract.as_object_mut() {
+            m.remove("conversation");
+            if let Some(c) = chat {
+                m.insert("conversation".into(), json!(c.conversation));
+            }
         }
         contract
     }
@@ -270,8 +290,13 @@ impl Kernel {
                 }
             }
         }
-        let secret = self.connector_secret(c).await.ok().flatten()?;
-        match self.mcp.list_tools(&c.url, Some(secret.expose())).await {
+        // An app that takes a credential lists nothing without it; one that
+        // takes none is listed as it is.
+        let secret = self.connector_secret(c).await.ok().flatten();
+        if c.credential.is_some() && secret.is_none() {
+            return None;
+        }
+        match self.mcp.list_tools(&c.url, secret.as_ref().map(|s| s.expose())).await {
             Ok(t) => {
                 self.live_tools.lock().await.insert(c.name.clone(), (Instant::now(), t.clone()));
                 Some(t)
@@ -491,7 +516,7 @@ impl Kernel {
             "end_schedule" => match self.read(|s| s.tasks.get(&run.task).and_then(|t| t.schedule.clone()).filter(|id| s.schedules.contains_key(id)).map(|id| (id.clone(), s.schedules[&id].clone()))) {
                 Some((id, sc)) => {
                     let reason = input["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).unwrap_or("its run ended it").to_string();
-                    self.emit("model", Ev::ScheduleEnded { id: id.clone(), reason: reason.clone() }).await?;
+                    self.emit("model", Ev::ScheduleEnded { id: id.clone(), reason: reason.clone(), run: Some(rid.to_string()) }).await?;
                     let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
                     self.post_notice(Some(run.task.clone()), Some(rid.to_string()), sc.person.clone(), format!("A schedule ended itself: {title}"), json!({ "reason": "schedule_ended", "evidence": { "schedule": id, "why": reason } }))
                         .await?;
@@ -771,12 +796,18 @@ impl Kernel {
             return Ok(Flow::Continue);
         }
         let summary = input["summary"].as_str().unwrap_or_default().to_string();
-        if !unchecked.is_empty() && run.config.module("verifier") {
+        // The verifier judges only criteria without a check: one whose check
+        // could not run goes to the person unchanged (K37).
+        let (no_check, could_not_run): (Vec<Value>, Vec<Value>) = unchecked.into_iter().partition(|cr| cr.get("check").is_none_or(|v| v.is_null()));
+        unchecked = could_not_run;
+        if !no_check.is_empty() && run.config.module("verifier") {
             let goal = contract["goal"].as_str().unwrap_or_default();
-            match self.verifier_on_completion(run, call_id, step_id, goal, unchecked, &summary).await? {
-                Ok(left) => unchecked = left,
+            match self.verifier_on_completion(run, call_id, step_id, goal, no_check, &summary).await? {
+                Ok(left) => unchecked.extend(left),
                 Err(flow) => return Ok(flow),
             }
+        } else {
+            unchecked.extend(no_check);
         }
         if !unchecked.is_empty() {
             // No executable check, and the verifier off or unsure: the person reviews (K37).

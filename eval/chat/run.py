@@ -23,6 +23,8 @@ class Api:
     def call(self, method, path, body=None):
         req = urllib.request.Request(self.url + path, method=method, data=None if body is None else json.dumps(body).encode())
         req.add_header("content-type", "application/json")
+        # Signs in as an app, so it names an app version the appliance accepts.
+        req.add_header("x-magnus-app", "0.5.0")
         if self.token:
             req.add_header("authorization", f"Bearer {self.token}")
         try:

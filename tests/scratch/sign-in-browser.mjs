@@ -35,17 +35,21 @@ try {
   await page.goto(url);
   await page.fill("#username", username);
   await page.fill("#password", password);
-  await Promise.all([page.waitForLoadState("load"), page.click("#kc-login")]);
+  // Each submit waits for the next page's own load: waiting for the load
+  // state returns at once on the page already loaded, and the steps below
+  // would then look at the page they are leaving (on a busy machine, the
+  // grant was skipped and the sign-in never approved).
+  await Promise.all([page.waitForEvent("load"), page.click("#kc-login")]);
   // A new account may have to choose its password first (Keycloak's
   // "Update password" required action); the person keeps the same one.
   if (await page.locator("#password-new").count()) {
     await page.fill("#password-new", password);
     await page.fill("#password-confirm", password);
-    await Promise.all([page.waitForLoadState("load"), page.locator("input[type=submit], button[type=submit]").first().click()]);
+    await Promise.all([page.waitForEvent("load"), page.locator("input[type=submit], button[type=submit]").first().click()]);
   }
   // The device grant asks the person to grant access to the client.
   const grant = page.locator(answer === "deny" ? "input[name=cancel], button[name=cancel]" : "input[name=accept], button[name=accept]");
-  if (await grant.count()) await Promise.all([page.waitForLoadState("load"), grant.first().click()]);
+  if (await grant.count()) await Promise.all([page.waitForEvent("load"), grant.first().click()]);
   const error = page.locator("#input-error, .kc-feedback-text, .alert-error, #kc-error-message");
   const landed = page.url();
   if (landed.startsWith(new URL(url).origin) && await error.count()) {
