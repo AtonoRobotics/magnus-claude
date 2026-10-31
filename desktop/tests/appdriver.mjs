@@ -15,7 +15,9 @@ export async function open(wd, app, shots, prefix) {
   if (shots) mkdirSync(shots, { recursive: true });
   async function call(method, path, body) {
     const r = await fetch(`${wd}${path}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-    const j = await r.json();
+    const text = await r.text();
+    let j;
+    try { j = JSON.parse(text); } catch { throw new Error(`${method} ${path}: HTTP ${r.status}, not WebDriver's answer: ${text.slice(0, 200) || "(empty)"}`); }
     if (!r.ok || (j.value && j.value.error)) throw new Error(`${method} ${path}: ${JSON.stringify(j.value)}`);
     return j.value;
   }

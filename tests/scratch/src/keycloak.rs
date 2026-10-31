@@ -264,14 +264,19 @@ impl Keycloak {
     }
 
     async fn browse(&self, url: &str, username: &str, deny: bool) -> Result<String, String> {
-        let out = tokio::process::Command::new("node")
+        // A browser that hangs fails the test in two minutes, named, never
+        // holds the run.
+        let run = tokio::process::Command::new("node")
             .arg(workspace_root().join("tests/scratch/sign-in-browser.mjs"))
             .args([url, &username.to_lowercase(), &password_of(username)])
             .args(deny.then_some("deny"))
             .env("MAGNUS_CHROMIUM", crate::chromium())
-            .output()
-            .await
-            .expect("run node");
+            .kill_on_drop(true)
+            .output();
+        let Ok(out) = tokio::time::timeout(std::time::Duration::from_secs(120), run).await else {
+            return Err(format!("the browser signing in at {url} did not finish in two minutes"));
+        };
+        let out = out.expect("run node");
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
         } else {
