@@ -8,11 +8,14 @@
 # already) and the browser sidecar (`browser/`, which the config's `[browser]
 # command` runs from the install directory) go in as a signed appliance
 # release, which the appliance installs by itself, with rollback
-# (crates/magnus/src/update.rs); this waits until it runs VERSION. Then the sandbox image those programs were tested with
-# (sandbox/image.sh) replaces the one the config names, as a link, so a
-# running guest keeps the image it started with. The log's tables are
-# brought up to date first when an `admin-url` file (the Postgres admin
-# address, readable by its owner only) is beside the config.
+# (crates/magnus/src/update.rs); this waits until it runs VERSION. Then the
+# sandbox image those programs were tested with (sandbox/image.sh) replaces
+# the one the config names, as a link, so a running guest keeps the image it
+# started with. The appliance keeps its own copy of the image, in `sandbox/`
+# beside the config, never a link into CI's store (which is pruned): the one
+# it runs and the one before it. The log's tables are brought up to date
+# first when an `admin-url` file (the Postgres admin address, readable by its
+# owner only) is beside the config.
 set -euo pipefail
 config=$1 version=$2 notes=$3
 cd "$(dirname "$0")/.."
@@ -54,8 +57,19 @@ done
 echo "the appliance runs $version"
 
 image=$(sandbox/image.sh)
+own="$(dirname "$config")/sandbox"
+mine="$own/$(basename "$image")"
+if [ ! -f "$mine/rootfs.ext4" ]; then
+  rm -rf "$mine.part" && mkdir -p "$mine.part"
+  cp --sparse=always "$image/vmlinux" "$image/rootfs.ext4" "$mine.part/"
+  mv -T "$mine.part" "$mine"
+fi
+before=$(dirname "$(readlink -f "$rootfs")")
 for f in "vmlinux $kernel" "rootfs.ext4 $rootfs"; do
   set -- $f
-  ln -sfn "$image/$1" "$2.new" && mv -Tf "$2.new" "$2"
+  ln -sfn "$mine/$1" "$2.new" && mv -Tf "$2.new" "$2"
 done
-echo "its sandbox image is $image"
+for d in "$own"/*; do
+  [ "$d" = "$mine" ] || [ "$d" = "$before" ] || rm -rf "$d"
+done
+echo "its sandbox image is $mine"
