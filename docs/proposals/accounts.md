@@ -17,6 +17,8 @@ decisions of 2026-10-30, newest last:
    the owner sends or from the appliance, and opens straight to username and
    password. Passkeys stay as an option, in the browser.
 5. "Open browser the first time or if user is not found."
+6. "The back up password is only for me. It should not be allowed for anyone
+   else."
 
 ## Sign-in (built)
 
@@ -55,9 +57,13 @@ makes and keeps the verifier, state and nonce, and checks the ID token's
 issuer (RFC 9207 `iss` too), audience, expiry and nonce. The appliance's own
 page in a browser uses the device grant for the same cases.
 
-**The local fallback.** A password set on the appliance (`magnus password`)
-still signs in when Keycloak is down or refuses. Such a person never needs
-the browser. With no `[sign_in.oidc]`, these passwords are the only way in.
+**The owner's backup.** A password set on the appliance (`magnus password`)
+signs in only the owner, when Keycloak is down or refuses. It is tried
+before Keycloak's "use the browser" or "enter your code" answers, so the
+owner never needs the browser. `magnus password` refuses anyone else, and a
+password someone had before Keycloak was set up stops counting, so turning
+a person off in Keycloak shuts them out. With no `[sign_in.oidc]`, these
+passwords are everyone's way in.
 
 **Trade-offs the owner accepted.** The password passes through the
 appliance (encrypted, never kept). Passkeys don't work in the app's form.

@@ -130,6 +130,7 @@ fn password(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
     anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
+    anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only the owner keeps a password on the appliance, as a backup");
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let pw = line.trim_end_matches(['\r', '\n']);

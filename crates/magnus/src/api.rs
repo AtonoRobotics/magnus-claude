@@ -212,8 +212,9 @@ async fn sign_in_method(State(k): K) -> Response {
 
 /// Username and password, typed in the app. With an identity provider the
 /// provider checks them (and the code from an authenticator app, when the
-/// person uses one); a password set on the appliance is the way in when the
-/// provider is down or refuses. Without one, only the appliance's own.
+/// person uses one); the owner's password set on the appliance is their
+/// backup when the provider is down or refuses, and nobody else's counts.
+/// Without one, only the appliance's own passwords.
 async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
     if let Err(r) = over_tls(&k, t, peer) {
         return r;
@@ -229,45 +230,56 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         )
             .into_response()
     };
-    let mut refused = None;
     if let Some(id) = k.identity() {
         if let Some(until) = k.accounts.locked(&person) {
             return locked(until);
         }
+        let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person);
         // The first time, the provider's own page signs them in: it can walk
-        // them through what a new account needs. A password set on the
-        // appliance is its own account, and needs nothing from the provider.
-        if !k.read(|s| s.signed_in_before.contains(&person)) && !k.accounts.has_password(&person) {
+        // them through what a new account needs. The owner's backup password
+        // needs nothing from the provider.
+        if !k.read(|s| s.signed_in_before.contains(&person)) && !backup {
             return provider_answered(&k, t, id.label(), crate::identity::Polled::UseBrowser(format!("The first time, sign in on the {} page that just opened in your browser.", id.label()))).await;
         }
-        match id.password(&person, password, code, app).await {
-            Ok(crate::identity::Polled::Refused(m)) => refused = Some(m),
+        let answer = match id.password(&person, password, code, app).await {
             Ok(polled @ crate::identity::Polled::Done { .. }) => {
                 k.accounts.succeeded(&person);
                 return provider_answered(&k, t, id.label(), polled).await;
             }
-            Ok(polled) => return provider_answered(&k, t, id.label(), polled).await,
-            Err(e) => tracing::warn!("identity: {} could not check a password: {e:#}", id.label()),
-        }
-        if !k.accounts.has_password(&person) {
-            if k.cfg.person(&person).is_some() {
+            Ok(polled) => Some(polled),
+            Err(e) => {
+                tracing::warn!("identity: {} could not check a password: {e:#}", id.label());
+                None
+            }
+        };
+        if !backup {
+            if matches!(answer, Some(crate::identity::Polled::Refused(_))) && k.cfg.person(&person).is_some() {
                 k.accounts.failed(&person);
             }
-            return match refused {
-                Some(m) => err(StatusCode::UNAUTHORIZED, m),
+            return match answer {
+                Some(polled) => provider_answered(&k, t, id.label(), polled).await,
                 None => err(StatusCode::BAD_GATEWAY, format!("{} is not answering. Try again in a few minutes.", id.label())),
             };
         }
+        // The owner's backup, before whatever else the provider said.
+        return match k.accounts.sign_in(&person, password) {
+            Ok(Ok(_)) => issue(&k, t, &person, app).await,
+            Ok(Err(crate::accounts::SignInError::Rejected)) => match answer {
+                Some(polled) => provider_answered(&k, t, id.label(), polled).await,
+                None => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
+            },
+            Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
+            Err(e) => internal(e),
+        };
     }
-    let wrong = refused.unwrap_or_else(|| "The name or password is wrong.".into());
     if k.cfg.person(&person).is_none() {
         // Same answer and the same work as a wrong password.
         let _ = k.accounts.sign_in(&person, password);
-        return err(StatusCode::UNAUTHORIZED, wrong);
+        return err(StatusCode::UNAUTHORIZED, "The name or password is wrong.");
     }
     match k.accounts.sign_in(&person, password) {
         Ok(Ok(_)) => issue(&k, t, &person, app).await,
-        Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, wrong),
+        Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
         Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
         Err(e) => internal(e),
     }

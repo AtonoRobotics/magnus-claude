@@ -152,11 +152,13 @@ fn has_jwt(text: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sign_in_through_keycloak_keeps_no_provider_token_and_passwords_stay_as_backup() {
+async fn sign_in_through_keycloak_keeps_no_provider_token_and_only_the_owner_keeps_a_password_as_backup() {
     let model = FakeModel::start(steps(vec![])).await;
     let mut app = Appliance::start(spec(), &model).await;
     let kc = Keycloak::start().await;
     kc.add_person("Carol").await;
+    // Carol had a password on the appliance before it used Keycloak.
+    assert!(set_password(&app, "carol", PASSWORD).status.success());
     kc.configure(&mut app).await;
 
     let (_, m) = app.api("carol").get("/v1/sign-in").await;
@@ -187,10 +189,18 @@ async fn sign_in_through_keycloak_keeps_no_provider_token_and_passwords_stay_as_
     let kept = std::fs::read_dir(app.state_dir.join("accounts")).unwrap().map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap_or_default()).collect::<String>();
     assert!(!has_jwt(&kept), "a Keycloak token was kept");
 
-    // Passwords stay open, for when the provider cannot be reached.
-    assert!(set_password(&app, "carol", PASSWORD).status.success());
+    // The password on the appliance is the owner's backup alone (owner,
+    // 2026-10-30: "The back up password is only for me"), so turning someone
+    // off in Keycloak shuts them out.
+    assert!(!set_password(&app, "carol", PASSWORD).status.success(), "a password was set for someone who signs in through Keycloak");
     let (st, v) = sign_in(&app, "carol", PASSWORD).await;
-    assert_eq!(st, 200, "{v}");
+    assert_eq!(st, 401, "carol's old appliance password still signs her in: {v}");
+    kc.disable("carol").await;
+    let (st, v) = sign_in(&app, "carol", PASSWORD).await;
+    assert_eq!(st, 401, "carol, turned off in Keycloak, signed in with her old appliance password: {v}");
+    assert!(set_password(&app, "alice", PASSWORD).status.success());
+    let (st, v) = sign_in(&app, "alice", PASSWORD).await;
+    assert_eq!((st.as_u16(), v["person"]["id"].as_str()), (200, Some("alice")), "the owner's backup did not sign her in: {v}");
 }
 
 /// Option 1 of docs/proposals/accounts.md: the username and password typed
@@ -363,9 +373,11 @@ async fn a_keycloak_sign_in_refuses_strangers_forgeries_other_clients_and_declin
 
     // Declined on Keycloak's page.
     let s = device_start(&app).await;
-    kc.browser_declining(s["verification_uri_complete"].as_str().unwrap(), "carol").await.ok();
+    // Keycloak shows its own error page after a decline, so the browser's
+    // answer is shown only when the decline did not reach the appliance.
+    let browsed = kc.browser_declining(s["verification_uri_complete"].as_str().unwrap(), "carol").await;
     let (st, v) = device_finish(&app, s["flow"].as_str().unwrap()).await;
-    assert_eq!((st, v["error"].as_str()), (410, Some("The sign-in was declined.")), "{v}");
+    assert_eq!((st, v["error"].as_str()), (410, Some("The sign-in was declined.")), "{v}; the browser: {browsed:?}");
 
     assert!(!app.db.dump().await.contains("signed_in"), "a refused sign-in was recorded as one");
 }
