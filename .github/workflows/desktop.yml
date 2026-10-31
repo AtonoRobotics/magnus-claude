@@ -180,3 +180,13 @@ jobs:
           case $s in "Merge pull request #"*) t=$(git log -1 --format=%b | head -1) ;; *) t=$s ;; esac
           printf '%s\n\nTest build: master at %s.\n' "$t" "$(git rev-parse --short HEAD)" > "$RUNNER_TEMP/notes"
           release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist test
+      # Master also runs on the build box's own appliance, which installs
+      # it by itself (DECISIONS.md, "Master runs on the build box's
+      # appliance"): `<next>-test.<run>`, numbered like the app's.
+      - name: Master on the build box's appliance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 | python3 -I -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='magnus'))")
+          git ls-remote --exit-code --tags origin "appliance-v$v" >/dev/null && v="${v%.*}.$(( ${v##*.} + 1 ))"
+          cargo build --release --workspace --bins
+          release/to-appliance.sh "${{ vars.MAGNUS_APPLIANCE_CONFIG }}" "$v-test.${{ github.run_number }}" "$RUNNER_TEMP/notes"
