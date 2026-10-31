@@ -23,15 +23,14 @@ review, 3 interruptions a day), the number is the spec's.
 Missing: identity and character, relationship memory, disagreement records,
 message reactions, general suggestion and observation cards with a ledger,
 the periodic review, the interruption budget, quiet hours, the Cedar
-suggest/interrupt/act permissions, and judge-scored behavior evals.
+suggest/interrupt/act permissions.
 
 ## Steps
 
-Each step ships with the eval suites that gate it (the spec's seven, in
-`eval/behavior/`): what a step offers people reaches them only once its
-suites pass. A judge model scores what needs judging, and a person
-spot-checks each run. A character or a provider is offered only after it
-passes.
+The character is part of Magnus: it speaks on every model, with no test
+gate (owner, 2026-10-31: "The character is integral. It is not a switch or
+something to be turned off by the models. All the testing of the models
+with the personality is over engineering.").
 
 1. **Identity and the character module.**
    - The functional personality (the spec's eight traits) is written into
@@ -41,15 +40,14 @@ passes.
      spec's eight sections) and `character.toml` (id, version, voice). The
      default is the spec's appendix, the chief of staff.
    - Each person picks a character in Settings > Appearance (a new section).
-     The org policy layer can fix it for everyone (Cedar).
+     The policy can take a character away (Cedar).
    - The bible goes into the system prompt after the identity. Every model
      call records the character's id and version in the log.
-   - Read-aloud uses the character's voice when the appliance has it.
-   - Tests: the character's id and version are on every logged call; a
-     person's choice holds across a restart and applies only to them; an org
-     lock refuses another choice.
-   - Gated by the suites: substance invariance, character consistency,
-     pushback, recession, long-session wear.
+   - Read-aloud uses the character's voice when it names one; the chief of
+     staff reads in the appliance's installed voice.
+   - Tests: the identity and the character are on every call where Magnus
+     speaks and their version on every logged call; a person's choice is
+     theirs and survives a restart; the policy takes a character away.
 2. **Relationship memory and reactions.**
    - The person's tone instructions ("fewer jokes"), what they delegated and
      standing decisions are kept as relationship memory, always in context
@@ -72,7 +70,7 @@ passes.
      suggests again.
    - At cold start, and for each newly connected app, Magnus looks at what it
      may see and proposes two or three things it could take over.
-   - Gated by the suite: suggestion grounding.
+   - Tests: a card whose evidence is not real is refused.
 4. **The proactive loop.**
    - The kernel wakes a review run for each person every 60 minutes in their
      working hours and once overnight, and on events: a task done or failed,
@@ -86,9 +84,8 @@ passes.
      person can change. Over-budget items wait for the next session. None
      outside working hours. The kill switch stops the loop.
    - Opening the app shows what changed and the queued observations.
-   - Gated by the suite: proactive precision.
-Each step lands as its own pull request, with its tests and its suites, in
-this order: step 1 is what every later step speaks through, and step 4
+   - Tests: the budget, quiet hours and the kill switch hold.
+Each step lands as its own pull request, with its tests, in this order: step 1 is what every later step speaks through, and step 4
 needs step 3's cards.
 
 ## Open
@@ -100,7 +97,7 @@ needs step 3's cards.
   plan) proposes the `admin` role. Until then, the owner sets the lock.
 - Cost: the review loop makes about 10 model calls per person per working
   day, plus one per event that wakes it.
-- Review (2026-10-31): each step ships with its own suites; card evidence
-  may be a connected-app item Magnus read; the interruption cap is per
-  working day and each person's to change; the traits are written as
-  identity, not commands.
+- Review (2026-10-31): card evidence may be a connected-app item Magnus
+  read; the interruption cap is per working day and each person's to
+  change; the traits are written as identity, not commands. The spec's
+  eval suites as gates are dropped (owner, above).
