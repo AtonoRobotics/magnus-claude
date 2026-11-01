@@ -162,15 +162,15 @@ impl Accounts {
     }
 
     /// End every session of a person (the provider turned them off).
-    pub fn end_all(&self, person: &str) -> Result<usize> {
+    /// End every session of `person`; the ids of those ended.
+    pub fn end_all(&self, person: &str) -> Result<Vec<String>> {
         let mut s = self.sessions.lock().unwrap();
-        let before = s.len();
-        s.retain(|_, x| x.person != person);
-        let n = before - s.len();
-        if n > 0 {
+        let ended: Vec<String> = s.values().filter(|x| x.person == person).map(|x| x.id.clone()).collect();
+        if !ended.is_empty() {
+            s.retain(|_, x| x.person != person);
             self.save(&s)?;
         }
-        Ok(n)
+        Ok(ended)
     }
 
     /// The people with a live session.
