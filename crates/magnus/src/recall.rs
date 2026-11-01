@@ -69,3 +69,48 @@ impl crate::kernel::Kernel {
             .collect())
     }
 }
+
+impl crate::kernel::Kernel {
+    /// A library file's bytes, recalled for its person from the event that
+    /// holds them. None when its content is gone or not theirs.
+    pub async fn file_bytes(&self, f: &crate::state::LibFile) -> Result<Option<Vec<u8>>> {
+        use base64::Engine;
+        let Some(b64) = self.file_b64(f).await? else { return Ok(None) };
+        Ok(Some(base64::engine::general_purpose::STANDARD.decode(b64)?))
+    }
+
+    /// A library file's content as base64, recalled as `file_bytes` is.
+    pub async fn file_b64(&self, f: &crate::state::LibFile) -> Result<Option<String>> {
+        let mut c = self.recall.content(&f.person, &[f.seq]).await?;
+        Ok(c.remove(&f.seq).and_then(|body| body["data_b64"].as_str().map(String::from)))
+    }
+
+    /// The files a run's task was given, with their content recalled for
+    /// the task's person, as `{name, media_type, data_b64}`.
+    pub async fn given_files(&self, task: &str) -> Result<Vec<Value>> {
+        let given: Vec<crate::state::LibFile> = self.read(|s| s.tasks.get(task).into_iter().flat_map(|t| &t.files).filter_map(|id| s.files.get(id)).cloned().collect());
+        let mut out = vec![];
+        for f in given {
+            if let Some(data) = self.file_b64(&f).await? {
+                out.push(serde_json::json!({ "name": f.name, "media_type": f.media_type, "data_b64": data }));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The search text of a person's text files (in lower case, up to what
+    /// a page shows), recalled for them, by file id. Only when a search
+    /// has words to match: a listing needs none.
+    pub async fn file_texts(&self, person: &str, terms: &[String]) -> Result<HashMap<String, String>> {
+        if terms.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let files: Vec<(String, i64, String)> = self.read(|s| s.files.values().filter(|f| f.person == person).map(|f| (f.id.clone(), f.seq, f.media_type.clone())).collect());
+        let seqs: Vec<i64> = files.iter().map(|(_, seq, _)| *seq).collect();
+        let content = self.recall.content(person, &seqs).await?;
+        Ok(files
+            .into_iter()
+            .filter_map(|(id, seq, media)| content.get(&seq).map(|c| (id, crate::state::search_text(&media, c["data_b64"].as_str().unwrap_or_default()))))
+            .collect())
+    }
+}

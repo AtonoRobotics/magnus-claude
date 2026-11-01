@@ -824,6 +824,10 @@ async fn search(State(k): K, h: HeaderMap, Query(q): Query<std::collections::Has
         let snippet = said.iter().find(|s| terms.iter().any(|w| s.to_lowercase().contains(w.as_str()))).map(|s| s.chars().take(160).collect::<String>());
         conversations.push(json!({ "thread": id, "title": t["title"], "updated_at": t["updated_at"], "project": t["project"], "snippet": snippet }));
     }
+    let texts = match k.file_texts(&p.id, &terms).await {
+        Ok(t) => t,
+        Err(e) => return internal(e),
+    };
     let (tasks, files) = k.read(|s| {
         let tasks: Vec<Value> = s
             .tasks
@@ -832,7 +836,7 @@ async fn search(State(k): K, h: HeaderMap, Query(q): Query<std::collections::Has
             .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(&k, s, &p, t, r)))
             .filter(|v| all(&format!("{} {} {}", v["title"].as_str().unwrap_or_default(), v["text"].as_str().unwrap_or_default(), v["summary"].as_str().unwrap_or_default()).to_lowercase()))
             .collect();
-        (tasks, crate::library::files_matching(s, &p, &terms, None))
+        (tasks, crate::library::files_matching(s, &p, &terms, &texts, None))
     });
     Json(json!({ "conversations": conversations, "tasks": tasks, "files": files })).into_response()
 }

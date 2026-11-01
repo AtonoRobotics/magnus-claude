@@ -67,12 +67,13 @@ fn clip(s: &str) -> String {
 impl Kernel {
     /// The exact context for the run's next model call, rebuilt from the log.
     /// It only grows at the end, so provider prompt caches stay valid (C1).
-    pub fn context(&self, run: &Run) -> (String, Vec<Message>) {
+    /// The library files it was given are recalled for its person.
+    pub async fn context(&self, run: &Run) -> anyhow::Result<(String, Vec<Message>)> {
+        let given = self.given_files(&run.task).await?;
         let (task, attachments, refs) = self.read(|s| {
             let task = s.tasks.get(&run.task).cloned();
             let mut files = s.attachments.get(&run.task).cloned().unwrap_or_default();
-            let given = task.as_ref().map(|t| t.files.clone()).unwrap_or_default();
-            files.extend(given.iter().filter_map(|id| s.files.get(id)).map(|f| json!({ "name": f.name, "media_type": f.media_type, "data_b64": f.data_b64 })));
+            files.extend(given);
             // The project's reference files, as they were when the task started.
             let refs: Vec<(String, String, usize)> = task
                 .as_ref()
@@ -183,7 +184,7 @@ impl Kernel {
             }
         }
         let system = if chat.is_some_and(|c| c.turn) { CHAT_INSTRUCTIONS } else { INSTRUCTIONS };
-        (system.to_string(), msgs)
+        Ok((system.to_string(), msgs))
     }
 
     /// A task from chat keeps the conversation it came from with its

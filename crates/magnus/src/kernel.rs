@@ -319,13 +319,12 @@ impl Kernel {
     }
 
     /// Start driving a run if nothing is.
-    pub fn wake(self: &Arc<Self>, run: &str) {
-        let files = self.read(|s| {
-            let task = s.runs.get(run).map(|r| r.task.clone()).unwrap_or_default();
-            let mut v = s.attachments.get(&task).cloned().unwrap_or_default();
-            v.extend(s.tasks.get(&task).into_iter().flat_map(|t| &t.files).filter_map(|id| s.files.get(id)).map(|f| serde_json::json!({ "name": f.name, "data_b64": f.data_b64 })));
-            v
-        });
+    /// The files a run's sandbox starts with: its task's attachments and
+    /// the library files it was given, recalled for its person.
+    async fn set_inputs(&self, run: &str) -> Result<()> {
+        let task = self.read(|s| s.runs.get(run).map(|r| r.task.clone()).unwrap_or_default());
+        let mut files = self.read(|s| s.attachments.get(&task).cloned().unwrap_or_default());
+        files.extend(self.given_files(&task).await?);
         if !files.is_empty() {
             use base64::Engine;
             let decoded = files
@@ -337,13 +336,20 @@ impl Kernel {
                 .collect();
             self.sandboxes.set_inputs(run, decoded);
         }
+        Ok(())
+    }
+
+    pub fn wake(self: &Arc<Self>, run: &str) {
         if !self.drivers.lock().unwrap().insert(run.to_string()) {
             return;
         }
         let k = self.clone();
         let run = run.to_string();
         tokio::spawn(async move {
-            let r = k.clone().drive(&run).await;
+            let r = match k.set_inputs(&run).await {
+                Ok(()) => k.clone().drive(&run).await,
+                Err(e) => Err(e),
+            };
             k.drivers.lock().unwrap().remove(&run);
             if let Err(e) = r {
                 tracing::error!("run {run}: {e:#}");

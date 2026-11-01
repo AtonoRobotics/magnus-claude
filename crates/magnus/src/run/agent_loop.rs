@@ -79,7 +79,7 @@ impl Kernel {
             .await?;
             return Ok(Flow::Stop);
         }
-        let (system, messages) = self.context(&run);
+        let (system, messages) = self.context(&run).await?;
         let chat = self.is_chat_turn(&run);
         let tools = self.tools_for(&run).await;
         let tools_hash = {

@@ -206,3 +206,47 @@ async fn a_persons_memory_is_recalled_from_the_content_store_for_them() {
     let answer = chat("What is my code name?").await.to_string();
     assert!(!answer.contains(&edited), "memory search read past her wall: {answer}");
 }
+
+/// A person's library files are recalled, not kept (step 5): a download,
+/// a search of their text, and the file a task is given come from the
+/// content store, for them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persons_files_are_recalled_from_the_content_store_for_them() {
+    use base64::Engine;
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    let m = FakeModel::start(steps(vec![fail("nothing to do")])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let carol = app.api("carol");
+    let (old, new) = (canary("old-words").to_lowercase(), canary("new-words").to_lowercase());
+    let (st, v) = carol.post("/v1/files", json!({ "name": "notes.txt", "media_type": "text/plain", "data_b64": b64(&format!("plan: {old}")) })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    let (st, v) = carol.post("/v1/files", json!({ "name": "chart.png", "media_type": "image/png", "data_b64": b64(&old) })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let image = v["id"].as_str().unwrap().to_string();
+    let found = |q: String| {
+        let carol = carol.clone();
+        async move { carol.get(&format!("/v1/files?q={q}")).await.1["files"].as_array().cloned().unwrap_or_default().len() }
+    };
+    assert_eq!(found(old.clone()).await, 1);
+
+    // The content store now says something else: that is what she gets.
+    let admin = app.db.admin().await;
+    for (from, to) in [(format!("plan: {old}"), format!("plan: {new}")), (old.clone(), new.clone())] {
+        let changed = admin.execute("UPDATE public.content SET body = jsonb_set(body, '{data_b64}', to_jsonb($2::text)) WHERE body->>'data_b64' = $1", &[&b64(&from), &b64(&to)]).await.unwrap();
+        assert_eq!(changed, 1);
+    }
+    assert_eq!(carol.get(&format!("/v1/files/{id}")).await.1, json!(format!("plan: {new}")), "the download is not recalled");
+    assert_eq!((found(old.clone()).await, found(new.clone()).await), (0, 1), "the search is not recalled");
+    let (st, v) = carol.post("/v1/tasks", json!({ "text": "Describe the chart.", "files": [image] })).await;
+    assert!(st.is_success(), "{v}");
+    carol.wait_settled(v["task_id"].as_str().unwrap()).await;
+    // Every model call that carries the image: the run's own.
+    let sent: Vec<String> = m.requests().iter().map(|c| c.body.to_string()).filter(|b| b.contains("\"type\":\"image\"")).collect();
+    assert!(!sent.is_empty() && sent.iter().all(|b| b.contains(&b64(&new)) && !b.contains(&b64(&old))), "the task was not given the recalled file: {} requests", sent.len());
+
+    // A row the database says is not hers is neither downloaded nor found.
+    admin.execute("UPDATE public.content SET person = 'bob' WHERE body->>'data_b64' = $1", &[&b64(&format!("plan: {new}"))]).await.unwrap();
+    assert_eq!(carol.get(&format!("/v1/files/{id}")).await.0.as_u16(), 404, "the download read past her wall");
+    assert_eq!(found(new.clone()).await, 0, "the search read past her wall");
+}
