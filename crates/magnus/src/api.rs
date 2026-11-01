@@ -28,8 +28,17 @@ pub(crate) fn err(code: StatusCode, msg: impl Into<String>) -> Response {
 }
 
 pub(crate) fn internal(e: anyhow::Error) -> Response {
+    if let Some(k) = e.downcast_ref::<crate::kernel::KillSwitchOn>() {
+        return err(StatusCode::CONFLICT, k.to_string());
+    }
     tracing::error!("api: {e:#}");
     err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+}
+
+/// New work is refused while the kill switch is on, before anything about
+/// it is recorded (owner's ruling 11).
+pub(crate) fn refused_by_kill_switch(k: &crate::kernel::Kernel) -> Option<Response> {
+    k.read(|s| s.kill_switch).then(|| internal(crate::kernel::KillSwitchOn.into()))
 }
 
 /// Which listener a request came in on.
@@ -156,8 +165,23 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .merge(crate::trash::router())
         .layer(axum::middleware::from_fn(cookie_guard))
         .layer(axum::middleware::from_fn(crate::update::app_version))
+        .layer(axum::middleware::from_fn_with_state(k.clone(), config_tokens_on_this_machine))
         .layer(Extension(transport))
         .with_state(k)
+}
+
+/// The config's long-lived tokens (the owner's scripts, the evaluation
+/// runner) work only on the plain listener, from this machine: nowhere a
+/// stolen copy could be used from the network (owner's ruling 13).
+async fn config_tokens_on_this_machine(State(k): State<Arc<Kernel>>, req: Request, next: Next) -> Response {
+    if credential(req.headers()).is_some_and(|t| k.cfg.person_by_token(t).is_some()) {
+        let plain = req.extensions().get::<Transport>() == Some(&Transport::Plain);
+        let local = req.extensions().get::<axum::extract::ConnectInfo<SocketAddr>>().is_some_and(|c| c.0.ip().is_loopback());
+        if !(plain && local) {
+            return err(StatusCode::UNAUTHORIZED, "This key works only on the appliance itself, over its local address. Sign in to use Magnus from elsewhere.");
+        }
+    }
+    next.run(req).await
 }
 
 /// Sign-in hands out a session, so over plain HTTP only from this machine:

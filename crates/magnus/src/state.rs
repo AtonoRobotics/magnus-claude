@@ -618,6 +618,8 @@ pub struct State {
     pub subjects: HashMap<String, String>,
     /// Roles the owner set in Settings, by person.
     pub roles_set: HashMap<String, Vec<String>>,
+    /// Whether people's data is private from the admin (by default it is not).
+    pub data_private: bool,
     /// Each person's own settings, by person.
     pub preferences: HashMap<String, Value>,
     /// Entries people deleted from their threads, by thread.
@@ -996,6 +998,8 @@ impl State {
             Ev::RightsFromProvider { person, groups, roles } => {
                 self.provider_rights.insert(person.clone(), (groups.clone(), roles.clone()));
             }
+            Ev::DataAccessSet { private } => self.data_private = *private,
+            Ev::PersonDataRead { .. } => {}
             Ev::RolesSet { person, roles } => {
                 self.roles_set.insert(person.clone(), roles.clone());
             }

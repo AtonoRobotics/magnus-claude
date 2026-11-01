@@ -217,6 +217,16 @@ pub enum Ev {
         #[serde(default)]
         roles: Option<Vec<String>>,
     },
+    /// The owner set whether people's data is private from the admin
+    /// (owner's ruling 14): by default it is the organisation's.
+    DataAccessSet {
+        private: bool,
+    },
+    /// The admin read a person's data (`what`: tasks, chats, files, memory).
+    PersonDataRead {
+        person: String,
+        what: String,
+    },
     /// The owner set a person's roles in Settings; they replace the config's
     /// unless the identity provider names the person's roles.
     RolesSet {
