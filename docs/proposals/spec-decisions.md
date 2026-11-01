@@ -1,6 +1,6 @@
 # The owner's specs against Magnus today: what needs your decision
 
-Status: questions for the owner, each with a proposed answer. Sources: the
+Status: ruled in part (below); the rest are questions for the owner, each with a proposed answer. Sources: the
 owner's "Magnus Connectors Spec" (rev 17), "Magnus Admin Console Spec"
 (rev 12) and "Magnus Authentication & Isolation Design" (rev 6), all of
 2026-10-31, read against master on 2026-11-01. "DEC n" is a line of
@@ -15,6 +15,42 @@ found is fixed separately (two owners demoting each other at once left no
 owner; fixed in #50). Everything below waits on a ruling; nothing in
 it is built until you rule, and the four marked **invariant** also need your
 approval to change a protected test.
+
+## The owner's rulings (2026-11-01)
+
+The owner answered the first three groups; the smaller conflicts (15-22) and
+the open points are not yet ruled.
+
+| # | Ruling |
+| --- | --- |
+| 1 | **No passkeys.** The browser-with-passkeys sign-in is not adopted: people go on signing in as today, with their username and password typed in the app (DEC 274, 276 stand), and nothing in Magnus asks for a passkey. |
+| 2 | Approved, without passkeys: the backup password stays as the way back in when the provider is down, on this machine, never for the admin console. The admin signs in, and steps up, with their password (and their code when they use one) instead of a passkey. |
+| 3-6 | Approved as proposed. |
+| 7, 8, 10 | Approved as proposed. |
+| 9 | Explained to the owner (below); ruling pending. |
+| 11-13 | Approved as proposed. |
+| 14 | **A policy, not a fixed rule.** In an organisation, a person's data is the organisation's data, with no right to privacy from it: by default the admin can read every person's tasks, chats, files and memory, connector results included. A policy setting can make people's data private from the admin. Each read is still recorded. |
+
+### 9, explained: walls between people's data in the database
+
+Today the walls between people are in Magnus's own code: every request is
+checked against who is asking (each person's things are their own, #33),
+and the tests try to cross them. The database holds one log of everything,
+which Magnus reads in full at start to rebuild what it knows.
+
+The specs ask for a second wall inside the database itself (Postgres
+row-level security keyed on the person), so that even a bug in Magnus's
+code could not hand one person another's rows. The whole log cannot be
+walled that way, because Magnus must read all of it at start. What can be
+walled is the content store, where the words people write, their files and
+their memory already live apart from the log since deletion step 1: the
+connection that serves a person would see only that person's content, and
+the start-up reading would use a separate role that sees everything.
+
+Proposed: not now. With ruling 14, a person's data is the organisation's
+by default, so the database wall would guard mainly against a bug in
+Magnus's checks, which the tests already cover. Build it, as its own plan,
+when an organisation turns on private data.
 
 ## Decisions that change recorded ones
 
@@ -69,8 +105,9 @@ approval to change a protected test.
 
 ## Order once ruled
 
-Known bugs first (the owner race is done, #50), then: identity by `sub` (3), the
-kill switch and new work (11), schedules of a person turned off (12),
-config tokens on loopback (13); then the authentication foundations, the
-admin console, and the connectors, each in its own pull request, as
-`auth.md` and `admin.md` order them.
+Known bugs first (the owner race is done, #50), then, each its own pull
+request: identity by `sub` (3), the kill switch refusing new work (11),
+schedules of a person turned off (12), config tokens on loopback (13), the
+admin's access to people's data as a policy (14); then the authentication
+foundations without passkeys, the admin console, and the connectors, as
+`auth.md` and `admin.md` order them, amended by these rulings.
