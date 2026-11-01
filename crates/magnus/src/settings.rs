@@ -38,6 +38,8 @@ pub fn router() -> Router<Arc<Kernel>> {
         .route("/v1/sessions/{id}", delete(end_session))
         .route("/v1/people", get(people))
         .route("/v1/people/{id}/roles", put(set_roles))
+        .route("/v1/people/{id}/data/{what}", get(person_data))
+        .route("/v1/data-access", get(get_data_access).put(put_data_access))
         .route("/v1/preferences", get(get_preferences).put(put_preferences))
         .route("/v1/deletion-requests", get(deletion_requests).post(request_deletion))
 }
@@ -127,6 +129,61 @@ async fn set_roles(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): J
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),
     }
+}
+
+/// Whether people's data is private from the admin: by default a person's
+/// data is the organisation's, and the owner can make it private (owner's
+/// ruling 14, 2026-11-01).
+async fn get_data_access(State(k): K, h: HeaderMap) -> Response {
+    if let Err(r) = who(&k, &h) {
+        return r;
+    }
+    Json(json!({ "private": k.read(|s| s.data_private) })).into_response()
+}
+
+async fn put_data_access(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let me = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some(private) = b["private"].as_bool() else { return err(StatusCode::BAD_REQUEST, "private is true or false") };
+    match k.emit(&format!("person:{}", me.id), Ev::DataAccessSet { private }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// The admin reads a person's tasks, conversations, files or memory, unless
+/// the organisation's policy makes people's data private. Each read is in
+/// the log and in the person's inbox.
+async fn person_data(State(k): K, h: HeaderMap, Path((id, what)): Path<(String, String)>) -> Response {
+    let me = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some(target) = k.person(&id) else { return err(StatusCode::NOT_FOUND, "no such person") };
+    if k.read(|s| s.data_private) && target.id != me.id {
+        return err(StatusCode::FORBIDDEN, "People's data is private here: the organisation's policy keeps it from the admin.");
+    }
+    let items: Vec<Value> = match what.as_str() {
+        "tasks" => k.read(|s| {
+            s.tasks.values().filter(|t| t.person == target.id && !t.is_chat_turn()).filter_map(|t| s.runs.get(&t.run_id).map(|r| crate::api::task_row(&k, s, &target, t, r))).collect()
+        }),
+        "chats" => k.threads(&target.id),
+        "files" => k.read(|s| crate::library::files_matching(s, &target, &[], None)),
+        "memory" => k.read(|s| {
+            s.memory.iter().filter(|m| m.person == target.id).map(|m| json!({ "id": m.id, "fact": m.fact, "topic": m.topic, "at": m.at })).collect()
+        }),
+        _ => return err(StatusCode::NOT_FOUND, "tasks, chats, files or memory"),
+    };
+    if target.id != me.id {
+        let read = Ev::PersonDataRead { person: target.id.clone(), what: what.clone() };
+        let notice = k.notice_to(None, None, target.id.clone(), format!("{} read your {what}", me.name), json!({ "reason": "data_read", "evidence": { "by": me.id, "what": what } }));
+        if let Err(e) = k.emit_all(vec![(&format!("person:{}", me.id), read), ("kernel", notice)]).await {
+            return internal(e);
+        }
+    }
+    Json(json!({ "person": target.id, what: items })).into_response()
 }
 
 async fn get_preferences(State(k): K, h: HeaderMap) -> Response {

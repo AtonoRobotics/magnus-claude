@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **The admin's access to people's data (owner's ruling 14, 2026-11-01; branch `data-access-policy`).** The owner reads a person's data, recorded and told to them, unless the policy makes it private.
 - **The owner's specs, ruled (2026-11-01; branch `owner-rulings`).** The owner answered `docs/proposals/spec-decisions.md`: no passkeys (typed password stays), 3-8 and 10-13 approved, and the admin's access to people's data is a policy (organisation's data by default, private when the policy says so). 9 (per-person walls in the database) approved after explanation. Open: 15-22. Next, each its own pull request: identity by `sub`, the kill switch refusing new work, schedules paused for a person turned off, config tokens on loopback, the data-access policy, then the walls' plan and the walls.
 - **Spec review fixes (2026-11-01; merged in #50).** From reviewing the owner's three spec documents (Connectors, Admin Console, Authentication & Isolation) against the code: someone now stays owner however many role changes race in. The review's other findings are choices for the owner, in `docs/proposals/spec-decisions.md` (branch `spec-decisions`).
 - **A closed panel is gone (2026-11-01; merged in #48).** #46 left the closed task panel covering the conversation in windows 1100px wide or narrower; fixed, with a check in the looks test.
