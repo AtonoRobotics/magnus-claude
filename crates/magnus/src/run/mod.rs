@@ -462,10 +462,10 @@ impl Kernel {
             "task_fail" => {
                 let reason = input["reason"].as_str().unwrap_or("no reason given").to_string();
                 self.result(rid, call_id, "Recorded.", false).await?;
-                self.emit("model", Ev::Failed { run: rid.into(), reason: reason.clone(), by: "model".into() }).await?;
+                // A failure is never silent (K24): the person's inbox says so, with the evidence, in the same write.
+                let notice = self.notice_of(&run, format!("Failed: {}", self.title_of(&run)), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run) } }));
+                self.emit_all(vec![("model", Ev::Failed { run: rid.into(), reason, by: "model".into() }), ("kernel", notice)]).await?;
                 self.on_stop(rid, true).await;
-                // A failure is never silent (K24): the person's inbox says so, with the evidence.
-                self.notice(&run, format!("Failed: {}", self.title_of(&run)), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run) } })).await?;
                 self.after_end(rid);
                 return Ok(Flow::Stop);
             }
@@ -672,13 +672,14 @@ impl Kernel {
     pub(crate) async fn end_chat_turn(self: &Arc<Self>, run: &Run, answer: String) -> Result<()> {
         let rid = run.id.as_str();
         let run = self.read(|s| s.runs.get(rid).cloned()).unwrap_or_else(|| run.clone());
-        self.emit("kernel", Ev::Completed { run: rid.into(), summary: answer, view: run.shown(), spoken: None }).await?;
-        self.on_stop(rid, true).await;
-        // What the person asked for and did not happen is in the inbox too (K24).
+        // What the person asked for and did not happen is in the inbox too (K24), in the same write as the turn's end.
         let unfinished = self.unfinished_chat_actions(&run);
+        let mut evs = vec![("kernel", Ev::Completed { run: rid.into(), summary: answer, view: run.shown(), spoken: None })];
         if !unfinished.is_empty() {
-            self.notice(&run, format!("Not done: {}", self.title_of(&run)), json!({ "reason": "chat_action_failed", "evidence": unfinished })).await?;
+            evs.push(("kernel", self.notice_of(&run, format!("Not done: {}", self.title_of(&run)), json!({ "reason": "chat_action_failed", "evidence": unfinished }))));
         }
+        self.emit_all(evs).await?;
+        self.on_stop(rid, true).await;
         self.after_end(rid);
         Ok(())
     }

@@ -2,11 +2,13 @@
 # Put this checkout on the build box's own appliance (DECISIONS.md, "Master
 # runs on the build box's appliance"): run by CI for every master build.
 #
-#   release/to-appliance.sh CONFIG VERSION NOTES_FILE
+#   release/to-appliance.sh CONFIG VERSION NOTES_FILE [PROGRAMS_DIR]
 #
-# CONFIG is that appliance's magnus.toml. Its programs (target/release, built
-# already), the browser sidecar (`browser/`, which the config's `[browser]
-# command` runs from the install directory) and the sandbox image those
+# CONFIG is that appliance's magnus.toml. Its programs (those named in
+# release/appliance-programs, release builds, from PROGRAMS_DIR: by default
+# target/release, or in CI the build its pull request's run kept), the
+# browser sidecar (`browser/`, which the config's `[browser] command` runs
+# from the install directory) and the sandbox image those
 # programs were tested with (sandbox/image.sh) go in as a signed appliance
 # release, which the appliance installs by itself, with rollback
 # (crates/magnus/src/update.rs); this waits until it runs VERSION.
@@ -21,8 +23,9 @@
 # The log's tables are brought up to date first when an `admin-url` file (the
 # Postgres admin address, readable by its owner only) is beside the config.
 set -euo pipefail
-config=$1 version=$2 notes=$3
+config=$1 version=$2 notes=$3 programs=${4:-target/release}
 cd "$(dirname "$0")/.."
+mapfile -t bins < <(sed "s#^#$programs/#" release/appliance-programs)
 
 # The settings this needs, with the appliance's own defaults.
 read -r listen updates minutes automatic kernel rootfs < <(python3 -I - "$config" <<'EOF'
@@ -40,7 +43,7 @@ own="$(dirname "$install")/sandbox"
 
 admin="$(dirname "$config")/admin-url"
 if [ -r "$admin" ]; then
-  target/release/magnus migrate --config "$config" --admin-url "$(cat "$admin")"
+  "$programs/magnus" migrate --config "$config" --admin-url "$(cat "$admin")"
 else
   echo "::warning::no $admin: the log's tables were not migrated"
 fi
@@ -60,7 +63,7 @@ ln -s "../sandbox/$h/rootfs.ext4" "$links/$(basename "$rootfs")"
 
 npm ci --prefix browser --omit=dev
 release/publish.sh appliance "$version" "$updates" "$notes" \
-  target/release/magnus target/release/magnus-adapter-anthropic target/release/magnus-adapter-openai browser \
+  "${bins[@]}" browser \
   "$links/$(basename "$kernel")" "$links/$(basename "$rootfs")"
 published=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$updates/appliance/latest.json")
 [ "$published" = "$version" ] || exit 0

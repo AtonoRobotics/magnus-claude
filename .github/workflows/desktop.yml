@@ -46,27 +46,33 @@ jobs:
       # answering (they may still be starting after a reboot).
       - name: Build box services
         run: dev/services.sh
-      # The version every step builds, tests and publishes. A tag's is the
-      # app's own; any other build is a pre-release of the next version,
-      # numbered by run so each is newer than the one before (apps only move
-      # forward): `<next>-review.<run>.pr.<n>` for pull request n, else
-      # `<next>-test.<run>`.
+      # The versions every step builds, tests and publishes: the app's
+      # (MAGNUS_VERSION) and the appliance's (MAGNUS_APPLIANCE_VERSION). A
+      # tag's app version is its own; any other build is a pre-release of the
+      # next version, numbered by run so each is newer than the one before
+      # (apps only move forward): `<next>-test.<run>.pr.<n>` for pull request
+      # n, else `<next>-test.<run>`. The same build goes to development and,
+      # once merged, to test (below), so its version names its run, not a
+      # channel.
       - name: Version
         env:
           TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
           PR: ${{ github.event.pull_request.number }}
         run: |
+          pre="test.${{ github.run_number }}${PR:+.pr.$PR}"
+          next() { git ls-remote --exit-code --tags origin "$1$2" >/dev/null && echo "${2%.*}.$(( ${2##*.} + 1 ))" || echo "$2"; }
           v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
-          if [ "$TAG" != true ]; then
-            git ls-remote --exit-code --tags origin "desktop-v$v" >/dev/null && v="${v%.*}.$(( ${v##*.} + 1 ))"
-            if [ -n "$PR" ]; then v="$v-review.${{ github.run_number }}.pr.$PR"; else v="$v-test.${{ github.run_number }}"; fi
-          fi
+          [ "$TAG" = true ] || v="$(next desktop-v "$v")-$pre"
+          a=$(cargo metadata --no-deps --format-version 1 | python3 -I -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='magnus'))")
           echo "MAGNUS_VERSION=$v" >> "$GITHUB_ENV"
+          echo "MAGNUS_APPLIANCE_VERSION=$(next appliance-v "$a")-$pre" >> "$GITHUB_ENV"
       # The updater packages (AppImage, setup.exe) are signed with the release
       # key, which is on the build box only, bound to the version.
       # Tested once (DECISIONS.md, "One pull request at a time"): a merge
       # to master whose files are exactly its pull request's, which passed
-      # these checks, is built and published, not tested again.
+      # these checks, is not tested again, and publishes the build that
+      # passed them (kept below, by its files' tree), versions included;
+      # only when that build is no longer kept is it built again.
       - name: Tested already
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:
@@ -78,8 +84,15 @@ jobs:
           if [ "$passed" -gt 0 ]; then
             echo "MAGNUS_TESTED=1" >> "$GITHUB_ENV"
             echo "the merged files are $head's, which passed release-checks: not testing again"
+            b="$HOME/magnus-ci/builds/$(git rev-parse HEAD^{tree})"
+            if [ -f "$b/versions" ]; then
+              cat "$b/versions" >> "$GITHUB_ENV"
+              echo "MAGNUS_BUILT=$b" >> "$GITHUB_ENV"
+              echo "publishing the build that passed them: $(cat "$b/versions" | tr '\n' ' ')"
+            fi
           fi
       - name: Installers
+        if: env.MAGNUS_BUILT == ''
         working-directory: desktop/src-tauri
         run: |
           export TAURI_SIGNING_PRIVATE_KEY="$HOME/.magnus-release/update.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
@@ -88,20 +101,27 @@ jobs:
           cargo tauri build --runner cargo --target x86_64-pc-windows-gnu --bundles nsis --config "$c"
       - name: Collect this version's installers
         run: |
+          rm -rf dist
+          if [ -n "${MAGNUS_BUILT:-}" ]; then
+            cp -r "$MAGNUS_BUILT/dist" dist && (cd dist && sha256sum -c --quiet SHA256SUMS)
+            exit 0
+          fi
           v=$MAGNUS_VERSION
           b=desktop/src-tauri/target
-          rm -rf dist && mkdir dist
+          mkdir dist
           cp "$b/release/bundle/deb/Magnus_${v}_amd64.deb" "$b/release/bundle/appimage/Magnus_${v}_amd64.AppImage" \
              "$b/x86_64-pc-windows-gnu/release/bundle/nsis/Magnus_${v}_x64-setup.exe" dist/
           (cd dist && sha256sum Magnus_* > SHA256SUMS)
       # The update test's two AppImages (desktop/tests/update-builds.sh),
       # built beside the tests, which mostly wait on time; the installed-app
-      # tests wait for them.
+      # tests wait for them. At the lowest CPU priority: the tests have time
+      # limits and the builds none (three browser tests timed out at the
+      # end of run 41267885346 while these compiled on every core).
       - name: Start the update test's two builds
         if: env.MAGNUS_TESTED != '1'
         run: |
           t="$RUNNER_TEMP/update-test" && rm -rf "$t" && mkdir -p "$t"
-          (desktop/tests/update-builds.sh "$MAGNUS_VERSION" "$t" > "$t/build.log" 2>&1; echo $? > "$t/build.status") &
+          (nice -n 19 desktop/tests/update-builds.sh "$MAGNUS_VERSION" "$t" > "$t/build.log" 2>&1; echo $? > "$t/build.status") &
       - name: Install the app from its package
         if: env.MAGNUS_TESTED != '1'
         run: |
@@ -129,8 +149,11 @@ jobs:
       - name: Test runner
         if: env.MAGNUS_TESTED != '1'
         run: cargo nextest --version 2>/dev/null | grep -q "^cargo-nextest $NEXTEST " || cargo install --locked "cargo-nextest@$NEXTEST"
+      # The browser flows keep a screenshot of a failed step (kept below).
       - name: Unit, invariant and scratch tests
         if: env.MAGNUS_TESTED != '1'
+        env:
+          MAGNUS_SHOTS: ${{ runner.temp }}/shots
         run: cargo nextest run -p magnus -p magnus-invariants -p magnus-scratch --no-fail-fast
       - name: The update test's two builds
         if: env.MAGNUS_TESTED != '1'
@@ -172,6 +195,25 @@ jobs:
           git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
           git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG" > "$RUNNER_TEMP/notes"
           release/publish.sh desktop "$v" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist
+      # The build that passed, kept on the build box for master's run after
+      # the merge, which publishes it unchanged (above, "Tested already"):
+      # keyed by the files' tree, so it is used only for exactly these files.
+      # The newest two are kept: the one under review and, while master's
+      # run for the one before may still be waiting, that one. The
+      # appliance's release programs are built here, after the tests: built
+      # beside them (a third build with the update test's two), they slowed
+      # the tests until an appliance missed its 30 s start (run 41265192814).
+      - name: Keep this build for master
+        if: github.event_name == 'pull_request'
+        run: |
+          cargo build --release --workspace --bins
+          store="$HOME/magnus-ci/builds" && b="$store/$(git rev-parse HEAD^{tree})"
+          rm -rf "$b.part" && mkdir -p "$b.part/appliance"
+          cp -r dist "$b.part/dist"
+          cp $(sed 's#^#target/release/#' release/appliance-programs) "$b.part/appliance/"
+          printf 'MAGNUS_VERSION=%s\nMAGNUS_APPLIANCE_VERSION=%s\n' "$MAGNUS_VERSION" "$MAGNUS_APPLIANCE_VERSION" > "$b.part/versions"
+          rm -rf "$b" && mv -T "$b.part" "$b"
+          ls -dt "$store"/*/ | tail -n +3 | xargs -r rm -rf
       # A pull request's tested build goes to development, the owner's apps;
       # once merged, master's goes to test, the testers'.
       # The build there may be a pull request's that was closed without
@@ -202,11 +244,11 @@ jobs:
           release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist test
       # Master also runs on the build box's own appliance, which installs
       # it by itself (DECISIONS.md, "Master runs on the build box's
-      # appliance"): `<next>-test.<run>`, numbered like the app's.
+      # appliance"): MAGNUS_APPLIANCE_VERSION, numbered like the app's; its
+      # pull request's kept programs when there are, else built here.
       - name: Master on the build box's appliance
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
-          v=$(cargo metadata --no-deps --format-version 1 | python3 -I -c "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='magnus'))")
-          git ls-remote --exit-code --tags origin "appliance-v$v" >/dev/null && v="${v%.*}.$(( ${v##*.} + 1 ))"
-          cargo build --release --workspace --bins
-          release/to-appliance.sh "${{ vars.MAGNUS_APPLIANCE_CONFIG }}" "$v-test.${{ github.run_number }}" "$RUNNER_TEMP/notes"
+          p=${MAGNUS_BUILT:+$MAGNUS_BUILT/appliance}
+          [ -n "$p" ] || { cargo build --release --workspace --bins; p=target/release; }
+          release/to-appliance.sh "${{ vars.MAGNUS_APPLIANCE_CONFIG }}" "$MAGNUS_APPLIANCE_VERSION" "$RUNNER_TEMP/notes" "$p"

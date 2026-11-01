@@ -316,8 +316,11 @@ impl Log {
         Ok(Event { seq: row.get(0), at: row.get(1), actor: actor.into(), ev: ev.clone() })
     }
 
-    /// Several events in one statement: all are in the log or none is.
-    pub async fn append_all(&self, actor: &str, evs: &[Ev]) -> Result<Vec<Event>> {
+    /// Several events, each with its actor, in one statement: all are in
+    /// the log or none is.
+    pub async fn append_all(&self, evs: &[(&str, Ev)]) -> Result<Vec<Event>> {
+        let actors: Vec<String> = evs.iter().map(|(a, _)| a.to_string()).collect();
+        let evs: Vec<&Ev> = evs.iter().map(|(_, e)| e).collect();
         let (bodies, contents): (Vec<Value>, Vec<Option<Content>>) = evs.iter().map(|e| self.split(e)).collect::<Result<Vec<_>>>()?.into_iter().unzip();
         let (salts, contents): (Vec<Option<Vec<u8>>>, Vec<Option<Value>>) = contents.into_iter().map(|c| c.map(|c| (c.salt, c.body)).unzip()).unzip();
         let kinds: Vec<String> = bodies.iter().map(|b| b["kind"].as_str().unwrap_or_default().to_string()).collect();
@@ -327,21 +330,21 @@ impl Log {
         let rows = match self.store {
             true => c.query(
                 "WITH e AS (INSERT INTO public.events (kind, actor, run_id, body)
-                            SELECT k, $2, r, b FROM unnest($1::text[], $3::text[], $4::jsonb[]) WITH ORDINALITY AS e(k, r, b, n) ORDER BY n
+                            SELECT k, a, r, b FROM unnest($1::text[], $2::text[], $3::text[], $4::jsonb[]) WITH ORDINALITY AS e(k, a, r, b, n) ORDER BY n
                             RETURNING seq, at),
                       o AS (SELECT seq, at, row_number() OVER (ORDER BY seq) AS n FROM e),
                       c AS (INSERT INTO public.content (seq, salt, body)
                             SELECT o.seq, x.s, x.b FROM o JOIN unnest($5::bytea[], $6::jsonb[]) WITH ORDINALITY AS x(s, b, n) ON x.n = o.n
                             WHERE x.b IS NOT NULL)
                  SELECT seq, at FROM o",
-                &[&kinds, &actor, &runs, &bodies, &salts, &contents],
+                &[&kinds, &actors, &runs, &bodies, &salts, &contents],
             )
             .await,
             false => c.query(
                 "INSERT INTO public.events (kind, actor, run_id, body)
-                 SELECT k, $2, r, b FROM unnest($1::text[], $3::text[], $4::jsonb[]) WITH ORDINALITY AS e(k, r, b, n) ORDER BY n
+                 SELECT k, a, r, b FROM unnest($1::text[], $2::text[], $3::text[], $4::jsonb[]) WITH ORDINALITY AS e(k, a, r, b, n) ORDER BY n
                  RETURNING seq, at",
-                &[&kinds, &actor, &runs, &bodies],
+                &[&kinds, &actors, &runs, &bodies],
             )
             .await,
         }
@@ -354,7 +357,7 @@ impl Log {
         if let Some((seq, _)) = at.last() {
             self.saw(*seq);
         }
-        Ok(at.into_iter().zip(evs).map(|((seq, at), ev)| Event { seq, at, actor: actor.into(), ev: ev.clone() }).collect())
+        Ok(at.into_iter().zip(evs).zip(actors).map(|(((seq, at), ev), actor)| Event { seq, at, actor, ev: ev.clone() }).collect())
     }
 
     /// One delivered file's content, read straight from the log and the store.

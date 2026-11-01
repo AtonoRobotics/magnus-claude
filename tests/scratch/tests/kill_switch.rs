@@ -173,3 +173,48 @@ async fn the_kill_switch_revokes_sign_ins_seals_the_vault_and_releasing_resumes_
     assert_eq!(ks["engaged"], false, "{ks}");
     assert_eq!(ks["revoked"]["oa_credential"]["at_provider"], true, "{ks}");
 }
+
+/// Releasing the switch and telling each person which of their tasks it
+/// stopped are one write: no release is left untold by a crash between them.
+#[tokio::test(flavor = "multi_thread")]
+async fn releasing_the_switch_and_its_notices_are_one_write() {
+    let in_turn = Arc::new(AtomicBool::new(false));
+    let go = Arc::new(tokio::sync::Notify::new());
+    let (t, g) = (in_turn.clone(), go.clone());
+    let m = FakeModel::start(script(move |c| {
+        let (t, g) = (t.clone(), g.clone());
+        async move {
+            match c.turn() {
+                0 => contract_unchecked("write a note", "note written"),
+                // Hold the model call open until the kill switch is engaged.
+                _ => {
+                    if !t.swap(true, Ordering::SeqCst) {
+                        g.notified().await;
+                    }
+                    complete("Written.")
+                }
+            }
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let id = alice.submit("Write a note.").await;
+    eventually("the task is in a model call", PATIENCE, || {
+        let t = in_turn.clone();
+        async move { t.load(Ordering::SeqCst).then_some(()) }
+    })
+    .await;
+    assert!(alice.post("/v1/kill-switch", json!({ "engaged": true })).await.0.is_success());
+    go.notify_one();
+    assert_eq!(alice.wait_status(&id, &["suspended"]).await["waiting_on"], "kill_switch");
+    let (st, v) = alice.post("/v1/kill-switch", json!({ "engaged": false })).await;
+    assert!(st.is_success() && v["told"] == 1, "{v}");
+
+    let rows = app.db.admin().await.query("SELECT kind, at::text, body->>'item_kind' FROM public.events ORDER BY seq", &[]).await.unwrap();
+    let rows: Vec<(String, String, Option<String>)> = rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect();
+    let release = rows.iter().rposition(|r| r.0 == "kill_switch").expect("the release is in the log");
+    let next = rows.get(release + 1).expect("a notice after the release");
+    assert_eq!((next.0.as_str(), next.2.as_deref()), ("item", Some("notice")), "{rows:?}");
+    assert_eq!(next.1, rows[release].1, "the release and its notice were written apart: {rows:?}");
+}

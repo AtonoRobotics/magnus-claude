@@ -1,0 +1,26 @@
+# A pull request is merged or closed within a day of going green (CLAUDE.md,
+# "How work lands"). Every six hours, each open pull request with no
+# activity for a day gets one comment saying what it waits on, so none sits
+# unseen while master moves on (release/pr-stale.sh).
+name: pr-stale
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: [self-hosted, linux, magnus-linux]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - name: Name what each waiting pull request waits on
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: release/pr-stale.sh

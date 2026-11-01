@@ -1127,20 +1127,18 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
     static SWITCHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one = SWITCHING.lock().await;
     if !engaged {
-        if let Err(e) = k.emit(&actor, Ev::KillSwitch { engaged }).await {
-            return internal(e);
-        }
         // Released: the vault takes secrets again, but holds none; nothing
         // resumes by itself (K53). Each person's tasks are their own: each
-        // is told which of theirs the switch stopped, and continues them.
-        k.vault.unseal();
+        // is told which of theirs the switch stopped, and continues them,
+        // in the same write as the release, so none is released untold.
         let stopped: Vec<crate::state::Run> = k.read(|s| s.runs.values().filter(|r| r.status == Status::Suspended && r.reason.as_deref() == Some("kill_switch")).cloned().collect());
-        for r in &stopped {
-            let summary = format!("Stopped by the kill switch: {}", k.title_of(r));
-            if let Err(e) = k.notice(r, summary, json!({ "reason": "kill_switch", "evidence": { "why": "the owner engaged the kill switch, and has released it; Continue goes on from where it stopped" } })).await {
-                return internal(e);
-            }
+        let why = json!({ "reason": "kill_switch", "evidence": { "why": "the owner engaged the kill switch, and has released it; Continue goes on from where it stopped" } });
+        let mut evs = vec![(actor.as_str(), Ev::KillSwitch { engaged })];
+        evs.extend(stopped.iter().map(|r| ("kernel", k.notice_of(r, format!("Stopped by the kill switch: {}", k.title_of(r)), why.clone()))));
+        if let Err(e) = k.emit_all(evs).await {
+            return internal(e);
         }
+        k.vault.unseal();
         return Json(json!({ "engaged": false, "told": stopped.len() })).into_response();
     }
     // One control (B11). The vault is sealed first, and each OAuth sign-in
