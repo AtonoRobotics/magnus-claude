@@ -1165,13 +1165,16 @@ async fn kill_switch_state(State(k): K, h: HeaderMap) -> Response {
     Json(json!({ "engaged": engaged, "revoked": revoked, "sealed": if engaged { sealed } else { vec![] } })).into_response()
 }
 
-async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match owner(&k, &h) {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
-    let engaged = b["engaged"].as_bool().unwrap_or(true);
-    let actor = format!("person:{}", p.id);
+impl Kernel {
+    /// The one kill switch (B11; owner's ruling 10): the app's and the admin
+    /// console's are this. Engaged, it seals the vault, revokes every
+    /// sign-in at its provider and suspends every running run; released,
+    /// it tells each person what it stopped, and resumes nothing (K53).
+    /// `actor` is who did it, as the log names them. The answer, or the
+    /// status and body of a failure.
+    pub async fn kill_switch(self: &Arc<Self>, actor: &str, engaged: bool) -> Result<Value, (StatusCode, Value)> {
+    let k = self.clone();
+    let actor = actor.to_string();
     // One at a time: a release racing an engage could unseal before the
     // engage sealed, or seal after the release.
     static SWITCHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1186,10 +1189,10 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
         let mut evs = vec![(actor.as_str(), Ev::KillSwitch { engaged })];
         evs.extend(stopped.iter().map(|r| ("kernel", k.notice_of(r, format!("Stopped by the kill switch: {}", k.title_of(r)), why.clone()))));
         if let Err(e) = k.emit_all(evs).await {
-            return internal(e);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("{e:#}") })));
         }
         k.vault.unseal();
-        return Json(json!({ "engaged": false, "told": stopped.len() })).into_response();
+        return Ok(json!({ "engaged": false, "told": stopped.len() }));
     }
     // One control (B11). The vault is sealed first, and each OAuth sign-in
     // taken out of it and revoked at its provider, whatever happens to the
@@ -1199,7 +1202,7 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
     k.vault.seal();
     let names = match k.vault.names() {
         Ok(n) => n,
-        Err(e) => return internal(e),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("{e:#}") }))),
     };
     let mut revoking = vec![];
     // Every person's own sign-in to every app people sign in to.
@@ -1214,7 +1217,7 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
     let take: Vec<String> = revoking.iter().map(|(n, _)| n.clone()).collect();
     let taken = match k.vault.seal_and_take(&take) {
         Ok(t) => t,
-        Err(e) => return internal(e),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("{e:#}") }))),
     };
     // Revoked at once; each result is recorded only after the vault's
     // sealing below (or its failure), which starts the list it goes in: a
@@ -1254,13 +1257,24 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
     let recorded = recorded.await;
     let _ = sealed_tx.send(());
     if let Err(e) = recorded {
-        return (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("The vault is sealed and the sign-ins are being revoked, but recording the kill switch failed: {e:#}. Engage it again once the appliance can write."), "sealed": true })),
-        )
-            .into_response();
+            json!({ "error": format!("The vault is sealed and the sign-ins are being revoked, but recording the kill switch failed: {e:#}. Engage it again once the appliance can write."), "sealed": true }),
+        ));
     }
-    Json(json!({ "engaged": true, "revoking": take, "sealed": kept })).into_response()
+    Ok(json!({ "engaged": true, "revoking": take, "sealed": kept }))
+    }
+}
+
+async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match k.kill_switch(&format!("person:{}", p.id), b["engaged"].as_bool().unwrap_or(true)).await {
+        Ok(v) => Json(v).into_response(),
+        Err((st, v)) => (st, Json(v)).into_response(),
+    }
 }
 
 async fn adapters(State(k): K, h: HeaderMap) -> Response {

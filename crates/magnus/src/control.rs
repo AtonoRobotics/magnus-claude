@@ -31,7 +31,7 @@ pub async fn serve(k: Arc<Kernel>, state_dir: &Path) -> Result<()> {
     let l = tokio::net::UnixListener::bind(&path).with_context(|| format!("listen on {}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!("magnus control socket at {}", path.display());
-    let app = Router::new().route("/v1/audit", post(record).get(list)).with_state(k);
+    let app = Router::new().route("/v1/audit", post(record).get(list)).route("/v1/kill-switch", post(switch).get(switch_state)).route("/v1/overview", axum::routing::get(overview)).with_state(k);
     axum::serve(l, app).await?;
     Ok(())
 }
@@ -81,4 +81,56 @@ async fn list(State(k): State<Arc<Kernel>>, Query(q): Query<HashMap<String, Stri
             .collect()
     });
     Json(json!({ "entries": rows })).into_response()
+}
+
+/// The kill switch as the console shows it: on or off, who moved it and
+/// when, and what it holds stopped (the runs it suspended, the schedules
+/// that do not fire while it is on).
+async fn switch_state(State(k): State<Arc<Kernel>>) -> Response {
+    Json(k.read(|s| {
+        let halted = s.runs.values().filter(|r| r.status == crate::state::Status::Suspended && r.reason.as_deref() == Some("kill_switch")).count();
+        let held = if s.kill_switch { s.schedules.values().filter(|x| x.next_due().is_some()).count() } else { 0 };
+        json!({
+            "engaged": s.kill_switch,
+            "by": s.kill_switch_by.as_ref().map(|(who, _)| who), "at": s.kill_switch_by.as_ref().map(|(_, at)| at),
+            "tasks_halted": halted, "schedules_held": held,
+            "sign_ins_revoked": s.revoked.len(),
+        })
+    }))
+    .into_response()
+}
+
+/// Engage or release it, as `actor`: the one switch, the app's own.
+async fn switch(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = text(&b, "actor") else { return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who moves the switch" }))).into_response() };
+    match k.kill_switch(&actor, b["engaged"].as_bool().unwrap_or(true)).await {
+        Ok(v) => Json(v).into_response(),
+        Err((st, v)) => (st, Json(v)).into_response(),
+    }
+}
+
+/// What the console's Overview and Health show of the kernel: its version,
+/// whether the log answers, the kill switch, tasks running, people signed
+/// in, what agents changed in the organisation's knowledge and memory in
+/// the last day, and the runs that failed most recently.
+async fn overview(State(k): State<Arc<Kernel>>) -> Response {
+    use crate::state::Status;
+    let log_up = k.log.up().await;
+    let signed_in = k.accounts.signed_in().len();
+    let day = chrono::Utc::now() - chrono::Duration::hours(24);
+    let v = k.read(|s| {
+        let mut failed: Vec<&crate::state::Run> = s.runs.values().filter(|r| r.status == Status::Failed).collect();
+        failed.sort_by(|a, b| b.ended_at.cmp(&a.ended_at));
+        let knowledge = s.knowledge.values().filter(|e| e.at > day && !e.author.starts_with("person:")).count();
+        let memory = s.memory.iter().filter(|m| m.at > day).count();
+        json!({
+            "version": crate::update::version(), "log_up": log_up, "kill_switch": s.kill_switch,
+            "running_tasks": s.runs.values().filter(|r| r.status == Status::Running).count(),
+            "waiting_tasks": s.runs.values().filter(|r| r.status == Status::Suspended).count(),
+            "signed_in": signed_in,
+            "knowledge_changes_24h": knowledge + memory,
+            "recent_errors": failed.iter().take(10).map(|r| json!({ "run": r.id, "task": r.task, "person": r.person, "reason": r.reason, "at": r.ended_at })).collect::<Vec<_>>(),
+        })
+    });
+    Json(v).into_response()
 }

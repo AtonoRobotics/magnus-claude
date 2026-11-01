@@ -87,3 +87,34 @@ async fn every_console_action_is_written_to_the_log_by_the_kernel_and_kept() {
     let v = control(&app, "GET", "/v1/audit?target=bob", None).await;
     assert!(v["entries"].as_array().unwrap().is_empty(), "{v}");
 }
+
+/// The console's kill switch is the app's own (owner's ruling 10), through
+/// the kernel (admin console spec, Kill switch): engaged from the console it
+/// suspends running work, refuses new work, says who and when, stays on
+/// across a restart, and shows in Overview; released, the app is free again.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_kill_switch_through_the_kernel_is_the_apps_own_and_outlives_a_restart() {
+    let m = FakeModel::start(steps(vec![])).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let v = control(&app, "POST", "/v1/kill-switch", Some(json!({ "actor": "admin:sub-1", "engaged": true }))).await;
+    assert_eq!(v["engaged"], true, "{v}");
+    // The app's own switch is on, moved by the admin.
+    assert_eq!(alice.get("/v1/kill-switch").await.1["engaged"], true);
+    let s = control(&app, "GET", "/v1/kill-switch", None).await;
+    assert_eq!((s["engaged"].as_bool(), s["by"].as_str()), (Some(true), Some("admin:sub-1")), "{s}");
+    assert!(s["at"].is_string() && s["tasks_halted"].is_number() && s["schedules_held"].is_number(), "{s}");
+    // No new run starts, from anyone, and that holds across a restart.
+    app.restart().await;
+    assert_eq!(control(&app, "GET", "/v1/kill-switch", None).await["engaged"], true, "the switch did not outlive a restart");
+    let (st, v) = alice.post("/v1/tasks", json!({ "text": "Write a note." })).await;
+    assert!(!st.is_success(), "a task started while the switch was on: {v}");
+    let o = control(&app, "GET", "/v1/overview", None).await;
+    assert_eq!((o["kill_switch"].as_bool(), o["log_up"].as_bool()), (Some(true), Some(true)), "{o}");
+    assert!(o["version"].is_string() && o["running_tasks"] == 0 && o["signed_in"].is_number() && o["recent_errors"].is_array(), "{o}");
+
+    let v = control(&app, "POST", "/v1/kill-switch", Some(json!({ "actor": "admin:sub-1", "engaged": false }))).await;
+    assert_eq!(v["engaged"], false, "{v}");
+    let (st, v) = alice.post("/v1/tasks", json!({ "text": "Write a note." })).await;
+    assert!(st.is_success(), "work did not start again after the release: {v}");
+}
