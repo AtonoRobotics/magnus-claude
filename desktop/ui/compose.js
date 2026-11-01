@@ -60,8 +60,11 @@ const Compose = (() => {
       <text x="0" y="${h + 16}" class="val">${corner(la0, lo0)}</text><text x="${w}" y="${h + 16}" text-anchor="end" class="val">${corner(la1, lo1)}</text></svg>${notes ? `<ul>${notes}</ul>` : ""}`);
   }
 
+  // One row per event: when (its first part strong, the rest under it, as
+  // "Day 1 · Sat"), what, and its note.
   function timeline(c) {
-    return frame(c, `<ol class="tl">${c.events.map(e => `<li><span class="when">${esc(e.when)}</span><span class="what">${esc(e.label)}${e.note ? `<span class="cap"> ${esc(e.note)}</span>` : ""}</span></li>`).join("")}</ol>`);
+    const when = w => { const [a, ...b] = String(w ?? "").split(" · "); return `${esc(a)}${b.length ? `<span class="sub">${esc(b.join(" · "))}</span>` : ""}`; };
+    return frame(c, `<ol class="tl">${c.events.map(e => `<li><span class="when">${when(e.when)}</span><span class="what"><span class="lbl">${esc(e.label)}</span>${e.note ? `<span class="note">${esc(e.note)}</span>` : ""}</span></li>`).join("")}</ol>`);
   }
 
   // Options side by side, one row per aspect; the option that wins an aspect
@@ -159,7 +162,11 @@ const Compose = (() => {
       case "heading": return c.level > 2 ? `<h4>${esc(c.text)}</h4>` : `<h2>${esc(c.text)}</h2>`;
       case "text": return `<p${c.muted ? ` class="cap"` : ""}>${esc(c.text)}</p>`;
       case "list": return frame(c, c.ordered ? `<ol>${c.items.map(i => `<li>${esc(i)}</li>`).join("")}</ol>` : `<ul>${c.items.map(i => `<li>${esc(i)}</li>`).join("")}</ul>`);
-      case "table": return frame(c, `<div class="tw"><table><thead><tr>${c.columns.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${c.rows.map(r => `<tr>${r.map(v => `<td class="${typeof v === "number" ? "num" : ""}">${fmt(v)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+      case "table": {
+        const head = c.columns.some(h => String(h).trim()) ? `<thead><tr>${c.columns.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead>` : "";
+        const cell = (v, i) => `<td class="${typeof v === "number" || (i > 0 && /^[-+]?[$€£]?[\d,.]+%?$/.test(String(v).trim())) ? "num" : ""}">${fmt(v)}</td>`;
+        return frame(c, `<div class="tw"><table>${head}<tbody>${c.rows.map(r => `<tr${/^total\b/i.test(String(r[0])) ? ` class="total"` : ""}>${r.map(cell).join("")}</tr>`).join("")}</tbody></table></div>`);
+      }
       case "stat": return `<div class="stat"><div class="sv">${fmt(c.value)}${c.unit ? `<span class="su"> ${esc(c.unit)}</span>` : ""}</div><div class="sl">${esc(c.label)}</div>${c.caption ? `<p class="cap">${esc(c.caption)}</p>` : ""}</div>`;
       case "bar_chart": return bar(c);
       case "line_chart": return line(c);
@@ -173,29 +180,41 @@ const Compose = (() => {
     }
   }
 
+  // Colors come from the app's look (theme.js tokens), so a result reads the
+  // same as the cards around it; without them, a light and a dark default.
+  const VARS = ["fg", "fg2", "muted", "line", "hair", "surface", "raised", "shadow", "accent", "accent-text"];
+  const DEFAULT_LIGHT = { fg: "#1C1C1E", fg2: "#3F3F44", muted: "#5E5E63", line: "#E7E6E2", hair: "#EFEEEA", surface: "#FFFFFF", raised: "#F6F6F3", shadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 20px rgba(0,0,0,0.04)", accent: "#3557D9", "accent-text": "#3557D9" };
+  const vars = t => VARS.map(k => `--${k}:${(t || DEFAULT_LIGHT)[k] ?? DEFAULT_LIGHT[k]};`).join("");
   const CSS = `
-    :root { color-scheme: light dark; --fg:#1b1d21; --muted:#5c6370; --line:#d9dce1; --bar:#2f5bd3; --bg:#ffffff; --s0:#2f5bd3; --s1:#c2410c; --s2:#0f766e; --s3:#7c3aed; --s4:#a16207; --s5:#be123c; }
-    @media (prefers-color-scheme: dark) { :root { --fg:#e7e9ec; --muted:#a3a9b3; --line:#3a3f47; --bar:#7aa2ff; --bg:#16181c; --s0:#7aa2ff; --s1:#fb923c; --s2:#2dd4bf; --s3:#a78bfa; --s4:#facc15; --s5:#fb7185; } }
-    html,body { margin:0; background:var(--bg); color:var(--fg); font: 15px/1.55 Inter, system-ui, sans-serif; }
-    body { padding: 4px 2px 8px; }
-    h2 { font-size: 18px; margin: 18px 0 6px; letter-spacing: -0.01em; }
-    h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
-    p { margin: 6px 0 10px; max-width: 70ch; white-space: pre-line; }
-    h4 { font-size: 15px; margin: 14px 0 4px; }
+    :root { --bar: var(--accent); --s0: var(--accent); --s1:#c2410c; --s2:#0f766e; --s3:#7c3aed; --s4:#a16207; --s5:#be123c; }
+    html,body { margin:0; background: transparent; color:var(--fg); font: 14px/1.45 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; font-feature-settings: "tnum" 1, "cv11" 1; }
+    body { padding: 1px 1px 2px; display: flex; flex-direction: column; gap: 16px; }
+    body > * { margin: 0; }
+    h2 { font-size: 15px; font-weight: 600; letter-spacing: 0; }
+    h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 0 8px; }
+    figure > h3 { padding: 14px 16px 0; margin: 0; }
+    p { max-width: 70ch; white-space: pre-line; font-size: 15px; }
+    h4 { font-size: 14px; font-weight: 600; }
     ul, ol { max-width: 70ch; }
     li { margin: 3px 0; }
-    .file { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 4px; }
+    .file { border-top: 1px solid var(--line); padding-top: 4px; }
     .fname { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
-    figure { margin: 14px 0; }
+    /* Each figure is a card: the surface, its edge and shadow, as in the app. */
+    figure { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; }
+    figure > :not(h3):not(.tw):not(.tl):not(svg) { padding-left: 16px; padding-right: 16px; }
+    figure > ul, figure > ol:not(.tl) { padding: 12px 16px 12px 36px; margin: 0; }
+    figure > svg { padding: 12px 16px; box-sizing: border-box; }
     .cap { color: var(--muted); font-size: 13px; }
-    ul, ol { margin: 6px 0; padding-left: 20px; }
-    .tw { overflow-x: auto; }
-    table { border-collapse: collapse; font-size: 14px; }
-    th, td { text-align: left; padding: 6px 12px 6px 0; border-bottom: 1px solid var(--line); }
-    th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
-    td.num { text-align: right; font-variant-numeric: tabular-nums; }
-    .stat { display: inline-block; margin: 10px 32px 10px 0; vertical-align: top; }
-    .sv { font-size: 30px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+    figure > .cap { padding-bottom: 12px; }
+    .tw { overflow-x: auto; padding: 14px 16px; }
+    table { border-collapse: collapse; width: 100%; font-size: 14px; }
+    th, td { text-align: left; padding: 4px 12px 4px 0; color: var(--fg2); }
+    th:last-child, td:last-child { padding-right: 0; }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; padding-bottom: 8px; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tr.total td { color: var(--fg); font-weight: 600; border-top: 1px solid var(--hair); padding-top: 8px; }
+    .stat { display: inline-block; margin: 0 32px 0 0; vertical-align: top; }
+    .sv { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
     .su { font-size: 15px; color: var(--muted); font-weight: 500; }
     .sl { color: var(--muted); font-size: 13px; }
     svg { width: 100%; max-width: 560px; height: auto; display: block; }
@@ -210,10 +229,14 @@ const Compose = (() => {
     img { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; }
     .area { fill: none; stroke: var(--line); }
     .pt { fill: var(--bar); }
-    .tl { list-style: none; padding: 0; border-left: 2px solid var(--line); margin-left: 4px; }
-    .tl li { display: flex; gap: 14px; padding: 4px 0 4px 14px; position: relative; }
-    .tl li::before { content: ""; position: absolute; left: -6px; top: 11px; width: 10px; height: 10px; border-radius: 50%; background: var(--bar); }
-    .when { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 9ch; }
+    .tl { list-style: none; padding: 0; margin: 0; }
+    .tl li { display: flex; gap: 14px; padding: 14px 16px; margin: 0; border-bottom: 1px solid var(--hair); }
+    .tl li:last-child { border-bottom: 0; }
+    .tl .when { flex: 0 0 52px; font-size: 12px; font-weight: 600; color: var(--accent-text); text-transform: uppercase; font-variant-numeric: tabular-nums; }
+    .tl .when .sub { display: block; color: var(--muted); font-weight: 500; text-transform: none; }
+    .tl .what { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .tl .lbl { font-weight: 600; }
+    .tl .note { color: var(--fg2); font-size: 13px; }
     .cmp th[scope=row] { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--fg); font-weight: 500; }
     .cmp td.best { font-weight: 650; color: var(--bar); }
     .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
@@ -223,11 +246,13 @@ const Compose = (() => {
   /// A whole document for the frame's srcdoc. `files` maps a delivered
   /// file's name to what the app fetched itself: {image: a data: URL} or
   /// {text, media_type}. `limit` is how much of a file to show.
-  function documentFor(view, files, fontCss, limit) {
+  /// `tokens`, the app's look (Theme.tokens), colors it; `mode` is its
+  /// light or dark, so the frame's own color scheme agrees with the page.
+  function documentFor(view, files, fontCss, limit, tokens, mode) {
     const body = (view || []).map(c => part(c, files || {}, limit || { chars: 160000, rows: 200 })).join("\n");
-    return `<!doctype html><html><head><meta charset="utf-8">
+    return `<!doctype html><html style="color-scheme: ${mode === "dark" ? "dark" : "light"}"><head><meta charset="utf-8">
       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data: ${location.origin}">
-      <style>${fontCss || ""}${CSS}</style></head><body>${body}</body></html>`;
+      <style>:root{${vars(tokens)}}${fontCss || ""}${CSS}</style></head><body>${body}</body></html>`;
   }
 
   return { documentFor, TEXT };

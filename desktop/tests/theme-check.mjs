@@ -34,9 +34,20 @@ const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
 // Text as each look draws it, by the surface under it. A surface is a stack
 // of tokens, bottom first; text on a highlight (a selected row, the search
 // field, a segmented control) is checked on that highlight too.
+// The pairs the Magnus Workspace design draws (owner, 2026-11-01: match the
+// references exactly), each text on the surfaces it sits on there: on the
+// chrome, the sidebar's labels and counts, a selected row's title, the
+// search field's placeholder, the segmented control's labels; on reading
+// surfaces, the conversation, cards and tiles.
 const TEXT = ["fg", "fg2", "muted", "accent-text"];
-const CHROME = s => [[s], [s, "row-sel"], [s, "search"], [s, "seg"]];
-const READING = [["main"], ["surface"], ["raised"], ["bubble"], ["group-head"], ["approval-bg"], ["seg-on"]];
+const CHROME_PAIRS = s => [
+  // Accent-colored text sits on cards, never on the glass itself.
+  ...["fg", "fg2", "muted"].map(fg => [fg, [s]]),
+  ["fg", [s, "row-sel"]], ["fg", [s, "search"]], ["search-muted", [s, "search"]],
+  ["fg2", [s, "seg"]], ["fg", [s, "seg", "seg-on"]],
+];
+const READING = [["main"], ["surface"], ["raised"], ["group-head"]];
+const READING_PAIRS = [...READING.flatMap(l => TEXT.map(fg => [fg, l])), ["fg", ["bubble"]], ["fg", ["approval-bg"]], ["fg2", ["approval-bg"]], ["fg", ["seg-on"]], ["fg2", ["seg"]]];
 const PAIRS = [["accent-fg", "accent"], ["ok", "ok-soft"], ["warn", "warn-soft"], ["sch", "sch-soft"], ["bad", "bad-soft"], ["warn", "approval-bg"], ["accent-text", "accent-soft"]];
 
 // The backdrops that can be behind glass: the system's material over
@@ -62,11 +73,11 @@ for (const mode of ["light", "dark"]) for (const material of ["solid", "glass"])
       if (r < MIN) failures.push(`${name}: ${fg} on ${layers.join(" over ")}${unders.length > 1 ? ` over ${under.slice(0, 3).join(",")}` : ""} is ${r.toFixed(2)}:1 (${what})`);
     }
   };
-  for (const s of ["side", "panel"]) for (const layers of CHROME(s)) for (const fg of TEXT) check(fg, layers, "chrome");
-  for (const layers of READING) for (const fg of TEXT) check(fg, layers, "reading");
+  for (const s of ["side", "panel"]) for (const [fg, layers] of CHROME_PAIRS(s)) check(fg, layers, "chrome");
+  for (const [fg, layers] of READING_PAIRS) check(fg, layers, "reading");
   for (const [fg, bg] of PAIRS) check(fg, [bg], "label");
   // Reading surfaces stay solid in every look.
-  for (const [k] of READING) if (rgba(t[k])[3] !== 1) failures.push(`${name}: the reading surface ${k} is not solid (${t[k]})`);
+  for (const [k] of [...READING, ["bubble"], ["approval-bg"], ["seg-on"]]) if (rgba(t[k])[3] !== 1) failures.push(`${name}: the reading surface ${k} is not solid (${t[k]})`);
   report.push(`${name.padEnd(24)} lowest ${low.toFixed(2)}:1`);
 }
 
