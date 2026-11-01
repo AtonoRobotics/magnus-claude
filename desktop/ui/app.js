@@ -1560,7 +1560,7 @@ function stopPanelLive() {
   Panel.liveText = "";
 }
 
-const PANEL_TITLES = { needs: "Needs you", tasks: "Tasks", schedules: "Schedules", library: "Library", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Decision", search: "Search" };
+const PANEL_TITLES = { needs: "Needs you", tasks: "Tasks", schedules: "Schedules", library: "Library", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Decision", search: "Search", connector: "Connector" };
 
 async function drawPanel() {
   const el = $("#detail");
@@ -1600,6 +1600,7 @@ const PANELS = {
   task: taskView,
   file: fileView,
   library: libraryView,
+  connector: connectorView,
   projects: projectsView,
   project: projectView,
   search: searchView,
@@ -1684,15 +1685,88 @@ async function fileView(id) {
 
 // Library: every file uploaded or delivered, as a view over the same files
 // the conversations show.
+// ---------- Connectors in the Library ----------
+
+// The organisation provides each app; each person connects it with their
+// own sign-in, on the app's own page (connectors spec: The connector card,
+// Library). The card never shows protocol words, and nothing is typed but
+// the person's own login, there.
+const CONNECTOR_GROUPS = [["connected", "Connected"], ["local", "On this computer"], ["needs_attention", "Needs attention"], ["available", "Available"]];
+const Connecting = {};
+
+function connectorAction(c) {
+  const state = Connecting[c.name] ? "connecting" : c.state;
+  return {
+    connecting: `<p class="small">Finish signing in in your browser, then come back here.</p><button class="link small" data-act="connect-page" id="connect-open" data-url="${esc(Connecting[c.name] || "")}">Open the sign-in page again</button>`,
+    available: `<button class="primary" data-act="connect" data-app="${esc(c.name)}">Connect</button>`,
+    needs_attention: `<button class="primary" data-act="connect" data-app="${esc(c.name)}">Sign in again</button>`,
+    connected: `<span class="chip ok">Connected</span>`,
+  }[state] || "";
+}
+
+function connectorCard(c) {
+  const state = Connecting[c.name] ? "connecting" : c.state;
+  const note = state === "needs_attention" ? `Your sign-in to ${c.title} stopped working.` : state === "connected" && c.account ? `Connected as ${c.account}.` : c.summary;
+  return `<li class="ccard" data-connector="${esc(c.name)}" data-state="${state}"><span class="cicon" aria-hidden="true">${esc((c.title || "?").slice(0, 1))}</span>
+    <div class="rg-main"><a href="#" data-open="connector:${esc(c.name)}"><strong>${esc(c.title)}</strong></a><span class="small muted">${esc(note)}</span></div>
+    <div class="row">${connectorAction(c)}</div></li>`;
+}
+
+// Connect: the system browser opens at the app's own sign-in page; the
+// answer comes back to this computer, and the card turns Connected.
+async function connectApp(name) {
+  if (!Magnus.loopbackOpen) { toast("Connect apps from the Magnus desktop app."); return; }
+  const redirect = await Magnus.loopbackOpen();
+  const r = await api("POST", `/v1/connectors/${enc(name)}/sign-in`, { redirect_uri: redirect });
+  Connecting[name] = r.authorize_url;
+  drawPanel();
+  Magnus.openExternal(r.authorize_url).catch(() => {});
+  try {
+    const got = await Magnus.loopbackWait();
+    if (got.state !== r.state) throw new Error("That sign-in came back for another request. Try again.");
+    await api("POST", `/v1/connectors/${enc(name)}/sign-in/complete`, { state: got.state, code: got.code, iss: got.iss });
+    toast("Connected.");
+  } catch (e) { toast(e.message); }
+  finally { delete Connecting[name]; drawPanel(); }
+}
+
+function connectorsSectionHtml(connectors, q) {
+  const words = (q || "").toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = connectors.filter(c => words.every(w => `${c.title} ${c.summary}`.toLowerCase().includes(w)));
+  if (!connectors.length) return `<h3>Connectors</h3><p class="empty">Your organisation has not added any apps yet.</p>`;
+  if (!shown.length) return `<h3>Connectors</h3><p class="empty">No connector matches.</p>`;
+  return `<h3>Connectors</h3>${CONNECTOR_GROUPS.map(([state, label]) => {
+    // A card keeps its group while it connects.
+    const g = shown.filter(c => c.state === state);
+    return g.length ? `<div class="cgroup" data-group="${state}"><h4 class="small muted">${label}</h4><ul class="clist">${g.map(connectorCard).join("")}</ul></div>` : "";
+  }).join("")}`;
+}
+
+// One connector: as whom and since when it is connected, what it allows in
+// plain words, what Magnus did through it lately, and Disconnect.
+async function connectorView(name) {
+  const c = await api("GET", `/v1/connectors/${enc(name)}`);
+  const at = c.connected_at ? when(c.connected_at) : null;
+  return plain(`<div class="spread"><h2 class="ptitle">${esc(c.title)}</h2><div class="row">${connectorAction(c)}</div></div>
+    <p class="muted">${esc(c.summary)}</p>
+    ${c.state === "needs_attention" ? `<p>Your sign-in to ${esc(c.title)} stopped working. Sign in again to keep using it.</p>` : ""}
+    ${c.state !== "available" ? `<dl class="kv"><dt>Connected as</dt><dd>${esc(c.account || "Your own account")}</dd>${at ? `<dt>Connected</dt><dd>${esc(at)}</dd>` : ""}<dt>Last used</dt><dd>${c.last_used ? esc(when(c.last_used)) : "Not yet"}</dd></dl>` : ""}
+    <h3>What it allows</h3>${c.allows.length ? `<ul class="allows">${c.allows.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : `<p class="empty">Nothing yet: your organisation has not chosen what Magnus may do with it.</p>`}
+    <h3>Recent actions</h3>${c.recent.length ? `<ul class="tlist">${c.recent.map(u => `<li class="trow"><a href="#/task/${enc(u.task)}" data-open="task:${esc(u.task)}"><span class="ttl">${esc(u.action.charAt(0).toUpperCase() + u.action.slice(1))}</span><span class="small faint when">${esc(when(u.at))}${u.worked === false ? " · did not work" : ""}</span></a></li>`).join("")}</ul>` : `<p class="empty">Magnus has not used it for you yet.</p>`}
+    ${c.state !== "available" && c.signs_in ? `<div class="row"><button data-act="disconnect" data-app="${esc(c.name)}">Disconnect</button></div>` : ""}`);
+}
+
 async function libraryView() {
   const { q, project } = Panel.lib;
   const qs = new URLSearchParams();
   if (q) qs.set("q", q);
   if (project) qs.set("project", project);
-  const { files } = await api("GET", `/v1/files${qs.size ? `?${qs}` : ""}`);
-  return plain(`<div class="row lib-bar"><label class="sr" for="lq">Search files</label><input id="lq" type="search" data-draft="lib-q" placeholder="Name, task, project or text" autocomplete="off">
+  const [{ files }, { connectors }] = await Promise.all([api("GET", `/v1/files${qs.size ? `?${qs}` : ""}`), api("GET", "/v1/connectors")]);
+  return plain(`<div class="row lib-bar"><label class="sr" for="lq">Search files and connectors</label><input id="lq" type="search" data-draft="lib-q" placeholder="Connectors, files, tasks, projects or text" autocomplete="off">
     <label class="sr" for="lp">Project</label><select id="lp" aria-label="Filter by project"><option value="">All files</option><option value="none"${project === "none" ? " selected" : ""}>In no project</option>${App.projects.map(p => `<option value="${esc(p.id)}"${p.id === project ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
     ${attachButton("Upload")}</div>
+    ${connectorsSectionHtml(connectors, q)}
+    <h3>Files</h3>
     ${files.length ? `<ul class="flist">${files.map(f => `<li data-lib-file="${esc(f.id)}"><div class="rg-main">${fileChip(f)}<span class="small muted">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"} · ${esc(when(f.at))} · ${fileFrom(f)}</span></div>${moveControl(f.id, f.project, App.projects, true)}</li>`).join("")}</ul>`
       : `<p class="empty">${q || project ? "No file matches." : "No files yet. Upload one, or ask Magnus for a document."}</p>`}`);
 }
@@ -1751,6 +1825,11 @@ function wirePanel() {
           if (!confirm("Stop this schedule? No more of its runs start. Runs already started go on, and stay in Tasks.")) return;
           await api("DELETE", `/v1/schedules/${enc(id)}`); toast("The schedule is stopped."); break;
         case "resume-schedule": await api("POST", `/v1/schedules/${enc(id)}/resume`, {}); toast("Schedule resumed."); break;
+        case "connect": connectApp(a.dataset.app).catch(err => toast(err.message)); return;
+        case "connect-page": await Magnus.openExternal(a.dataset.url); return;
+        case "disconnect":
+          if (!confirm("Disconnect? Your sign-in is ended at the app, and Magnus can no longer use it for you until you connect again.")) return;
+          await api("DELETE", `/v1/connectors/${enc(a.dataset.app)}/connection`); toast("Disconnected."); break;
         case "save-ins":
           await api("PUT", `/v1/projects/${enc(id)}`, { instructions: $("#pin", el).value }); delete drafts[`pin-${id}`];
           toast("Instructions saved. New tasks here use them."); break;
@@ -1896,59 +1975,34 @@ async function modelsSection(main) {
   await draw();
 }
 
-// ---------- Connectors ----------
+// ---------- Connectors: the organisation's apps (owner) ----------
 
-// The person's apps over MCP. The owner adds one by its address, signs in on
-// the app's own page (the code comes back to this computer), and decides
-// what each tool may do; a tool left "not offered" is never shown to the worker.
+// The owner adds an app for everyone by its address, the one field in the
+// connector system (connectors spec); each person then connects it with
+// their own sign-in in their Library. The owner decides what each of its
+// tools may do; a tool left "not offered" is never shown to the worker.
 const RISKS = [["", "Not offered"], ["read", "Reads only"], ["reversible_write", "Changes things (undoable)"], ["irreversible", "Changes things (cannot undo)"], ["financial", "Moves money"], ["prohibited", "Never"]];
-const AUDIENCES = [["private", "Only the person"], ["internal", "People in the organization"], ["public", "Anyone"]];
 // A tool whose definition changed is blocked until the owner accepts it;
 // the decision is the inbox item's, shown again on its connector.
 const changesFor = name => App.inbox.filter(i => i.status === "open" && (i.kind === "tool_change" && String(i.details?.tool).startsWith(`${name}__`)
   || i.kind === "tool_review" && (i.details?.tools || []).some(t => String(t.tool).startsWith(`${name}__`))));
 async function connectorsSection(main) {
-  const note = {};
   const draw = async () => {
     const { connectors } = await api("GET", "/v1/connectors");
-    paint(main, `<h2>Connectors</h2><p class="muted">The person's apps the worker can use: email, calendar, files, chat, business systems. Sign-ins go to the appliance's vault; this computer keeps none.</p>
-      ${connectors.map(c => `<div class="card" data-app="${esc(c.name)}"><div class="spread"><strong>${esc(c.name)}</strong>
-          <span class="row">${c.signed_in ? `<span class="chip ok">connected</span>` : `<span class="chip warn">${esc(c.problem || "not connected")}</span>`}
-          ${c.source === "config" ? `<span class="chip">set in the config file</span>` : ""}</span></div>
-        <div class="small muted mono">${esc(c.url)}</div>
-        <div class="small muted">What it sends reaches: ${esc((AUDIENCES.find(a => a[0] === c.audience) || [, c.audience])[1])} · what comes back: ${esc(c.label)}</div>
-        <div class="row" style="margin-top:10px">${c.auth === "oauth" ? `<button ${c.signed_in ? "" : `class="primary"`} data-act="signin" data-app="${esc(c.name)}">${c.signed_in ? "Sign in again" : "Sign in"}</button>` : ""}
-          ${c.source === "app" ? `<button class="link" data-act="remove" data-app="${esc(c.name)}">Disconnect</button>` : ""}</div>
-        <div data-note="${esc(c.name)}">${note[c.name] || ""}</div>
+    paint(main, `<h2>Connectors</h2><p class="muted">The apps your organisation provides. Each appears in everyone's Library, and each person connects it with their own account; no one acts through anyone else's.</p>
+      ${connectors.map(c => `<div class="card" data-app="${esc(c.name)}"><div class="spread"><strong>${esc(c.title)}</strong>
+          <span class="row">${c.source === "config" ? `<span class="chip">set in the config file</span>` : `<button class="link" data-act="remove" data-app="${esc(c.name)}">Remove for everyone</button>`}</span></div>
+        <div class="small muted">${esc(c.summary)}</div>
         ${changesFor(c.name).map(i => card(i, [])).join("")}
         ${c.tools.length ? `<table class="t small" style="margin-top:10px"><thead><tr><th>Tool</th><th>What the app says it does</th><th>May</th></tr></thead><tbody>
           ${c.tools.map(t => `<tr><td class="mono">${esc(t.name)}</td><td class="muted">${esc(t.description)}</td>
             <td><select data-tool="${esc(t.name)}" data-app="${esc(c.name)}" aria-label="What ${esc(t.name)} may do" ${c.source === "app" ? "" : "disabled"}>
-              ${RISKS.map(([v, l]) => `<option value="${v}" ${(t.risk || "") === v ? "selected" : ""}>${esc(l)}${v && v === t.suggested && !t.risk ? " (the app's hint)" : ""}</option>`).join("")}</select></td></tr>`).join("")}</tbody></table>` : ""}
-      </div>`).join("") || `<p class="empty">No connectors yet.</p>`}
-      <div class="card"><strong>Connect an app</strong>
-        <div class="grid2" style="margin-top:8px"><label>Name<input id="aname" placeholder="calendar" autocomplete="off"></label>
-          <label>Address (MCP)<input id="aurl" placeholder="https://mcp.example.com/mcp" autocomplete="off"></label>
-          <label>What the worker sends there reaches<select id="aaud">${AUDIENCES.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}</select></label>
-          <div><div class="small">What comes back</div><label class="row small"><input type="checkbox" id="apriv" checked> is the person's private data</label>
-            <label class="row small"><input type="checkbox" id="auntr" checked> may hold text written by others</label></div></div>
-        <div class="row" style="margin-top:10px"><button class="primary" data-act="add">Connect</button></div></div>`);
-  };
-  const say = (app, html) => { note[app] = html; const el = $(`[data-note="${CSS.escape(app)}"]`, main); if (el) el.innerHTML = html; };
-  const signIn = async app => {
-    if (!Magnus.loopbackOpen) { say(app, `<p class="small">Sign in to apps from the Magnus desktop app.</p>`); return; }
-    const redirect = await Magnus.loopbackOpen();
-    const r = await api("POST", `/v1/connectors/${enc(app)}/sign-in`, { redirect_uri: redirect });
-    say(app, `<div style="margin-top:10px"><p class="small">Sign in on ${esc(app)}'s page, then come back here.</p>
-      <div class="row"><button data-act="open" data-url="${esc(r.authorize_url)}" id="app-open">Open the sign-in page</button></div>
-      <p class="small muted">Waiting for the sign-in…</p></div>`);
-    try {
-      const got = await Magnus.loopbackWait();
-      if (got.state !== r.state) throw new Error("the sign-in came back for a different request; start again");
-      await api("POST", `/v1/connectors/${enc(app)}/sign-in/complete`, { state: got.state, code: got.code, iss: got.iss });
-      say(app, `<p class="small" style="color:var(--ok)">Connected.</p>`);
-      await draw();
-    } catch (e) { say(app, `<p class="small" style="color:var(--bad)">${esc(e.message)}</p>`); }
+              ${RISKS.map(([v, l]) => `<option value="${v}" ${(t.risk || "") === v ? "selected" : ""}>${esc(l)}${v && v === t.suggested && !t.risk ? " (the app's hint)" : ""}</option>`).join("")}</select></td></tr>`).join("")}</tbody></table>`
+          : c.signed_in ? "" : `<p class="small">Connect it in your Library to see its tools and choose what each may do.</p>`}
+      </div>`).join("") || `<p class="empty">No apps yet.</p>`}
+      <div class="card"><strong>Add an app for everyone</strong>
+        <label style="margin-top:8px">Its address<input id="aurl" placeholder="https://app.example.com" autocomplete="off"></label>
+        <div class="row" style="margin-top:10px"><button class="primary" data-act="add">Add</button></div></div>`);
   };
   main.onchange = async e => {
     const s = e.target.closest("select[data-tool]"); if (!s) return;
@@ -1964,20 +2018,18 @@ async function connectorsSection(main) {
     const app = b.dataset.app;
     try {
       if (b.dataset.act === "add") {
-        const name = $("#aname", main).value.trim(), url = $("#aurl", main).value.trim();
-        if (!name || !url) return toast("Give the app a name and its address.");
-        const label = [$("#apriv", main).checked && "private", $("#auntr", main).checked && "untrusted"].filter(Boolean).join("+") || "principal";
+        const url = $("#aurl", main).value.trim();
+        if (!url) return toast("Give the app's address.");
         b.disabled = true;
-        const r = await api("POST", "/v1/connectors", { name, url, audience: $("#aaud", main).value, label });
+        // Its results are taken as private and possibly others' words, and
+        // what is sent there as reaching anyone, until the owner says otherwise.
+        const r = await api("POST", "/v1/connectors", { url, audience: "public", label: "private+untrusted" });
+        toast(`${r.name || "The app"} is in everyone's Library. Connect it there with your own account.`);
         await draw();
-        if (r.sign_in) signIn(name);
       }
-      if (b.dataset.act === "signin") signIn(app);
-      if (b.dataset.act === "open") await Magnus.openExternal(b.dataset.url);
       if (b.dataset.act === "remove") {
-        if (!confirm(`Disconnect ${app}? Its sign-in is revoked and the worker can no longer use it.`)) return;
+        if (!confirm(`Remove ${app} for everyone? Every person's sign-in to it is ended, and the worker can no longer use it.`)) return;
         await api("DELETE", `/v1/connectors/${enc(app)}`);
-        delete note[app];
         await draw();
       }
     } catch (err) { toast(err.message); b.disabled = false; }

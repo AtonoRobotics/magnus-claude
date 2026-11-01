@@ -74,6 +74,8 @@ pub struct ResultRec {
 pub struct Intent {
     pub call_id: String,
     pub tool: String,
+    /// When it was recorded.
+    pub at: DateTime<Utc>,
     pub input: Value,
     pub issuer: String,
     /// pending until a result for this key is recorded
@@ -1341,7 +1343,7 @@ impl State {
                     r.actions += 1;
                     r.intents.insert(
                         key.clone(),
-                        Intent { call_id: call_id.clone(), tool: tool.clone(), input: input.clone(), issuer: issuer.clone(), result: None },
+                        Intent { call_id: call_id.clone(), tool: tool.clone(), at: e.at, input: input.clone(), issuer: issuer.clone(), result: None },
                     );
                 }
             }

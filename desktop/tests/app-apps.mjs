@@ -1,9 +1,10 @@
-// The owner connects one of the person's apps from Settings, Connectors, in
-// the installed app and signs in to it: the shell opens a loopback address on
-// this computer, the app's sign-in page sends its code there, and the shell
-// hands it to the appliance. Then the owner lets the worker read the app's
-// events, and accepts a change to that tool's definition on the connector.
-// Fails if the Connectors page or its connection flow is gone.
+// The owner adds an app for everyone by its address in Settings, Connectors,
+// in the installed app, then connects it with their own account from its
+// card in the Library: the shell opens a loopback address on this computer,
+// the app's sign-in page sends its code there, and the shell hands it to the
+// appliance. Then the owner lets the worker read the app's events, and
+// accepts a change to that tool's definition on the connector.
+// Fails if the Connectors page, the Library's card or its connection flow is gone.
 //
 // MAGNUS_WEBDRIVER  tauri-driver's address      MAGNUS_APP  the app binary
 // MAGNUS_URL        the appliance (https)       MAGNUS_FINGERPRINT  what it printed
@@ -18,22 +19,26 @@ const d = await open(wd, app, process.env.MAGNUS_SHOTS, "apps");
 
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
-await d.step("connect the calendar by its address", async () => {
+await d.step("add the calendar for everyone by its address", async () => {
   await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
   await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Connectors']"));
   await d.xpath("//h2[normalize-space()='Connectors']");
-  await d.type(d.css("#aname"), "calendar");
   await d.type(d.css("#aurl"), appUrl);
-  await d.click(d.button("Connect"));
+  await d.click(d.button("Add"));
+  await d.css('[data-app="calendar"]');
 });
 
-await d.step("sign in on the app's page; its code comes back to this computer", async () => {
-  const link = await d.attr(d.css("#app-open"), "data-url");
+await d.step("connect it from its card in the Library; the code comes back to this computer", async () => {
+  await d.click(d.xpath("//nav//a[normalize-space()='Library']"));
+  await d.click(d.button("Connect", "//li[@data-connector='calendar']"));
+  const link = await d.attr(d.css("#connect-open"), "data-url");
   // The person's browser: the app's page approves and redirects to the shell's loopback address.
   const r = await fetch(link);
   const page = await r.text();
   if (!r.url.startsWith("http://127.0.0.1:") || !page.includes("Signed in")) throw new Error(`the sign-in ended at ${r.url}: ${page.slice(0, 200)}`);
-  await d.css('[data-app="calendar"] .chip.ok');
+  await d.css('li[data-connector="calendar"][data-state="connected"]');
+  await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
+  await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Connectors']"));
 });
 
 await d.step("let the worker read events; the rest stays not offered", async () => {
