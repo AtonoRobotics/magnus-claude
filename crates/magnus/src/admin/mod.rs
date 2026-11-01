@@ -6,12 +6,13 @@
 //! anything else is not found. Every page is hardened: a strict
 //! Content-Security-Policy, nothing from anywhere but the appliance.
 //!
-//! This is its first part: the process, its listener and its shell. Sign-in,
-//! the audit log, and each section follow as their own pull requests; until
-//! sign-in exists, every API route but health answers that sign-in is
-//! needed.
+//! Its parts so far: the process, its listener and its shell (`net`), and
+//! signing in (`auth`, `session`). The audit log and each section follow as
+//! their own pull requests.
 
+pub mod auth;
 pub mod net;
+pub mod session;
 
 use crate::config::Config;
 use anyhow::{Context, Result};
@@ -28,13 +29,21 @@ use std::sync::Arc;
 /// script, never framed.
 pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
-/// The console's settings, checked.
+/// The console's settings, checked, and what it keeps while it runs.
 pub struct Console {
     pub hostname: String,
     pub org: String,
+    pub idp: session::Idp,
+    pub key: auth::Key,
+    pub store: auth::Store,
+    pub idle_minutes: i64,
+    pub session_hours: i64,
+    pub step_up_seconds: i64,
+    pub refresh_seconds: i64,
 }
 
-/// `magnus-admin --config <file>`.
+/// `magnus-admin --config <file>`, or `magnus-admin jwk --config <file>`
+/// to print the console's public key, for its client in the realm.
 pub fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("MAGNUS_LOG").unwrap_or_else(|_| "info".into()))
@@ -46,7 +55,15 @@ pub fn main() {
         std::process::exit(2);
     };
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let r = rt.block_on(async { serve(Config::load(std::path::Path::new(path)).with_context(|| format!("load {path}"))?).await });
+    let jwk = args.get(1).map(String::as_str) == Some("jwk");
+    let r = rt.block_on(async {
+        let cfg = Config::load(std::path::Path::new(path)).with_context(|| format!("load {path}"))?;
+        if jwk {
+            println!("{}", auth::Key::load_or_make(&key_dir(&cfg))?.jwks());
+            return Ok(());
+        }
+        serve(cfg).await
+    });
     if let Err(e) = r {
         eprintln!("magnus-admin: {e:#}");
         std::process::exit(1);
@@ -61,10 +78,29 @@ pub async fn serve(cfg: Config) -> Result<()> {
     let allow = net::allowlist(&a.allow)?;
     anyhow::ensure!(valid_host(&a.hostname), "admin.hostname {:?} is not a hostname", a.hostname);
     let tls = net::tls(&a.tls_cert, &a.tls_key)?;
-    let console = Arc::new(Console { hostname: a.hostname.to_ascii_lowercase(), org: a.org.clone().unwrap_or_else(|| "Magnus".into()) });
+    let oidc = cfg.sign_in.oidc.as_ref();
+    let issuer = a.issuer.clone().or_else(|| oidc.map(|o| o.issuer.clone())).context("the admin console signs in through the organisation's identity provider: set sign_in.oidc or admin.issuer")?;
+    let roles_claim = oidc.and_then(|o| o.roles_claim.clone()).unwrap_or_else(|| "/realm_access/roles".into());
+    let console = Arc::new(Console {
+        hostname: a.hostname.to_ascii_lowercase(),
+        org: a.org.clone().unwrap_or_else(|| "Magnus".into()),
+        idp: session::Idp::new(issuer, a.client_id.clone(), roles_claim, a.idp_internal.clone()),
+        key: auth::Key::load_or_make(&key_dir(&cfg))?,
+        store: Default::default(),
+        idle_minutes: a.idle_minutes.into(),
+        session_hours: a.session_hours.into(),
+        step_up_seconds: a.step_up_seconds.into(),
+        refresh_seconds: a.refresh_seconds.into(),
+    });
     let l = net::Listener::bind(&addrs, allow, tls).await?;
     axum::serve(l, router(console)).await?;
     Ok(())
+}
+
+/// Where the console keeps its own key: the appliance's state, readable by
+/// its owner only.
+fn key_dir(cfg: &Config) -> std::path::PathBuf {
+    cfg.appliance.state_dir.join("admin")
 }
 
 fn valid_host(h: &str) -> bool {
@@ -72,11 +108,20 @@ fn valid_host(h: &str) -> bool {
 }
 
 pub fn router(console: Arc<Console>) -> Router {
+    // Every API route but health is an admin's alone.
+    let api = Router::new()
+        .route("/api/v1/session", get(session::me).delete(session::logout))
+        .route("/api/v1/session/step-up", axum::routing::post(session::confirm))
+        .route("/api/v1/{*rest}", axum::routing::any(api_not_found))
+        .layer(axum::middleware::from_fn_with_state(console.clone(), session::guard));
     Router::new()
         .route("/", get(shell))
         .route("/assets/{file}", get(asset))
+        .route("/auth/login", get(session::login))
+        .route("/auth/step-up", get(session::step_up))
+        .route("/auth/callback", get(session::callback))
         .route("/api/v1/health", get(health))
-        .route("/api/v1/{*rest}", axum::routing::any(sign_in_needed))
+        .merge(api)
         .fallback(not_found)
         .layer(axum::middleware::from_fn_with_state(console.clone(), host_check))
         .layer(axum::middleware::from_fn(harden))
@@ -118,8 +163,8 @@ async fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "not found").into_response()
 }
 
-async fn sign_in_needed() -> Response {
-    (StatusCode::UNAUTHORIZED, Json(json!({ "error": "sign_in_required", "message": "Sign in to the admin console." }))).into_response()
+async fn api_not_found() -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
 }
 
 async fn health() -> Response {

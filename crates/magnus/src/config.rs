@@ -107,6 +107,47 @@ pub struct Admin {
     /// The organisation's name, shown in the console's top bar.
     #[serde(default)]
     pub org: Option<String>,
+    /// The console's confidential client in the realm, which proves itself
+    /// with the console's own key (`magnus-admin jwk` prints its public half).
+    #[serde(default = "admin_client")]
+    pub client_id: String,
+    /// The realm, when not the app's (`sign_in.oidc.issuer`).
+    #[serde(default)]
+    pub issuer: Option<String>,
+    /// Where the console reaches the identity provider when not at the
+    /// issuer's address (its internal address on the appliance); the tokens
+    /// still name the public issuer.
+    #[serde(default)]
+    pub idp_internal: Option<String>,
+    /// A session ends after this long unused, and after `session_hours`.
+    #[serde(default = "admin_idle_minutes")]
+    pub idle_minutes: u32,
+    #[serde(default = "admin_session_hours")]
+    pub session_hours: u32,
+    /// A step-up (a fresh password) counts this long.
+    #[serde(default = "admin_step_up_seconds")]
+    pub step_up_seconds: u32,
+    /// The provider is asked again whether the admin is still one, and
+    /// still turned on, at least this often.
+    #[serde(default = "admin_refresh_seconds")]
+    pub refresh_seconds: u32,
+}
+
+fn admin_step_up_seconds() -> u32 {
+    300
+}
+fn admin_refresh_seconds() -> u32 {
+    240
+}
+
+fn admin_client() -> String {
+    "magnus-admin".into()
+}
+fn admin_idle_minutes() -> u32 {
+    30
+}
+fn admin_session_hours() -> u32 {
+    12
 }
 
 /// Sign-in for people's apps. Tunable values, not decisions (K51).

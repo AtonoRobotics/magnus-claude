@@ -233,6 +233,31 @@ impl Keycloak {
         self.admin(reqwest::Method::POST, "/clients", Some(body)).await;
     }
 
+    /// The admin console's client (admin console spec): confidential, the
+    /// code flow with PKCE, its one redirect, proving itself with the
+    /// console's key (`jwks`, from `magnus-admin jwk`), and realm roles in
+    /// its ID token.
+    pub async fn add_admin_client(&self, client_id: &str, redirect_uri: &str, jwks: &Value) {
+        let claims = json!({ "id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true", "claim.name": "realm_access.roles", "multivalued": "true" });
+        let body = json!({
+            "clientId": client_id, "publicClient": false, "clientAuthenticatorType": "client-jwt",
+            "standardFlowEnabled": true, "directAccessGrantsEnabled": false, "serviceAccountsEnabled": false,
+            "redirectUris": [redirect_uri],
+            "attributes": {
+                "pkce.code.challenge.method": "S256", "use.jwks.string": "true", "jwks.string": jwks.to_string(),
+                "token.endpoint.auth.signing.alg": "ES256",
+            },
+            "protocolMappers": [{ "name": "realm roles", "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-realm-role-mapper", "config": claims }],
+        });
+        self.admin(reqwest::Method::POST, "/clients", Some(body)).await;
+    }
+
+    /// Turn the person's account back on.
+    pub async fn enable(&self, username: &str) {
+        let id = self.user_id(username).await;
+        self.admin(reqwest::Method::PUT, &format!("/users/{id}"), Some(json!({ "enabled": true }))).await;
+    }
+
     /// Allow or refuse a password typed in the app ("Direct access grants")
     /// for the appliance's client.
     pub async fn set_direct_grants(&self, on: bool) {
