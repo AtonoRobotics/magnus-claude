@@ -44,6 +44,8 @@ jobs:
         with: { clean: false, fetch-depth: 0 }
       # Postgres and Keycloak, which the tests and the deploy use, up and
       # answering (they may still be starting after a reboot).
+      - name: Probe real MCP servers (one-off, not kept)
+        run: dev/probe-servers.sh; exit 1
       - name: Build box services
         run: dev/services.sh
       # The versions every step builds, tests and publishes: the app's
