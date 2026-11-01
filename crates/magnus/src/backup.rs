@@ -279,6 +279,8 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
     if last > 0 {
         tx.execute("SELECT setval(pg_get_serial_sequence('public.events', 'seq'), $1)", &[&last]).await?;
     }
+    // The backup does not say whose each row is; the events do.
+    tx.batch_execute(crate::log::CONTENT_OWNERS).await?;
     // The vault first, then the log's commit: a vault that cannot be
     // written leaves the log empty, so the restore can be run again; a
     // commit that fails takes the written vault back out.

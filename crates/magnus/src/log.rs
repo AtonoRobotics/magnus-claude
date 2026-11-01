@@ -83,10 +83,56 @@ pub async fn migrate(admin_url: &str, kernel_url: &str) -> Result<()> {
              GRANT SELECT, INSERT, DELETE ON public.content TO {role};"
         ))
         .await?;
+    admin.batch_execute(&content_walls_sql(&role)).await.context("wall the content store by person")?;
     // The knowledge base's index, filtered for each reader by row security.
     admin.batch_execute(&crate::knowledge::migrate_sql(&role)).await.context("create the knowledge index (pgvector must be installed)")?;
     Ok(())
 }
+
+/// The walls between people in the content store (owner's ruling 9 and
+/// "recall only", 2026-11-01; `docs/proposals/recall-only.md`, step 1):
+/// each row records the person it belongs to, and `{role}_person` reads
+/// only the rows of the person in `magnus.person`, under a row policy,
+/// whatever query it is given. The kernel's own role still reads every
+/// row. The policy is not forced on the table's owner, the administrator
+/// `migrate` runs as, which fills the column below. Rows written before the column existed are filled from their
+/// events, by the same rule as `State::content_owner`.
+pub fn content_walls_sql(role: &str) -> String {
+    let reader = format!("{role}_person");
+    let owners = CONTENT_OWNERS;
+    format!(
+        "ALTER TABLE public.content ADD COLUMN IF NOT EXISTS person text;
+         CREATE INDEX IF NOT EXISTS content_person ON public.content (person);
+         DO $$ BEGIN CREATE ROLE {reader} NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+         DO $$ BEGIN IF NOT pg_has_role('{role}', '{reader}', 'MEMBER') THEN GRANT {reader} TO {role}; END IF; END $$;
+         REVOKE ALL ON public.content FROM {reader};
+         REVOKE ALL ON public.events FROM {reader};
+         GRANT USAGE ON SCHEMA public TO {reader};
+         GRANT SELECT ON public.content TO {reader};
+         ALTER TABLE public.content ENABLE ROW LEVEL SECURITY;
+         DROP POLICY IF EXISTS content_kernel ON public.content;
+         CREATE POLICY content_kernel ON public.content FOR ALL TO {role} USING (true) WITH CHECK (true);
+         DROP POLICY IF EXISTS content_person ON public.content;
+         CREATE POLICY content_person ON public.content FOR SELECT TO {reader}
+             USING (person IS NOT NULL AND person = NULLIF(current_setting('magnus.person', true), ''));
+         {owners}"
+    )
+}
+
+/// Fill in whose each content row is, for rows that do not say: written
+/// before the column existed, or restored from a backup.
+pub const CONTENT_OWNERS: &str = "UPDATE public.content c SET person = o.person FROM (
+    SELECT e.seq, CASE
+        WHEN e.kind IN ('knowledge_added', 'playbook') THEN NULL
+        WHEN e.kind = 'item_resolved' THEN (SELECT i.body->>'person' FROM public.events i
+            WHERE i.kind = 'item' AND i.body->>'id' = e.body->>'id' ORDER BY i.seq LIMIT 1)
+        WHEN e.kind = 'schedule_ended' THEN (SELECT x.body->>'person' FROM public.events x
+            WHERE x.kind = 'schedule_set' AND x.body->>'id' = e.body->>'id' ORDER BY x.seq LIMIT 1)
+        ELSE COALESCE(e.body->>'person', (SELECT t.body->>'person' FROM public.events t
+            WHERE t.kind = 'task_created' AND t.run_id = e.run_id ORDER BY t.seq LIMIT 1))
+    END AS person
+    FROM public.events e JOIN public.content w USING (seq) WHERE w.person IS NULL
+) o WHERE c.seq = o.seq AND o.person IS NOT NULL;";
 
 /// One event's content, apart from its record.
 pub struct Content {
@@ -171,6 +217,9 @@ pub struct Log {
     /// The content store exists. A release installed without `migrate`
     /// since has none yet, and keeps content in the log as before.
     store: bool,
+    /// The content store records whose each row is (its `person` column).
+    /// A release installed without `migrate` since writes rows without it.
+    owners: bool,
     client: tokio::sync::RwLock<Client>,
     /// The last event this process wrote or read, to find one that was
     /// written while its answer was lost.
@@ -190,7 +239,14 @@ impl Log {
         if !store {
             tracing::warn!("no content store: content stays in the event log until `magnus migrate` runs");
         }
-        Ok(Log { url: url.into(), writer, store, client: tokio::sync::RwLock::new(client), last: 0.into() })
+        let owners: bool = client
+            .query_one("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'content' AND column_name = 'person')", &[])
+            .await?
+            .get(0);
+        if store && !owners {
+            tracing::warn!("the content store does not record whose each row is until `magnus migrate` runs");
+        }
+        Ok(Log { url: url.into(), writer, store, owners, client: tokio::sync::RwLock::new(client), last: 0.into() })
     }
 
     pub async fn open(url: &str) -> Result<Log> {
@@ -289,14 +345,22 @@ impl Log {
         Log::new(url, false, connect(url).await?).await
     }
 
-    /// One event, and its content beside it, in one statement.
-    pub async fn append(&self, actor: &str, ev: &Ev) -> Result<Event> {
+    /// One event, and its content beside it with the person it belongs
+    /// to, in one statement.
+    pub async fn append(&self, actor: &str, ev: &Ev, owner: Option<&str>) -> Result<Event> {
         let (body, content) = self.split(ev)?;
         let kind = body["kind"].as_str().unwrap_or_default().to_string();
         let run = ev.run().map(String::from);
         let (salt, content) = content.map(|c| (c.salt, c.body)).unzip();
         let c = self.client().await?;
         let row = match self.store {
+            true if self.owners => c.query_one(
+                "WITH e AS (INSERT INTO public.events (kind, actor, run_id, body) VALUES ($1, $2, $3, $4) RETURNING seq, at),
+                      c AS (INSERT INTO public.content (seq, salt, body, person) SELECT seq, $5, $6, $7 FROM e WHERE $6::jsonb IS NOT NULL)
+                 SELECT seq, at FROM e",
+                &[&kind, &actor, &run, &body, &salt, &content, &owner],
+            )
+            .await,
             true => c.query_one(
                 "WITH e AS (INSERT INTO public.events (kind, actor, run_id, body) VALUES ($1, $2, $3, $4) RETURNING seq, at),
                       c AS (INSERT INTO public.content (seq, salt, body) SELECT seq, $5, $6 FROM e WHERE $6::jsonb IS NOT NULL)
@@ -316,9 +380,9 @@ impl Log {
         Ok(Event { seq: row.get(0), at: row.get(1), actor: actor.into(), ev: ev.clone() })
     }
 
-    /// Several events, each with its actor, in one statement: all are in
-    /// the log or none is.
-    pub async fn append_all(&self, evs: &[(&str, Ev)]) -> Result<Vec<Event>> {
+    /// Several events, each with its actor (and the person its content
+    /// belongs to), in one statement: all are in the log or none is.
+    pub async fn append_all(&self, evs: &[(&str, Ev)], owners: &[Option<String>]) -> Result<Vec<Event>> {
         let actors: Vec<String> = evs.iter().map(|(a, _)| a.to_string()).collect();
         let evs: Vec<&Ev> = evs.iter().map(|(_, e)| e).collect();
         let (bodies, contents): (Vec<Value>, Vec<Option<Content>>) = evs.iter().map(|e| self.split(e)).collect::<Result<Vec<_>>>()?.into_iter().unzip();
@@ -328,6 +392,18 @@ impl Log {
         let c = self.client().await?;
         // Identities are given in insert order, so the n-th seq is the n-th event.
         let rows = match self.store {
+            true if self.owners => c.query(
+                "WITH e AS (INSERT INTO public.events (kind, actor, run_id, body)
+                            SELECT k, a, r, b FROM unnest($1::text[], $2::text[], $3::text[], $4::jsonb[]) WITH ORDINALITY AS e(k, a, r, b, n) ORDER BY n
+                            RETURNING seq, at),
+                      o AS (SELECT seq, at, row_number() OVER (ORDER BY seq) AS n FROM e),
+                      c AS (INSERT INTO public.content (seq, salt, body, person)
+                            SELECT o.seq, x.s, x.b, x.p FROM o JOIN unnest($5::bytea[], $6::jsonb[], $7::text[]) WITH ORDINALITY AS x(s, b, p, n) ON x.n = o.n
+                            WHERE x.b IS NOT NULL)
+                 SELECT seq, at FROM o",
+                &[&kinds, &actors, &runs, &bodies, &salts, &contents, &owners],
+            )
+            .await,
             true => c.query(
                 "WITH e AS (INSERT INTO public.events (kind, actor, run_id, body)
                             SELECT k, a, r, b FROM unnest($1::text[], $2::text[], $3::text[], $4::jsonb[]) WITH ORDINALITY AS e(k, a, r, b, n) ORDER BY n
