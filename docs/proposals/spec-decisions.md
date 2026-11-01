@@ -27,7 +27,7 @@ the open points are not yet ruled.
 | 2 | Approved, without passkeys: the backup password stays as the way back in when the provider is down, on this machine, never for the admin console. The admin signs in, and steps up, with their password (and their code when they use one) instead of a passkey. |
 | 3-6 | Approved as proposed. |
 | 7, 8, 10 | Approved as proposed. |
-| 9 | Explained to the owner (below); ruling pending. |
+| 9 | **Approved** (owner, after the explanation below): per-person walls in the database, on the content store, with the start-up reading through its own role. Its own plan first, then built after 11-14. |
 | 11-13 | Approved as proposed. |
 | 14 | **A policy, not a fixed rule.** In an organisation, a person's data is the organisation's data, with no right to privacy from it: by default the admin can read every person's tasks, chats, files and memory, connector results included. A policy setting can make people's data private from the admin. Each read is still recorded. |
 
@@ -47,10 +47,11 @@ their memory already live apart from the log since deletion step 1: the
 connection that serves a person would see only that person's content, and
 the start-up reading would use a separate role that sees everything.
 
-Proposed: not now. With ruling 14, a person's data is the organisation's
+Proposed then: not now. With ruling 14, a person's data is the organisation's
 by default, so the database wall would guard mainly against a bug in
 Magnus's checks, which the tests already cover. Build it, as its own plan,
-when an organisation turns on private data.
+when an organisation turns on private data. The owner approved building
+the walls.
 
 ## Decisions that change recorded ones
 
