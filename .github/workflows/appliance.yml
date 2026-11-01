@@ -16,6 +16,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: never
+  # cargo-nextest, the test runner (its latest release on 2026-11-01).
+  NEXTEST: 0.9.150
 
 jobs:
   release:
@@ -41,8 +43,10 @@ jobs:
         run: npm ci --prefix browser
       - name: Programs the tests launch
         run: cargo build --workspace --bins
+      - name: Test runner
+        run: cargo nextest --version 2>/dev/null | grep -q "^cargo-nextest $NEXTEST " || cargo install --locked "cargo-nextest@$NEXTEST"
       - name: Invariants and scratch suites
-        run: cargo test -p magnus-invariants -p magnus-scratch
+        run: cargo nextest run -p magnus-invariants -p magnus-scratch --no-fail-fast
       - name: Release programs
         run: cargo build --release --workspace --bins
       - name: Into the appliance's updates
