@@ -7,6 +7,12 @@ changes into steps. Each step is its own pull request, tested on the real
 Keycloak. The design replaces several earlier decisions, listed under
 "Replaced" so none of them stays half in force.
 
+Amended by the owner's rulings of 2026-11-01 (`spec-decisions.md`): no
+passkeys, and people go on typing their username and password in the app,
+so the browser-only sign-in below is not built and DEC 274 and 276 stand;
+the admin's step-up is their password (and code). A person's data is the
+organisation's by default, with a policy that can make it private.
+
 ## Today against the design
 
 | Design | Today | |
