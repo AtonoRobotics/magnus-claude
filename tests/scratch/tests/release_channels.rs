@@ -4,7 +4,8 @@
 //! never moves a channel backwards, in version or in content (a build
 //! without the work of the one before is refused); the appliance decides
 //! which channel each app gets, never the app: the owner's apps
-//! development, testers' test, everyone else's production.
+//! development, testers' test, everyone else's production; a pull request
+//! closed without merging, or pushed again, stops no later build.
 
 use magnus_invariants::*;
 use reqwest::StatusCode;
@@ -34,6 +35,13 @@ fn publish(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: &str)
 /// The same, built from the checkout `repo`; `head` is a pull request's
 /// head commit when the checkout is its merge with master.
 fn publish_from(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: &str, repo: &Path, head: Option<&str>) -> i32 {
+    publish_as(key, updates, tmp, version, channel, repo, head, None)
+}
+
+/// The same, as CI publishes a pull request's build: `pr` is its number and
+/// the pull requests CI found closed without merging (`MAGNUS_GIVEN_UP`).
+#[allow(clippy::too_many_arguments)]
+fn publish_as(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: &str, repo: &Path, head: Option<&str>, pr: Option<(u32, &str)>) -> i32 {
     let (dist, notes) = (tmp.join("dist"), tmp.join("notes"));
     build(&dist, version);
     std::fs::write(&notes, format!("Build {version}.\n")).unwrap();
@@ -43,7 +51,10 @@ fn publish_from(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: 
         .arg(channel)
         .env("MAGNUS_RELEASE_KEY", key)
         .env_remove("MAGNUS_COMMIT")
+        .env_remove("MAGNUS_PR")
+        .env_remove("MAGNUS_GIVEN_UP")
         .envs(head.map(|h| ("MAGNUS_COMMIT", h)))
+        .envs(pr.map(|(n, given_up)| [("MAGNUS_PR", n.to_string()), ("MAGNUS_GIVEN_UP", given_up.to_string())]).into_iter().flatten())
         .current_dir(repo)
         .output()
         .unwrap();
@@ -144,15 +155,41 @@ async fn the_owner_gets_development_testers_get_test_and_everyone_else_productio
         let linux = &man["platforms"]["linux-x86_64"];
         let url = linux["url"].as_str().unwrap();
         assert_eq!(url, format!("{}/v1/updates/desktop/{files}/Magnus_{v}_amd64.AppImage", app.base));
-        assert_eq!(reqwest::get(url).await.unwrap().text().await.unwrap(), format!("the {v} build"));
+        // The updater asks for the package with the session it asked with.
+        let got = reqwest::Client::new().get(url).bearer_auth(app.api(who).token).send().await.unwrap();
+        assert_eq!(got.text().await.unwrap(), format!("the {v} build"));
+        // A development or test package is only for the apps given it.
+        if files != "files" {
+            assert_eq!(reqwest::get(url).await.unwrap().status(), StatusCode::NOT_FOUND, "{files} without a session");
+            for other in ["alice", "bob", "carol"].into_iter().filter(|o| *o != who) {
+                let st = reqwest::Client::new().get(url).bearer_auth(app.api(other).token).send().await.unwrap().status();
+                assert_eq!(st, StatusCode::NOT_FOUND, "{other} got {files}");
+            }
+        }
         let sig = String::from_utf8(base64_decode(linux["signature"].as_str().unwrap())).unwrap();
         assert!(sig.contains(&format!("version:{v}")), "the signature does not bind the version: {sig}");
     }
 
-    // Apps before channels ask without a session and get the channel their
-    // version was built for.
-    for (v, offer) in [("0.7.0", "0.7.1"), ("0.7.1-review.107.pr.31", "0.7.2-review.16.pr.9"), ("0.7.1-test.3", "0.7.2-test.17"), ("", "0.7.1")] {
-        assert_eq!(offered_version(&app, None, v).await.as_deref(), Some(offer), "an app at {v:?}");
+    // Without a session that holds (signed out, ended, or an app from before
+    // channels), the version an app says it runs chooses nothing: a release
+    // gets production, a pre-release nothing until it asks signed in (one
+    // too old to sign in at all, production: its only way forward). An
+    // ended session is not sent to production, which need not hold its
+    // build's work (review of master, 2026-10-31).
+    for token in [Some("mgs_ended-session"), None] {
+        for (v, offer) in [("0.7.0", Some("0.7.1")), ("", Some("0.7.1")), ("0.7.1-review.107.pr.31", None), ("0.7.2-review.16.pr.9", None), ("0.7.1-test.3", None), ("0.4.9-test.3", Some("0.7.1"))] {
+            let mut r = reqwest::Client::new().get(format!("{}/v1/updates/desktop/latest.json", app.base)).header("x-magnus-app", v);
+            if let Some(t) = token {
+                r = r.bearer_auth(t);
+            }
+            let r = r.send().await.unwrap();
+            let got = match r.status() {
+                StatusCode::OK => Some(r.json::<Value>().await.unwrap()["version"].as_str().unwrap().to_string()),
+                StatusCode::NO_CONTENT => None,
+                st => panic!("an app at {v:?}: {st}"),
+            };
+            assert_eq!(got.as_deref(), offer, "an app at {v:?} with {token:?}");
+        }
     }
 
     // No app names its own channel, and nothing outside the channels is served.
@@ -240,6 +277,62 @@ fn a_build_without_the_work_already_in_its_channel_is_never_published() {
     assert_eq!(publish_from(&key, &updates, &w, "0.7.2", "production", &repo, None), 3);
     assert_eq!(channel("production"), ("0.7.1".into(), merged));
     assert_eq!(channel("development"), ("0.7.1-review.23.pr.2".into(), b));
+}
+
+/// Review of master (2026-10-31): a pull request whose build reached
+/// development and was then closed without merging made every later pull
+/// request's publish fail (its head is in no later build), and so did a
+/// pull request pushed again with its commits replaced. Its work was given
+/// up on purpose; the next build must still hold master's.
+#[test]
+fn a_pull_request_closed_unmerged_or_pushed_again_stops_no_later_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key = tmp.path().join("test.key");
+    let made = Command::new("cargo").args(["tauri", "signer", "generate", "--ci", "-p", "", "-f", "-w"]).arg(&key).output().unwrap();
+    assert!(made.status.success(), "a test release key: {}", String::from_utf8_lossy(&made.stderr));
+    let (updates, w, repo) = (tmp.path().join("updates"), tmp.path().join("work"), tmp.path().join("repo"));
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "master"]);
+    let base = commit(&repo, "base");
+    let dev = || -> Value { serde_json::from_slice(&std::fs::read(updates.join("desktop/development/latest.json")).unwrap()).unwrap() };
+    // A pull request's build as CI makes it: its branch from `from`, merged
+    // with master; its head.
+    let pr = |name: &str, from: &str| -> String {
+        git(&repo, &["checkout", "-q", "-b", name, from]);
+        let head = commit(&repo, name);
+        git(&repo, &["checkout", "-q", "--detach", "master"]);
+        git(&repo, &["merge", "-q", "--no-ff", "--no-edit", name]);
+        head
+    };
+
+    // Pull request 1's build is in development; it is closed unmerged.
+    let a = pr("a", &base);
+    assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.20.pr.1", "development", &repo, Some(&a), Some((1, ""))), 0);
+    // Pull request 2, from master: refused while CI has not found 1 closed,
+    // published once it has.
+    let b = pr("b", "master");
+    assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.21.pr.2", "development", &repo, Some(&b), Some((2, ""))), 3);
+    assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.21.pr.2", "development", &repo, Some(&b), Some((2, "1"))), 0, "a pull request closed unmerged stopped the next");
+    assert_eq!((dev()["commit"].as_str(), dev()["pr"].as_u64(), dev()["base"].as_str()), (Some(b.as_str()), Some(2), Some(base.as_str())));
+
+    // Pull request 2 pushed again with its commits replaced: published.
+    let b2 = pr("b2", "master");
+    assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.22.pr.2", "development", &repo, Some(&b2), Some((2, ""))), 0);
+    assert_eq!(dev()["commit"], b2.as_str());
+
+    // Master moves on, and 2 is rebuilt on it. A pull request whose build
+    // lacks master's work is still refused, given up or not.
+    git(&repo, &["checkout", "-q", "master"]);
+    let m = commit(&repo, "m");
+    let b3 = pr("b3", "master");
+    assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.23.pr.2", "development", &repo, Some(&b3), Some((2, ""))), 0);
+    assert_eq!(dev()["base"], m.as_str());
+    git(&repo, &["checkout", "-q", "-b", "c", &base]);
+    let c = commit(&repo, "c");
+    git(&repo, &["checkout", "-q", "--detach", &base]);
+    git(&repo, &["merge", "-q", "--no-ff", "--no-edit", "c"]);
+    assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.24.pr.3", "development", &repo, Some(&c), Some((3, "2"))), 3);
+    assert_eq!(dev()["commit"], b3.as_str());
 }
 
 fn base64_decode(s: &str) -> Vec<u8> {
