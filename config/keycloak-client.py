@@ -9,6 +9,13 @@ It signs in to Keycloak's admin API with the administrator in --admin-file
 to match. The client is public (no secret): the appliance only reads who
 signed in from the ID token and keeps no Keycloak token. Prints what to put
 in magnus.toml. Prints no credential.
+
+With --admin-console JWKS_FILE, it registers the admin console instead
+(admin console spec): a confidential client, the code flow with PKCE, its
+one redirect https://<--admin-hostname>/auth/callback, proving itself with
+the console's own key, whose public half `magnus-admin jwk --config
+magnus.toml` prints into JWKS_FILE; and the person's realm roles in its ID
+token, since only the realm role `admin` opens the console.
 """
 import argparse
 import json
@@ -26,7 +33,16 @@ p.add_argument("--ca", default="/etc/magnus-production-origin/ca.pem", help="CA 
 p.add_argument("--realm", default="magnus")
 p.add_argument("--client-id", default="magnus-claude")
 p.add_argument("--name", default="Magnus appliance")
+p.add_argument("--admin-console", metavar="JWKS_FILE", help="register the admin console's client, with the key `magnus-admin jwk` printed")
+p.add_argument("--admin-hostname", help="the admin console's hostname, with :port if not 443")
 a = p.parse_args()
+if a.admin_console:
+    if not a.admin_hostname:
+        p.error("--admin-console needs --admin-hostname")
+    if a.client_id == "magnus-claude":
+        a.client_id = "magnus-admin"
+    if a.name == "Magnus appliance":
+        a.name = "Magnus admin console"
 
 ctx = ssl.create_default_context(cafile=a.ca)
 admin = json.load(open(a.admin_file))
@@ -68,6 +84,31 @@ client = {
     "serviceAccountsEnabled": False,
     "attributes": {"oauth2.device.authorization.grant.enabled": "true"},
 }
+if a.admin_console:
+    jwks = json.load(open(a.admin_console))
+    client = {
+        "clientId": a.client_id,
+        "name": a.name,
+        "protocol": "openid-connect",
+        "enabled": True,
+        "publicClient": False,
+        "clientAuthenticatorType": "client-jwt",
+        "standardFlowEnabled": True,
+        "implicitFlowEnabled": False,
+        "directAccessGrantsEnabled": False,
+        "serviceAccountsEnabled": False,
+        "redirectUris": [f"https://{a.admin_hostname}/auth/callback"],
+        "attributes": {
+            "pkce.code.challenge.method": "S256",
+            "use.jwks.string": "true",
+            "jwks.string": json.dumps(jwks),
+            "token.endpoint.auth.signing.alg": "ES256",
+        },
+        "protocolMappers": [{
+            "name": "realm roles", "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-realm-role-mapper",
+            "config": {"id.token.claim": "true", "access.token.claim": "true", "userinfo.token.claim": "true", "claim.name": "realm_access.roles", "multivalued": "true"},
+        }],
+    }
 found = send("GET", f"{base}/clients?{urlencode({'clientId': a.client_id})}", token=token)
 if found:
     send("PUT", f"{base}/clients/{found[0]['id']}", body={**found[0], **client, "attributes": {**found[0].get("attributes", {}), **client["attributes"]}}, token=token)
@@ -75,6 +116,13 @@ if found:
 else:
     send("POST", f"{base}/clients", body=client, token=token)
     print(f"Created client {a.client_id} in realm {a.realm}.")
+
+if a.admin_console:
+    print(f"""
+The admin console signs in through {issuer} as {a.client_id}. Give the
+realm role "admin" to the people who run the appliance; only they enter.
+""")
+    sys.exit(0)
 
 print(f"""
 Add to magnus.toml, then restart the appliance:

@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **The admin console, part 2: signing in (owner, 2026-11-01; branch `admin-sign-in`).** Admins sign in on the provider's page with their password; only the realm role `admin` enters; a server-side session with CSRF, a 4-minute check with the provider, and step-up by a fresh password. Next: the audit log and the root database role.
 - **The admin console, part 1: its own process (owner, 2026-11-01; branch `admin-listener`).** `magnus-admin` listens only on the organisation's network, takes only the allowed LAN and VPN subnets, answers only its hostname, over TLS 1.3, and serves its shell. Next: sign-in, then the audit log, the kill switch, Users, Security, Operations and Knowledge.
 - **Recall only, step 6: knowledge entries are read from the index (owner, 2026-11-01; branch `knowledge-recalled`).** Entries' text, sources, evidence and values leave memory; the kernel reads them from the content store only to index them, and every reader reads them from the index through its row security. Next: chats and tasks (step 3), then step 7.
 - **Recall only, step 5: library files are recalled (owner, 2026-11-01; merged in #64).** Uploads' bytes and files' search text leave memory; downloads, searches, project reads and the files a task is given are recalled through the person's wall.

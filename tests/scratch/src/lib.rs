@@ -5,6 +5,7 @@
 use axum::{body::Body, extract::State, http::HeaderMap, response::Response, routing::{get, post}, Json, Router};
 use magnus_invariants::appliance::bin;
 
+pub mod admin;
 mod keycloak;
 pub use keycloak::*;
 mod oauth_app;
