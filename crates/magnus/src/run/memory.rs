@@ -38,7 +38,7 @@ impl Kernel {
         // an untrusted or private fact shown to a cleaner run would be filed
         // again without its label.
         let label = crate::tools::Label { untrusted: run.untrusted, private: run.private };
-        let known: Vec<String> = self.read(|s| s.memory.iter().filter(|m| m.person == run.person && m.label.join(label) == label).map(|m| format!("- {}", m.fact)).collect());
+        let known: Vec<String> = self.remembered(&run.person, |m| m.label.join(label) == label).await?.into_iter().map(|r| format!("- {}", r.fact)).collect();
         let known = if known.is_empty() { "nothing yet".to_string() } else { known.join("\n") };
         let msg = Message { role: Role::User, content: vec![Block::Text { text: format!("{text}\n\nAlready remembered:\n{known}") }], state: None };
         let tools: Vec<_> = crate::tools::builtin_specs(false, false, false).into_iter().filter(|t| t.name == "memory_write").collect();

@@ -355,12 +355,13 @@ pub struct KnowledgeEntry {
 }
 
 #[derive(Clone, Debug)]
+/// A remembered fact's record. What it says (the fact and its topic) is
+/// not kept here: it is recalled from the content store, for its person,
+/// when a request needs it (recall only, step 4).
 pub struct MemoryEntry {
     pub id: String,
     pub person: String,
     pub run: String,
-    pub fact: String,
-    pub topic: Option<String>,
     pub label: Label,
     pub sources: Vec<String>,
     /// The memory pass, or None for the run's own model.
@@ -553,6 +554,14 @@ enum Held {
 }
 
 impl Trashed {
+    /// A trashed memory's record: its content is recalled, not kept.
+    pub fn memory(&self) -> Option<&MemoryEntry> {
+        match &self.held {
+            Held::Memory(m) => Some(m),
+            _ => None,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self.held {
             Held::Task(..) => "task",
@@ -829,8 +838,9 @@ impl State {
             return Some((p.name.clone(), Held::Project(p)));
         }
         if let Some(i) = self.memory.iter().position(|m| m.id == item) {
+            // Its title in the trash is its fact, recalled when listed.
             let m = self.memory.remove(i);
-            return Some((m.fact.clone(), Held::Memory(m)));
+            return Some((String::new(), Held::Memory(m)));
         }
         let k = self.knowledge.remove(item)?;
         Some((k.title.clone(), Held::Knowledge(Box::new(k))))
@@ -839,7 +849,8 @@ impl State {
     /// Which events hold a trashed item's own content. A task's or a
     /// conversation's runs keep what they made that is an item of its own:
     /// files they delivered, memories and playbook items they wrote.
-    pub fn holding(&self, item: &str) -> Option<crate::log::Holding> {
+    /// `fact` is a trashed memory's fact, recalled by the caller.
+    pub fn holding(&self, item: &str, fact: Option<&str>) -> Option<crate::log::Holding> {
         use crate::log::Holding;
         const OWN: [&str; 3] = ["output", "memory", "playbook"];
         let named = |kinds: Vec<&'static str>, field: &'static str, id: &str| Holding { kinds, field, id: id.into(), ..Default::default() };
@@ -872,9 +883,10 @@ impl State {
             // the reply that made the call (the run's model, or the memory
             // pass), found by the fact's text in that run.
             Held::Memory(m) => {
-                let text = serde_json::to_string(&m.fact).unwrap_or_default();
+                let fact = fact.unwrap_or_default();
+                let text = serde_json::to_string(fact).unwrap_or_default();
                 let text = text.trim_matches('"').to_string();
-                let containing = ["intent", "tool_result", "model_reply", "memory_pass"].into_iter().map(|k| (k, m.run.clone(), text.clone())).filter(|_| !m.fact.trim().is_empty()).collect();
+                let containing = ["intent", "tool_result", "model_reply", "memory_pass"].into_iter().map(|k| (k, m.run.clone(), text.clone())).filter(|_| !fact.trim().is_empty()).collect();
                 Holding { containing, ..named(vec!["memory"], "id", item) }
             }
             Held::Knowledge(_) => named(vec!["knowledge_added"], "id", item),
@@ -1600,12 +1612,10 @@ impl State {
             Ev::AdapterVerified { adapter_id, version, model, passed, report, .. } => {
                 self.conformance.insert(adapter_id.clone(), (version.clone(), model.clone(), *passed, report.clone()));
             }
-            Ev::Memory { id, person, run, fact, topic, label, sources, by } => self.memory.push(MemoryEntry {
+            Ev::Memory { id, person, run, label, sources, by, .. } => self.memory.push(MemoryEntry {
                 id: id.clone(),
                 person: person.clone(),
                 run: run.clone(),
-                fact: fact.clone(),
-                topic: topic.clone(),
                 label: *label,
                 sources: sources.clone(),
                 by: by.clone(),

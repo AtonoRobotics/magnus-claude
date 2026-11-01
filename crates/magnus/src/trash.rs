@@ -69,7 +69,14 @@ impl Kernel {
         // One trash change at a time: a restore between reading what the
         // item holds and deleting it would put back an item with no content.
         let _one = changing().lock().await;
-        let Some(holding) = self.read(|s| s.holding(item)) else { return Ok(()) };
+        // A memory is found where it was written by what it says, recalled
+        // for its person: the kernel does not keep it.
+        let memory = self.read(|s| s.trash.get(item).and_then(|t| t.memory().map(|m| (t.person.clone(), m.seq))));
+        let fact = match memory {
+            Some((person, seq)) => self.recall.content(&person, &[seq]).await?.remove(&seq).and_then(|c| c["fact"].as_str().map(String::from)),
+            None => None,
+        };
+        let Some(holding) = self.read(|s| s.holding(item, fact.as_deref())) else { return Ok(()) };
         let seqs = self.log.content_seqs(&holding).await?;
         self.emit(actor, Ev::Removed { item: item.into(), seqs: seqs.clone() }).await?;
         self.log.delete_content(&seqs).await?;
@@ -143,11 +150,23 @@ macro_rules! person {
 async fn list(State(k): K, h: HeaderMap) -> Response {
     let p = person!(k, h);
     let keep = chrono::Duration::days(k.cfg.trash.keep_days as i64);
+    // A trashed memory's title is its fact, recalled for the person.
+    let seqs: Vec<i64> = k.read(|s| s.trash.values().filter(|t| t.person == p.id).filter_map(|t| t.memory().map(|m| m.seq)).collect());
+    let facts = match k.recall.content(&p.id, &seqs).await {
+        Ok(c) => c,
+        Err(e) => return crate::api::internal(e),
+    };
     let mut items: Vec<Value> = k.read(|s| {
         s.trash
             .iter()
             .filter(|(_, t)| t.person == p.id)
-            .map(|(id, t)| json!({ "item": id, "kind": t.kind(), "title": t.title.chars().take(120).collect::<String>(), "thread": t.thread(), "trashed_at": t.at, "removed_at": t.at + keep }))
+            .map(|(id, t)| {
+                let title = match t.memory() {
+                    Some(m) => facts.get(&m.seq).and_then(|c| c["fact"].as_str()).unwrap_or_default().to_string(),
+                    None => t.title.clone(),
+                };
+                json!({ "item": id, "kind": t.kind(), "title": title.chars().take(120).collect::<String>(), "thread": t.thread(), "trashed_at": t.at, "removed_at": t.at + keep })
+            })
             .collect()
     });
     items.sort_by(|a, b| b["trashed_at"].as_str().cmp(&a["trashed_at"].as_str()));

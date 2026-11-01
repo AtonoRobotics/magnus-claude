@@ -1406,13 +1406,17 @@ async fn memory(State(k): K, h: HeaderMap) -> Response {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let items: Vec<Value> = k.read(|s| {
-        s.memory
-            .iter()
-            .filter(|m| m.person == p.id)
-            .map(|m| json!({ "id": m.id, "fact": m.fact, "topic": m.topic, "label": m.label, "run": m.run, "by": m.by.as_deref().unwrap_or("model"), "at": m.at }))
-            .collect()
-    });
+    // Recalled for the person, through their wall.
+    let items: Vec<Value> = match k.remembered(&p.id, |_| true).await {
+        Ok(r) => r
+            .into_iter()
+            .map(|r| {
+                let m = r.entry;
+                json!({ "id": m.id, "fact": r.fact, "topic": r.topic, "label": m.label, "run": m.run, "by": m.by.as_deref().unwrap_or("model"), "at": m.at })
+            })
+            .collect(),
+        Err(e) => return internal(e),
+    };
     Json(json!({ "memory": items })).into_response()
 }
 
