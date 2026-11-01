@@ -206,7 +206,7 @@ function nav() {
       ${link("#/dev/policy", "Policy")}
       ${link("#/dev/playbook", "Playbook")}` : ""}
     <div class="who"><span class="avatar" aria-hidden="true">${esc((App.me?.name || "?").trim().charAt(0).toUpperCase())}</span>
-      <div class="whoami"><div class="ttl" title="${esc(App.me?.id)} on ${esc(App.appliance)}">${esc(App.me?.name)}</div>
+      <div class="whoami" data-appliance="${esc(App.appliance)}"><div class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</div>
       <button class="link" data-act="sign-out">Sign out</button></div>
       <a href="#/settings" class="icon-btn${route.startsWith("#/settings") ? " on" : ""}" title="Settings">${icon("gear")}<span class="sr">Settings</span></a></div></div>`;
 }
