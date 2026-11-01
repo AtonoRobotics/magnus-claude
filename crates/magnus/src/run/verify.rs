@@ -55,7 +55,7 @@ impl Kernel {
     /// Before work: the verifier's review of a new contract's criteria, as a
     /// note for the agent; None when it has nothing to add.
     pub(super) async fn review_criteria(&self, run: &Run, contract: &Value) -> Result<Option<String>> {
-        let task = self.read(|s| s.tasks.get(&run.task).map(|t| t.text.clone())).unwrap_or_default();
+        let task = self.asked(run).await?;
         let text = format!("The person asked:\n\n{task}\n\nThe agent's criteria:\n{}", serde_json::to_string_pretty(&contract["criteria"])?);
         let msg = Message { role: Role::User, content: vec![Block::Text { text }], state: None };
         let Some(blocks) = self.verifier_call(run, "criteria", CRITERIA, vec![msg], vec![]).await? else { return Ok(None) };
@@ -66,7 +66,7 @@ impl Kernel {
     /// After the agent reports completion: each criterion no code check
     /// covers, judged by the verifier from what it reads.
     pub(super) async fn verify_work(self: &Arc<Self>, run: &Run, call_id: &str, step_id: &str, goal: &str, criteria: &[Value], summary: &str) -> Result<Vec<(Value, Judged)>> {
-        let task = self.read(|s| s.tasks.get(&run.task).map(|t| t.text.clone())).unwrap_or_default();
+        let task = self.asked(run).await?;
         let mut tools: Vec<ToolSpec> = self.tools_for(run).await.into_iter().filter(|t| crate::boundary::facts(self, &t.name).is_some_and(|f| crate::tools::checkable(&f.name, f.risk))).collect();
         tools.push(ToolSpec {
             name: "verdict".into(),

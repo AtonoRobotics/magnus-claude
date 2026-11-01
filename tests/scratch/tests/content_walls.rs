@@ -250,3 +250,53 @@ async fn a_persons_files_are_recalled_from_the_content_store_for_them() {
     assert_eq!(carol.get(&format!("/v1/files/{id}")).await.0.as_u16(), 404, "the download read past her wall");
     assert_eq!(found(new.clone()).await, 0, "the search read past her wall");
 }
+
+/// What a person asked is recalled, not kept (step 3a): their tasks, their
+/// schedules and their chat messages show what the content store says,
+/// for them, whatever the kernel read before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persons_requests_are_recalled_from_the_content_store_for_them() {
+    let m = FakeModel::start(steps(vec![fail("nothing to do"), fail("nothing to do")])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let carol = app.api("carol");
+    let (said, edited) = (canary("said"), canary("edited"));
+    let task = carol.submit(&format!("Plan the offsite. {said}")).await;
+    carol.wait_settled(&task).await;
+    let (st, v) = carol.post("/v1/chat", json!({ "text": format!("Hello there. {said}") })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let thread = v["thread"].as_str().unwrap().to_string();
+    carol.wait_settled(v["task_id"].as_str().unwrap()).await;
+    let (st, v) = carol.post("/v1/schedules", json!({ "text": format!("Water the plants. {said}"), "daily_at": "03:00" })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let views = || async {
+        let tasks = carol.get("/v1/tasks").await.1.to_string();
+        let one = carol.get(&format!("/v1/tasks/{task}")).await.1.to_string();
+        let schedules = carol.get("/v1/schedules").await.1.to_string();
+        let chat = carol.get(&format!("/v1/chat/{thread}")).await.1.to_string();
+        let threads = carol.get("/v1/chat").await.1.to_string();
+        [tasks, one, schedules, chat, threads]
+    };
+    for v in views().await {
+        assert!(v.contains(&said), "{v}");
+    }
+
+    // The content store now says something else: that is what she is shown.
+    let admin = app.db.admin().await;
+    let changed = admin
+        .execute(
+            "UPDATE public.content SET body = jsonb_set(body, '{text}', to_jsonb(replace(body->>'text', $1, $2))) WHERE body->>'text' LIKE '%' || $1 || '%'",
+            &[&said, &edited],
+        )
+        .await
+        .unwrap();
+    assert!(changed >= 3, "{changed}");
+    for (name, v) in ["tasks", "task", "schedules", "chat", "threads"].iter().zip(views().await) {
+        assert!(v.contains(&edited) && !v.contains(&said), "her {name} view is not recalled: {v}");
+    }
+
+    // Rows the database says are not hers are not shown to her.
+    admin.execute("UPDATE public.content SET person = 'bob' WHERE body->>'text' LIKE '%' || $1 || '%'", &[&edited]).await.unwrap();
+    for (name, v) in ["tasks", "task", "schedules", "chat", "threads"].iter().zip(views().await) {
+        assert!(!v.contains(&edited), "her {name} view read past her wall: {v}");
+    }
+}
