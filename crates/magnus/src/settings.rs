@@ -38,6 +38,7 @@ pub fn router() -> Router<Arc<Kernel>> {
         .route("/v1/sessions/{id}", delete(end_session))
         .route("/v1/people", get(people))
         .route("/v1/people/{id}/roles", put(set_roles))
+        .route("/v1/people/{id}/account", delete(clear_account))
         .route("/v1/preferences", get(get_preferences).put(put_preferences))
         .route("/v1/deletion-requests", get(deletion_requests).post(request_deletion))
 }
@@ -94,7 +95,8 @@ async fn people(State(k): K, h: HeaderMap) -> Response {
                     "config"
                 }
             });
-            Some(json!({ "id": p.id, "name": p.name, "groups": p.groups, "roles": p.roles, "roles_from": from }))
+            let bound = k.read(|s| s.subjects.contains_key(&c.id));
+            Some(json!({ "id": p.id, "name": p.name, "groups": p.groups, "roles": p.roles, "roles_from": from, "account_bound": bound }))
         })
         .collect();
     Json(json!({ "people": list })).into_response()
@@ -124,6 +126,28 @@ async fn set_roles(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): J
         return err(StatusCode::CONFLICT, "someone must keep the owner role");
     }
     match k.emit(&format!("person:{}", me.id), Ev::RolesSet { person: id, roles }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// The owner lets a person's account at the identity provider change: the
+/// person is no longer bound to the account that first signed in as them,
+/// and the next account to sign in as them becomes theirs (for an account
+/// made again, or a person moved to a new one).
+async fn clear_account(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
+    let me = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if k.cfg.person(&id).is_none() {
+        return err(StatusCode::NOT_FOUND, "no such person");
+    }
+    let _decide = k.decide.lock().await;
+    if !k.read(|s| s.subjects.contains_key(&id)) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    match k.emit(&format!("person:{}", me.id), Ev::SubjectBound { person: id, subject: None }).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),
     }
