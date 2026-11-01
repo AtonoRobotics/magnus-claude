@@ -51,4 +51,4 @@ jobs:
           git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
           git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' "refs/tags/$TAG" > "$RUNNER_TEMP/notes"
           release/publish.sh appliance "$v" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" \
-            target/release/magnus target/release/magnus-adapter-anthropic target/release/magnus-adapter-openai
+            target/release/magnus target/release/magnus-adapter-anthropic target/release/magnus-adapter-openai browser

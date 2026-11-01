@@ -19,7 +19,7 @@ while read -r n updated head; do
   gh pr checks "$n" >/dev/null 2>&1 || checks=$?
   case $checks in
   0) waits="$waits
-- Its checks pass: it waits on the owner's merge." ;;
+- Its checks pass: its session merges it once no review thread waits on an answer." ;;
   8) waits="$waits
 - Its checks are still running." ;;
   *) waits="$waits
