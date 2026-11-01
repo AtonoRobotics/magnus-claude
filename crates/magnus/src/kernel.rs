@@ -179,11 +179,12 @@ impl Kernel {
         Ok(e)
     }
 
-    /// Append several events in one write and apply them together: no
-    /// reader sees some of them without the rest.
-    pub async fn emit_all(&self, actor: &str, evs: Vec<Ev>) -> Result<Vec<Event>> {
+    /// Append several events, each with its actor, in one write and apply
+    /// them together: no reader sees some of them without the rest, and no
+    /// crash leaves some of them out.
+    pub async fn emit_all(&self, evs: Vec<(&str, Ev)>) -> Result<Vec<Event>> {
         let _g = self.write.lock().await;
-        let es = self.log.append_all(actor, &evs).await?;
+        let es = self.log.append_all(&evs).await?;
         self.capture.lock().unwrap().appends += es.len() as u64;
         let mut s = self.state.lock().unwrap();
         for e in &es {
@@ -561,7 +562,7 @@ impl Kernel {
     /// nobody sees the item while the run still shows as running.
     pub async fn suspend_on(&self, run: &str, reason: &str, id: String, item: Option<Ev>) -> Result<()> {
         let stop = Ev::Suspended { run: run.into(), reason: reason.into(), item: Some(id) };
-        self.emit_all("kernel", item.into_iter().chain([stop]).collect()).await?;
+        self.emit_all(item.into_iter().chain([stop]).map(|e| ("kernel", e)).collect()).await?;
         self.on_stop(run, false).await;
         Ok(())
     }
@@ -582,6 +583,13 @@ impl Kernel {
 
     pub async fn notice(&self, run: &crate::state::Run, summary: String, details: serde_json::Value) -> Result<String> {
         self.post_notice(Some(run.task.clone()), Some(run.id.clone()), run.person.clone(), summary, details).await
+    }
+
+    /// A run's notice as an event, to be written in the same write as what
+    /// it tells of (`emit_all`): a failure is never seen, nor left by a
+    /// crash, without its notice (K24).
+    pub fn notice_of(&self, run: &crate::state::Run, summary: String, details: serde_json::Value) -> Ev {
+        notice_event(Some(run.task.clone()), Some(run.id.clone()), run.person.clone(), summary, details).1
     }
 
     /// The task's title, or the start of what the person asked.

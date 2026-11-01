@@ -82,3 +82,51 @@ async fn failures_reach_the_inbox_and_every_schedule_firing_shows() {
     let task = s["last"]["task_id"].clone();
     eventually("a notice for the scheduled task's failure", PATIENCE, || async { notices(&alice).await.into_iter().find(|i| i["task_id"] == task) }).await;
 }
+
+/// Each notice in the log with the event just before it: (that event's
+/// kind, its actor, whether both have one time, the notice's actor). One
+/// statement gives its rows one time, so the same time means one write.
+async fn notices_with_what_they_tell(app: &Appliance) -> Vec<(String, String, bool, String)> {
+    let rows = app
+        .db
+        .admin()
+        .await
+        .query("SELECT kind, actor, at::text, body->>'item_kind' FROM public.events ORDER BY seq", &[])
+        .await
+        .unwrap();
+    let rows: Vec<(String, String, String, Option<String>)> = rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))).collect();
+    rows.windows(2)
+        .filter(|w| w[1].0 == "item" && w[1].3.as_deref() == Some("notice"))
+        .map(|w| (w[0].0.clone(), w[0].1.clone(), w[0].2 == w[1].2, w[1].1.clone()))
+        .collect()
+}
+
+/// A failed task's notice, and a chat turn's "Not done", are written with
+/// the failure and the turn's end, in one write: nobody sees the run ended
+/// without its notice, and no crash between the two leaves it untold (K24).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_ends_badly_and_its_notice_are_one_write() {
+    let m = FakeModel::start(script(|c| async move {
+        if c.body["system"].to_string().contains(CHAT) {
+            return match c.turn() {
+                0 | 1 => schedule(1, ""),
+                _ => Reply::Text("Done.".into()),
+            };
+        }
+        tool("task_fail", json!({ "reason": "the report site was down (HTTP 503)" }))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let t = alice.submit("Download this month's report.").await;
+    assert_eq!(alice.wait_settled(&t).await["status"], "failed");
+    let (_, v) = alice.post("/v1/chat", json!({ "text": "Schedule a system test every minute." })).await;
+    alice.wait_settled(v["task_id"].as_str().unwrap()).await;
+
+    let told = notices_with_what_they_tell(&app).await;
+    assert_eq!(
+        told,
+        [("failed".to_string(), "model".to_string(), true, "kernel".to_string()), ("completed".into(), "kernel".into(), true, "kernel".into())],
+        "each notice right after what it tells of, in the same write"
+    );
+}
