@@ -441,9 +441,9 @@ impl Kernel {
             let finished: Vec<(crate::state::Schedule, String)> =
                 self.read(|s| s.schedules.values().filter_map(|x| x.finished(now).map(|why| (x.clone(), why))).collect());
             for (sc, why) in finished {
-                if self.emit("kernel", Ev::ScheduleEnded { id: sc.id.clone(), reason: why.clone(), run: None }).await.is_ok() {
-                    let _ = self.post_notice(None, None, sc.person.clone(), format!("A schedule ended: {}", sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect())), serde_json::json!({ "reason": "schedule_ended", "evidence": { "schedule": sc.id, "why": why } })).await;
-                }
+                let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                let notice = self.notice_to(None, None, sc.person.clone(), format!("A schedule ended: {title}"), serde_json::json!({ "reason": "schedule_ended", "evidence": { "schedule": sc.id, "why": why } }));
+                self.tell(vec![("kernel", Ev::ScheduleEnded { id: sc.id.clone(), reason: why, run: None }), ("kernel", notice)]).await;
             }
             // A schedule whose run waits on a person pauses until that person
             // answers (owner, 2026-10-30: without it, it acts without the
@@ -461,10 +461,9 @@ impl Kernel {
                 (hold, release)
             });
             for (sc, task, why) in hold {
-                if self.emit("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why.clone(), task: Some(task.clone()) }).await.is_ok() {
-                    let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
-                    let _ = self.post_notice(Some(task.clone()), None, sc.person.clone(), format!("A schedule paused until you answer its run: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why, "task": task } })).await;
-                }
+                let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                let notice = self.notice_to(Some(task.clone()), None, sc.person.clone(), format!("A schedule paused until you answer its run: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why, "task": task } }));
+                self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: Some(task) }), ("kernel", notice)]).await;
             }
             for id in release {
                 let _ = self.emit("kernel", Ev::ScheduleResumed { id }).await;
@@ -485,9 +484,8 @@ impl Kernel {
                 let n = self.cfg.schedules.pause_after_failures;
                 if n > 0 && self.read(|s| s.failures_in_a_row(&sc.id)) >= n {
                     let why = format!("its last {n} runs failed");
-                    if self.emit("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why.clone(), task: None }).await.is_ok() {
-                        let _ = self.post_notice(None, None, sc.person.clone(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why } })).await;
-                    }
+                    let notice = self.notice_to(None, None, sc.person.clone(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why } }));
+                    self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: None }), ("kernel", notice)]).await;
                     continue;
                 }
                 // A scheduled task acts for the person who set it up (K54),
@@ -507,8 +505,8 @@ impl Kernel {
                     }
                     Err(e) => {
                         tracing::error!("schedule {}: {e:#}", sc.id);
-                        let _ = self.emit("kernel", Ev::ScheduleFailed { id: sc.id.clone(), reason: format!("{e:#}") }).await;
-                        let _ = self.post_notice(None, None, sc.person.clone(), format!("A schedule could not start: {title}"), serde_json::json!({ "reason": "schedule_failed", "evidence": { "schedule": sc.id, "error": format!("{e:#}") } })).await;
+                        let notice = self.notice_to(None, None, sc.person.clone(), format!("A schedule could not start: {title}"), serde_json::json!({ "reason": "schedule_failed", "evidence": { "schedule": sc.id, "error": format!("{e:#}") } }));
+                        self.tell(vec![("kernel", Ev::ScheduleFailed { id: sc.id.clone(), reason: format!("{e:#}") }), ("kernel", notice)]).await;
                     }
                 }
             }
@@ -522,13 +520,12 @@ impl Kernel {
                     .collect();
                 (running, due)
             });
+            // What the model is told and the resume, in one write: a crash
+            // between them left the run waiting with the wait's end told,
+            // and told again on the next sweep.
             for (run, step) in due {
-                let ok = self
-                    .emit("kernel", Ev::Notice { run: run.clone(), step, text: format!("It is now {}. Your wait has ended.", now.to_rfc3339()) })
-                    .await
-                    .is_ok()
-                    && self.emit("kernel", Ev::Resumed { run: run.clone() }).await.is_ok();
-                if ok {
+                let told = Ev::Notice { run: run.clone(), step, text: format!("It is now {}. Your wait has ended.", now.to_rfc3339()) };
+                if self.emit_all(vec![("kernel", told), ("kernel", Ev::Resumed { run: run.clone() })]).await.is_ok() {
                     self.wake(&run);
                 }
             }
@@ -574,22 +571,27 @@ impl Kernel {
         self.suspend_on(run, reason, id, Some(ev)).await
     }
 
-    /// A notice in the person's inbox: something ended or stopped, with the evidence.
-    pub async fn post_notice(&self, task: Option<String>, run: Option<String>, person: String, summary: String, details: serde_json::Value) -> Result<String> {
-        let (id, ev) = notice_event(task, run, person, summary, details);
-        self.emit("kernel", ev).await?;
-        Ok(id)
+    /// A notice in the person's inbox (something ended or stopped, with the
+    /// evidence) as an event, to be written in the same write as what it
+    /// tells of (`emit_all`, K24).
+    pub fn notice_to(&self, task: Option<String>, run: Option<String>, person: String, summary: String, details: serde_json::Value) -> Ev {
+        notice_event(task, run, person, summary, details).1
     }
 
-    pub async fn notice(&self, run: &crate::state::Run, summary: String, details: serde_json::Value) -> Result<String> {
-        self.post_notice(Some(run.task.clone()), Some(run.id.clone()), run.person.clone(), summary, details).await
+    /// The sweep writes an event and its notice; if the write fails, both
+    /// are left unwritten and the next sweep tries again, so it is logged
+    /// rather than returned.
+    async fn tell(&self, evs: Vec<(&str, Ev)>) {
+        if let Err(e) = self.emit_all(evs).await {
+            tracing::error!("sweep: {e:#}");
+        }
     }
 
     /// A run's notice as an event, to be written in the same write as what
     /// it tells of (`emit_all`): a failure is never seen, nor left by a
     /// crash, without its notice (K24).
     pub fn notice_of(&self, run: &crate::state::Run, summary: String, details: serde_json::Value) -> Ev {
-        notice_event(Some(run.task.clone()), Some(run.id.clone()), run.person.clone(), summary, details).1
+        self.notice_to(Some(run.task.clone()), Some(run.id.clone()), run.person.clone(), summary, details)
     }
 
     /// The task's title, or the start of what the person asked.

@@ -239,7 +239,7 @@ impl Driver {
             .env("MAGNUS_SIGN_IN_AS", self.home.path().join("sign-in-as"))
             .env("MAGNUS_PASSWORDS", json!(REALM_PEOPLE.iter().map(|p| (p.to_string(), password_of(p))).collect::<std::collections::BTreeMap<_, _>>()).to_string())
             .envs(envs.iter().copied())
-            .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+            .envs(shots())
             .output()
             .await
             .unwrap();
