@@ -176,7 +176,8 @@ impl Kernel {
     pub async fn emit(&self, actor: &str, ev: Ev) -> Result<Event> {
         let _g = self.write.lock().await;
         let t = Instant::now();
-        let e = self.log.append(actor, &ev).await?;
+        let owner = self.read(|s| s.content_owner(&ev, &HashMap::new()));
+        let e = self.log.append(actor, &ev, owner.as_deref()).await?;
         let us = t.elapsed().as_micros() as u64;
         {
             let mut c = self.capture.lock().unwrap();
@@ -197,7 +198,19 @@ impl Kernel {
     /// crash leaves some of them out.
     pub async fn emit_all(&self, evs: Vec<(&str, Ev)>) -> Result<Vec<Event>> {
         let _g = self.write.lock().await;
-        let es = self.log.append_all(&evs).await?;
+        let owners = self.read(|s| {
+            // A run started in this batch is the person's of its TaskCreated.
+            let mut runs = HashMap::new();
+            evs.iter()
+                .map(|(_, ev)| {
+                    if let Ev::TaskCreated { run, person, .. } = ev {
+                        runs.insert(run.clone(), person.clone());
+                    }
+                    s.content_owner(ev, &runs)
+                })
+                .collect::<Vec<_>>()
+        });
+        let es = self.log.append_all(&evs, &owners).await?;
         self.capture.lock().unwrap().appends += es.len() as u64;
         let mut s = self.state.lock().unwrap();
         for e in &es {

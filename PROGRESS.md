@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **Recall only, step 1: whose each row of content is (owner, 2026-11-01; branch `content-person`).** Every content row records its person; a per-person reader role sees only that person's rows, and not the log. Nothing reads through it yet (step 2).
 - **The admin's access to people's data (owner's ruling 14, 2026-11-01; branch `data-access-policy`).** The owner reads a person's data, recorded and told to them, unless the policy makes it private.
 - **A person turned off in the identity provider (owner's ruling 12, 2026-11-01; merged in #56).** Their sessions end (logged) and their schedules pause; the check covers everyone with a schedule, every five minutes.
 - **Config tokens on this machine only (owner's ruling 13, 2026-11-01; merged in #55).** The config's long-lived tokens work only on the plain loopback listener.

@@ -666,6 +666,26 @@ fn search_text(media_type: &str, data_b64: &str) -> String {
 }
 
 impl State {
+    /// The person an event's content belongs to: the person it names, else
+    /// the person of its run, item or schedule. `runs` holds the runs of
+    /// events written in the same batch, before them. The organisation's
+    /// own content (knowledge entries, the playbook) belongs to no one
+    /// person: None.
+    pub fn content_owner(&self, ev: &crate::events::Ev, runs: &HashMap<String, String>) -> Option<String> {
+        use crate::events::Ev;
+        match ev {
+            Ev::KnowledgeAdded { .. } | Ev::Playbook { .. } => return None,
+            Ev::ItemResolved { id, .. } => return self.items.get(id).map(|i| i.person.clone()),
+            Ev::ScheduleEnded { id, .. } => return self.schedules.get(id).map(|s| s.person.clone()),
+            _ => {}
+        }
+        if let Some(p) = serde_json::to_value(ev).ok().and_then(|v| v["person"].as_str().map(String::from)) {
+            return Some(p);
+        }
+        let run = ev.run()?;
+        runs.get(run).cloned().or_else(|| self.runs.get(run).map(|r| r.person.clone()))
+    }
+
     /// The project an item is in: where the person moved it, else where it
     /// began. A task begins in the project it started in; a thread in its
     /// first message's; a delivered file in its task's; a file uploaded in

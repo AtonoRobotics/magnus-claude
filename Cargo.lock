@@ -1609,6 +1609,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tokio-postgres",
  "toml",
  "url",
  "uuid",
