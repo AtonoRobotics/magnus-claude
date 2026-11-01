@@ -7,14 +7,15 @@ owner's "Magnus Connectors Spec" (rev 17), "Magnus Admin Console Spec"
 DECISIONS.md as of that date; plans already written are `auth.md` and
 `admin.md` beside this file.
 
-**Where things stand.** The admin console is almost entirely unbuilt. About
-a sixth of the connectors spec exists (one owner-added MCP server per app,
-with OAuth, refresh and revocation). The authentication design reverses
-several decisions recorded on 2026-10-30 and 2026-10-31. One bug the review
-found is fixed separately (two owners demoting each other at once left no
-owner; fixed in #50). Everything below waits on a ruling; nothing in
-it is built until you rule, and the four marked **invariant** also need your
-approval to change a protected test.
+**Where things stand (2026-11-01).** The specs are built as written (owner:
+"all specs are for implementation not proposal"), amended by the rulings
+below. The owner ruled the first three groups; 15-22 are not yet ruled.
+Built since: per-person connections (#62), the Library's connector cards and
+the real catalog (#63), the connectors as a catalog of apps with no forms
+(`connectors-catalog`), and the admin console's own process and listener
+(`admin-listener`). The relay, the rest of the launch catalog and the
+console's sections follow, each its own pull request. The four marked
+**invariant** still need the owner's approval to change a protected test.
 
 ## The owner's rulings (2026-11-01)
 

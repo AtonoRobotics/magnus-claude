@@ -13,6 +13,11 @@ path = "src/lib.rs"
 name = "magnus"
 path = "src/main.rs"
 
+# The admin console, its own process (admin console spec).
+[[bin]]
+name = "magnus-admin"
+path = "src/bin/magnus-admin.rs"
+
 [dependencies]
 magnus-adapter-proto = { path = "../adapter-proto" }
 anyhow = "1"

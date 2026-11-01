@@ -7,6 +7,10 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Deserialize, Clone, Debug)]
 pub struct Config {
     pub appliance: Appliance,
+    /// The admin console (`magnus-admin`), reachable only from the
+    /// organisation's network or VPN.
+    #[serde(default)]
+    pub admin: Option<Admin>,
     pub database: Database,
     pub model: Model,
     #[serde(default)]
@@ -85,6 +89,24 @@ pub struct Appliance {
     pub tls_cert: Option<PathBuf>,
     #[serde(default)]
     pub tls_key: Option<PathBuf>,
+}
+
+/// The admin console's reach (admin console spec, Access): its hostname
+/// (requests naming anything else are not found), the appliance's addresses
+/// on the organisation's network to listen on (never every address, never
+/// loopback), the LAN and VPN subnets it takes connections from (never
+/// loopback), and the organisation's certificate for that hostname (TLS 1.3
+/// only).
+#[derive(Deserialize, Clone, Debug)]
+pub struct Admin {
+    pub hostname: String,
+    pub listen: Vec<String>,
+    pub allow: Vec<String>,
+    pub tls_cert: PathBuf,
+    pub tls_key: PathBuf,
+    /// The organisation's name, shown in the console's top bar.
+    #[serde(default)]
+    pub org: Option<String>,
 }
 
 /// Sign-in for people's apps. Tunable values, not decisions (K51).

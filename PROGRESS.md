@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **The admin console, part 1: its own process (owner, 2026-11-01; branch `admin-listener`).** `magnus-admin` listens only on the organisation's network, takes only the allowed LAN and VPN subnets, answers only its hostname, over TLS 1.3, and serves its shell. Next: sign-in, then the audit log, the kill switch, Users, Security, Operations and Knowledge.
 - **Recall only, step 6: knowledge entries are read from the index (owner, 2026-11-01; branch `knowledge-recalled`).** Entries' text, sources, evidence and values leave memory; the kernel reads them from the content store only to index them, and every reader reads them from the index through its row security. Next: chats and tasks (step 3), then step 7.
 - **Recall only, step 5: library files are recalled (owner, 2026-11-01; merged in #64).** Uploads' bytes and files' search text leave memory; downloads, searches, project reads and the files a task is given are recalled through the person's wall.
 - **Real connectors, from the catalog (owner, 2026-11-01; merged in #63).** No fakes: connector tests run against the real services. The catalog brings Google's Gmail, Calendar, Drive and Chat online through the organisation's Google registration, each person signing in with their own account; their manifests match the live servers. Next: real calls through a test account's sign-in, then Notion and Linear, then Microsoft 365 and Slack once their registrations exist.

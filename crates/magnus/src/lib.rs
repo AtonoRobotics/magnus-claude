@@ -6,6 +6,7 @@
 //! contract (`adapters`), MCP (`apps`), or vsock (`sandbox`).
 
 pub mod accounts;
+pub mod admin;
 pub mod adapters;
 pub mod api;
 pub mod apps;
