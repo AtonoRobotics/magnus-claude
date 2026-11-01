@@ -28,8 +28,17 @@ pub(crate) fn err(code: StatusCode, msg: impl Into<String>) -> Response {
 }
 
 pub(crate) fn internal(e: anyhow::Error) -> Response {
+    if let Some(k) = e.downcast_ref::<crate::kernel::KillSwitchOn>() {
+        return err(StatusCode::CONFLICT, k.to_string());
+    }
     tracing::error!("api: {e:#}");
     err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+}
+
+/// New work is refused while the kill switch is on, before anything about
+/// it is recorded (owner's ruling 11).
+pub(crate) fn refused_by_kill_switch(k: &crate::kernel::Kernel) -> Option<Response> {
+    k.read(|s| s.kill_switch).then(|| internal(crate::kernel::KillSwitchOn.into()))
 }
 
 /// Which listener a request came in on.

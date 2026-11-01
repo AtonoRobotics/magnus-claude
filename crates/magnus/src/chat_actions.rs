@@ -102,6 +102,9 @@ async fn delete(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, 
 /// that answered it, with the files it had.
 async fn resend(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, String)>, Json(b): Json<Value>) -> Response {
     let p = person!(k, h);
+    if let Some(r) = crate::api::refused_by_kill_switch(&k) {
+        return r;
+    }
     let (entries, at) = found!(k, p, thread, entry);
     let e = &entries[at];
     let (message, text) = match e["kind"].as_str() {
@@ -296,6 +299,9 @@ async fn save(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, St
 /// comes along (with its taint), and the result posts to the thread.
 async fn task(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, String)>) -> Response {
     let p = person!(k, h);
+    if let Some(r) = crate::api::refused_by_kill_switch(&k) {
+        return r;
+    }
     let (entries, at) = found!(k, p, thread, entry);
     let e = &entries[at];
     let text = text_of(e);
