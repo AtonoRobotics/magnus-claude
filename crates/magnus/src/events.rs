@@ -201,6 +201,13 @@ pub enum Ev {
         at_provider: bool,
         detail: String,
     },
+    /// The identity provider's account a person is: bound at their first
+    /// sign-in through it (`subject` its `sub`), or cleared by the owner
+    /// (`None`) so the next sign-in binds again.
+    SubjectBound {
+        person: String,
+        subject: Option<String>,
+    },
     /// The groups and roles the identity provider gave a person at sign-in
     /// (where the owner named those claims); they replace the config's.
     RightsFromProvider {

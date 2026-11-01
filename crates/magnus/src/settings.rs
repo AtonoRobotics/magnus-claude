@@ -40,6 +40,7 @@ pub fn router() -> Router<Arc<Kernel>> {
         .route("/v1/people/{id}/roles", put(set_roles))
         .route("/v1/people/{id}/data/{what}", get(person_data))
         .route("/v1/data-access", get(get_data_access).put(put_data_access))
+        .route("/v1/people/{id}/account", delete(clear_account))
         .route("/v1/preferences", get(get_preferences).put(put_preferences))
         .route("/v1/deletion-requests", get(deletion_requests).post(request_deletion))
 }
@@ -96,7 +97,8 @@ async fn people(State(k): K, h: HeaderMap) -> Response {
                     "config"
                 }
             });
-            Some(json!({ "id": p.id, "name": p.name, "groups": p.groups, "roles": p.roles, "roles_from": from }))
+            let bound = k.read(|s| s.subjects.contains_key(&c.id));
+            Some(json!({ "id": p.id, "name": p.name, "groups": p.groups, "roles": p.roles, "roles_from": from, "account_bound": bound }))
         })
         .collect();
     Json(json!({ "people": list })).into_response()
@@ -148,6 +150,28 @@ async fn put_data_access(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Res
     };
     let Some(private) = b["private"].as_bool() else { return err(StatusCode::BAD_REQUEST, "private is true or false") };
     match k.emit(&format!("person:{}", me.id), Ev::DataAccessSet { private }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// The owner lets a person's account at the identity provider change: the
+/// person is no longer bound to the account that first signed in as them,
+/// and the next account to sign in as them becomes theirs (for an account
+/// made again, or a person moved to a new one).
+async fn clear_account(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
+    let me = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if k.cfg.person(&id).is_none() {
+        return err(StatusCode::NOT_FOUND, "no such person");
+    }
+    let _decide = k.decide.lock().await;
+    if !k.read(|s| s.subjects.contains_key(&id)) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    match k.emit(&format!("person:{}", me.id), Ev::SubjectBound { person: id, subject: None }).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),
     }

@@ -61,6 +61,18 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
 }
 
+/// New work refused because the kill switch is on.
+#[derive(Debug)]
+pub struct KillSwitchOn;
+
+impl std::fmt::Display for KillSwitchOn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The kill switch is on: nothing new starts until the owner releases it.")
+    }
+}
+
+impl std::error::Error for KillSwitchOn {}
+
 /// How a new run differs from a plain task.
 #[derive(Default)]
 pub struct NewRun {
@@ -212,13 +224,14 @@ impl Kernel {
     /// A person's rights: the identity provider's where it names them, else
     /// the roles the owner set in Settings, else the config's.
     /// The identity provider people sign in through, if the appliance has one.
-    /// End the sessions of people the identity provider has turned off or
-    /// no longer knows: once now, then every ten minutes. A provider that
-    /// cannot be asked ends nothing.
+    /// End the sessions, and pause the schedules, of people the identity
+    /// provider has turned off or no longer knows: once now, then every five
+    /// minutes. Everyone signed in or with a schedule is asked about; a
+    /// provider that cannot be asked changes nothing (owner's ruling 12).
     pub fn watch_sessions(self: &Arc<Self>) {
         let k = self.clone();
         tokio::spawn(async move {
-            let mut t = tokio::time::interval(std::time::Duration::from_secs(600));
+            let mut t = tokio::time::interval(std::time::Duration::from_secs(300));
             loop {
                 t.tick().await;
                 k.end_turned_off().await;
@@ -228,17 +241,37 @@ impl Kernel {
 
     pub async fn end_turned_off(&self) -> usize {
         let Some(id) = self.identity() else { return 0 };
+        let mut people = self.accounts.signed_in();
+        people.extend(self.read(|s| s.schedules.values().filter(|x| x.next_due().is_some()).map(|x| x.person.clone()).collect::<Vec<_>>()));
         let mut ended = 0;
-        for person in self.accounts.signed_in() {
+        for person in people {
             match id.active(&person).await {
                 Ok(true) => {}
-                Ok(false) => match self.accounts.end_all(&person) {
-                    Ok(n) => {
-                        tracing::warn!("{} has {person} turned off or no longer knows them: their {n} sessions here are ended", id.label());
-                        ended += n;
+                Ok(false) => {
+                    let why = format!("{} has turned {person} off or no longer knows them", id.label());
+                    match self.accounts.end_all(&person) {
+                        Ok(sessions) => {
+                            if !sessions.is_empty() {
+                                tracing::warn!("{why}: their {} sessions here are ended", sessions.len());
+                            }
+                            ended += sessions.len();
+                            let evs: Vec<(&str, Ev)> = sessions.into_iter().map(|session| ("kernel", Ev::SignedOut { person: person.clone(), session })).collect();
+                            if !evs.is_empty() {
+                                self.tell(evs).await;
+                            }
+                        }
+                        Err(e) => tracing::error!("ending {person}'s sessions: {e:#}"),
                     }
-                    Err(e) => tracing::error!("ending {person}'s sessions: {e:#}"),
-                },
+                    // Their schedules stop acting for them until they are
+                    // turned back on and resume them.
+                    let schedules: Vec<crate::state::Schedule> = self.read(|s| s.schedules.values().filter(|x| x.person == person && x.next_due().is_some()).cloned().collect());
+                    for sc in schedules {
+                        let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                        let reason = format!("{} has turned your account off", id.label());
+                        let notice = self.notice_to(None, None, person.clone(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": reason } }));
+                        self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason, task: None }), ("kernel", notice)]).await;
+                    }
+                }
                 Err(e) => tracing::debug!("cannot ask whether {person} is still on: {e:#}"),
             }
         }
@@ -375,8 +408,12 @@ impl Kernel {
         }
     }
 
-    /// Create a task or a chat turn and start it.
+    /// Create a task or a chat turn and start it. Nothing new starts while
+    /// the kill switch is on (owner's ruling 11, 2026-11-01).
     pub async fn create_run(self: &Arc<Self>, actor: &str, person: &str, text: String, attachments: Vec<serde_json::Value>, o: NewRun) -> Result<(String, String)> {
+        if self.read(|s| s.kill_switch) {
+            return Err(KillSwitchOn.into());
+        }
         let (task, run) = match &o.ids {
             Some((t, r)) => (t.clone(), r.clone()),
             None => (new_id("task"), new_id("run")),

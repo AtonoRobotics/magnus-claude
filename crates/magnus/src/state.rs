@@ -614,6 +614,8 @@ pub struct State {
     /// Groups and roles from the identity provider, per person, as of their
     /// latest sign-in.
     pub provider_rights: HashMap<String, (Option<Vec<String>>, Option<Vec<String>>)>,
+    /// The identity provider account (`sub`) each person is bound to.
+    pub subjects: HashMap<String, String>,
     /// Roles the owner set in Settings, by person.
     pub roles_set: HashMap<String, Vec<String>>,
     /// Whether people's data is private from the admin (by default it is not).
@@ -985,6 +987,14 @@ impl State {
             Ev::SecretRevoked { name, adapter, at_provider, detail } => {
                 self.revoked.insert(name.clone(), Revoked { adapter: Some(adapter.clone()), at_provider: Some(*at_provider), detail: Some(detail.clone()) });
             }
+            Ev::SubjectBound { person, subject } => match subject {
+                Some(sub) => {
+                    self.subjects.insert(person.clone(), sub.clone());
+                }
+                None => {
+                    self.subjects.remove(person);
+                }
+            },
             Ev::RightsFromProvider { person, groups, roles } => {
                 self.provider_rights.insert(person.clone(), (groups.clone(), roles.clone()));
             }
