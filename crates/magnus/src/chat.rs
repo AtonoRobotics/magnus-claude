@@ -52,7 +52,7 @@ impl Kernel {
             }
             None => (new_id("thread"), project),
         };
-        let conversation = self.conversation(person, &thread);
+        let conversation = self.conversation(person, &thread).await?;
         // What the turn reads in the conversation carries the taint of the
         // runs that wrote it, as their tasks would (I2).
         let label = self.thread_label(person, &thread, None);
@@ -69,15 +69,26 @@ impl Kernel {
         Ok(Some((thread, task)))
     }
 
-    /// The person's threads, most recent first.
-    pub fn threads(&self, person: &str) -> Vec<Value> {
+    /// The person's threads, most recent first, each titled by its first
+    /// message, recalled for them.
+    pub async fn threads(&self, person: &str) -> anyhow::Result<Vec<Value>> {
+        let w = self.person_words(person).await?;
+        Ok(self.threads_with(person, &w))
+    }
+
+    /// Whether the person has this thread (no words are recalled).
+    pub fn has_thread(&self, person: &str, thread: &str) -> bool {
+        self.threads_with(person, &Default::default()).iter().any(|t| t["thread"] == thread)
+    }
+
+    fn threads_with(&self, person: &str, w: &crate::recall::Words) -> Vec<Value> {
         let mut by: std::collections::BTreeMap<String, (DateTime<Utc>, DateTime<Utc>, String)> = Default::default();
         self.read(|s| {
             for t in s.tasks.values().filter(|t| t.person == person) {
                 let Some(c) = t.chat.as_ref() else { continue };
-                let e = by.entry(c.thread.clone()).or_insert((t.created_at, t.created_at, t.text.clone()));
+                let e = by.entry(c.thread.clone()).or_insert((t.created_at, t.created_at, w.text(t.seq).to_string()));
                 if t.created_at < e.0 && c.turn {
-                    (e.0, e.2) = (t.created_at, t.text.clone());
+                    (e.0, e.2) = (t.created_at, w.text(t.seq).to_string());
                 }
                 e.1 = e.1.max(t.created_at);
             }
@@ -121,10 +132,16 @@ impl Kernel {
     /// The thread as the person sees it, from the log.
     /// Each entry has an `id`, which the message actions name; entries the
     /// person deleted (in the trash or removed from it) or replaced are left out.
-    pub fn thread_entries(&self, person: &str, thread: &str) -> Option<Vec<Value>> {
+    /// What the person said in it is recalled for them.
+    pub async fn thread_entries(&self, person: &str, thread: &str) -> anyhow::Result<Option<Vec<Value>>> {
         if self.thread_gone(thread) {
-            return None;
+            return Ok(None);
         }
+        let w = self.person_words(person).await?;
+        Ok(self.entries_with(person, thread, &w))
+    }
+
+    fn entries_with(&self, person: &str, thread: &str, w: &crate::recall::Words) -> Option<Vec<Value>> {
         let runs = self.thread(person, thread);
         let branch = self.read(|s| s.branches.get(thread).filter(|b| b.person == person).cloned());
         if runs.is_empty() && branch.is_none() {
@@ -148,7 +165,7 @@ impl Kernel {
             let status = crate::api::status_str(r.status);
             if turn {
                 let files: Vec<Value> = self.read(|s| t.files.iter().filter_map(|id| s.files.get(id)).map(|f| json!({ "id": f.id, "name": f.name, "media_type": f.media_type, "size": f.size })).collect());
-                out.push((t.created_at, 0, json!({ "id": format!("m:{}", t.task_id), "kind": "message", "text": t.text, "at": t.created_at, "task_id": t.task_id, "files": files })));
+                out.push((t.created_at, 0, json!({ "id": format!("m:{}", t.task_id), "kind": "message", "text": w.text(t.seq), "at": t.created_at, "task_id": t.task_id, "files": files })));
                 let mut cards: Vec<_> = r.results.values().filter_map(|res| res.data.as_ref().filter(|d| d["card"].is_string()).map(|d| (res.seq, d.clone()))).collect();
                 cards.sort_by_key(|(seq, _)| *seq);
                 for (seq, d) in cards {
@@ -181,14 +198,14 @@ impl Kernel {
                     )),
                 }
             } else {
-                let title = crate::api::title_of(t, r);
+                let title = crate::api::title_of(t, Some(r), w);
                 let from = t.chat.as_ref().and_then(|c| c.from_run.clone()).unwrap_or_else(|| t.task_id.clone());
                 let e = started.entry(from).or_insert((t.created_at, vec![]));
-                e.1.push(json!({ "task_id": t.task_id, "title": title, "text": t.text, "status": status, "waiting_on": r.reason, "waiting_item": r.waiting_item }));
+                e.1.push(json!({ "task_id": t.task_id, "title": title, "text": w.text(t.seq), "status": status, "waiting_on": r.reason, "waiting_item": r.waiting_item }));
                 if let Some(end) = r.ended_at {
                     let after = t.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| answered.get(f)).map_or(end, |a| end.max(*a));
                     let files: Vec<Value> = r.outputs.iter().map(|(id, name, mt, size)| json!({ "id": id, "name": name, "media_type": mt, "size": size })).collect();
-                    out.push((after, i64::MAX, json!({ "id": format!("r:{}", t.task_id), "kind": "result", "task_id": t.task_id, "title": title, "text": t.text, "status": status, "summary": r.summary, "view": r.outcome_view, "at": end, "files": files, "verdict": t.verdict })));
+                    out.push((after, i64::MAX, json!({ "id": format!("r:{}", t.task_id), "kind": "result", "task_id": t.task_id, "title": title, "text": w.text(t.seq), "status": status, "summary": r.summary, "view": r.outcome_view, "at": end, "files": files, "verdict": t.verdict })));
                 }
             }
         }
@@ -223,7 +240,8 @@ impl Kernel {
     /// (all of it when none): that of the runs that wrote each entry. The
     /// person's own messages carry none.
     pub fn thread_label(&self, person: &str, thread: &str, upto: Option<&str>) -> Label {
-        let entries = self.thread_entries(person, thread).unwrap_or_default();
+        // Which entries, not what they say: no words are recalled.
+        let entries = if self.thread_gone(thread) { vec![] } else { self.entries_with(person, thread, &Default::default()).unwrap_or_default() };
         let end = upto.and_then(|u| entries.iter().position(|e| e["id"] == u)).map_or(entries.len(), |i| i + 1);
         let mut tasks: Vec<String> = vec![];
         for e in &entries[..end] {
@@ -239,8 +257,8 @@ impl Kernel {
     }
 
     /// The thread as the model reads it in the next turn: who said what.
-    pub(crate) fn conversation(&self, person: &str, thread: &str) -> Vec<Value> {
-        Self::transcript_of(self.thread_entries(person, thread).unwrap_or_default())
+    pub(crate) async fn conversation(&self, person: &str, thread: &str) -> Result<Vec<Value>> {
+        Ok(Self::transcript_of(self.thread_entries(person, thread).await?.unwrap_or_default()))
     }
 
     /// Entries as the model reads them: who said what.
@@ -282,7 +300,7 @@ impl Kernel {
         let (task_id, run_id) = (derived("task", key), derived("run", key));
         if !self.read(|s| s.tasks.contains_key(&task_id)) {
             let mut conversation = chat.conversation.clone();
-            conversation.push(json!({ "role": "person", "text": task.text }));
+            conversation.push(json!({ "role": "person", "text": self.asked(&run).await? }));
             let o = NewRun {
                 chat: Some(ChatOrigin { thread: chat.thread.clone(), turn: false, from_run: Some(a.run.clone()), conversation }),
                 label: Some(Label { untrusted: run.untrusted, private: run.private }),

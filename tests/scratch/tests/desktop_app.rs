@@ -534,12 +534,16 @@ async fn two_people_sign_in_on_one_installed_app_each_with_their_own_rights() {
 async fn the_owner_connects_an_app_from_settings_and_reapproves_a_changed_tool() {
     let (f, _idp, url, fingerprint) = appliance().await;
     let cal = FakeOAuthApp::start(3600).await;
+    let alice = f.app.api(PERSON);
+    // The admin adds a server by its address in the admin console, never in
+    // the app (connectors spec rev 46): here, through the same API.
+    let (st, v) = alice.post("/v1/connectors", json!({ "url": cal.url, "audience": "public", "label": "private+untrusted" })).await;
+    assert!(st.is_success(), "{v}");
     let d = Driver::start().await;
     let envs = [("MAGNUS_APP_URL", cal.url.as_str())];
     let script = d.script("app-apps.mjs", &url, &fingerprint, &envs);
     // Once the worker may read events, a task pins the tool's definition;
     // the app then changes it, and the next task finds the change.
-    let alice = f.app.api(PERSON);
     // When the script fails before the owner lets the worker read events,
     // its log says where: this side waits for it rather than panicking first.
     let change = async {

@@ -176,8 +176,10 @@ impl Store {
 }
 
 /// The checks every console ID token passes: our client, the realm's
-/// issuer, current, answering this sign-in's nonce, and with a subject.
-pub fn check_claims(c: &Value, issuer: &str, client_id: &str, nonce: &str, now: DateTime<Utc>) -> Result<String> {
+/// issuer, current, answering this sign-in's nonce, and with a subject. A
+/// refresh's ID token answers no sign-in (`nonce` None): Keycloak leaves
+/// the nonce out of it, and every other check still holds.
+pub fn check_claims(c: &Value, issuer: &str, client_id: &str, nonce: Option<&str>, now: DateTime<Utc>) -> Result<String> {
     if c["iss"].as_str() != Some(issuer) {
         bail!("from {}, not {issuer}", c["iss"]);
     }
@@ -192,7 +194,7 @@ pub fn check_claims(c: &Value, issuer: &str, client_id: &str, nonce: &str, now: 
     if c["exp"].as_i64().is_none_or(|e| e <= now.timestamp()) {
         bail!("expired");
     }
-    if c["nonce"].as_str() != Some(nonce) {
+    if nonce.is_some_and(|n| c["nonce"].as_str() != Some(n)) {
         bail!("not an answer to this sign-in");
     }
     c["sub"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from).ok_or_else(|| anyhow!("no subject"))
@@ -231,14 +233,21 @@ mod tests {
     fn an_id_token_is_for_this_client_this_realm_this_sign_in_and_current() {
         let now = Utc::now();
         let ok = json!({ "iss": "https://idp/realms/m", "aud": "magnus-admin", "exp": now.timestamp() + 60, "nonce": "n1", "sub": "abc" });
-        assert_eq!(check_claims(&ok, "https://idp/realms/m", "magnus-admin", "n1", now).unwrap(), "abc");
+        assert_eq!(check_claims(&ok, "https://idp/realms/m", "magnus-admin", Some("n1"), now).unwrap(), "abc");
         for (k, v) in [("iss", json!("https://evil")), ("aud", json!("magnus-test")), ("exp", json!(now.timestamp() - 1)), ("nonce", json!("n2")), ("sub", json!(""))] {
             let mut c = ok.clone();
             c[k] = v;
-            assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", "n1", now).is_err(), "{k}");
+            assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", Some("n1"), now).is_err(), "{k}");
         }
+        // A refresh's ID token, without a nonce, is checked for the rest.
+        let mut c = ok.clone();
+        c.as_object_mut().unwrap().remove("nonce");
+        assert_eq!(check_claims(&c, "https://idp/realms/m", "magnus-admin", None, now).unwrap(), "abc");
+        assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", Some("n1"), now).is_err(), "a sign-in's token without its nonce passed");
+        c["aud"] = json!("magnus-test");
+        assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", None, now).is_err());
         let mut c = ok.clone();
         c["azp"] = json!("magnus-test");
-        assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", "n1", now).is_err());
+        assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", Some("n1"), now).is_err());
     }
 }

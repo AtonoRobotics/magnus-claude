@@ -39,8 +39,10 @@ const step = async (name, f) => {
   catch (e) { await shot(`FAILED-${name}`); console.error(`FAIL ${name}: ${e.message}`); await browser.close(); process.exit(1); }
 };
 const T = 60_000;
+// On a re-authentication (a step-up), Keycloak shows who is signing in as
+// fixed text and asks only for the password.
 const login = async () => {
-  await page.locator("#username").fill(person);
+  if (await page.locator("#username").count()) await page.locator("#username").fill(person);
   await page.locator("#password").fill(password);
   await Promise.all([page.waitForEvent("load"), page.locator("#kc-login").click()]);
 };

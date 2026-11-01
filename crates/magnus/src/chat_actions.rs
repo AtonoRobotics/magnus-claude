@@ -34,8 +34,8 @@ pub fn router() -> Router<Arc<Kernel>> {
 }
 
 /// The person's thread as shown, and where `entry` is in it.
-fn find(k: &Kernel, person: &str, thread: &str, entry: &str) -> Result<(Vec<Value>, usize), Response> {
-    let entries = k.thread_entries(person, thread).ok_or_else(|| err(StatusCode::NOT_FOUND, "no such thread"))?;
+async fn find(k: &Kernel, person: &str, thread: &str, entry: &str) -> Result<(Vec<Value>, usize), Response> {
+    let entries = k.thread_entries(person, thread).await.map_err(crate::api::internal)?.ok_or_else(|| err(StatusCode::NOT_FOUND, "no such thread"))?;
     let at = entries.iter().position(|e| e["id"] == entry).ok_or_else(|| err(StatusCode::NOT_FOUND, "no such message"))?;
     Ok((entries, at))
 }
@@ -74,7 +74,7 @@ macro_rules! person {
 
 macro_rules! found {
     ($k:expr, $p:expr, $thread:expr, $entry:expr) => {
-        match find(&$k, &$p.id, &$thread, &$entry) {
+        match find(&$k, &$p.id, &$thread, &$entry).await {
             Ok(x) => x,
             Err(r) => return r,
         }

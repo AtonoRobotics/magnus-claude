@@ -12,7 +12,7 @@ DECISIONS.md as of that date; plans already written are `auth.md` and
 below. The owner ruled the first three groups; 15-22 are not yet ruled.
 Built since: per-person connections (#62), the Library's connector cards and
 the real catalog (#63), the connectors as a catalog of apps with no forms
-(`connectors-catalog`), and the admin console's own process and listener
+(#67), and the admin console's own process and listener
 (`admin-listener`). The relay, the rest of the launch catalog and the
 console's sections follow, each its own pull request. The four marked
 **invariant** still need the owner's approval to change a protected test.

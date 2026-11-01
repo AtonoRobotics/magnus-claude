@@ -32,7 +32,7 @@ impl Kernel {
         if !run.config.module("memory_pass") || run.model_calls >= run.config.budget.max_model_calls {
             return Ok(());
         }
-        let Some(text) = self.exchange(&run) else { return Ok(()) };
+        let Some(text) = self.exchange(&run).await? else { return Ok(()) };
         // Only facts the run's own taint already covers: the pass reads them
         // outside execute(), and what it writes carries the run's label, so
         // an untrusted or private fact shown to a cleaner run would be filed
@@ -62,8 +62,9 @@ impl Kernel {
     }
 
     /// What the person said and what came of it, for the pass to read.
-    fn exchange(&self, run: &Run) -> Option<String> {
-        self.read(|s| {
+    async fn exchange(&self, run: &Run) -> anyhow::Result<Option<String>> {
+        let asked = self.asked(run).await?;
+        Ok(self.read(|s| {
             let t = s.tasks.get(&run.task)?;
             let said: Vec<String> = t.chat.as_ref().map(|c| c.conversation.iter().map(|m| format!("{}: {}", m["role"].as_str().unwrap_or("?"), m["text"].as_str().unwrap_or_default())).collect()).unwrap_or_default();
             // A run waiting for review has no summary yet: its report is on
@@ -73,7 +74,7 @@ impl Kernel {
             });
             let answer = answer.unwrap_or_default();
             let earlier = if said.is_empty() { String::new() } else { format!("Earlier in the conversation:\n{}\n\n", said.join("\n")) };
-            Some(format!("{earlier}The person said:\n{}\n\nMagnus answered (or the task ended with):\n{answer}", t.text))
-        })
+            Some(format!("{earlier}The person said:\n{asked}\n\nMagnus answered (or the task ended with):\n{answer}"))
+        }))
     }
 }

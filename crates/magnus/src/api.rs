@@ -611,12 +611,13 @@ pub(crate) fn status_str(s: Status) -> &'static str {
 }
 
 /// The short title the model gave the task (when starting it, or in its
-/// contract), else the start of what the person wrote.
-pub(crate) fn title_of(task: &crate::state::Task, run: &Run) -> String {
-    task.title
-        .clone()
-        .or_else(|| run.contract.as_ref().and_then(|c| c["title"].as_str()).map(str::trim).filter(|t| !t.is_empty()).map(String::from))
-        .unwrap_or_else(|| task.text.chars().take(80).collect())
+/// contract), else the start of what the person wrote; from its words,
+/// recalled for its person.
+pub(crate) fn title_of(task: &crate::state::Task, run: Option<&Run>, words: &crate::recall::Words) -> String {
+    words
+        .title(task.seq)
+        .or_else(|| run.and_then(|r| r.contract.as_ref()).and_then(|c| c["title"].as_str()).map(str::trim).filter(|t| !t.is_empty()).map(String::from))
+        .unwrap_or_else(|| words.text(task.seq).chars().take(80).collect())
 }
 
 /// Whether the task waits on an inbox item this person can answer.
@@ -626,8 +627,9 @@ fn needs(s: &crate::state::State, p: &Person, run: &Run) -> bool {
 
 /// A task in a list: what it is, where it stands, whether it needs this
 /// person, and the request it came from (a chat message or a schedule).
-pub(crate) fn task_row(k: &Kernel, s: &crate::state::State, p: &Person, t: &crate::state::Task, r: &Run) -> Value {
-    let mut v = task_json(k, t, r, false);
+/// `words` holds the recalled words of the tasks and schedules it names.
+pub(crate) fn task_row(k: &Kernel, s: &crate::state::State, p: &Person, t: &crate::state::Task, r: &Run, words: &crate::recall::Words) -> Value {
+    let mut v = task_json(k, t, r, false, words);
     let mine = t.person == p.id;
     v["needs_you"] = json!(needs(s, p, r));
     // Another person's projects and conversations are theirs alone: the
@@ -636,10 +638,10 @@ pub(crate) fn task_row(k: &Kernel, s: &crate::state::State, p: &Person, t: &crat
     v["waiting_item"] = json!(r.waiting_item);
     v["ended_at"] = json!(r.ended_at);
     v["group"] = if let Some(sc) = t.schedule.as_ref().and_then(|id| s.schedules.get(id)) {
-        json!({ "kind": "schedule", "id": sc.id, "title": sc.title.clone().unwrap_or_else(|| sc.text.clone()) })
+        json!({ "kind": "schedule", "id": sc.id, "title": words.title(sc.seq).unwrap_or_else(|| words.text(sc.seq).to_string()) })
     } else if let Some((c, turn)) = t.chat.as_ref().and_then(|c| c.from_run.as_ref().and_then(|f| s.runs.get(f)).and_then(|r| s.tasks.get(&r.task)).map(|turn| (c, turn))) {
         if mine {
-            json!({ "kind": "chat", "id": turn.task_id, "title": turn.text, "thread": c.thread })
+            json!({ "kind": "chat", "id": turn.task_id, "title": words.text(turn.seq), "thread": c.thread })
         } else {
             json!({ "kind": "chat", "id": turn.task_id, "title": format!("A conversation of {}", t.person) })
         }
@@ -649,13 +651,13 @@ pub(crate) fn task_row(k: &Kernel, s: &crate::state::State, p: &Person, t: &crat
     v
 }
 
-fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Value {
+fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool, words: &crate::recall::Words) -> Value {
     let mut v = json!({
         "task_id": task.task_id,
         "run_id": run.id,
         "person": task.person,
-        "text": task.text,
-        "title": title_of(task, run),
+        "text": words.text(task.seq),
+        "title": title_of(task, Some(run), words),
         "created_at": task.created_at,
         "status": status_str(run.status),
         "waiting_on": run.reason,
@@ -703,7 +705,7 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool) -> Va
         v["plan_version"] = json!(run.plan_version);
         v["outcome_view"] = run.outcome_view.clone().unwrap_or(Value::Null);
         // Only here, never in a list's rows: those are built under the state lock.
-        v["files"] = json!(k.read(|s| task.files.iter().filter_map(|id| s.files.get(id)).map(|f| crate::library::file_json(s, f)).collect::<Vec<_>>()));
+        v["files"] = json!(k.read(|s| task.files.iter().filter_map(|id| s.files.get(id)).map(|f| crate::library::file_json(s, f, words)).collect::<Vec<_>>()));
         v["project"] = k.read(|s| crate::library::project_ref(s, &task.task_id));
         v["preview"] = json!({ "chars": crate::compose::PREVIEW_CHARS, "rows": crate::compose::MAX_ROWS });
         v["spoken"] = json!(run.spoken);
@@ -784,11 +786,15 @@ async fn list_tasks(State(k): K, h: HeaderMap) -> Response {
         Ok(p) => p,
         Err(r) => return r,
     };
+    let words = match k.person_words(&p.id).await {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
     let tasks: Vec<Value> = k.read(|s| {
         s.tasks
             .values()
             .filter(|t| visible_task(&p, t) && !t.is_chat_turn())
-            .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(&k, s, &p, t, r)))
+            .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(&k, s, &p, t, r, &words)))
             .collect()
     });
     Json(json!({ "tasks": tasks })).into_response()
@@ -814,9 +820,16 @@ async fn search(State(k): K, h: HeaderMap, Query(q): Query<std::collections::Has
     }
     let all = |hay: &str| terms.iter().all(|t| hay.contains(t.as_str()));
     let mut conversations = vec![];
-    for t in k.threads(&p.id) {
+    let threads = match k.threads(&p.id).await {
+        Ok(t) => t,
+        Err(e) => return internal(e),
+    };
+    for t in threads {
         let id = t["thread"].as_str().unwrap_or_default();
-        let said: Vec<String> = k.thread_entries(&p.id, id).unwrap_or_default().iter().filter_map(|e| e["text"].as_str().or(e["summary"].as_str()).map(String::from)).collect();
+        let said: Vec<String> = match k.thread_entries(&p.id, id).await {
+            Ok(e) => e.unwrap_or_default(),
+            Err(e) => return internal(e),
+        }.iter().filter_map(|e| e["text"].as_str().or(e["summary"].as_str()).map(String::from)).collect();
         let title = t["title"].as_str().unwrap_or_default().to_lowercase();
         if !all(&format!("{title} {}", said.join(" ").to_lowercase())) {
             continue;
@@ -828,15 +841,19 @@ async fn search(State(k): K, h: HeaderMap, Query(q): Query<std::collections::Has
         Ok(t) => t,
         Err(e) => return internal(e),
     };
+    let words = match k.person_words(&p.id).await {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
     let (tasks, files) = k.read(|s| {
         let tasks: Vec<Value> = s
             .tasks
             .values()
             .filter(|t| visible_task(&p, t) && !t.is_chat_turn())
-            .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(&k, s, &p, t, r)))
+            .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(&k, s, &p, t, r, &words)))
             .filter(|v| all(&format!("{} {} {}", v["title"].as_str().unwrap_or_default(), v["text"].as_str().unwrap_or_default(), v["summary"].as_str().unwrap_or_default()).to_lowercase()))
             .collect();
-        (tasks, crate::library::files_matching(s, &p, &terms, &texts, None))
+        (tasks, crate::library::files_matching(s, &p, &terms, &texts, None, &words))
     });
     Json(json!({ "conversations": conversations, "tasks": tasks, "files": files })).into_response()
 }
@@ -872,7 +889,10 @@ async fn chat_post(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response 
 
 async fn chat_threads(State(k): K, h: HeaderMap) -> Response {
     match who(&k, &h) {
-        Ok(p) => Json(json!({ "threads": k.threads(&p.id) })).into_response(),
+        Ok(p) => match k.threads(&p.id).await {
+            Ok(t) => Json(json!({ "threads": t })).into_response(),
+            Err(e) => internal(e),
+        },
         Err(r) => r,
     }
 }
@@ -883,9 +903,10 @@ async fn chat_thread(State(k): K, h: HeaderMap, Path(thread): Path<String>) -> R
         Ok(p) => p,
         Err(r) => return r,
     };
-    match k.thread_entries(&p.id, &thread) {
-        Some(entries) => Json(json!({ "thread": thread, "entries": entries })).into_response(),
-        None => err(StatusCode::NOT_FOUND, "no such thread"),
+    match k.thread_entries(&p.id, &thread).await {
+        Ok(Some(entries)) => Json(json!({ "thread": thread, "entries": entries })).into_response(),
+        Ok(None) => err(StatusCode::NOT_FOUND, "no such thread"),
+        Err(e) => internal(e),
     }
 }
 
@@ -922,7 +943,11 @@ async fn task(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
     };
     match find(&k, &p, &id) {
         Some((t, r)) => {
-            let mut v = task_json(&k, &t, &r, true);
+            let words = match k.person_words(&t.person).await {
+                Ok(w) => w,
+                Err(e) => return internal(e),
+            };
+            let mut v = task_json(&k, &t, &r, true, &words);
             // The owner sees every task, but not another person's library or
             // projects (theirs alone).
             if t.person != p.id {
@@ -1187,7 +1212,10 @@ impl Kernel {
         let stopped: Vec<crate::state::Run> = k.read(|s| s.runs.values().filter(|r| r.status == Status::Suspended && r.reason.as_deref() == Some("kill_switch")).cloned().collect());
         let why = json!({ "reason": "kill_switch", "evidence": { "why": "the owner engaged the kill switch, and has released it; Continue goes on from where it stopped" } });
         let mut evs = vec![(actor.as_str(), Ev::KillSwitch { engaged })];
-        evs.extend(stopped.iter().map(|r| ("kernel", k.notice_of(r, format!("Stopped by the kill switch: {}", k.title_of(r)), why.clone()))));
+        for r in &stopped {
+            let title = k.title_of(r).await;
+            evs.push(("kernel", k.notice_of(r, format!("Stopped by the kill switch: {title}"), why.clone())));
+        }
         if let Err(e) = k.emit_all(evs).await {
             return Err((StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("{e:#}") })));
         }
@@ -1576,6 +1604,10 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
         Ok(p) => p,
         Err(r) => return r,
     };
+    let words = match k.person_words(&p.id).await {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
     let list: Vec<Value> = k.read(|s| {
         s.schedules
             .values()
@@ -1585,13 +1617,13 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
                 let mut runs: Vec<(&crate::state::Task, &Run)> =
                     s.tasks.values().filter(|t| t.schedule.as_deref() == Some(x.id.as_str())).filter_map(|t| s.runs.get(&t.run_id).map(|r| (t, r))).collect();
                 runs.sort_by(|a, b| b.0.created_at.cmp(&a.0.created_at));
-                let rows: Vec<Value> = runs.iter().map(|(t, r)| task_row(&k, s, &p, t, r)).collect();
+                let rows: Vec<Value> = runs.iter().map(|(t, r)| task_row(&k, s, &p, t, r, &words)).collect();
                 // Every firing shows: the newest task whatever its state, and firings that could not start one.
                 let last = rows.first().cloned();
                 let failures: Vec<Value> = x.failures.iter().rev().map(|(at, why)| json!({ "at": at, "error": why })).collect();
                 let last_failed = x.failures.last().filter(|(at, _)| rows.first().and_then(|r| r["created_at"].as_str()).and_then(|c| chrono::DateTime::parse_from_rfc3339(c).ok()).is_none_or(|c| c < *at)).map(|(at, why)| json!({ "at": at, "error": why }));
                 json!({
-                    "id": x.id, "person": x.person, "text": x.text, "title": x.title.clone().unwrap_or_else(|| x.text.clone()),
+                    "id": x.id, "person": x.person, "text": words.text(x.seq), "title": words.title(x.seq).unwrap_or_else(|| words.text(x.seq).to_string()),
                     "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due(), "last_fired": x.last_fired,
                     "until": x.until, "max_runs": x.max_runs, "started": x.started, "paused": x.paused, "paused_on": x.paused_on,
                     // Each run's limit: its own, or the appliance's when it has none.
