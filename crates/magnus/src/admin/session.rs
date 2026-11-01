@@ -123,9 +123,9 @@ impl Idp {
         let jwt = b["id_token"].as_str().ok_or_else(|| anyhow!("the provider sent no ID token"))?;
         let c = self.verified(jwt).await?;
         let sub = match nonce {
-            Some(n) => auth::check_claims(&c, &self.issuer, &self.client_id, n, Utc::now())?,
+            Some(n) => auth::check_claims(&c, &self.issuer, &self.client_id, Some(n), Utc::now())?,
             // A refresh's ID token answers no nonce; the rest still holds.
-            None => auth::check_claims(&c, &self.issuer, &self.client_id, c["nonce"].as_str().unwrap_or_default(), Utc::now())?,
+            None => auth::check_claims(&c, &self.issuer, &self.client_id, None, Utc::now())?,
         };
         let name = c["name"].as_str().or(c["preferred_username"].as_str()).unwrap_or(&sub).to_string();
         Ok((sub, name, auth::roles(&c, &self.roles_claim).iter().any(|r| r == ROLE), c["auth_time"].as_i64()))
@@ -305,9 +305,19 @@ pub async fn guard(State(c): State<Arc<Console>>, mut req: Request, next: Next) 
                     }
                     true
                 }
-                _ => false,
+                Ok((sub, _, admin, _)) => {
+                    tracing::warn!("admin console: {}'s session ends: the provider now names {sub}, admin {admin}", s.sub);
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!("admin console: {}'s session ends: the provider's new ID token was refused: {e:#}", s.sub);
+                    false
+                }
             },
-            Err(_) => false,
+            Err(e) => {
+                tracing::warn!("admin console: {}'s session ends: {e:#}", s.sub);
+                false
+            }
         };
         if !still {
             c.store.sessions.lock().unwrap().remove(&sid);
