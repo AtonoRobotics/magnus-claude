@@ -97,12 +97,17 @@ nav.side .who .icon-btn svg.ic { width: 19px; height: 19px; }
 /* The conversation: a solid reading surface; with glass it floats, inset. */
 main { background: var(--main); margin: var(--main-gap) 0; height: calc(100vh - 2 * var(--main-gap)); border-radius: var(--main-radius); box-shadow: var(--main-shadow); outline: 1px solid var(--main-edge); padding: 28px 36px 64px; width: 100%; overflow-y: auto; min-width: 0; }
 body.with-detail main { border-radius: var(--main-radius); }
-main:has(> section.conv) { padding: 0; scroll-padding-top: 88px; scroll-padding-bottom: 170px; }
-section.conv { min-height: 100%; display: flex; flex-direction: column; }
-section.conv .thread { flex: 1; }
+/* The conversation is a column: its head, then the thread, which alone
+   scrolls, then the composer. Nothing lies over the thread, so whatever is
+   scrolled into view in it is in view. */
+main:has(> section.conv) { padding: 0; overflow: hidden; }
+section.conv { height: 100%; min-height: 0; display: flex; flex-direction: column; }
 /* The thread and the composer: a 760px column, as the design draws them. */
-section.conv .thread, section.conv #composer, section.conv #banners { width: 100%; max-width: 760px; margin-left: auto; margin-right: auto; padding-left: 32px; padding-right: 32px; }
-.conv-head { position: sticky; top: 0; z-index: 3; background: var(--main); display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: nowrap; padding: 18px 32px; border-bottom: 1px solid var(--hair); }
+section.conv #composer, section.conv #banners { width: 100%; max-width: 760px; margin-left: auto; margin-right: auto; padding-left: 32px; padding-right: 32px; }
+/* The thread scrolls across the conversation's width; its padding keeps the
+   same 760px column (696px of text, at least 32px either side). */
+section.conv .thread { flex: 1; min-height: 0; overflow-y: auto; width: 100%; padding-left: max(32px, calc((100% - 696px) / 2)); padding-right: max(32px, calc((100% - 696px) / 2)); }
+.conv-head { flex: none; background: var(--main); display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: nowrap; padding: 18px 32px; border-bottom: 1px solid var(--hair); }
 .conv-head h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conv-title .small { font-size: 12px; color: var(--muted); }
 .conv-title .small a { color: var(--muted); }
@@ -111,7 +116,7 @@ section.conv .thread, section.conv #composer, section.conv #banners { width: 100
 .conv-head .row { flex-wrap: nowrap; gap: 4px; flex: none; }
 .conv-head select { height: 36px; font-size: 14px; font-weight: 500; padding: 0 10px; max-width: 180px; border: 1px solid var(--btn-border); border-radius: 10px; background: var(--button-bg); color: var(--fg); }
 .hello { margin-top: 24px; }
-#composer { position: sticky; bottom: 0; background: var(--main); padding-top: 8px; padding-bottom: 24px; }
+#composer { flex: none; background: var(--main); padding-top: 8px; padding-bottom: 24px; }
 aside.detail { background: var(--panel); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); border-left: 1px solid var(--panel-edge); height: 100vh; overflow-y: auto; padding: 0; min-width: 0; display: flex; flex-direction: column; }
 .detail-head { position: sticky; top: 0; z-index: 2; background: var(--panel); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 20px 24px 14px; }
 .detail-body { flex: 1; display: flex; flex-direction: column; padding: 0 24px 24px; min-height: 0; }
@@ -223,6 +228,11 @@ svg.chev { width: 16px; height: 16px; color: var(--chev); stroke-width: 1.8; }
 .result > details > summary .muted { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .result .pre { white-space: pre-wrap; margin: 8px 0; }
 .result > a { display: inline-block; margin-top: 6px; }
+/* A result that shows its deliverable: the full column, its line above the
+   deliverable's own cards, as on the outcome page. */
+.result:has(> iframe.composed) { align-self: stretch; width: 100%; border: 0; background: none; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.result:has(> iframe.composed) > a { margin-top: 0; }
+.entry:has(> .result > iframe.composed) { align-self: stretch; max-width: 100%; }
 /* A task in its conversation, with the decision it waits on right under it. */
 .tcard { list-style: none; }
 /* Files where they are mentioned: a glimpse, the name, Download. */

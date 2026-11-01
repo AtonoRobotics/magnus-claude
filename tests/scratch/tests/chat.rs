@@ -425,7 +425,8 @@ async fn a_schedule_from_chat_fires_after_a_restart() {
     }
     let t = fired.unwrap_or_else(|| panic!("the schedule for {at} did not fire after the restart"));
     assert_eq!(t["person"], "alice", "the scheduled task does not act for its creator");
-    let minute = due.with_second(0).and_then(|d| d.with_nanosecond(0)).unwrap();
+    // In UTC: a local time in the hour clocks repeat has no single second 0.
+    let minute = due.with_timezone(&chrono::Utc).with_second(0).and_then(|d| d.with_nanosecond(0)).unwrap();
     let created = chrono::DateTime::parse_from_rfc3339(t["created_at"].as_str().unwrap()).unwrap();
     assert!(created >= minute, "fired at {created}, before {at} ({minute})");
     let done = alice.wait_settled(t["task_id"].as_str().unwrap()).await;

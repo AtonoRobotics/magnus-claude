@@ -188,7 +188,7 @@ impl Kernel {
                 if let Some(end) = r.ended_at {
                     let after = t.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| answered.get(f)).map_or(end, |a| end.max(*a));
                     let files: Vec<Value> = r.outputs.iter().map(|(id, name, mt, size)| json!({ "id": id, "name": name, "media_type": mt, "size": size })).collect();
-                    out.push((after, i64::MAX, json!({ "id": format!("r:{}", t.task_id), "kind": "result", "task_id": t.task_id, "title": title, "text": t.text, "status": status, "summary": r.summary, "at": end, "files": files, "verdict": t.verdict })));
+                    out.push((after, i64::MAX, json!({ "id": format!("r:{}", t.task_id), "kind": "result", "task_id": t.task_id, "title": title, "text": t.text, "status": status, "summary": r.summary, "view": r.outcome_view, "at": end, "files": files, "verdict": t.verdict })));
                 }
             }
         }
