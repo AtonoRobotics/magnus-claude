@@ -553,6 +553,23 @@ pub struct Connector {
     /// entry whose quote is found in its answer is verified.
     #[serde(default)]
     pub system_of_record: bool,
+    /// The access asked for at sign-in, when the app's manifest names it
+    /// (else what the app's metadata offers).
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// The provider whose registration (Alpha Vector's client, set by the
+    /// owner) signs people in to it.
+    #[serde(default)]
+    pub registration: Option<String>,
+    /// Its name and one sentence on what Magnus can do with it, from its
+    /// manifest.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// From the catalog, not added by the owner.
+    #[serde(default)]
+    pub catalog: bool,
 }
 
 /// The company knowledge base. Without an embedding server it is searched

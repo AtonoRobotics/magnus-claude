@@ -13,8 +13,20 @@ fn tool_of<'a>(list: &'a Value, app: &str, tool: &str) -> &'a Value {
     c["tools"].as_array().unwrap().iter().find(|t| t["name"] == tool).unwrap_or(&Value::Null)
 }
 
+/// The organisation provides an app; each person signs in to it with their
+/// own account, and only their own runs use that sign-in (connectors spec;
+/// owner, 2026-11-01: "connectors are per person login. The connector
+/// itself is provided by the org.").
+async fn sign_in(api: &Api, app: &str, port: u16) {
+    let (st, v) = api.post(&format!("/v1/connectors/{app}/sign-in"), json!({ "redirect_uri": format!("http://127.0.0.1:{port}/callback") })).await;
+    assert!(st.is_success(), "{v}");
+    let (code, state) = FakeOAuthApp::browse(v["authorize_url"].as_str().unwrap()).await;
+    assert_eq!(state, v["state"].as_str().unwrap());
+    assert_eq!(api.post(&format!("/v1/connectors/{app}/sign-in/complete"), json!({ "state": state, "code": code })).await.0, 204);
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn the_owner_adds_an_app_signs_in_classifies_its_tools_and_the_kill_switch_revokes_the_sign_in() {
+async fn the_owner_adds_an_app_each_person_signs_in_with_their_own_account_and_the_kill_switch_revokes_every_sign_in() {
     // Tokens last 30 s, inside the minute Magnus refreshes ahead: every use refreshes.
     let cal = FakeOAuthApp::start(30).await;
     let m = FakeModel::start(script(|c| async move {
@@ -49,7 +61,11 @@ async fn the_owner_adds_an_app_signs_in_classifies_its_tools_and_the_kill_switch
     let (st, v) = alice.post("/v1/connectors/calendar/sign-in", json!({ "redirect_uri": format!("http://127.0.0.1:{port}/callback") })).await;
     assert!(st.is_success(), "{v}");
     let (code, state) = FakeOAuthApp::browse(v["authorize_url"].as_str().unwrap()).await;
-    assert_eq!(state, v["state"].as_str().unwrap());
+    // Someone else cannot finish another person's sign-in and make it theirs.
+    assert!(!carol.post("/v1/connectors/calendar/sign-in/complete", json!({ "state": state, "code": code })).await.0.is_success(), "carol took alice's sign-in");
+    let (st, v) = alice.post("/v1/connectors/calendar/sign-in", json!({ "redirect_uri": format!("http://127.0.0.1:{port}/callback") })).await;
+    assert!(st.is_success(), "{v}");
+    let (code, state) = FakeOAuthApp::browse(v["authorize_url"].as_str().unwrap()).await;
     assert_eq!(alice.post("/v1/connectors/calendar/sign-in/complete", json!({ "state": state, "code": code })).await.0, 204);
     assert!(!alice.post("/v1/connectors/calendar/sign-in/complete", json!({ "state": state, "code": code })).await.0.is_success(), "a sign-in completed twice");
 
@@ -65,25 +81,44 @@ async fn the_owner_adds_an_app_signs_in_classifies_its_tools_and_the_kill_switch
     assert_eq!(alice.put("/v1/connectors/calendar/tools/delete_all", json!({ "risk": "anything" })).await.0, 400);
     assert!(alice.put_policy("org", &org_policy(&permit_execute("calendar__create_event"))).await.is_success());
 
-    // A person's task uses the classified tools; the unclassified one is never offered.
+    // Carol sees the organisation's app, not signed in for her: alice's
+    // sign-in is alice's. Her task is not offered it, and a call is refused.
+    let (_, list) = carol.get("/v1/connectors").await;
+    assert_eq!((list["connectors"][0]["name"].as_str(), list["connectors"][0]["signed_in"].as_bool()), (Some("calendar"), Some(false)), "{list}");
+    assert!(list["connectors"][0]["tools"].is_null() && list["connectors"][0]["url"].is_null(), "a person sees the owner's view: {list}");
+    let before = m.requests().len();
+    let t = carol.submit("Put the standup on my calendar.").await;
+    carol.wait_settled(&t).await;
+    assert_eq!(cal.calls("create_event"), 0, "carol's task acted through alice's sign-in");
+    let offered: Vec<String> = m.requests()[before..].iter().flat_map(|c| c.offered_tools()).collect();
+    assert!(!offered.iter().any(|t| t.starts_with("calendar__")), "carol was offered an app she has not signed in to: {offered:?}");
+
+    // Carol signs in with her own account; her task uses the classified tools.
+    sign_in(&carol, "calendar", port).await;
+    let before = m.requests().len();
     let t = carol.submit("Put the standup on my calendar.").await;
     let done = carol.wait_settled(&t).await;
     assert_eq!(done["waiting_on"], "review", "{done}");
     assert_eq!((cal.calls("create_event"), cal.calls("list_events")), (1, 1));
-    let offered: Vec<String> = m.requests().iter().flat_map(|c| c.offered_tools()).collect();
+    let offered: Vec<String> = m.requests()[before..].iter().flat_map(|c| c.offered_tools()).collect();
     assert!(offered.contains(&"calendar__create_event".to_string()) && !offered.iter().any(|t| t == "calendar__delete_all"), "{offered:?}");
     assert!(cal.state.lock().unwrap().refreshes >= 2, "expired tokens were not refreshed (or a rotated refresh token was reused)");
 
-    // The kill switch revokes the sign-in at the app.
+    // Alice ends her own sign-in; carol's is untouched and still hers.
+    assert_eq!(alice.send(reqwest::Method::DELETE, "/v1/connectors/calendar/connection", None).await.0, 204);
+    assert_eq!(alice.get("/v1/connectors").await.1["connectors"][0]["signed_in"], false);
+    assert_eq!(carol.get("/v1/connectors").await.1["connectors"][0]["signed_in"], true);
+
+    // The kill switch revokes every person's sign-in at the app.
     assert!(alice.post("/v1/kill-switch", json!({ "engaged": true })).await.0.is_success());
-    let ks = eventually("the app's sign-in is revoked", PATIENCE, || async {
+    let ks = eventually("carol's sign-in is revoked", PATIENCE, || async {
         let (_, ks) = alice.get("/v1/kill-switch").await;
-        (ks["revoked"]["connector_calendar"]["at_provider"] == true).then_some(ks)
+        (ks["revoked"]["connector_calendar__carol"]["at_provider"] == true).then_some(ks)
     })
     .await;
     assert!(cal.state.lock().unwrap().revoked.iter().any(|t| t.starts_with("rt-")), "{ks}");
     assert!(alice.post("/v1/kill-switch", json!({ "engaged": false })).await.0.is_success());
-    let (_, list) = alice.get("/v1/connectors").await;
+    let (_, list) = carol.get("/v1/connectors").await;
     assert_eq!(list["connectors"][0]["signed_in"], false, "a revoked sign-in still counts: {list}");
 
     // Removed, it is gone; the worker is no longer offered its tools.

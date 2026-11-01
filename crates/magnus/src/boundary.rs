@@ -246,7 +246,11 @@ impl Kernel {
         if let Some(c) = &f.connector {
             // Compare the live definition with the pin right before acting, so
             // a definition changed after it was listed cannot run (B10).
-            if let Err(why) = self.check_pin(c, &f).await {
+            let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
+            if !self.connected(c, &person) {
+                return self.deny(a, "credentials", &format!("{} is not connected for the person this task is for: they connect it with their own account in the Library, and no one else's sign-in is used", f.app), false, None).await;
+            }
+            if let Err(why) = self.check_pin(c, &f, &person).await {
                 return self.deny(a, "identify", &why, true, None).await;
             }
             let (pinned, changed) = self.read(|s| (s.pins.contains_key(&a.tool), s.changed.contains_key(&a.tool)));
@@ -317,10 +321,12 @@ impl Kernel {
         if self.read(|s| s.kill_switch) {
             return self.deny(a, "credentials", "the kill switch is engaged", false, None).await;
         }
+        // The person's own sign-in, never anyone else's.
+        let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
         let secret = match f.connector.as_ref().filter(|c| c.credential.is_some()) {
-            Some(c) => match self.connector_secret(c).await? {
+            Some(c) => match self.connector_secret(c, &person).await? {
                 Some(s) => Some(s),
-                None => return self.deny(a, "credentials", &format!("no credential is stored for {} (or its sign-in expired: the owner signs in again)", f.app), false, None).await,
+                None => return self.deny(a, "credentials", &format!("{} is not connected for the person this task is for (or their sign-in expired): they sign in again in the Library", f.app), false, None).await,
             },
             None => None,
         };
@@ -409,8 +415,8 @@ impl Kernel {
         }
     }
 
-    async fn check_pin(&self, c: &Connector, f: &Facts) -> std::result::Result<(), String> {
-        let secret = self.connector_secret(c).await.ok().flatten();
+    async fn check_pin(&self, c: &Connector, f: &Facts, person: &str) -> std::result::Result<(), String> {
+        let secret = self.connector_secret(c, person).await.ok().flatten();
         let live = self
             .mcp
             .list_tools(&c.url, secret.as_ref().map(|s| s.expose()))

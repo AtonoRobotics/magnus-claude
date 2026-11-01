@@ -174,6 +174,12 @@ pub enum Ev {
     ConnectorRemoved {
         name: String,
     },
+    /// The owner set (or cleared) the organisation's registration with a
+    /// provider; its client ID and secret are in the vault, not here.
+    RegistrationSet {
+        provider: String,
+        set: bool,
+    },
     /// The owner classified one of an app's tools (None: not offered).
     ToolClassified {
         connector: String,
