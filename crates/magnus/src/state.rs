@@ -339,22 +339,25 @@ pub struct Pin {
     pub approved: bool,
 }
 
+/// A knowledge entry's record. What it says (its text, source, evidence
+/// and value) is not kept here: it is read from the content store when the
+/// entry is indexed, and every reader reads it from the index, as the
+/// readers its row security allows (recall only, step 6). The title stays
+/// until step 3 settles the titles shown in lists.
 #[derive(Clone, Debug, Serialize)]
 pub struct KnowledgeEntry {
     pub id: String,
     pub title: String,
-    pub text: String,
     pub readers: Vec<Vec<String>>,
     pub integrity: String,
-    pub source: Value,
     pub author: String,
     pub run: Option<String>,
-    pub verification: Option<Value>,
-    pub value: Option<Value>,
     pub endorsed: Option<Value>,
     pub at: DateTime<Utc>,
     /// The last event that changed it, so the index knows it is current.
     pub version: i64,
+    /// The event that added it: where its content is.
+    pub seq: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -1121,23 +1124,20 @@ impl State {
                 }
                 _ => {}
             },
-            Ev::KnowledgeAdded { id, title, text, readers, integrity, source, author, run, verification, value } => {
+            Ev::KnowledgeAdded { id, title, readers, integrity, author, run, .. } => {
                 self.knowledge.insert(
                     id.clone(),
                     KnowledgeEntry {
                         id: id.clone(),
                         title: title.clone(),
-                        text: text.clone(),
                         readers: readers.clone(),
                         integrity: integrity.clone(),
-                        source: source.clone(),
                         author: author.clone(),
                         run: run.clone(),
-                        verification: verification.clone(),
-                        value: value.clone(),
                         endorsed: None,
                         at: e.at,
                         version: e.seq,
+                        seq: e.seq,
                     },
                 );
             }
