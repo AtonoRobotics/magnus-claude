@@ -108,9 +108,13 @@ const isDev = () => App.me?.roles?.includes("developer");
 const drafts = {};
 function paint(el, html) {
   if (!el || el._html === html) return false;
-  $$("[data-draft]", el).forEach(i => { drafts[i.dataset.draft] = i.value; });
+  // A card can be shown in several places at once (its conversation, the
+  // panel, Needs you), each copy with the same draft key: the copy being
+  // typed in is the draft, and only a region that held the focus takes it.
+  const active = document.activeElement;
+  $$("[data-draft]", el).forEach(i => { if (!(active !== i && active?.dataset?.draft === i.dataset.draft)) drafts[i.dataset.draft] = i.value; });
   const opened = new Set($$("details[data-key]", el).filter(d => d.open).map(d => d.dataset.key));
-  const focused = document.activeElement?.dataset?.draft;
+  const focused = el.contains(active) ? active?.dataset?.draft : undefined;
   el.innerHTML = html;
   el._html = html;
   $$("details[data-key]", el).forEach(d => { if (opened.has(d.dataset.key)) d.open = true; });
@@ -185,7 +189,7 @@ function nav() {
     <button class="needs${waiting.length ? " some" : ""}${on("needs")}" data-open="needs" title="${blocking ? `${blocking} waiting on you now` : "Approvals, questions and reviews"}">${icon("bell")}<span class="ttl">Needs you</span><span class="pill${blocking ? "" : " quiet"}" data-needs-count>${waiting.length}</span></button>
     <div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more${on("projects")}" title="All projects, and a new one">All</a></div>
     ${App.projects.map(p => `<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" class="${on(`project:${p.id}`).trim()}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>
-      ${App.threads.filter(t => t.project?.id === p.id).map(conv).join("")}`).join("") || `<p class="small faint pad">None yet.</p>`}
+      ${App.threads.filter(t => t.project?.id === p.id).map(t => conv(t)).join("")}`).join("") || `<p class="small faint pad">None yet.</p>`}
     ${loose.length ? `<div class="group"><span>Conversations</span></div>${loose.map(t => conv(t, false)).join("")}` : ""}
     <div class="group"><span>Across everything</span></div>
     <div class="views">
@@ -1373,6 +1377,8 @@ async function fill(frame, view, taskId, task) {
 }
 
 async function respond(btn, root) {
+  // Sent once, however many handlers see the click.
+  if (btn.disabled) return;
   const id = btn.dataset.item;
   let [decision, scope] = btn.dataset.decision.split(":");
   const body = { decision };
@@ -2119,7 +2125,8 @@ async function dataSection(el) {
         ${requests.length ? `<table class="t small" data-deletions style="margin-top:10px"><tbody>${requests.map(q => `<tr><td>${esc(q.what)}${isOwner() && q.person !== App.me.id ? ` <span class="faint">(${esc(q.person)})</span>` : ""}</td>
           <td>${q.decision ? `<span class="chip ${STATE[q.decision]?.[0] || ""}">${esc(STATE[q.decision]?.[1] || q.decision)}</span>${q.note ? ` <span class="muted">${esc(q.note)}</span>` : ""}` : `<span class="chip warn">asked</span> due ${esc(new Date(q.due).toLocaleDateString())}`}</td></tr>`).join("")}</tbody></table>` : ""}</div>
       ${backups ? `<h3>Backups</h3><div class="card"><div class="spread"><span class="small muted">${backups.files.length ? `${backups.files.length} kept for ${esc(backups.keep_days)} days` : "None yet."}${backups.latest ? ` · last ${esc(when(backups.latest.at))}${backups.latest.restored ? ", restored to check it" : `, <span style="color:var(--bad)">did not restore: ${esc(backups.latest.detail)}</span>`}` : ""}</span>
-        <button data-act="backup">Back up now</button></div></div>` : ""}`);
+        <button data-act="backup">Back up now</button></div>
+        ${backups.on_appliance_disk ? `<p class="small" data-backup-disk style="color:var(--warn)">They are on the appliance's own disk, so a lost disk loses them too: set <span class="mono">[backup] dir</span> to another disk, and keep a copy of the backup key off the appliance.</p>` : ""}</div>` : ""}`);
   };
   el.onchange = async e => {
     const c = e.target.closest("input[data-pref]"); if (!c) return;
@@ -2218,7 +2225,8 @@ function stop() {
   window.onhashchange = null;
   Panel.what = null;
   App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null;
-  // What one person was typing is not shown to the next who signs in here.
+  // What one person was typing or filtering by is not the next one's here.
+  Panel.lib = { q: "", project: "" };
   for (const k of Object.keys(drafts)) delete drafts[k];
 }
 
