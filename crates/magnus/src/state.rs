@@ -479,6 +479,8 @@ impl Schedule {
 /// When clocks go back, the time comes twice: the schedule is due at the first
 /// still ahead, once a day (made in between, at the second; never at both).
 /// When clocks go forward past it, it is due as the clocks resume, an hour on.
+/// The two times of a repeated hour are taken in time order, whatever order
+/// the time zone gives them in.
 fn next_daily<Tz: chrono::TimeZone>(after: DateTime<Utc>, fired: bool, h: u32, m: u32, tz: &Tz) -> Option<DateTime<Utc>> {
     use chrono::LocalResult;
     let local = after.with_timezone(tz);
@@ -487,13 +489,26 @@ fn next_daily<Tz: chrono::TimeZone>(after: DateTime<Utc>, fired: bool, h: u32, m
         let at = day.and_hms_opt(h, m, 0)?;
         let t = match tz.from_local_datetime(&at) {
             LocalResult::Single(t) => t,
-            LocalResult::Ambiguous(first, _) if first > local => first,
-            LocalResult::Ambiguous(_, second) if !fired => second,
-            LocalResult::Ambiguous(_, _) => {
-                day = day.succ_opt()?;
-                continue;
+            // In time order: chrono's `Local` gives the later first.
+            LocalResult::Ambiguous(x, y) => {
+                let (first, second) = if x <= y { (x, y) } else { (y, x) };
+                if first > local {
+                    first
+                } else if !fired {
+                    second
+                } else {
+                    day = day.succ_opt()?;
+                    continue;
+                }
             }
-            LocalResult::None => tz.from_local_datetime(&(at + chrono::Duration::hours(1))).earliest()?,
+            LocalResult::None => {
+                // An hour on is never in a gap; take its earlier time if repeated.
+                match tz.from_local_datetime(&(at + chrono::Duration::hours(1))) {
+                    LocalResult::Single(t) => t,
+                    LocalResult::Ambiguous(x, y) => x.min(y),
+                    LocalResult::None => return None,
+                }
+            }
         };
         if t > local {
             return Some(t.with_timezone(&Utc));
@@ -1601,8 +1616,41 @@ mod tests {
         // Due as they resume, at 03:30 PDT, and on the next day at 02:30 again.
         assert_eq!(super::next_daily(utc("2027-03-14T09:00:00Z"), false, 2, 30, &la), Some(utc("2027-03-14T10:30:00Z")));
         assert_eq!(super::next_daily(utc("2027-03-14T10:30:00Z"), true, 2, 30, &la), Some(utc("2027-03-15T09:30:00Z")));
+        // Whatever order the time zone gives the two in (chrono's `Local`
+        // gives the later first; on the owner's build box, the first 01:31
+        // came out an hour late).
+        let rev = Reversed(la);
+        assert_eq!(super::next_daily(utc("2026-11-01T08:29:00Z"), false, 1, 31, &rev), Some(utc("2026-11-01T08:31:00Z")));
+        assert_eq!(super::next_daily(utc("2026-11-01T09:29:00Z"), false, 1, 31, &rev), Some(utc("2026-11-01T09:31:00Z")));
+        assert_eq!(super::next_daily(utc("2026-11-01T08:31:00Z"), true, 1, 31, &rev), Some(utc("2026-11-02T09:31:00Z")));
         // An ordinary day.
         assert_eq!(super::next_daily(la.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap().with_timezone(&Utc), false, 8, 0, &la), Some(utc("2026-06-02T15:00:00Z")));
+    }
+
+    /// A time zone that gives a repeated time's two instants latest first,
+    /// as chrono's `Local` does.
+    #[derive(Clone, Copy)]
+    struct Reversed(chrono_tz::Tz);
+    impl chrono::TimeZone for Reversed {
+        type Offset = <chrono_tz::Tz as chrono::TimeZone>::Offset;
+        fn from_offset(o: &Self::Offset) -> Self {
+            Reversed(chrono_tz::Tz::from_offset(o))
+        }
+        fn offset_from_local_date(&self, d: &chrono::NaiveDate) -> chrono::LocalResult<Self::Offset> {
+            self.0.offset_from_local_date(d)
+        }
+        fn offset_from_local_datetime(&self, d: &chrono::NaiveDateTime) -> chrono::LocalResult<Self::Offset> {
+            match self.0.offset_from_local_datetime(d) {
+                chrono::LocalResult::Ambiguous(a, b) => chrono::LocalResult::Ambiguous(b, a),
+                r => r,
+            }
+        }
+        fn offset_from_utc_date(&self, d: &chrono::NaiveDate) -> Self::Offset {
+            self.0.offset_from_utc_date(d)
+        }
+        fn offset_from_utc_datetime(&self, d: &chrono::NaiveDateTime) -> Self::Offset {
+            self.0.offset_from_utc_datetime(d)
+        }
     }
 
     fn ev(seq: i64, actor: &str, ev: serde_json::Value) -> Event {
