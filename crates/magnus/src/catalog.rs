@@ -2,9 +2,12 @@
 //! Magnus (`catalog/*.toml`), compiled into the appliance so the release's
 //! signature covers them (connectors spec, "Catalog and connector
 //! manifests"). A manifest's tool classes count as the organisation owner's
-//! classification (owner's ruling 5). A connector whose provider needs
-//! Alpha Vector's own client is in no one's Library until the owner sets
-//! that registration (`/v1/registrations`).
+//! classification (owner's ruling 5). Every catalog connector is in every
+//! Library, already set up: no one, person or admin, is asked for a client
+//! ID, secret or address (connectors spec rev 46, "What the user sees").
+//! A connector whose provider needs Alpha Vector's own client signs in
+//! through it (`catalog/registrations.toml`); its secret, when it has one,
+//! is Alpha Vector's, provisioned to the appliance until the relay holds it.
 
 use crate::config::{Connector, ToolClass};
 use serde::Deserialize;
@@ -46,16 +49,28 @@ pub fn manifests() -> &'static [Manifest] {
     M.get_or_init(|| SOURCES.iter().map(|s| toml::from_str(s).expect("a catalog manifest parses (checked by a unit test)")).collect())
 }
 
-/// The providers whose registration the owner sets: those of the
-/// catalog's `preregistered` connectors.
-pub fn providers() -> Vec<String> {
-    let mut p: Vec<String> = manifests().iter().filter(|m| m.registration == "preregistered").filter_map(|m| m.provider.clone()).collect();
-    p.sort();
-    p.dedup();
-    p
+/// Alpha Vector's own client with a provider.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Client {
+    pub client_id: String,
+    /// `desktop` or `confidential` (a secret at the token exchange), or
+    /// `public` (none).
+    pub kind: String,
 }
 
-/// The vault name of the organisation's registration with a provider.
+impl Client {
+    pub fn needs_secret(&self) -> bool {
+        self.kind != "public"
+    }
+}
+
+/// Alpha Vector's client with `provider`, if it has one.
+pub fn client(provider: &str) -> Option<&'static Client> {
+    static C: OnceLock<BTreeMap<String, Client>> = OnceLock::new();
+    C.get_or_init(|| toml::from_str(include_str!("../../../catalog/registrations.toml")).expect("the catalog's registrations parse (checked by a unit test)")).get(provider)
+}
+
+/// The vault name of Alpha Vector's provisioned secret for a provider.
 pub fn registration_name(provider: &str) -> String {
     format!("registration_{provider}")
 }
@@ -106,6 +121,14 @@ mod tests {
                 assert!(["read", "reversible_write", "irreversible", "financial"].contains(&risk.as_str()), "{}: {t} is {risk}", m.id);
             }
             assert!(!m.summary.to_lowercase().contains("mcp") && !m.summary.to_lowercase().contains("oauth"), "{}: protocol words", m.id);
+            // A preregistered connector is set up already: its provider's client is in the catalog.
+            if let Some(p) = &m.provider {
+                assert!(super::client(p).is_some(), "{}: no client for {p} in catalog/registrations.toml", m.id);
+            }
+        }
+        for p in ["google", "microsoft", "github", "vercel", "slack", "sentry"] {
+            let c = super::client(p).unwrap_or_else(|| panic!("{p}"));
+            assert!(!c.client_id.is_empty() && ["desktop", "confidential", "public"].contains(&c.kind.as_str()), "{p}: {c:?}");
         }
     }
 }

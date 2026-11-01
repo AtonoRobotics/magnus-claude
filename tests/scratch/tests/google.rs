@@ -1,11 +1,11 @@
 //! Google's connectors, against Google: no fakes (owner, 2026-11-01: "No
 //! fakes. Test everything against real."). The catalog's Gmail, Calendar,
-//! Drive and Chat sign in through the organisation's registration with
-//! Google, Alpha Vector's Desktop OAuth client (owner: "connectors should be
-//! built for developer org accounts and users have their own oauth sign
-//! in"). This finds each live server's sign-in from the server itself and
-//! starts a person's sign-in at Google. Its client ID is Alpha Vector's,
-//! from `catalog/registrations.toml`.
+//! Drive and Chat are in every Library already set up, and sign in through
+//! Alpha Vector's Desktop OAuth client with Google (owner: "connectors
+//! should be built for developer org accounts and users have their own
+//! oauth sign in"; connectors spec rev 46: nobody sets a connector up).
+//! This finds each live server's sign-in from the server itself and starts
+//! a person's sign-in at Google.
 
 use magnus_invariants::*;
 use serde_json::{json, Value};
@@ -20,40 +20,36 @@ const SERVERS: [(&str, &str, &str); 4] = [
 fn client() -> (String, String) {
     // Alpha Vector's Google client ID is public, kept in the catalog. These
     // tests never reach the token exchange, the one step that uses the
-    // client secret, so they send a stand-in for it.
+    // client secret, so they provision a stand-in for it, as Alpha
+    // Vector's deployment provisions the real one.
     let path = magnus_invariants::appliance::workspace_root().join("catalog/registrations.toml");
     let r: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
     let id = r["google"]["client_id"].as_str().expect("catalog/registrations.toml names Alpha Vector's Google client").to_string();
     (id, "not-used-before-the-token-exchange".into())
 }
 
-fn names(list: &Value) -> Vec<String> {
-    list["connectors"].as_array().unwrap().iter().filter_map(|c| c["name"].as_str().map(String::from)).collect()
-}
-
 #[tokio::test(flavor = "multi_thread")]
-async fn google_s_connectors_come_online_with_the_organisation_s_registration_and_sign_in_at_google() {
+async fn google_s_connectors_are_in_every_library_already_set_up_and_sign_in_at_google() {
     let (id, secret) = client();
     let m = FakeModel::start(steps(vec![])).await;
     let app = Appliance::start(Spec::default(), &m).await;
     let (alice, carol) = (app.api("alice"), app.api("carol"));
 
-    // Not in anyone's Library until the organisation's registration is set.
+    // In everyone's Library from the start; until Alpha Vector's secret is
+    // provisioned (a deployment step, never typed by anyone), the card says
+    // it is not ready rather than offering a sign-in that cannot finish.
     let (_, list) = carol.get("/v1/connectors").await;
-    assert!(!names(&list).iter().any(|n| n.starts_with("google-")), "{list}");
-    let (_, regs) = alice.get("/v1/registrations").await;
-    assert_eq!(regs["registrations"], json!([{ "provider": "google", "set": false, "connectors": ["Gmail", "Google Calendar", "Google Drive", "Google Chat"] }]), "{regs}");
+    let gmail = list["connectors"].as_array().unwrap().iter().find(|c| c["name"] == "google-gmail").cloned().unwrap_or_else(|| panic!("{list}"));
+    assert_eq!((gmail["state"].as_str(), gmail["ready"].as_bool()), (Some("available"), Some(false)), "{gmail}");
+    assert!(!carol.post("/v1/connectors/google-gmail/sign-in", json!({ "redirect_uri": "http://127.0.0.1:9/callback" })).await.0.is_success());
 
-    // Only the owner sets it; it is kept in the vault and never shown again.
-    let reg = json!({ "client_id": id, "client_secret": secret });
-    assert_eq!(carol.put("/v1/registrations/google", reg.clone()).await.0, 403);
-    assert_eq!(alice.put("/v1/registrations/google", reg).await.0, 204);
-    let (_, regs) = alice.get("/v1/registrations").await;
-    assert_eq!(regs["registrations"][0]["set"], true, "{regs}");
+    // Only the owner's credentials (Alpha Vector's deployment) provision it;
+    // it is kept in the vault and never shown again, nor logged.
+    assert_eq!(carol.put("/v1/registrations/google", json!({ "client_secret": secret })).await.0, 403);
+    assert_eq!(alice.put("/v1/registrations/google", json!({ "client_secret": secret })).await.0, 204);
+    assert_eq!(alice.get("/v1/registrations").await.0, 404, "registrations are listed for someone to set");
     let (_, all) = alice.get("/v1/connectors").await;
-    for shown in [regs.to_string(), all.to_string()] {
-        assert!(!shown.contains(&id) && !shown.contains(&secret), "the registration's client is shown: {shown}");
-    }
+    assert!(!all.to_string().contains(&secret), "the client secret is shown: {all}");
     let log = app.db.admin().await.query_one("SELECT string_agg(body::text, ' ') FROM public.events", &[]).await.unwrap().get::<_, Option<String>>(0).unwrap_or_default();
     assert!(!log.contains(&secret), "the client secret is in the log");
 
@@ -65,7 +61,7 @@ async fn google_s_connectors_come_online_with_the_organisation_s_registration_an
     let port = callback.local_addr().unwrap().port();
     for (name, title, scope) in SERVERS {
         let c = list["connectors"].as_array().unwrap().iter().find(|c| c["name"] == name).unwrap_or_else(|| panic!("{name} is not in carol's Library: {list}"));
-        assert_eq!((c["title"].as_str(), c["state"].as_str(), c["catalog"].as_bool()), (Some(title), Some("available"), Some(true)), "{c}");
+        assert_eq!((c["title"].as_str(), c["state"].as_str(), c["catalog"].as_bool(), c["ready"].as_bool()), (Some(title), Some("available"), Some(true), Some(true)), "{c}");
         let (st, v) = carol.post(&format!("/v1/connectors/{name}/sign-in"), json!({ "redirect_uri": format!("http://127.0.0.1:{port}/callback") })).await;
         assert!(st.is_success(), "{name}: Magnus could not find the live server's sign-in: {v}");
         let u = url::Url::parse(v["authorize_url"].as_str().unwrap()).unwrap();
@@ -81,11 +77,6 @@ async fn google_s_connectors_come_online_with_the_organisation_s_registration_an
         assert!(page.status().is_success() || page.status().is_redirection(), "{name}: Google answered {}", page.status());
         assert!(!to.contains("error=") && !to.contains("/signin/oauth/error"), "{name}: Google refused the sign-in request: {to}");
     }
-
-    // Cleared, they leave everyone's Library.
-    assert_eq!(alice.send(reqwest::Method::DELETE, "/v1/registrations/google", None).await.0, 204);
-    let (_, list) = carol.get("/v1/connectors").await;
-    assert!(!names(&list).iter().any(|n| n.starts_with("google-")), "{list}");
 }
 
 /// Tool drift (connectors spec, Required tests): each Google manifest names
@@ -126,7 +117,8 @@ async fn a_person_s_card_for_gmail_says_what_magnus_can_do_in_plain_words() {
     let (id, secret) = client();
     let m = FakeModel::start(steps(vec![])).await;
     let app = Appliance::start(Spec::default(), &m).await;
-    assert_eq!(app.api("alice").put("/v1/registrations/google", json!({ "client_id": id, "client_secret": secret })).await.0, 204);
+    let _ = id;
+    assert_eq!(app.api("alice").put("/v1/registrations/google", json!({ "client_secret": secret })).await.0, 204);
     let (st, c) = app.api("carol").get("/v1/connectors/google-gmail").await;
     assert!(st.is_success(), "{c}");
     assert_eq!((c["title"].as_str(), c["state"].as_str()), (Some("Gmail"), Some("available")), "{c}");
@@ -149,7 +141,8 @@ async fn the_library_shows_google_s_connectors_as_the_spec_s_cards_in_the_browse
     let m = FakeModel::start(steps(vec![])).await;
     let app = Appliance::start(Spec::default(), &m).await;
     assert!(set_password(&app, PERSON, PASSWORD));
-    assert_eq!(app.api(PERSON).put("/v1/registrations/google", json!({ "client_id": id, "client_secret": secret })).await.0, 204);
+    let _ = id;
+    assert_eq!(app.api(PERSON).put("/v1/registrations/google", json!({ "client_secret": secret })).await.0, 204);
     let out = tokio::process::Command::new("node")
         .arg(magnus_invariants::appliance::workspace_root().join("desktop/tests/connectors.mjs"))
         .env("MAGNUS_URL", &app.base)

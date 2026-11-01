@@ -305,21 +305,28 @@ async fn discover(app_url: &str, resource_metadata: Option<String>) -> Result<(V
 }
 
 impl Kernel {
-    /// Every app: the config file's, then those the owner added.
     /// The organisation's apps: the config file's, those the owner added,
-    /// and the catalog's whose provider registration is set (or that need
-    /// none).
+    /// and the whole catalog, already set up (connectors spec rev 46).
     pub fn connectors(&self) -> Vec<Connector> {
         let mut all = self.cfg.connectors.clone();
-        let (added, registered): (Vec<Connector>, std::collections::BTreeSet<String>) = self.read(|s| (s.connectors.values().cloned().collect(), s.registrations.clone()));
+        let added: Vec<Connector> = self.read(|s| s.connectors.values().cloned().collect());
         all.extend(added.into_iter().filter(|c| self.cfg.connectors.iter().all(|f| f.name != c.name)));
         for m in crate::catalog::manifests() {
-            let online = m.registration == "dcr" || m.provider.as_ref().is_some_and(|p| registered.contains(p));
-            if online && all.iter().all(|c| c.name != m.id) {
+            if all.iter().all(|c| c.name != m.id) {
                 all.push(crate::catalog::connector(m));
             }
         }
         all
+    }
+
+    /// Whether a catalog connector's provider client is complete on this
+    /// appliance: its secret, when it has one, provisioned by Alpha Vector.
+    /// Only a deployment that has not yet had it is incomplete.
+    pub fn provider_ready(&self, c: &Connector) -> bool {
+        match c.registration.as_deref() {
+            None => true,
+            Some(p) => crate::catalog::client(p).is_some_and(|cl| !cl.needs_secret() || self.read(|s| s.registrations.contains(p))),
+        }
     }
 
     pub fn connector(&self, name: &str) -> Option<Connector> {
@@ -385,14 +392,22 @@ impl Kernel {
         if asm["code_challenge_methods_supported"].as_array().is_some_and(|m| !m.iter().any(|x| x == "S256")) {
             bail!("the app's authorization server does not support PKCE (S256), which MCP requires");
         }
-        // A catalog connector signs in through the organisation's
-        // registration with its provider (Alpha Vector's client there).
+        // A catalog connector signs in through Alpha Vector's own client
+        // with its provider, from the catalog; its secret, when it has one,
+        // is the one Alpha Vector provisioned to this appliance.
+        let shown = c.title.clone().unwrap_or_else(|| c.name.clone());
         let registered: Option<(String, Option<String>)> = match &c.registration {
             Some(provider) => {
-                let raw = self.vault.get(&crate::catalog::registration_name(provider))?.ok_or_else(|| anyhow!("your organisation has not set up its {provider} registration yet"))?;
-                let v: Value = serde_json::from_str(raw.expose()).context("stored registration")?;
-                let id = v["client_id"].as_str().ok_or_else(|| anyhow!("the {provider} registration has no client ID"))?.to_string();
-                Some((id, v["client_secret"].as_str().map(String::from)))
+                let client = crate::catalog::client(provider).ok_or_else(|| anyhow!("{} cannot be connected on this appliance yet", shown))?;
+                let secret = match client.needs_secret() {
+                    true => {
+                        let raw = self.vault.get(&crate::catalog::registration_name(provider))?.ok_or_else(|| anyhow!("{} cannot be connected on this appliance yet: Alpha Vector has not finished setting it up here", shown))?;
+                        let v: Value = serde_json::from_str(raw.expose()).context("stored registration")?;
+                        Some(v["client_secret"].as_str().ok_or_else(|| anyhow!("{} cannot be connected on this appliance yet", shown))?.to_string())
+                    }
+                    false => None,
+                };
+                Some((client.client_id.clone(), secret))
             }
             None => None,
         };
@@ -606,70 +621,29 @@ pub fn router() -> Router<Arc<Kernel>> {
         .route("/v1/connectors/{name}/sign-in", post(sign_in))
         .route("/v1/connectors/{name}/sign-in/complete", post(sign_in_complete))
         .route("/v1/connectors/{name}/connection", delete(disconnect))
-        .route("/v1/registrations", axum::routing::get(registrations))
-        .route("/v1/registrations/{provider}", put(set_registration).delete(clear_registration))
+        .route("/v1/registrations/{provider}", put(set_registration))
 }
 
-/// The organisation's registrations with providers (Alpha Vector's client
-/// with each), which the catalog's connectors sign people in through: for
-/// each, whether it is set and which connectors it brings online. Never
-/// the client's ID or secret.
-async fn registrations(AxState(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = owner(&k, &h) {
-        return r;
-    }
-    let set = k.read(|s| s.registrations.clone());
-    let out: Vec<Value> = crate::catalog::providers()
-        .into_iter()
-        .map(|p| {
-            let connectors: Vec<String> = crate::catalog::manifests().iter().filter(|m| m.provider.as_deref() == Some(p.as_str())).map(|m| m.name.clone()).collect();
-            json!({ "provider": p, "set": set.contains(&p), "connectors": connectors })
-        })
-        .collect();
-    Json(json!({ "registrations": out })).into_response()
-}
-
-/// The owner sets the organisation's registration with a provider: its
-/// client ID and secret go to the vault; the log records only that it was
-/// set, by whom.
+/// Alpha Vector provisions its client secret for a provider to this
+/// appliance (its deployment calls this; no person types it, and nothing
+/// shows it again), until the relay holds it (connectors spec rev 46). The
+/// log records only that it was provisioned.
 async fn set_registration(AxState(k): K, h: HeaderMap, Path(provider): Path<String>, Json(b): Json<Value>) -> Response {
     let p = match owner(&k, &h) {
         Ok(p) => p,
         Err(r) => return r,
     };
-    if !crate::catalog::providers().contains(&provider) {
-        return err(StatusCode::NOT_FOUND, "no catalog connector signs in through that provider");
+    if crate::catalog::client(&provider).is_none_or(|c| !c.needs_secret()) {
+        return err(StatusCode::NOT_FOUND, "no catalog provider takes a secret by that name");
     }
-    let id = b["client_id"].as_str().map(str::trim).unwrap_or_default();
     let secret = b["client_secret"].as_str().map(str::trim).unwrap_or_default();
-    if id.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "the registration needs its client ID");
+    if secret.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "give the provider's client secret");
     }
-    let v = json!({ "client_id": id, "client_secret": (!secret.is_empty()).then_some(secret) });
-    if let Err(e) = k.vault.put(&crate::catalog::registration_name(&provider), &v.to_string()) {
+    if let Err(e) = k.vault.put(&crate::catalog::registration_name(&provider), &json!({ "client_secret": secret }).to_string()) {
         return internal(e);
     }
     match k.emit(&format!("person:{}", p.id), Ev::RegistrationSet { provider, set: true }).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => internal(e),
-    }
-}
-
-/// The owner clears a registration: its connectors leave everyone's
-/// Library. People's sign-ins made through it stay in the vault, unused,
-/// until it is set again or they disconnect.
-async fn clear_registration(AxState(k): K, h: HeaderMap, Path(provider): Path<String>) -> Response {
-    let p = match owner(&k, &h) {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
-    if !crate::catalog::providers().contains(&provider) {
-        return err(StatusCode::NOT_FOUND, "no catalog connector signs in through that provider");
-    }
-    if let Err(e) = k.vault.remove(&crate::catalog::registration_name(&provider)) {
-        return internal(e);
-    }
-    match k.emit(&format!("person:{}", p.id), Ev::RegistrationSet { provider, set: false }).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),
     }
@@ -771,6 +745,8 @@ async fn card(k: &Kernel, c: &Connector, person: &str) -> Value {
         "name": c.name, "title": c.title.clone().unwrap_or_else(|| title(&c.name)), "summary": summary, "allows": allows, "catalog": c.catalog,
         "state": standing.as_str(), "signed_in": standing == Standing::Connected, "signs_in": c.auth.as_deref() == Some(OAUTH),
         "connected_at": at.and_then(|s| chrono::DateTime::from_timestamp(s, 0)), "account": account, "last_used": last,
+        // False only on an appliance Alpha Vector has not finished setting up.
+        "ready": k.provider_ready(c),
     })
 }
 

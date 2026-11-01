@@ -26,6 +26,16 @@ impl Recall {
     /// The content of these events that belongs to `person`, by event seq.
     /// Events whose content is not theirs, or was deleted, are not in it.
     pub async fn content(&self, person: &str, seqs: &[i64]) -> Result<HashMap<i64, Value>> {
+        self.read(person, seqs, None).await
+    }
+
+    /// Only these fields of that content: what a view shows, without the
+    /// rest (a task's attachments, a conversation).
+    pub async fn fields(&self, person: &str, seqs: &[i64], fields: &[&str]) -> Result<HashMap<i64, Value>> {
+        self.read(person, seqs, Some(fields)).await
+    }
+
+    async fn read(&self, person: &str, seqs: &[i64], fields: Option<&[&str]>) -> Result<HashMap<i64, Value>> {
         if seqs.is_empty() {
             return Ok(HashMap::new());
         }
@@ -37,7 +47,17 @@ impl Recall {
         let tx = c.transaction().await?;
         tx.batch_execute(&format!("SET LOCAL ROLE {}", self.reader)).await.context("recall as the person (has `magnus migrate` run since this release was installed?)")?;
         tx.execute("SELECT set_config('magnus.person', $1, true)", &[&person]).await?;
-        let rows = tx.query("SELECT seq, body FROM public.content WHERE seq = ANY($1)", &[&seqs]).await?;
+        let rows = match fields {
+            None => tx.query("SELECT seq, body FROM public.content WHERE seq = ANY($1)", &[&seqs]).await?,
+            Some(f) => {
+                let f: Vec<String> = f.iter().map(|x| x.to_string()).collect();
+                tx.query(
+                    "SELECT seq, COALESCE((SELECT jsonb_object_agg(k, body->k) FROM unnest($2::text[]) AS k WHERE body ? k), '{}'::jsonb) FROM public.content WHERE seq = ANY($1)",
+                    &[&seqs, &f],
+                )
+                .await?
+            }
+        };
         tx.commit().await?;
         Ok(rows.iter().map(|r| (r.get::<_, i64>(0), r.get::<_, Value>(1))).collect())
     }
@@ -112,5 +132,99 @@ impl crate::kernel::Kernel {
             .into_iter()
             .filter_map(|(id, seq, media)| content.get(&seq).map(|c| (id, crate::state::search_text(&media, c["data_b64"].as_str().unwrap_or_default()))))
             .collect())
+    }
+}
+
+/// What a view or a step reads of a task's or a schedule's content.
+const WORDS: &[&str] = &["text", "title", "scope"];
+
+/// Recalled content by event seq, for building a view or a step: a seq
+/// whose content is not there (deleted, or not its person's) reads as
+/// nothing.
+#[derive(Default, Debug)]
+pub struct Words(HashMap<i64, Value>);
+
+impl Words {
+    /// The content of the event `seq` names, or null.
+    pub fn of(&self, seq: i64) -> &Value {
+        self.0.get(&seq).unwrap_or(&Value::Null)
+    }
+
+    /// A string field of that content, or "".
+    pub fn str(&self, seq: i64, field: &str) -> &str {
+        self.of(seq)[field].as_str().unwrap_or_default()
+    }
+
+    /// An optional string field of that content.
+    pub fn opt(&self, seq: i64, field: &str) -> Option<String> {
+        self.of(seq)[field].as_str().map(String::from)
+    }
+
+    /// What a task or schedule asked.
+    pub fn text(&self, seq: i64) -> &str {
+        self.str(seq, "text")
+    }
+
+    /// A task's title as shown: the one the model gave it, else the start
+    /// of what the person wrote.
+    pub fn title(&self, seq: i64) -> Option<String> {
+        self.opt(seq, "title").filter(|t| !t.trim().is_empty())
+    }
+}
+
+impl crate::kernel::Kernel {
+    /// The content of these events, each recalled for the person it is
+    /// named with, through their wall: one read per person.
+    pub async fn words(&self, wanted: impl IntoIterator<Item = (String, i64)>) -> Result<Words> {
+        let mut by: HashMap<String, Vec<i64>> = HashMap::new();
+        for (person, seq) in wanted {
+            by.entry(person).or_default().push(seq);
+        }
+        let mut out = HashMap::new();
+        for (person, seqs) in by {
+            out.extend(self.recall.fields(&person, &seqs, WORDS).await?);
+        }
+        Ok(Words(out))
+    }
+
+    /// The words of every task, each recalled for its person: for the
+    /// developer views, which show every run.
+    pub async fn all_words(&self) -> Result<Words> {
+        let seqs: Vec<(String, i64)> = self.read(|s| s.tasks.values().map(|t| (t.person.clone(), t.seq)).collect());
+        self.words(seqs).await
+    }
+
+    /// The words of a person's tasks and schedules, for a view of them.
+    pub async fn person_words(&self, person: &str) -> Result<Words> {
+        let seqs: Vec<(String, i64)> = self.read(|s| {
+            let tasks = s.tasks.values().filter(|t| t.person == person).map(|t| t.seq);
+            let schedules = s.schedules.values().filter(|x| x.person == person).map(|x| x.seq);
+            tasks.chain(schedules).map(|seq| (person.to_string(), seq)).collect()
+        });
+        self.words(seqs).await
+    }
+
+    /// A schedule's title as shown: the one it was given, else the start
+    /// of what it asks; recalled for its person.
+    pub async fn schedule_title(&self, sc: &crate::state::Schedule) -> Result<String> {
+        let w = self.words_of(&sc.person, sc.seq).await?;
+        Ok(w.title(sc.seq).unwrap_or_else(|| w.text(sc.seq).chars().take(80).collect()))
+    }
+
+    /// A task's title as shown, recalled for its person: see `title_of`.
+    pub async fn task_title(&self, t: &crate::state::Task, run: Option<&crate::state::Run>) -> Result<String> {
+        let w = self.words_of(&t.person, t.seq).await?;
+        Ok(crate::api::title_of(t, run, &w))
+    }
+
+    /// What the person asked a run's task, recalled for them.
+    pub async fn asked(&self, run: &crate::state::Run) -> Result<String> {
+        let Some((person, seq)) = self.read(|s| s.tasks.get(&run.task).map(|t| (t.person.clone(), t.seq))) else { return Ok(String::new()) };
+        Ok(self.words_of(&person, seq).await?.text(seq).to_string())
+    }
+
+    /// One task's or schedule's words, recalled for its person.
+    pub async fn words_of(&self, person: &str, seq: i64) -> Result<Words> {
+        self.words([(person.to_string(), seq)]).await
     }
 }
