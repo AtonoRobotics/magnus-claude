@@ -31,12 +31,11 @@ await d.step("add the calendar for everyone by its address", async () => {
 await d.step("connect it from its card in the Library; the code comes back to this computer", async () => {
   // Settings has no workspace sidebar: the Library by its address.
   await d.run(`location.hash = "#/library"`);
+  // Connect opens the app's page in this computer's browser (the test's, as
+  // a person's would): the page approves and sends its code to the shell's
+  // one-time loopback address, and the card turns Connected. Nothing else
+  // may use that address first.
   await d.click(d.button("Connect", "//li[@data-connector='calendar']"));
-  const link = await d.attr(d.css("#connect-open"), "data-url");
-  // The person's browser: the app's page approves and redirects to the shell's loopback address.
-  const r = await fetch(link);
-  const page = await r.text();
-  if (!r.url.startsWith("http://127.0.0.1:") || !page.includes("Signed in")) throw new Error(`the sign-in ended at ${r.url}: ${page.slice(0, 200)}`);
   await d.css('li[data-connector="calendar"][data-state="connected"]');
   await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
   await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Connectors']"));
