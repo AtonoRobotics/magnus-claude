@@ -412,3 +412,7 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 ## Spec review fixes (2026-11-01)
 
 - Someone stays owner however many role changes race in: the check and the change are made under the decision lock (`Kernel::decide`). Reason: the check ran outside any lock, so two owners taking the role from each other at the same moment both passed it and the appliance was left with no owner, and so no one who could set roles, policy or the kill switch (found reviewing the owner's specs against the code, 2026-11-01). Test: `two_owners_demoting_each_other_at_once_leave_one` (settings.rs; without the lock, both demotions succeed in the first round).
+
+## The owner's specs against Magnus today (2026-11-01, `spec-decisions`)
+
+- Where the owner's Connectors, Admin Console and Authentication & Isolation specs (2026-10-31) conflict with recorded decisions or the invariants, nothing is built until the owner rules; `docs/proposals/spec-decisions.md` puts 22 questions to the owner with a proposed answer each (four of them change protected invariant tests and need the owner's approval for that too), and lists what the specs leave open. Reason: the specs reverse decisions the owner made a day earlier (the app's typed password, the backup password, identity by username, the owner's roles), and building either side first would leave the other half in force.
