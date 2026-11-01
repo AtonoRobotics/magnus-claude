@@ -24,7 +24,8 @@ pub struct Kernel {
     state: Mutex<State>,
     write: tokio::sync::Mutex<()>,
     /// Held while a person's decision is checked and recorded, so an inbox
-    /// item or a chat card is decided once however many answers race in.
+    /// item or a chat card is decided once however many answers race in, and
+    /// a change of roles keeps an owner however many race in.
     pub(crate) decide: tokio::sync::Mutex<()>,
     pub vault: Arc<Vault>,
     pub accounts: crate::accounts::Accounts,

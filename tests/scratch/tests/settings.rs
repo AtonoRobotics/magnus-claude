@@ -83,6 +83,32 @@ async fn the_owner_sets_roles_and_someone_stays_owner() {
     assert_eq!(v["people"].as_array().unwrap().iter().find(|p| p["id"] == "carol").unwrap()["roles_from"], "settings");
 }
 
+/// Two owners who take the role from each other at the same moment leave one
+/// owner, never none (spec review, 2026-11-01: the check that someone stays
+/// owner ran outside any lock).
+#[tokio::test(flavor = "multi_thread")]
+async fn two_owners_demoting_each_other_at_once_leave_one() {
+    let (_m, app) = start().await;
+    let (alice, carol) = (app.api("alice"), app.api("carol"));
+    async fn owner(a: &Api, who: &str) -> bool {
+        a.get("/v1/me").await;
+        let (_, v) = a.get("/v1/people").await;
+        v["people"].as_array().map_or(false, |l| l.iter().any(|p| p["id"] == who && p["roles"].as_array().unwrap().iter().any(|r| r == "owner")))
+    }
+    for round in 0..30 {
+        // Whoever is owner makes the other owner too.
+        let (by, other) = if owner(&alice, "alice").await { (&alice, "carol") } else { (&carol, "alice") };
+        assert_eq!(by.send(reqwest::Method::PUT, &format!("/v1/people/{other}/roles"), Some(json!({ "roles": ["owner"] }))).await.0, 204, "round {round}");
+        let (a, c) = futures::join!(
+            alice.send(reqwest::Method::PUT, "/v1/people/carol/roles", Some(json!({ "roles": [] }))),
+            carol.send(reqwest::Method::PUT, "/v1/people/alice/roles", Some(json!({ "roles": [] }))),
+        );
+        let viewer = if owner(&alice, "alice").await { &alice } else { &carol };
+        let left = owner(viewer, "alice").await as u8 + owner(viewer, "carol").await as u8;
+        assert!(left >= 1, "round {round}: both gave the owner role away ({} and {})", a.0, c.0);
+    }
+}
+
 /// Each person's notification and privacy choices start from defaults, are
 /// theirs alone, and only known ones with yes or no are kept.
 #[tokio::test(flavor = "multi_thread")]
