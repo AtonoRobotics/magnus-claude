@@ -10,7 +10,8 @@
 # The desktop app's CHANNEL (DECISIONS.md, "Release channels") is
 # production (the default: tagged releases, in desktop/), test (master, in
 # desktop/test/) or development (pull requests, in desktop/development/);
-# test and development keep only their latest packages.
+# test and development keep only their latest packages; the appliance's
+# directory its latest and the one before.
 #
 # Every package is signed with `tauri signer sign --app-version`, so the
 # signature binds the version it was published as. latest.json is written
@@ -117,10 +118,11 @@ fi
 
 case $what in
 appliance)
+  previous=$( [ -f "$dir/latest.json" ] && python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["file"])' "$dir/latest.json" || true)
   mkdir -p "$dir"
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
-  for p in "$@"; do cp -rL "$p" "$stage/"; done
+  for p in "$@"; do cp -r "$p" "$stage/"; done
   echo "$version" > "$stage/VERSION"
   file=magnus-appliance-$version.tar.gz
   tar -C "$stage" -czf "$dir/$file" .
@@ -138,6 +140,13 @@ desktop)
   ;;
 esac
 mv "$dir/latest.json.tmp" "$dir/latest.json"
+# The appliance's packages: this one and the one before it; the installed
+# releases themselves are kept by the appliance (`<dir>.prev`).
+if [ "$what" = appliance ]; then
+  for f in "$dir"/magnus-appliance-*; do
+    case $f in "$dir/$file" | "$dir/$file.sig" | "$dir/$previous" | "$dir/$previous.sig") ;; *) rm -f "$f" ;; esac
+  done
+fi
 if [ "$what" = desktop ] && [ "$channel" != production ]; then
   for f in "$dir"/Magnus_*; do
     case $f in "$dir/$linux" | "$dir/$windows" | "$dir/$linux.sig" | "$dir/$windows.sig") ;; *) rm -f "$f" ;; esac
