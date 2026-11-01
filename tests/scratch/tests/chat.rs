@@ -807,7 +807,7 @@ async fn a_request_set_compares_models_in_chat_and_takes_the_persons_judgment() 
         .env("MAGNUS_EXPERIMENT", "set2")
         .env("MAGNUS_MODELS", models.len().to_string())
         .env("MAGNUS_CHROMIUM", magnus_scratch::chromium())
-        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .envs(magnus_scratch::shots())
         .output()
         .await
         .unwrap();

@@ -54,7 +54,7 @@ async fn the_outcome_page_leads_with_the_full_deliverable() {
         .env("MAGNUS_PASSWORD", PASSWORD)
         .env("MAGNUS_TASK", &id)
         .env("MAGNUS_CHROMIUM", chromium())
-        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .envs(shots())
         .output()
         .await
         .unwrap();

@@ -164,7 +164,7 @@ async fn a_batch_of_requests_is_organised_and_what_needs_you_fits_one_screen() {
         .env("MAGNUS_NEEDS", needs.to_string())
         .env("MAGNUS_THREAD", &offsite)
         .env("MAGNUS_CHROMIUM", chromium())
-        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .envs(shots())
         .output()
         .await
         .unwrap();

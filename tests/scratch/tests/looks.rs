@@ -98,7 +98,7 @@ async fn each_look_draws_the_workspace_as_the_references_do() {
         .env("MAGNUS_PASSWORD", PASSWORD)
         .env("MAGNUS_TASK", &id)
         .env("MAGNUS_CHROMIUM", chromium())
-        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .envs(shots())
         .output()
         .await
         .unwrap();

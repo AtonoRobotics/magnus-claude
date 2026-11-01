@@ -163,7 +163,7 @@ async fn the_kill_switch_revokes_sign_ins_seals_the_vault_and_releasing_resumes_
         .env("MAGNUS_PERSON", "alice")
         .env("MAGNUS_PASSWORD", PASSWORD)
         .env("MAGNUS_CHROMIUM", chromium())
-        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .envs(shots())
         .output()
         .await
         .unwrap();

@@ -19,6 +19,8 @@ const [base, person, password, task] = ["MAGNUS_URL", "MAGNUS_PERSON", "MAGNUS_P
 const shots = process.env.MAGNUS_SHOTS;
 if (shots) mkdirSync(shots, { recursive: true });
 const T = 60_000;
+// A screenshot is evidence, never a check.
+const shoot = (page, name) => shots ? page.screenshot({ path: join(shots, name) }).catch(e => console.error(`screenshot not kept: ${e.message.split("\n")[0]}`)) : null;
 
 const browser = await chromium.launch({ executablePath: env("MAGNUS_CHROMIUM"), args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 const failures = [];
@@ -75,7 +77,7 @@ for (const [name, look] of LOOKS) {
   await page.locator("aside.detail").waitFor({ timeout: T });
   await page.locator("iframe.composed").first().waitFor({ timeout: T });
   await page.waitForTimeout(800);
-  if (shots) await page.screenshot({ path: join(shots, `app-${name}.png`) });
+  await shoot(page, `app-${name}.png`);
   const got = await page.evaluate(() => {
     const cs = (sel, prop, root = document) => { const e = root.querySelector(sel); return e ? getComputedStyle(e)[prop] : null; };
     const frame = document.querySelector("aside.detail iframe.composed")?.contentDocument;
@@ -127,7 +129,7 @@ for (const [name, look] of LOOKS) {
   await page.getByRole("link", { name: "Settings" }).click();
   await page.getByRole("navigation", { name: "Settings" }).getByRole("link", { name: "Appearance" }).click();
   await page.waitForTimeout(800);
-  if (shots) await page.screenshot({ path: join(shots, "app-appearance.png") });
+  await shoot(page, "app-appearance.png");
   const got = await page.evaluate(() => {
     const cs = (sel, prop) => { const e = document.querySelector(sel); return e ? getComputedStyle(e)[prop] : null; };
     return {

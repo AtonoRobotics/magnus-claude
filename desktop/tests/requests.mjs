@@ -24,7 +24,7 @@ const page = await browser.newPage({ viewport: { width: win.width, height: win.h
 const errors = [];
 page.on("pageerror", e => errors.push(String(e)));
 let n = 0;
-const shot = async name => { if (shots) await page.screenshot({ path: join(shots, `requests-${String(++n).padStart(2, "0")}-${name}.png`), fullPage: true }); };
+const shot = async name => { if (shots) await page.screenshot({ path: join(shots, `requests-${String(++n).padStart(2, "0")}-${name}.png`), fullPage: true }).catch(e => console.error(`screenshot not kept: ${e.message.split("\n")[0]}`)); };
 const step = async (name, f) => {
   try { await f(); await shot(name); console.log(`ok   ${name}`); }
   catch (e) { await shot(`FAILED-${name}`); console.error(`FAIL ${name}: ${e.message}`); await browser.close(); process.exit(1); }
