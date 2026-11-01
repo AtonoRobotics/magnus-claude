@@ -2,7 +2,8 @@
 
 ## Now (2026-10-29)
 
-- **Recall only, step 1: whose each row of content is (owner, 2026-11-01; branch `content-person`).** Every content row records its person; a per-person reader role sees only that person's rows, and not the log. Nothing reads through it yet (step 2).
+- **Recall only, step 2: the recall path (owner, 2026-11-01; branch `recall-path`).** `Recall` reads a person's content through their wall; the owner's read of a person's memory is recalled that way. Next: chats and tasks (step 3).
+- **Recall only, step 1: whose each row of content is (owner, 2026-11-01; merged in #59).** Every content row records its person; a per-person reader role sees only that person's rows, and not the log. Nothing reads through it yet (step 2).
 - **Recall only, behind per-person walls: the plan (owner, 2026-11-01; merged in #58).** `docs/proposals/recall-only.md`: content leaves the kernel's memory and is read per request through row-level security, in seven steps; two questions for the owner.
 - **The admin's access to people's data (owner's ruling 14, 2026-11-01; merged in #57).** The owner reads a person's data, recorded and told to them, unless the policy makes it private.
 - **A person turned off in the identity provider (owner's ruling 12, 2026-11-01; merged in #56).** Their sessions end (logged) and their schedules pause; the check covers everyone with a schedule, every five minutes.

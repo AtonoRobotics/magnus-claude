@@ -29,6 +29,7 @@ pub mod log;
 pub mod identity;
 pub mod oidc;
 pub mod policy;
+pub mod recall;
 pub mod run;
 pub mod sandbox;
 pub mod settings;

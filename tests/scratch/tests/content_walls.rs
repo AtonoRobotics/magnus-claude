@@ -105,3 +105,41 @@ async fn each_persons_content_is_walled_from_everyone_else_in_the_database() {
     app.restart().await;
     assert_eq!(alice.get("/v1/me").await.0, 200);
 }
+
+/// The owner's read of a person's memory is recalled from the content
+/// store as that person, through the wall (step 2): content the database
+/// does not give that person is not shown, whatever the kernel holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_reads_a_persons_memory_recalled_through_their_wall() {
+    let fact = canary("carol-fact");
+    let said = fact.clone();
+    let m = FakeModel::start(script(move |c| {
+        let said = said.clone();
+        async move {
+            let pass = c.offered_tools() == ["memory_write".to_string()];
+            match c.turn() {
+                0 if !pass && c.text().contains("Remember that") => tool("memory_write", json!({ "fact": format!("Carol's code name is {said}.") })),
+                _ => Reply::Text("Noted.".into()),
+            }
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (alice, carol) = (app.api("alice"), app.api("carol"));
+    let (st, v) = carol.post("/v1/chat", json!({ "text": "Remember that my code name matters." })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    carol.wait_settled(v["task_id"].as_str().unwrap()).await;
+    let read = || async { alice.get("/v1/people/carol/data/memory").await.1["memory"].as_array().cloned().unwrap_or_default() };
+    let facts = read().await;
+    assert!(facts.iter().any(|f| f["fact"].as_str().is_some_and(|t| t.contains(&fact))), "{facts:?}");
+
+    // The database now says the row is someone else's: a read for carol
+    // that took it from the kernel's memory would still show it.
+    let admin = app.db.admin().await;
+    let moved = admin.execute("UPDATE public.content SET person = 'bob' WHERE body->>'fact' LIKE '%' || $1 || '%'", &[&fact]).await.unwrap();
+    assert_eq!(moved, 1);
+    let facts = read().await;
+    assert!(!facts.iter().any(|f| f.to_string().contains(&fact)), "carol's memory read past her wall: {facts:?}");
+    // Carol's own view is unchanged until step 4 moves it too.
+    assert!(carol.get("/v1/memory").await.1.to_string().contains(&fact));
+}

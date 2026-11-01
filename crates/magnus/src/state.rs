@@ -366,6 +366,8 @@ pub struct MemoryEntry {
     /// The memory pass, or None for the run's own model.
     pub by: Option<String>,
     pub at: DateTime<Utc>,
+    /// The event that wrote it: where its content is recalled from.
+    pub seq: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -1608,6 +1610,7 @@ impl State {
                 sources: sources.clone(),
                 by: by.clone(),
                 at: e.at,
+                seq: e.seq,
             }),
         }
     }

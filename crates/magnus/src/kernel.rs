@@ -42,6 +42,8 @@ pub struct Kernel {
     pub live_text: Arc<Live>,
     /// The knowledge base's search index.
     pub knowledge: crate::knowledge::Index,
+    /// People's content, read for one person at a time (recall only).
+    pub recall: crate::recall::Recall,
     /// How long each log append took since boot, in microseconds (V6).
     pub capture: Mutex<Capture>,
 }
@@ -138,6 +140,7 @@ impl Kernel {
             live_tools: tokio::sync::Mutex::new(HashMap::new()),
             live_text,
             knowledge: crate::knowledge::Index::new(&cfg.database.url),
+            recall: crate::recall::Recall::new(&cfg.database.url),
             capture: Mutex::new(Capture::default()),
             cfg,
         });
