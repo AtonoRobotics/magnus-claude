@@ -218,7 +218,7 @@ impl Provider {
                 bail!("the ID token does not answer this sign-in's nonce");
             }
         }
-        Ok((person, Rights { groups: names_at(&c, &self.cfg.groups_claim), roles: names_at(&c, &self.cfg.roles_claim) }))
+        Ok((person, Rights { groups: names_at(&c, &self.cfg.groups_claim), roles: names_at(&c, &self.cfg.roles_claim), subject: c["sub"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from) }))
     }
 
     /// Begin a sign-in in the person's browser that comes back to

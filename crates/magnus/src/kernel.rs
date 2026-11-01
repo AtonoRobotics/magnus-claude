@@ -61,6 +61,18 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
 }
 
+/// New work refused because the kill switch is on.
+#[derive(Debug)]
+pub struct KillSwitchOn;
+
+impl std::fmt::Display for KillSwitchOn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("The kill switch is on: nothing new starts until the owner releases it.")
+    }
+}
+
+impl std::error::Error for KillSwitchOn {}
+
 /// How a new run differs from a plain task.
 #[derive(Default)]
 pub struct NewRun {
@@ -396,8 +408,12 @@ impl Kernel {
         }
     }
 
-    /// Create a task or a chat turn and start it.
+    /// Create a task or a chat turn and start it. Nothing new starts while
+    /// the kill switch is on (owner's ruling 11, 2026-11-01).
     pub async fn create_run(self: &Arc<Self>, actor: &str, person: &str, text: String, attachments: Vec<serde_json::Value>, o: NewRun) -> Result<(String, String)> {
+        if self.read(|s| s.kill_switch) {
+            return Err(KillSwitchOn.into());
+        }
         let (task, run) = match &o.ids {
             Some((t, r)) => (t.clone(), r.clone()),
             None => (new_id("task"), new_id("run")),
