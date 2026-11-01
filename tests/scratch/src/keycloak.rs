@@ -162,15 +162,18 @@ impl Keycloak {
         let id = self.user_id(username).await;
         let secret = uuid::Uuid::new_v4().simple().to_string();
         // Keycloak takes a credential with its secret only in a whole user,
-        // so the person is rewritten with their password and the app.
+        // so the person is rewritten with their password and the app, by a
+        // partial import that keeps their id: the same account, as adding an
+        // authenticator app is (a new id is a new account, which the
+        // appliance refuses as someone else).
         let mut user = self.admin(reqwest::Method::GET, &format!("/users/{id}"), None).await;
         user["credentials"] = json!([
             { "type": "password", "value": password_of(username), "temporary": false },
             { "type": "otp", "userLabel": "phone", "secretData": json!({ "value": secret }).to_string(),
               "credentialData": json!({ "subType": "totp", "digits": 6, "period": 30, "algorithm": "HmacSHA1", "counter": 0 }).to_string() },
         ]);
-        self.admin(reqwest::Method::DELETE, &format!("/users/{id}"), None).await;
-        self.admin(reqwest::Method::POST, "/users", Some(user)).await;
+        self.admin(reqwest::Method::POST, "/partialImport", Some(json!({ "ifResourceExists": "OVERWRITE", "users": [user] }))).await;
+        assert_eq!(self.user_id(username).await, id, "adding the authenticator app made a new account");
         secret
     }
 
