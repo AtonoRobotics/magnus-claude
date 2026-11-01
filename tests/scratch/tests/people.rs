@@ -164,7 +164,8 @@ async fn an_account_made_again_under_the_same_username_is_not_the_old_person() {
     let alice = app.api("alice");
     let bound = |v: &Value| v["people"].as_array().unwrap().iter().find(|p| p["id"] == "carol").unwrap()["account_bound"].clone();
 
-    let (st, v) = kc.app_password(&app, "carol", &password_of("carol"), None).await;
+    // Her first sign-in here is on Keycloak's page.
+    let (st, v) = kc.app_sign_in(&app, "carol").await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(bound(&alice.get("/v1/people").await.1), json!(true), "carol's first sign-in did not bind her account");
     // Her own account again: still her.
