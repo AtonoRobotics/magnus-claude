@@ -2,7 +2,8 @@
 
 ## Now (2026-10-29)
 
-- **The admin's access to people's data (owner's ruling 14, 2026-11-01; branch `data-access-policy`).** The owner reads a person's data, recorded and told to them, unless the policy makes it private.
+- **Recall only, behind per-person walls: the plan (owner, 2026-11-01; branch `data-walls-plan`).** `docs/proposals/recall-only.md`: content leaves the kernel's memory and is read per request through row-level security, in seven steps; two questions for the owner.
+- **The admin's access to people's data (owner's ruling 14, 2026-11-01; merged in #57).** The owner reads a person's data, recorded and told to them, unless the policy makes it private.
 - **A person turned off in the identity provider (owner's ruling 12, 2026-11-01; merged in #56).** Their sessions end (logged) and their schedules pause; the check covers everyone with a schedule, every five minutes.
 - **Config tokens on this machine only (owner's ruling 13, 2026-11-01; merged in #55).** The config's long-lived tokens work only on the plain loopback listener.
 - **New work under the kill switch (owner's ruling 11, 2026-11-01; merged in #54).** Tasks, chat messages and chat actions that would start work are refused while the switch is on.
