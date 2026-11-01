@@ -867,6 +867,7 @@ async function showThread(main, thread) {
     const el = $("#thread", main);
     if (!el) return;
     const grew = paint(el, body);
+    keepHeights(el);
     motion(el, ui);
     for (const e of entries.filter(e => e.view)) fill($(`iframe[data-shown="${CSS.escape(e.id)}"]`, main), e.view, e.task_id);
     for (const [id, view, , task] of ui.composed) fill($(`iframe[data-view="${CSS.escape(id)}"]`, el), view, task);
@@ -1378,7 +1379,10 @@ const look = () => { const l = window.Theme?.look; return l ? [Theme.tokens(l), 
 // a redraw of the thread makes the frame anew, and drawn at its known height
 // the thread keeps its layout (and its scroll) while the frame loads again.
 const frameHeights = {};
-const shownFrame = (id, title) => `<iframe class="composed" sandbox="allow-same-origin" title="${title}" data-shown="${esc(id)}"${frameHeights[id] ? ` style="height:${frameHeights[id]}px"` : ""}></iframe>`;
+// (Set after the thread is drawn, not in its markup, so the markup stays the
+// same and a loaded frame does not make the thread draw itself again.)
+const shownFrame = (id, title) => `<iframe class="composed" sandbox="allow-same-origin" title="${title}" data-shown="${esc(id)}"></iframe>`;
+const keepHeights = el => $$("iframe[data-shown]", el).forEach(f => { if (frameHeights[f.dataset.shown]) f.style.height = frameHeights[f.dataset.shown] + "px"; });
 async function fill(frame, view, taskId, task) {
   if (!frame || frame._drawn) return;
   frame._drawn = true;

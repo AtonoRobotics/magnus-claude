@@ -51,6 +51,15 @@ if (drawn.tl < drawn.card - 1) await fail(`the timeline is ${drawn.tl}px wide in
 if (drawn.width < drawn.column - 2 * 32 - 2) await fail(`the deliverable's frame is ${drawn.width}px wide in a ${drawn.column}px conversation`);
 await shoot("chat-results.png");
 
+// Once drawn, the frame leaves the thread as it is: the thread is not drawn
+// again for its sake (a redraw replaces what a person is about to click).
+const still = await page.evaluate(id => new Promise(done => {
+  const r = document.querySelector(`#thread [data-result="${id}"]`);
+  r._seen = true;
+  setTimeout(() => done(document.querySelector(`#thread [data-result="${id}"]`)?._seen === true), 5000);
+}), task);
+if (!still) await fail("the thread drew itself again after the deliverable loaded");
+
 // A redraw of the thread makes the frame anew; it comes back at the height it
 // had, so nothing in the conversation moves while it loads again.
 const redrawn = await page.evaluate(id => new Promise(done => {
