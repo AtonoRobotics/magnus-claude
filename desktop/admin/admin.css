@@ -24,3 +24,6 @@ body:not(.signed-in) { grid-template-areas: "top top" "main main"; }
   .ad-main { padding: 16px; }
   .ad-status .small { display: none; }
 }
+#audit-filter { flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-bottom: 12px; }
+#audit-filter label { display: flex; flex-direction: column; font-size: 12px; gap: 2px; }
+#audit-rows { overflow-x: auto; }

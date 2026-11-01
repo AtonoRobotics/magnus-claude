@@ -41,8 +41,9 @@ fn ident(s: &str) -> Result<&str> {
     Ok(s)
 }
 
-/// Create the log table and the kernel role named in `kernel_url`.
-pub async fn migrate(admin_url: &str, kernel_url: &str) -> Result<()> {
+/// Create the log table and the kernel role named in `kernel_url`, and,
+/// when the admin console is set up, its root role named in `root_url`.
+pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) -> Result<()> {
     let k = url::Url::parse(kernel_url).context("database.url")?;
     let role = ident(k.username())?.to_string();
     let password = k.password().context("database.url has no password")?.replace('\'', "''");
@@ -86,6 +87,32 @@ pub async fn migrate(admin_url: &str, kernel_url: &str) -> Result<()> {
     admin.batch_execute(&content_walls_sql(&role)).await.context("wall the content store by person")?;
     // The knowledge base's index, filtered for each reader by row security.
     admin.batch_execute(&crate::knowledge::migrate_sql(&role)).await.context("create the knowledge index (pgvector must be installed)")?;
+    if let Some(root) = root_url {
+        migrate_root(&admin, root, &db).await.context("the admin console's database role")?;
+    }
+    Ok(())
+}
+
+/// The admin console's root role (admin console spec, Authority and audit):
+/// it reads every person's content, past the walls between people
+/// (BYPASSRLS), and the log, which it can add to but never change or
+/// delete from. No other process holds it.
+async fn migrate_root(admin: &Client, root_url: &str, db: &str) -> Result<()> {
+    let r = url::Url::parse(root_url).context("admin.database_url")?;
+    let role = ident(r.username())?.to_string();
+    let password = r.password().context("admin.database_url has no password")?.replace('\'', "''");
+    let exists = admin.query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role]).await?.is_some();
+    let verb = if exists { "ALTER" } else { "CREATE" };
+    admin.batch_execute(&format!("{verb} ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS")).await?;
+    admin
+        .batch_execute(&format!(
+            "GRANT CONNECT ON DATABASE {db} TO {role};
+             GRANT USAGE ON SCHEMA public TO {role};
+             REVOKE ALL ON public.events, public.content, public.knowledge FROM {role};
+             GRANT SELECT, INSERT ON public.events TO {role};
+             GRANT SELECT ON public.content, public.knowledge TO {role};"
+        ))
+        .await?;
     Ok(())
 }
 

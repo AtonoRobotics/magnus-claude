@@ -626,6 +626,9 @@ pub struct State {
     /// Providers the organisation has a registration with (its client ID
     /// and secret are in the vault).
     pub registrations: std::collections::BTreeSet<String>,
+    /// What was done in the admin console, oldest first: each entry's seq,
+    /// when, and the action as written.
+    pub audit: Vec<(i64, DateTime<Utc>, Value)>,
     /// Secrets the kill switch emptied from the vault, latest engagement
     /// only: what the owner signs in to or enters again.
     pub revoked: BTreeMap<String, Revoked>,
@@ -972,6 +975,11 @@ impl State {
                 self.version_changes.push((e.seq, e.at, format!("policy:{layer}"), format!("v{n}")));
             }
             Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
+            Ev::AdminAction { .. } => {
+                if let Ok(v) = serde_json::to_value(&e.ev) {
+                    self.audit.push((e.seq, e.at, v));
+                }
+            }
             Ev::BackupMade { .. } => {}
             Ev::UpdateStarted { from, to, rollback } => self.updating = Some((from.clone(), to.clone(), *rollback)),
             Ev::UpdateFinished { from, to } => {
