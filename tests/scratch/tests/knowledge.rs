@@ -327,3 +327,47 @@ async fn search_by_meaning_keeps_to_the_readers() {
     assert!(search(&bob, "payroll calendar").await.iter().any(|h| h["id"] == payroll["id"]));
     assert!(seen.lock().unwrap().iter().any(|t| t == "when does the office open"), "the query was not embedded");
 }
+
+/// A knowledge entry's text is not kept by the kernel (recall only, step
+/// 6): it is read from the content store when the entry is indexed, and
+/// every reader reads it from the index. An entry edited in the content
+/// store is found, shown and put on its endorsement card edited once it is
+/// indexed again; one whose content is gone is found by no one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_knowledge_entry_s_text_is_read_from_the_content_store_not_kept() {
+    let k = start().await;
+    let (alice, carol) = (k.app.api("alice"), k.app.api("carol"));
+    let (said, edited) = (canary("said"), canary("edited"));
+    let (st, e) = carol.post("/v1/knowledge", json!({ "title": "Parking", "text": format!("Park on level 2. {said}"), "groups": ["staff"] })).await;
+    assert_eq!(st, 201, "{e}");
+    assert!(e["text"].as_str().unwrap().contains(&said), "{e}");
+    let id = e["id"].as_str().unwrap().to_string();
+
+    let admin = k.app.db.admin().await;
+    let changed = admin
+        .execute(
+            "UPDATE public.content SET body = jsonb_set(body, '{text}', to_jsonb($2::text)) WHERE body->>'text' LIKE '%' || $1 || '%'",
+            &[&said, &format!("Park on level 3. {edited}")],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed, 1);
+
+    // Indexed again (out of the trash and back), it says what the content
+    // store says: a kernel that kept the text would index it unchanged.
+    assert!(carol.post("/v1/trash", json!({ "item": id })).await.0.is_success());
+    assert!(carol.post(&format!("/v1/trash/{id}/restore"), json!({})).await.0.is_success());
+    let found = search(&carol, "parking").await;
+    let shown = serde_json::to_string(&found).unwrap();
+    assert!(shown.contains(&edited) && !shown.contains(&said), "the index kept the kernel's copy: {shown}");
+    let (st, v) = carol.post(&format!("/v1/knowledge/{id}/endorsement"), json!({})).await;
+    assert_eq!(st, 201, "{v}");
+    let card = alice.inbox().await.into_iter().find(|i| i["id"] == v["item"]).unwrap();
+    assert!(card["details"]["text"].as_str().is_some_and(|t| t.contains(&edited)), "the card shows the kernel's copy: {card}");
+
+    // Its content gone, nothing is indexed from memory.
+    admin.execute("DELETE FROM public.content WHERE body->>'text' LIKE '%' || $1 || '%'", &[&edited]).await.unwrap();
+    assert!(carol.post("/v1/trash", json!({ "item": id })).await.0.is_success());
+    assert!(carol.post(&format!("/v1/trash/{id}/restore"), json!({})).await.0.is_success());
+    assert!(!search(&carol, "parking").await.iter().any(|x| x["id"] == id.as_str()), "an entry with no content was indexed");
+}
