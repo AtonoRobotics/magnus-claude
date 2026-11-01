@@ -1753,7 +1753,7 @@ async function connectorView(name) {
     ${c.state !== "available" ? `<dl class="kv"><dt>Connected as</dt><dd>${esc(c.account || "Your own account")}</dd>${at ? `<dt>Connected</dt><dd>${esc(at)}</dd>` : ""}<dt>Last used</dt><dd>${c.last_used ? esc(when(c.last_used)) : "Not yet"}</dd></dl>` : ""}
     <h3>What it allows</h3>${c.allows.length ? `<ul class="allows">${c.allows.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : `<p class="empty">Nothing yet: your organisation has not chosen what Magnus may do with it.</p>`}
     <h3>Recent actions</h3>${c.recent.length ? `<ul class="tlist">${c.recent.map(u => `<li class="trow"><a href="#/task/${enc(u.task)}" data-open="task:${esc(u.task)}"><span class="ttl">${esc(u.action.charAt(0).toUpperCase() + u.action.slice(1))}</span><span class="small faint when">${esc(when(u.at))}${u.worked === false ? " · did not work" : ""}</span></a></li>`).join("")}</ul>` : `<p class="empty">Magnus has not used it for you yet.</p>`}
-    ${c.state !== "available" && c.signs_in ? `<div class="row"><button data-act="disconnect" data-app="${esc(c.name)}">Disconnect</button></div>` : ""}`);
+    ${c.state !== "available" && c.signs_in ? `<div class="row" style="margin-top:16px"><button data-act="disconnect" data-app="${esc(c.name)}">Disconnect</button></div>` : ""}`);
 }
 
 async function libraryView() {
