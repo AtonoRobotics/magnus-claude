@@ -1602,6 +1602,7 @@ dependencies = [
  "hmac 0.12.1",
  "magnus-invariants",
  "minisign",
+ "rcgen",
  "reqwest",
  "serde_json",
  "sha1",

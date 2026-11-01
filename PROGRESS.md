@@ -2,7 +2,8 @@
 
 ## Now (2026-10-29)
 
-- **Connectors are a catalog of apps, set up already (owner, 2026-11-01; branch `connectors-catalog`).** Every catalog connector is in everyone's Library; no form asks anyone for a client ID, secret or address. Next: the relay on Cloudflare Workers, which takes over the secrets and client IDs; then Slack, GitHub, Vercel and the rest of the launch catalog.
+- **The admin console, part 1: its own process (owner, 2026-11-01; branch `admin-listener`).** `magnus-admin` listens only on the organisation's network, takes only the allowed LAN and VPN subnets, answers only its hostname, over TLS 1.3, and serves its shell. Next: sign-in, then the audit log, the kill switch, Users, Security, Operations and Knowledge.
+- **Connectors are a catalog of apps, set up already (owner, 2026-11-01; merged in #67).** Every catalog connector is in everyone's Library; no form asks anyone for a client ID, secret or address. Next: the relay on Cloudflare Workers, which takes over the secrets and client IDs; then Slack, GitHub, Vercel and the rest of the launch catalog.
 - **Recall only, step 3a: what a person asked is recalled (owner, 2026-11-01; merged in #66).** Tasks' and schedules' text, titles and scopes leave memory; every view and step recalls them for their person. Next: 3b chat conversations, 3c a run's replies and results, 3d cards and outputs, then step 7.
 - **Recall only, step 6: knowledge entries are read from the index (owner, 2026-11-01; merged in #65).** Entries' text, sources, evidence and values leave memory; the kernel reads them from the content store only to index them, and every reader reads them from the index through its row security.
 - **Recall only, step 5: library files are recalled (owner, 2026-11-01; merged in #64).** Uploads' bytes and files' search text leave memory; downloads, searches, project reads and the files a task is given are recalled through the person's wall.

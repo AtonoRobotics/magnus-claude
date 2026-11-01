@@ -1,0 +1,26 @@
+/* The admin console's shell (admin console spec, Web UI): a top bar with
+   the organisation, the appliance's status, the kill switch and the
+   signed-in admin; five sections in a sidebar, a bottom tab bar at phone
+   width. Its components and themes are the desktop app's (app.css). */
+body { background: var(--bg); display: grid; grid-template-columns: 220px 1fr; grid-template-rows: 52px 1fr; grid-template-areas: "top top" "nav main"; min-height: 100vh; }
+.ad-top { grid-area: top; display: flex; align-items: center; gap: 12px; padding: 0 16px; background: var(--side); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; min-width: 0; }
+.ad-org { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ad-spacer { flex: 1; }
+.ad-status { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.ad-status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); flex: none; }
+.ad-status[data-state="ok"] .dot { background: var(--ok-icon); }
+.ad-status[data-state="down"] .dot { background: var(--bad); }
+.ad-nav { grid-area: nav; display: flex; flex-direction: column; gap: 2px; padding: 12px 8px; background: var(--side); border-right: 1px solid var(--line); }
+.ad-nav a { padding: 8px 12px; border-radius: 8px; color: var(--fg); }
+.ad-nav a[aria-current="page"] { background: var(--row-sel); font-weight: 600; }
+.ad-main { grid-area: main; padding: 24px; min-width: 0; outline: none; }
+body:not(.signed-in) { grid-template-areas: "top top" "main main"; }
+.ad-sign-in { max-width: 420px; margin: 10vh auto 0; padding: 24px; }
+@media (max-width: 720px) {
+  body { grid-template-columns: 1fr; grid-template-rows: 52px 1fr 56px; grid-template-areas: "top" "main" "nav"; }
+  body:not(.signed-in) { grid-template-areas: "top" "main" "main"; }
+  .ad-nav { flex-direction: row; justify-content: space-around; padding: 4px; border-right: 0; border-top: 1px solid var(--line); position: sticky; bottom: 0; }
+  .ad-nav a { padding: 8px 6px; font-size: 12px; }
+  .ad-main { padding: 16px; }
+  .ad-status .small { display: none; }
+}

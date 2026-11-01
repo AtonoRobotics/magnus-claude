@@ -22,6 +22,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 hmac = "0.12"
 sha1 = "0.10"
+rcgen = "0.13"
 
 [dev-dependencies]
 flate2 = "1"
