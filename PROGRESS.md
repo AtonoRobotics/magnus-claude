@@ -2,7 +2,8 @@
 
 ## Now (2026-10-29)
 
-- **A person turned off in the identity provider (owner's ruling 12, 2026-11-01; branch `turned-off-schedules`).** Their sessions end (logged) and their schedules pause; the check covers everyone with a schedule, every five minutes.
+- **The admin's access to people's data (owner's ruling 14, 2026-11-01; branch `data-access-policy`).** The owner reads a person's data, recorded and told to them, unless the policy makes it private.
+- **A person turned off in the identity provider (owner's ruling 12, 2026-11-01; merged in #56).** Their sessions end (logged) and their schedules pause; the check covers everyone with a schedule, every five minutes.
 - **Config tokens on this machine only (owner's ruling 13, 2026-11-01; merged in #55).** The config's long-lived tokens work only on the plain loopback listener.
 - **New work under the kill switch (owner's ruling 11, 2026-11-01; merged in #54).** Tasks, chat messages and chat actions that would start work are refused while the switch is on.
 - **The owner's specs, ruled (2026-11-01; merged in #52).** The owner answered `docs/proposals/spec-decisions.md`: no passkeys (typed password stays), 3-8 and 10-13 approved, and the admin's access to people's data is a policy (organisation's data by default, private when the policy says so). 9 (per-person walls in the database) approved after explanation. Open: 15-22. Next, each its own pull request: identity by `sub`, the kill switch refusing new work, schedules paused for a person turned off, config tokens on loopback, the data-access policy, then the walls' plan and the walls.
