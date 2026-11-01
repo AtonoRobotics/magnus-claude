@@ -150,3 +150,45 @@ async fn groups_and_roles_come_from_keycloak_at_each_sign_in() {
     assert_eq!(groups(&me), ["staff"], "{me}");
     assert!(!has_role(&me, "approver:irreversible"), "{me}");
 }
+
+/// A person turned off in the identity provider loses their sessions, each
+/// recorded in the log, and their schedules pause: the check asks about
+/// everyone with a schedule, signed in or not (owner's ruling 12).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_turned_off_in_keycloak_loses_their_sessions_and_their_schedules_pause() {
+    let m = FakeModel::start(worker()).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let kc = Keycloak::start().await;
+    for who in ["carol", "bob"] {
+        kc.add_person(who).await;
+    }
+    kc.configure(&mut app).await;
+    let (st, v) = kc.app_sign_in(&app, "carol").await;
+    assert_eq!(st, 200, "{v}");
+    let session = v["token"].as_str().unwrap().to_string();
+    let mut carol = app.api("carol");
+    carol.token = session.clone();
+    assert_eq!(carol.get("/v1/me").await.0, 200);
+    // A schedule each: carol's, and bob's, who has never signed in here.
+    for who in ["carol", "bob"] {
+        let (st, v) = app.api(who).post("/v1/schedules", json!({ "text": "Summarise the news.", "daily_at": "03:00" })).await;
+        assert_eq!(st.as_u16(), 201, "{who}: {v}");
+    }
+
+    kc.disable("carol").await;
+    kc.disable("bob").await;
+    // The check runs as the appliance starts, then every five minutes.
+    app.restart().await;
+    eventually("carol's session ended", PATIENCE, || async { (carol.get("/v1/me").await.0 == 401).then_some(()) }).await;
+    for who in ["carol", "bob"] {
+        let paused = eventually("the schedule paused", PATIENCE, || async {
+            let (_, v) = app.api(who).get("/v1/schedules").await;
+            v["schedules"].as_array()?.iter().find(|s| s["paused"].is_string()).cloned()
+        })
+        .await;
+        assert!(paused["paused"].as_str().unwrap().contains("turned your account off"), "{who}: {paused}");
+    }
+    let admin = app.db.admin().await;
+    let ended = admin.query_one("SELECT count(*) FROM public.events WHERE kind = 'signed_out' AND body->>'person' = 'carol'", &[]).await.unwrap().get::<_, i64>(0);
+    assert_eq!(ended, 1, "the session the check ended is not in the log");
+}
