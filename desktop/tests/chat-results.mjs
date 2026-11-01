@@ -51,6 +51,23 @@ if (drawn.tl < drawn.card - 1) await fail(`the timeline is ${drawn.tl}px wide in
 if (drawn.width < drawn.column - 2 * 32 - 2) await fail(`the deliverable's frame is ${drawn.width}px wide in a ${drawn.column}px conversation`);
 await shoot("chat-results.png");
 
+// A redraw of the thread makes the frame anew; it comes back at the height it
+// had, so nothing in the conversation moves while it loads again.
+const redrawn = await page.evaluate(id => new Promise(done => {
+  const thread = document.querySelector("#thread");
+  const before = document.querySelector(`#thread [data-result="${id}"] iframe.composed[data-shown]`).getBoundingClientRect().height;
+  const seen = new MutationObserver(() => {
+    const f = document.querySelector(`#thread [data-result="${id}"] iframe.composed[data-shown]`);
+    if (f && !f._drawnBefore) { seen.disconnect(); done({ before, after: f.getBoundingClientRect().height }); }
+  });
+  document.querySelector(`#thread [data-result="${id}"] iframe.composed[data-shown]`)._drawnBefore = true;
+  seen.observe(thread, { childList: true, subtree: true });
+  thread._html = "";   // the next refresh draws the thread again
+  setTimeout(() => { seen.disconnect(); done(null); }, 10_000);
+}), task);
+if (!redrawn) await fail("the thread was not drawn again");
+if (Math.abs(redrawn.after - redrawn.before) > 1) await fail(`a redraw of the thread drew the deliverable's frame ${redrawn.after}px tall, not the ${redrawn.before}px it had`);
+
 if (errors.length) await fail(`page errors: ${errors.join("; ")}`);
 await browser.close();
 console.log("the deliverable shows in the conversation");
