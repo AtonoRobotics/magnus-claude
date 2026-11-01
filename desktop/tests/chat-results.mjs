@@ -40,7 +40,7 @@ const drawn = await page.waitForFunction(id => {
   const f = document.querySelector(`#thread [data-result="${id}"] iframe.composed[data-shown]`);
   const d = f?.contentDocument;
   if (!d?.querySelector(".tl") || !d.querySelector("table")) return null;
-  return { days: d.querySelectorAll(".tl li").length, total: [...d.querySelectorAll("td")].some(td => td.textContent.trim() === "$912"), height: f.getBoundingClientRect().height, width: f.getBoundingClientRect().width, column: document.querySelector("#thread").getBoundingClientRect().width, tl: d.querySelector(".tl").getBoundingClientRect().width, card: d.querySelector(".tl").closest("figure").clientWidth };
+  return { days: d.querySelectorAll(".tl li").length, total: [...d.querySelectorAll("td")].some(td => td.textContent.trim() === "$912"), height: f.getBoundingClientRect().height, width: f.getBoundingClientRect().width, column: (t => t.clientWidth - parseFloat(getComputedStyle(t).paddingLeft) - parseFloat(getComputedStyle(t).paddingRight))(document.querySelector("#thread")), tl: d.querySelector(".tl").getBoundingClientRect().width, card: d.querySelector(".tl").closest("figure").clientWidth };
 }, task, { timeout: T }).then(h => h.jsonValue()).catch(() => null);
 if (!drawn) await fail("the deliverable's frame in the conversation is empty");
 if (drawn.days !== 3) await fail(`the timeline shows ${drawn.days} of its 3 days`);
@@ -48,8 +48,18 @@ if (!drawn.total) await fail("the table's total is not shown");
 if (drawn.height < 100) await fail(`the deliverable's frame is ${drawn.height}px tall`);
 if (drawn.tl < drawn.card - 1) await fail(`the timeline is ${drawn.tl}px wide in its ${drawn.card}px card`);
 // It has the conversation's width, as the outcome page gives it the panel's.
-if (drawn.width < drawn.column - 2 * 32 - 2) await fail(`the deliverable's frame is ${drawn.width}px wide in a ${drawn.column}px conversation`);
+if (drawn.width < drawn.column - 2) await fail(`the deliverable's frame is ${drawn.width}px wide in a ${drawn.column}px column`);
 await shoot("chat-results.png");
+
+// Nothing lies over the thread: its head is above it and the composer below,
+// so whatever is scrolled into view in it can be clicked (the installed app's
+// driver scrolls a target to the edge, and found it under the composer).
+const overlap = await page.evaluate(() => {
+  const r = s => document.querySelector(s).getBoundingClientRect();
+  const t = r("#thread"), h = r("#conv-head"), c = r("#composer");
+  return { underHead: h.bottom - t.top, underComposer: t.bottom - c.top };
+});
+if (overlap.underHead > 0.5 || overlap.underComposer > 0.5) await fail(`the thread lies under the conversation's head or composer: ${JSON.stringify(overlap)}`);
 
 // Once drawn, the frame leaves the thread as it is: the thread is not drawn
 // again for its sake (a redraw replaces what a person is about to click).
