@@ -194,7 +194,7 @@ async fn person_data(State(k): K, h: HeaderMap, Path((id, what)): Path<(String, 
             s.tasks.values().filter(|t| t.person == target.id && !t.is_chat_turn()).filter_map(|t| s.runs.get(&t.run_id).map(|r| crate::api::task_row(&k, s, &target, t, r))).collect()
         }),
         "chats" => k.threads(&target.id),
-        "files" => k.read(|s| crate::library::files_matching(s, &target, &[], None)),
+        "files" => k.read(|s| crate::library::files_matching(s, &target, &[], &Default::default(), None)),
         // Recalled from the content store as the person, through the wall.
         "memory" => {
             match k.remembered(&target.id, |_| true).await {

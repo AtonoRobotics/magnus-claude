@@ -87,13 +87,19 @@ async fn list(State(k): K, h: HeaderMap, Query(q): Query<HashMap<String, String>
         Err(r) => return r,
     };
     let terms = crate::api::terms(q.get("q").map(String::as_str).unwrap_or_default());
-    let files = k.read(|s| files_matching(s, &p, &terms, q.get("project").map(String::as_str)));
+    let texts = match k.file_texts(&p.id, &terms).await {
+        Ok(t) => t,
+        Err(e) => return internal(e),
+    };
+    let files = k.read(|s| files_matching(s, &p, &terms, &texts, q.get("project").map(String::as_str)));
     Json(json!({ "files": files })).into_response()
 }
 
 /// The person's files with every term in their name, origin, project or
 /// text, newest first; `want` keeps one project's (`none`: in no project).
-pub(crate) fn files_matching(s: &St, p: &Person, terms: &[String], want: Option<&str>) -> Vec<Value> {
+/// `texts` holds the search text of their text files, recalled for them
+/// (`Kernel::file_texts`).
+pub(crate) fn files_matching(s: &St, p: &Person, terms: &[String], texts: &HashMap<String, String>, want: Option<&str>) -> Vec<Value> {
     let mut v: Vec<(&LibFile, Value)> = s
         .files
         .values()
@@ -105,7 +111,8 @@ pub(crate) fn files_matching(s: &St, p: &Person, terms: &[String], want: Option<
             Some(id) => j["project"]["id"] == id,
         })
         .filter(|(f, j)| {
-            let hay = format!("{} {} {} {}", f.name.to_lowercase(), j["origin"]["title"].as_str().unwrap_or_default().to_lowercase(), j["project"]["name"].as_str().unwrap_or_default().to_lowercase(), f.text);
+            let text = texts.get(&f.id).map(String::as_str).unwrap_or_default();
+            let hay = format!("{} {} {} {}", f.name.to_lowercase(), j["origin"]["title"].as_str().unwrap_or_default().to_lowercase(), j["project"]["name"].as_str().unwrap_or_default().to_lowercase(), text);
             terms.iter().all(|t| hay.contains(t.as_str()))
         })
         .collect();
@@ -170,7 +177,7 @@ pub(crate) async fn add_file(k: &Kernel, p: &Person, b: &Value, thread: Option<S
 pub(crate) fn given_files(k: &Kernel, p: &Person, b: &Value) -> Result<Vec<String>, Response> {
     let ids: Vec<String> = b["files"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect();
     for id in &ids {
-        match k.read(|s| s.files.get(id).filter(|f| f.person == p.id).map(|f| f.data_b64.is_some())) {
+        match k.read(|s| s.files.get(id).filter(|f| f.person == p.id).map(|f| f.uploaded)) {
             None => return Err(err(StatusCode::NOT_FOUND, format!("no such file {id}"))),
             Some(false) => return Err(err(StatusCode::BAD_REQUEST, "only uploaded files can be given to a task or message; to use a delivered file, put it in a project")),
             Some(true) => {}
@@ -210,14 +217,11 @@ async fn download(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response
         Err(r) => return r,
     };
     let Some(f) = k.read(|s| s.files.get(&id).filter(|f| f.person == p.id).cloned()) else { return err(StatusCode::NOT_FOUND, "no such file") };
-    use base64::Engine;
-    let bytes = match &f.data_b64 {
-        Some(d) => base64::engine::general_purpose::STANDARD.decode(d).unwrap_or_default(),
-        None => match k.output_bytes(f.run.as_deref().unwrap_or_default(), &f.id).await {
-            Ok(Some((.., b))) => b,
-            Ok(None) => return err(StatusCode::NOT_FOUND, "no such file"),
-            Err(e) => return internal(e),
-        },
+    // Recalled for the person, through their wall.
+    let bytes = match k.file_bytes(&f).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "no such file"),
+        Err(e) => return internal(e),
     };
     attachment(&f.name, &f.media_type, bytes)
 }

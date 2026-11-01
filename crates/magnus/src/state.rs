@@ -271,9 +271,13 @@ pub struct LibFile {
     pub media_type: String,
     pub size: usize,
     pub at: DateTime<Utc>,
-    /// An upload's content, kept for the runs given it (inputs, images,
-    /// PDFs). A delivered file's is read from the log when needed.
-    pub data_b64: Option<String>,
+    /// An upload (it can be given to a task or message), not a file a run
+    /// delivered.
+    pub uploaded: bool,
+    /// The event that holds its content (the upload, or the run's output):
+    /// its bytes are recalled from there for its person when a request
+    /// needs them, never kept here (recall only, step 5).
+    pub seq: i64,
     /// The run that delivered it.
     pub run: Option<String>,
     /// The chat thread it was uploaded in.
@@ -281,9 +285,6 @@ pub struct LibFile {
     /// Its content's taint: an upload is private and untrusted; a delivered
     /// file has the taint its run had when it delivered it.
     pub label: Label,
-    /// A text file's content in lower case, for search, up to the length a
-    /// page shows of it.
-    pub text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -674,7 +675,7 @@ pub struct State {
 
 /// A text file's content in lower case for library search, up to as much as
 /// a page shows of a file; other files are found by name.
-fn search_text(media_type: &str, data_b64: &str) -> String {
+pub fn search_text(media_type: &str, data_b64: &str) -> String {
     use base64::Engine;
     let textual = media_type.starts_with("text/") || ["application/json", "application/xml", "application/csv"].contains(&media_type);
     let Some(bytes) = textual.then(|| base64::engine::general_purpose::STANDARD.decode(data_b64).ok()).flatten() else { return String::new() };
@@ -1589,11 +1590,11 @@ impl State {
                         media_type: media_type.clone(),
                         size: data_b64.len() * 3 / 4,
                         at: e.at,
-                        data_b64: None,
+                        uploaded: false,
+                        seq: e.seq,
                         run: Some(run.clone()),
                         thread: None,
                         label: Label { untrusted: r.untrusted, private: r.private },
-                        text: search_text(media_type, data_b64),
                     };
                     self.files.insert(id.clone(), f);
                 }
@@ -1606,11 +1607,11 @@ impl State {
                     media_type: media_type.clone(),
                     size: data_b64.len() * 3 / 4,
                     at: e.at,
-                    data_b64: Some(data_b64.clone()),
+                    uploaded: true,
+                    seq: e.seq,
                     run: None,
                     thread: thread.clone(),
                     label: Label { untrusted: true, private: true },
-                    text: search_text(media_type, data_b64),
                 };
                 self.files.insert(id.clone(), f);
             }

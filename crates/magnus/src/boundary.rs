@@ -828,11 +828,8 @@ impl Kernel {
                     let Some(f) = self.project_file(&a.run, &name) else {
                         return Ok((format!("The project has no reference file {name:?}. A retry with the same name will not help."), true, None));
                     };
-                    use base64::Engine;
-                    let bytes = match &f.data_b64 {
-                        Some(d) => base64::engine::general_purpose::STANDARD.decode(d)?,
-                        None => self.output_bytes(f.run.as_deref().unwrap_or_default(), &f.id).await?.map(|(.., b)| b).unwrap_or_default(),
-                    };
+                    // Recalled for the file's person, through their wall.
+                    let bytes = self.file_bytes(&f).await?.unwrap_or_default();
                     let safe: String = f.name.chars().map(|c| if c == '/' || c == '\\' { '_' } else { c }).collect();
                     let copied = self.sandboxes.available() && self.sandboxes.write(&a.run, &format!("/workspace/project/{safe}"), &bytes).await.is_ok();
                     let at = if copied { format!(" A copy is at /workspace/project/{safe}.") } else { String::new() };
