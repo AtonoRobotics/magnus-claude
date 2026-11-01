@@ -150,10 +150,16 @@ macro_rules! person {
 async fn list(State(k): K, h: HeaderMap) -> Response {
     let p = person!(k, h);
     let keep = chrono::Duration::days(k.cfg.trash.keep_days as i64);
-    // A trashed memory's title is its fact, recalled for the person.
+    // A trashed memory's title is its fact, and a task's, a message's or a
+    // conversation's is what the person asked: recalled for the person.
     let seqs: Vec<i64> = k.read(|s| s.trash.values().filter(|t| t.person == p.id).filter_map(|t| t.memory().map(|m| m.seq)).collect());
     let facts = match k.recall.content(&p.id, &seqs).await {
         Ok(c) => c,
+        Err(e) => return crate::api::internal(e),
+    };
+    let asked: Vec<(String, i64)> = k.read(|s| s.trash.values().filter(|t| t.person == p.id).filter_map(|t| t.title_from.map(|f| (p.id.clone(), f.seq()))).collect());
+    let words = match k.words(asked).await {
+        Ok(w) => w,
         Err(e) => return crate::api::internal(e),
     };
     let mut items: Vec<Value> = k.read(|s| {
@@ -161,9 +167,10 @@ async fn list(State(k): K, h: HeaderMap) -> Response {
             .iter()
             .filter(|(_, t)| t.person == p.id)
             .map(|(id, t)| {
-                let title = match t.memory() {
-                    Some(m) => facts.get(&m.seq).and_then(|c| c["fact"].as_str()).unwrap_or_default().to_string(),
-                    None => t.title.clone(),
+                let title = match (t.memory(), t.title_from) {
+                    (Some(m), _) => facts.get(&m.seq).and_then(|c| c["fact"].as_str()).unwrap_or_default().to_string(),
+                    (None, Some(from)) => from.title(words.of(from.seq())),
+                    (None, None) => t.title.clone(),
                 };
                 json!({ "item": id, "kind": t.kind(), "title": title.chars().take(120).collect::<String>(), "thread": t.thread(), "trashed_at": t.at, "removed_at": t.at + keep })
             })

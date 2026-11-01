@@ -82,6 +82,13 @@ impl Kernel {
                 .unwrap_or_default();
             (task, files, refs)
         });
+        // What the person asked, recalled for them.
+        let words = match &task {
+            Some(t) => self.words_of(&t.person, t.seq).await?,
+            None => Default::default(),
+        };
+        let said = task.as_ref().map(|t| words.text(t.seq).to_string()).unwrap_or_default();
+        let scope = task.as_ref().and_then(|t| words.opt(t.seq, "scope"));
         let project = task.as_ref().and_then(|t| t.project.clone());
         let chat = task.as_ref().and_then(|t| t.chat.clone());
         let mut first = vec![];
@@ -93,8 +100,7 @@ impl Kernel {
             }
             _ => {}
         }
-        let scope = task.as_ref().and_then(|t| t.scope.clone());
-        first.push(Block::Text { text: task.map(|t| t.text).unwrap_or_default() });
+        first.push(Block::Text { text: said });
         // A schedule's run keeps to the scope the person confirmed for it.
         if let Some(scope) = scope {
             first.push(Block::Text { text: format!("The person confirmed this schedule for this scope; keep to it: {scope}") });
@@ -472,7 +478,7 @@ impl Kernel {
                 let reason = input["reason"].as_str().unwrap_or("no reason given").to_string();
                 self.result(rid, call_id, "Recorded.", false).await?;
                 // A failure is never silent (K24): the person's inbox says so, with the evidence, in the same write.
-                let notice = self.notice_of(&run, format!("Failed: {}", self.title_of(&run)), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run) } }));
+                let notice = self.notice_of(&run, format!("Failed: {}", self.title_of(&run).await), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run) } }));
                 self.emit_all(vec![("model", Ev::Failed { run: rid.into(), reason, by: "model".into() }), ("kernel", notice)]).await?;
                 self.on_stop(rid, true).await;
                 self.after_end(rid);
@@ -529,7 +535,7 @@ impl Kernel {
             "end_schedule" => match self.read(|s| s.tasks.get(&run.task).and_then(|t| t.schedule.clone()).filter(|id| s.schedules.contains_key(id)).map(|id| (id.clone(), s.schedules[&id].clone()))) {
                 Some((id, sc)) => {
                     let reason = input["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).unwrap_or("its run ended it").to_string();
-                    let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                    let title = self.schedule_title(&sc).await?;
                     let notice = self.notice_to(Some(run.task.clone()), Some(rid.to_string()), sc.person.clone(), format!("A schedule ended itself: {title}"), json!({ "reason": "schedule_ended", "evidence": { "schedule": id, "why": reason } }));
                     self.emit_all(vec![("model", Ev::ScheduleEnded { id, reason, run: Some(rid.to_string()) }), ("kernel", notice)]).await?;
                     self.result(rid, call_id, "The schedule has ended; no more runs will start. This run goes on.", false).await?;
@@ -684,7 +690,7 @@ impl Kernel {
         let unfinished = self.unfinished_chat_actions(&run);
         let mut evs = vec![("kernel", Ev::Completed { run: rid.into(), summary: answer, view: run.shown(), spoken: None })];
         if !unfinished.is_empty() {
-            evs.push(("kernel", self.notice_of(&run, format!("Not done: {}", self.title_of(&run)), json!({ "reason": "chat_action_failed", "evidence": unfinished }))));
+            evs.push(("kernel", self.notice_of(&run, format!("Not done: {}", self.title_of(&run).await), json!({ "reason": "chat_action_failed", "evidence": unfinished }))));
         }
         self.emit_all(evs).await?;
         self.on_stop(rid, true).await;
