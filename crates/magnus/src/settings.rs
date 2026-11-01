@@ -189,12 +189,23 @@ async fn person_data(State(k): K, h: HeaderMap, Path((id, what)): Path<(String, 
     if k.read(|s| s.data_private) && target.id != me.id {
         return err(StatusCode::FORBIDDEN, "People's data is private here: the organisation's policy keeps it from the admin.");
     }
+    // Their tasks' words are recalled as them, through their wall.
+    let words = match what.as_str() {
+        "tasks" | "files" => match k.person_words(&target.id).await {
+            Ok(w) => w,
+            Err(e) => return crate::api::internal(e),
+        },
+        _ => Default::default(),
+    };
     let items: Vec<Value> = match what.as_str() {
         "tasks" => k.read(|s| {
-            s.tasks.values().filter(|t| t.person == target.id && !t.is_chat_turn()).filter_map(|t| s.runs.get(&t.run_id).map(|r| crate::api::task_row(&k, s, &target, t, r))).collect()
+            s.tasks.values().filter(|t| t.person == target.id && !t.is_chat_turn()).filter_map(|t| s.runs.get(&t.run_id).map(|r| crate::api::task_row(&k, s, &target, t, r, &words))).collect()
         }),
-        "chats" => k.threads(&target.id),
-        "files" => k.read(|s| crate::library::files_matching(s, &target, &[], &Default::default(), None)),
+        "chats" => match k.threads(&target.id).await {
+            Ok(t) => t,
+            Err(e) => return crate::api::internal(e),
+        },
+        "files" => k.read(|s| crate::library::files_matching(s, &target, &[], &Default::default(), None, &words)),
         // Recalled from the content store as the person, through the wall.
         "memory" => {
             match k.remembered(&target.id, |_| true).await {
