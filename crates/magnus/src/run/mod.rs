@@ -520,10 +520,9 @@ impl Kernel {
             "end_schedule" => match self.read(|s| s.tasks.get(&run.task).and_then(|t| t.schedule.clone()).filter(|id| s.schedules.contains_key(id)).map(|id| (id.clone(), s.schedules[&id].clone()))) {
                 Some((id, sc)) => {
                     let reason = input["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).unwrap_or("its run ended it").to_string();
-                    self.emit("model", Ev::ScheduleEnded { id: id.clone(), reason: reason.clone(), run: Some(rid.to_string()) }).await?;
                     let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
-                    self.post_notice(Some(run.task.clone()), Some(rid.to_string()), sc.person.clone(), format!("A schedule ended itself: {title}"), json!({ "reason": "schedule_ended", "evidence": { "schedule": id, "why": reason } }))
-                        .await?;
+                    let notice = self.notice_to(Some(run.task.clone()), Some(rid.to_string()), sc.person.clone(), format!("A schedule ended itself: {title}"), json!({ "reason": "schedule_ended", "evidence": { "schedule": id, "why": reason } }));
+                    self.emit_all(vec![("model", Ev::ScheduleEnded { id, reason, run: Some(rid.to_string()) }), ("kernel", notice)]).await?;
                     self.result(rid, call_id, "The schedule has ended; no more runs will start. This run goes on.", false).await?;
                 }
                 None => self.result(rid, call_id, "This task was not started by a schedule that is still set. A retry will not help.", true).await?,

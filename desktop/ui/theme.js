@@ -16,19 +16,19 @@
     "row-sel": "rgba(0,0,0,0.06)", search: "rgba(118,118,128,0.12)", "group-head": "#FAFAF8", "row-hi": "#F4F6FE",
     ok: "#1A6B3A", "ok-soft": "#E3F4E9", "ok-icon": "#1E7A44", warn: "#8A4200", "warn-soft": "#FFEBD2", "warn-icon": "#9A4A00",
     sch: "#2C43AD", "sch-soft": "#E9EDFC", "approval-bg": "#FFFAF3", "approval-border": "#F2D9B8", bad: "#B42318", "bad-soft": "#FBE7E5",
-    shadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 20px rgba(0,0,0,0.04)", avatar: "#D9D8D2", chev: "#76767B", "panel-edge": "#E7E6E2", "main-edge": "transparent",
+    shadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 20px rgba(0,0,0,0.04)", avatar: "#D9D8D2", chev: "#8A8A8F", "pdf-bg": "#FBE7E4", "pdf-fg": "#A23A2C", "panel-edge": "#E7E6E2", "main-edge": "transparent",
     "t-read": "#5E5E63", "t-reversible": "#2C43AD", "t-irreversible": "#9A4A00", "t-financial": "#B42318",
     "k-question": "#6D28D9", "k-review": "#0F766E", "k-notice": "#8A4200", "k-proposal": "#4338CA", "k-message": "#5E5E63", "k-tool": "#7C2D12",
   };
   const DARK = {
     bg: "#161618", side: "#161618", panel: "#19191C", main: "#1C1C1F", surface: "#242428", raised: "#2A2A2F",
     bubble: "#2C2C31", seg: "#2A2A2F", "seg-on": "#3A3A40",
-    fg: "#F2F2F4", fg2: "#D1D1D6", muted: "#A8A8AF", faint: "#A8A8AF",
+    fg: "#F2F2F4", fg2: "#D1D1D6", muted: "#A1A1A8", faint: "#A1A1A8",
     line: "#2E2E33", hair: "#2A2A2F", "line-strong": "#4A4A52", "btn-border": "#3A3A40", "button-bg": "#2A2A2F",
     "row-sel": "rgba(255,255,255,0.08)", search: "rgba(255,255,255,0.08)", "group-head": "#202024", "row-hi": "#20263A",
     ok: "#86DBA0", "ok-soft": "#16331F", "ok-icon": "#6CCB8A", warn: "#FFBE78", "warn-soft": "#3A2410", "warn-icon": "#FFAA55",
     sch: "#A9BAFF", "sch-soft": "#1D2547", "approval-bg": "#241B10", "approval-border": "#4A3418", bad: "#FF8A80", "bad-soft": "#3A1717",
-    shadow: "0 1px 2px rgba(0,0,0,0.3)", avatar: "#3A3A40", chev: "#8A8A90", "panel-edge": "#2E2E33", "main-edge": "transparent",
+    shadow: "0 1px 2px rgba(0,0,0,0.3)", avatar: "#3A3A40", chev: "#7A7A80", "pdf-bg": "#3A1E1A", "pdf-fg": "#FF9D8C", "panel-edge": "#2E2E33", "main-edge": "transparent",
     "t-read": "#A1A1A8", "t-reversible": "#A9BAFF", "t-irreversible": "#FFAA55", "t-financial": "#FF8A80",
     "k-question": "#C4B5FD", "k-review": "#5EEAD4", "k-notice": "#FFBE78", "k-proposal": "#A5B4FC", "k-message": "#A1A1A8", "k-tool": "#FDBA74",
   };
@@ -39,26 +39,29 @@
   // glass is a step stronger than on solid.
   const GLASS = {
     light: {
-      system: "rgba(248,248,246,0.63)",
+      system: "rgba(248,248,246,0.86)",
       side: "rgba(248,248,246,0.62)", panel: "rgba(250,250,248,0.70)", search: "rgba(255,255,255,0.55)", seg: "rgba(0,0,0,0.06)",
-      muted: "#45454A", faint: "#45454A", chev: "#5E5E63", "panel-edge": "rgba(255,255,255,0.6)", "main-edge": "rgba(0,0,0,0.05)",
+      muted: "#55555A", faint: "#55555A", "panel-edge": "rgba(255,255,255,0.6)", "main-edge": "rgba(0,0,0,0.05)",
       "main-shadow": "0 10px 40px rgba(40,50,90,0.12)",
       backdrop: "radial-gradient(60% 50% at 12% 18%, #F7C8A6 0%, rgba(247,200,166,0) 70%), radial-gradient(55% 55% at 88% 12%, #AFC2F7 0%, rgba(175,194,247,0) 70%), radial-gradient(60% 60% at 72% 92%, #BFE5D2 0%, rgba(191,229,210,0) 70%), #E4E6EE",
     },
     dark: {
-      system: "rgba(24,24,28,0.63)",
-      side: "rgba(26,26,30,0.58)", panel: "rgba(28,28,32,0.66)", search: "rgba(255,255,255,0.08)", seg: "rgba(255,255,255,0.08)",
-      muted: "#C2C2C8", faint: "#C2C2C8", chev: "#A1A1A8", "panel-edge": "rgba(255,255,255,0.08)", "main-edge": "rgba(255,255,255,0.06)",
+      system: "rgba(24,24,28,0.86)",
+      side: "rgba(26,26,30,0.58)", panel: "rgba(28,28,32,0.66)", search: "rgba(255,255,255,0.10)", seg: "rgba(255,255,255,0.08)",
+      "panel-edge": "rgba(255,255,255,0.08)", "main-edge": "rgba(255,255,255,0.06)",
       "main-shadow": "0 10px 40px rgba(0,0,0,0.45)",
+      // The design's muted text over its 10% search field falls to 4.2:1
+      // over the wallpaper's darkest color; the placeholder alone is lifted.
+      "search-muted": "#B4B4BB",
       backdrop: "radial-gradient(60% 50% at 12% 18%, #4B2A5E 0%, rgba(75,42,94,0) 70%), radial-gradient(55% 55% at 88% 12%, #173F66 0%, rgba(23,63,102,0) 70%), radial-gradient(60% 60% at 72% 92%, #5A2F1C 0%, rgba(90,47,28,0) 70%), #0D0F1A",
     },
   };
   // Each accent: the fill of primary buttons with the text on it, and the
   // color of accent text (links, selected labels) on each mode's surfaces.
   const ACCENTS = [
-    { id: "blue", label: "Blue", swatch: "#3557D9", light: { accent: "#3557D9", "accent-fg": "#FFFFFF", "accent-text": "#2541A8", "accent-soft": "#E9EDFC" }, dark: { accent: "#3557D9", "accent-fg": "#FFFFFF", "accent-text": "#AEBFFF", "accent-soft": "#1D2547" } },
-    { id: "teal", label: "Teal", swatch: "#1F7A6D", light: { accent: "#1F7A6D", "accent-fg": "#FFFFFF", "accent-text": "#145247", "accent-soft": "#E1F2EE" }, dark: { accent: "#1F7A6D", "accent-fg": "#FFFFFF", "accent-text": "#6FD3C1", "accent-soft": "#13302B" } },
-    { id: "clay", label: "Clay", swatch: "#B4532A", light: { accent: "#B4532A", "accent-fg": "#FFFFFF", "accent-text": "#7D3618", "accent-soft": "#FBEAE2" }, dark: { accent: "#B4532A", "accent-fg": "#FFFFFF", "accent-text": "#F7B394", "accent-soft": "#3A2016" } },
+    { id: "blue", label: "Blue", swatch: "#3557D9", light: { accent: "#3557D9", "accent-fg": "#FFFFFF", "accent-text": "#3557D9", "accent-soft": "#E9EDFC" }, dark: { accent: "#3557D9", "accent-fg": "#FFFFFF", "accent-text": "#9DB1FF", "accent-soft": "#1D2547" } },
+    { id: "teal", label: "Teal", swatch: "#1F7A6D", light: { accent: "#1F7A6D", "accent-fg": "#FFFFFF", "accent-text": "#1F7A6D", "accent-soft": "#EAF6F3" }, dark: { accent: "#1F7A6D", "accent-fg": "#FFFFFF", "accent-text": "#6FD3C1", "accent-soft": "#13302B" } },
+    { id: "clay", label: "Clay", swatch: "#B4532A", light: { accent: "#B4532A", "accent-fg": "#FFFFFF", "accent-text": "#B4532A", "accent-soft": "#FDF2EC" }, dark: { accent: "#B4532A", "accent-fg": "#FFFFFF", "accent-text": "#F7B394", "accent-soft": "#3A2016" } },
     { id: "graphite", label: "Graphite", swatch: "#1C1C1E", light: { accent: "#1C1C1E", "accent-fg": "#FFFFFF", "accent-text": "#1C1C1E", "accent-soft": "#EDEDEA" }, dark: { accent: "#E5E5EA", "accent-fg": "#1C1C1E", "accent-text": "#E5E5EA", "accent-soft": "#3A3A40" } },
   ];
   const MODES = [["light", "Light"], ["dark", "Dark"], ["system", "Match computer"]];
@@ -99,6 +102,8 @@
       t.blur = "blur(40px) saturate(170%)"; t["main-gap"] = "10px"; t["main-radius"] = "18px";
     }
     Object.assign(t, (ACCENTS.find(a => a.id === look.accent) || ACCENTS[0])[look.mode]);
+    // The search field's placeholder and icon: muted, unless the look lifts it.
+    t["search-muted"] = (look.material === "glass" && GLASS[look.mode]["search-muted"]) || t.muted;
     return t;
   }
 

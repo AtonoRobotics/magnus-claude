@@ -65,7 +65,12 @@ export async function open(wd, app, shots, prefix) {
   d.attr = (el, name) => on(el, id => call("GET", s(`/element/${id}/attribute/${name}`)));
   d.seen = t => d.until(`"${t}"`, () => d.run("return document.body.innerText.includes(arguments[0])", t));
   let n = 0;
-  const shot = async name => { if (shots) writeFileSync(join(shots, `${prefix}-${String(++n).padStart(2, "0")}-${name}.png`), Buffer.from(await call("GET", s("/screenshot")), "base64")); };
+  const shot = async name => {
+    if (!shots) return;
+    const file = join(shots, `${prefix}-${String(++n).padStart(2, "0")}-${name}.png`);
+    // Evidence only: a screenshot that cannot be taken fails no check.
+    try { writeFileSync(file, Buffer.from(await call("GET", s("/screenshot")), "base64")); } catch (e) { console.error(`screenshot not kept: ${String(e.message).split("\n")[0]}`); }
+  };
   d.close = () => call("DELETE", s("")).catch(() => {});
   d.step = async (name, f) => {
     try { await f(); await shot(name); console.log(`ok   ${name}`); }

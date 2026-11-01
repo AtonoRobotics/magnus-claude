@@ -79,7 +79,7 @@ async fn a_task_from_chat_shows_its_deliverable_in_the_conversation() {
         .env("MAGNUS_THREAD", &thread)
         .env("MAGNUS_TASK", &id)
         .env("MAGNUS_CHROMIUM", chromium())
-        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .envs(shots())
         .output()
         .await
         .unwrap();
