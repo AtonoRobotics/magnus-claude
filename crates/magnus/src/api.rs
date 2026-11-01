@@ -1198,11 +1198,12 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
         Err(e) => return internal(e),
     };
     let mut revoking = vec![];
-    let signed_in: Vec<(String, String)> = k.connectors().into_iter().filter(|c| c.auth.as_deref() == Some(crate::connectors::OAUTH)).filter_map(|c| Some((c.credential?, c.name))).collect();
+    // Every person's own sign-in to every app people sign in to.
+    let signed_in: Vec<String> = k.connectors().into_iter().filter(|c| c.auth.as_deref() == Some(crate::connectors::OAUTH)).map(|c| c.name).collect();
     for n in &names {
         if let Some(adapter) = k.adapters.oauth_owner_of(n).await {
             revoking.push((n.clone(), adapter));
-        } else if let Some((_, app)) = signed_in.iter().find(|(cred, _)| cred == n) {
+        } else if let Some(app) = signed_in.iter().find(|app| crate::connectors::is_sign_in_of(n, app)) {
             revoking.push((n.clone(), format!("connector:{app}")));
         }
     }

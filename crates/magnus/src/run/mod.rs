@@ -222,7 +222,12 @@ impl Kernel {
         }
         let Some(person) = self.person(&run.person) else { return specs };
         for c in self.connectors() {
-            let live = self.live_app_tools(&c).await;
+            // An app people sign in to is offered only to a run whose
+            // person has signed in to it themselves.
+            if !self.connected(&c, &run.person) {
+                continue;
+            }
+            let live = self.live_app_tools(&c, &run.person).await;
             let mut fresh = vec![];
             for (remote, class) in &c.tools {
                 let name = format!("{}__{remote}", c.name);
@@ -285,10 +290,13 @@ impl Kernel {
         Ok(())
     }
 
-    async fn live_app_tools(&self, c: &crate::config::Connector) -> Option<Vec<crate::apps::AppTool>> {
+    /// An app's tools as it lists them now, to `person` (through their own
+    /// sign-in, for an app people sign in to).
+    async fn live_app_tools(&self, c: &crate::config::Connector, person: &str) -> Option<Vec<crate::apps::AppTool>> {
+        let key = crate::connectors::connection_name(&c.name, person);
         {
             let cache = self.live_tools.lock().await;
-            if let Some((at, tools)) = cache.get(&c.name) {
+            if let Some((at, tools)) = cache.get(&key) {
                 if at.elapsed() < Duration::from_secs(2) {
                     return Some(tools.clone());
                 }
@@ -296,13 +304,13 @@ impl Kernel {
         }
         // An app that takes a credential lists nothing without it; one that
         // takes none is listed as it is.
-        let secret = self.connector_secret(c).await.ok().flatten();
+        let secret = self.connector_secret(c, person).await.ok().flatten();
         if c.credential.is_some() && secret.is_none() {
             return None;
         }
         match self.mcp.list_tools(&c.url, secret.as_ref().map(|s| s.expose())).await {
             Ok(t) => {
-                self.live_tools.lock().await.insert(c.name.clone(), (Instant::now(), t.clone()));
+                self.live_tools.lock().await.insert(key, (Instant::now(), t.clone()));
                 Some(t)
             }
             Err(e) => {

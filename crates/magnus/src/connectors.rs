@@ -22,14 +22,32 @@ use std::time::{Duration, Instant};
 
 pub const OAUTH: &str = "oauth";
 
-/// The vault name of an app's credential.
+/// The vault name of an app's credential: the organisation's key for an
+/// app that takes one, or, before connections were each person's own, the
+/// one sign-in everyone's runs used (no longer used; revoked with the app).
 pub fn credential_name(app: &str) -> String {
     format!("connector_{app}")
+}
+
+/// The vault name of one person's own sign-in to an app (connectors spec:
+/// the organisation provides the connector, each person signs in with
+/// their own account, and no one else acts through it). App names never
+/// hold `__`, so the person is what follows the first one.
+pub fn connection_name(app: &str, person: &str) -> String {
+    format!("connector_{app}__{person}")
+}
+
+/// Whether a vault name is one of an app's sign-ins: a person's own, or
+/// the old shared one.
+pub fn is_sign_in_of(name: &str, app: &str) -> bool {
+    name == credential_name(app) || name.starts_with(&format!("{}__", credential_name(app)))
 }
 
 /// A sign-in waiting for its code.
 struct Pending {
     app: String,
+    /// Who is signing in: the sign-in becomes theirs alone.
+    person: String,
     verifier: String,
     redirect_uri: String,
     client: Client,
@@ -202,14 +220,17 @@ impl Kernel {
         self.connectors().into_iter().find(|c| c.name == name)
     }
 
-    /// The bearer token for an app: its stored token, or for a signed-in
-    /// app its access token, refreshed when it has expired. None when there
-    /// is none (or the refresh failed: the person signs in again).
-    pub async fn connector_secret(&self, c: &Connector) -> Result<Option<Secret>> {
-        let Some(name) = &c.credential else { return Ok(None) };
+    /// The bearer token for an app, for `person`: the organisation's key
+    /// for an app that takes one, or for an app people sign in to, the
+    /// person's own access token, refreshed when it has expired. None when
+    /// there is none (they have not signed in, or the refresh failed: they
+    /// sign in again).
+    pub async fn connector_secret(&self, c: &Connector, person: &str) -> Result<Option<Secret>> {
+        let Some(org) = &c.credential else { return Ok(None) };
         if c.auth.as_deref() != Some(OAUTH) {
-            return self.vault.get(name);
+            return self.vault.get(org);
         }
+        let name = &connection_name(&c.name, person);
         let _g = refreshing().lock().await;
         let Some(raw) = self.vault.get(name)? else { return Ok(None) };
         let mut t: Tokens = serde_json::from_str(raw.expose()).context("stored sign-in")?;
@@ -249,7 +270,7 @@ impl Kernel {
 
     /// Start signing in to an app: register if needed, and return the
     /// address to open in the person's browser.
-    pub async fn connector_sign_in(&self, c: &Connector, redirect_uri: &str) -> Result<(String, String)> {
+    pub async fn connector_sign_in(&self, c: &Connector, person: &str, redirect_uri: &str) -> Result<(String, String)> {
         loopback(redirect_uri)?;
         let meta = asks_sign_in(&c.url).await?.unwrap_or(None);
         let (asm, scopes, issuer) = discover(&c.url, meta).await?;
@@ -297,13 +318,14 @@ impl Kernel {
         let mut p = pending().lock().unwrap();
         p.retain(|_, x| x.at.elapsed() < PENDING_FOR);
         let iss_required = asm["authorization_response_iss_parameter_supported"] == true;
-        p.insert(state.clone(), Pending { app: c.name.clone(), verifier, redirect_uri: redirect_uri.into(), client, issuer, iss_required, at: Instant::now() });
+        p.insert(state.clone(), Pending { app: c.name.clone(), person: person.into(), verifier, redirect_uri: redirect_uri.into(), client, issuer, iss_required, at: Instant::now() });
         Ok((u.to_string(), state))
     }
 
     /// Finish a sign-in with the code the browser brought back.
-    pub async fn connector_sign_in_complete(&self, app: &str, state: &str, code: &str, iss: Option<&str>) -> Result<()> {
-        let p = pending().lock().unwrap().remove(state).filter(|p| p.app == app && p.at.elapsed() < PENDING_FOR).ok_or_else(|| anyhow!("this sign-in expired or is unknown; start again"))?;
+    /// Only the person who started it can finish it.
+    pub async fn connector_sign_in_complete(&self, app: &str, person: &str, state: &str, code: &str, iss: Option<&str>) -> Result<()> {
+        let p = pending().lock().unwrap().remove(state).filter(|p| p.app == app && p.person == person && p.at.elapsed() < PENDING_FOR).ok_or_else(|| anyhow!("this sign-in expired or is unknown; start again"))?;
         // The answer must come from the server the sign-in went to (RFC
         // 9207): otherwise the code and verifier would go to this one's token
         // endpoint for another server's code (a mix-up).
@@ -337,9 +359,32 @@ impl Kernel {
             lifetime: v["expires_in"].as_i64(),
             client: p.client,
         };
-        self.vault.put(&credential_name(app), &serde_json::to_string(&t)?)?;
-        self.live_tools.lock().await.remove(app);
+        self.vault.put(&connection_name(app, person), &serde_json::to_string(&t)?)?;
+        self.live_tools.lock().await.remove(&connection_name(app, person));
         Ok(())
+    }
+
+    /// Whether `person` can use an app now: it takes no sign-in, or they
+    /// have signed in to it themselves.
+    pub fn connected(&self, c: &Connector, person: &str) -> bool {
+        match (&c.credential, c.auth.as_deref()) {
+            (None, _) => true,
+            (Some(_), Some(OAUTH)) => self.vault.names().is_ok_and(|n| n.contains(&connection_name(&c.name, person))),
+            (Some(org), _) => self.vault.names().is_ok_and(|n| n.contains(org)),
+        }
+    }
+
+    /// End one person's sign-in to an app: revoked at the app, then deleted.
+    pub async fn disconnect(&self, app: &str, person: &str) -> Result<bool> {
+        match self.vault.remove(&connection_name(app, person))? {
+            Some(s) => {
+                let (done, detail) = revoke(s.expose()).await;
+                tracing::info!("{person} disconnected {app}: revoked {done}: {detail}");
+                self.live_tools.lock().await.remove(&connection_name(app, person));
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 }
 
@@ -377,10 +422,11 @@ pub fn suggested_risk(annotations: &Value) -> &'static str {
     }
 }
 
-// The owner's API: the apps, their tools and their classification, and
-// signing in to them.
+// The API: the organisation's apps, which the owner adds, classifies and
+// removes; and each person's own sign-in to them, which only they make and
+// end, and which only their runs use.
 
-use crate::api::{err, internal, owner};
+use crate::api::{err, internal, owner, who};
 use crate::events::Ev;
 use axum::{
     extract::{Path, State as AxState},
@@ -400,6 +446,7 @@ pub fn router() -> Router<Arc<Kernel>> {
         .route("/v1/connectors/{name}/tools/{tool}", put(classify))
         .route("/v1/connectors/{name}/sign-in", post(sign_in))
         .route("/v1/connectors/{name}/sign-in/complete", post(sign_in_complete))
+        .route("/v1/connectors/{name}/connection", delete(disconnect))
 }
 
 macro_rules! owner {
@@ -411,17 +458,26 @@ macro_rules! owner {
     };
 }
 
-/// Every app with its tools as the app lists them now, each with the
-/// owner's classification (none: the worker is not offered it) and the
+/// The organisation's apps, each with whether the person asking is
+/// signed in to it. The owner also gets each app's tools as the app lists
+/// them now (through the owner's own sign-in), each with the owner's
+/// classification (none: the worker is not offered it) and the
 /// classification the app's own hints suggest.
 async fn list(AxState(k): K, h: HeaderMap) -> Response {
-    owner!(k, h);
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
     let added: Vec<String> = k.read(|s| s.connectors.keys().cloned().collect());
     let mut out = vec![];
     for c in k.connectors() {
         let from_app = added.contains(&c.name) && k.cfg.connectors.iter().all(|f| f.name != c.name);
-        let secret = k.connector_secret(&c).await.ok().flatten();
+        let secret = k.connector_secret(&c, &p.id).await.ok().flatten();
         let signed_in = c.credential.is_none() || secret.is_some();
+        if !p.is_owner() {
+            out.push(json!({ "name": c.name, "auth": c.auth, "signed_in": signed_in, "problem": (!signed_in).then_some("sign in to this app") }));
+            continue;
+        }
         let (tools, problem) = if !signed_in {
             (vec![], Some(if c.auth.as_deref() == Some(OAUTH) { "sign in to this app".to_string() } else { "no credential is stored".to_string() }))
         } else {
@@ -518,11 +574,16 @@ async fn remove(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Respon
         Ok(c) => c,
         Err(r) => return r,
     };
-    if let Some(cred) = &c.credential {
-        match k.vault.remove(cred) {
+    // The organisation's key, and every person's sign-in, each revoked.
+    let names: Vec<String> = match k.vault.names() {
+        Ok(n) => n.into_iter().filter(|n| is_sign_in_of(n, &name) || c.credential.as_ref() == Some(n)).collect(),
+        Err(e) => return internal(e),
+    };
+    for cred in names {
+        match k.vault.remove(&cred) {
             Ok(Some(s)) if c.auth.as_deref() == Some(OAUTH) => {
                 let (done, detail) = revoke(s.expose()).await;
-                tracing::info!("removed {name}: revoked {done}: {detail}");
+                tracing::info!("removed {name}: revoked {cred} {done}: {detail}");
             }
             Ok(_) => {}
             Err(e) => return internal(e),
@@ -550,23 +611,47 @@ async fn classify(AxState(k): K, h: HeaderMap, Path((name, tool)): Path<(String,
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// A person signs in to one of the organisation's apps with their own
+/// account; the sign-in is theirs alone.
 async fn sign_in(AxState(k): K, h: HeaderMap, Path(name): Path<String>, Json(b): Json<Value>) -> Response {
-    owner!(k, h);
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
     let Some(c) = k.connector(&name).filter(|c| c.auth.as_deref() == Some(OAUTH)) else { return err(StatusCode::NOT_FOUND, "no app by that name signs in") };
     if k.read(|s| s.kill_switch) {
         return err(StatusCode::CONFLICT, "the kill switch is engaged");
     }
-    match k.connector_sign_in(&c, b["redirect_uri"].as_str().unwrap_or_default()).await {
+    match k.connector_sign_in(&c, &p.id, b["redirect_uri"].as_str().unwrap_or_default()).await {
         Ok((url, state)) => Json(json!({ "authorize_url": url, "state": state })).into_response(),
         Err(e) => err(StatusCode::BAD_GATEWAY, &format!("{e:#}")),
     }
 }
 
 async fn sign_in_complete(AxState(k): K, h: HeaderMap, Path(name): Path<String>, Json(b): Json<Value>) -> Response {
-    owner!(k, h);
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
     let (Some(state), Some(code)) = (b["state"].as_str(), b["code"].as_str()) else { return err(StatusCode::BAD_REQUEST, "state and code are required") };
-    match k.connector_sign_in_complete(&name, state, code, b["iss"].as_str()).await {
+    match k.connector_sign_in_complete(&name, &p.id, state, code, b["iss"].as_str()).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, &format!("{e:#}")),
+    }
+}
+
+/// A person ends their own sign-in to an app.
+async fn disconnect(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if k.connector(&name).is_none() {
+        return err(StatusCode::NOT_FOUND, "no such app");
+    }
+    match k.disconnect(&name, &p.id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "you are not signed in to this app"),
+        Err(e) => internal(e),
     }
 }

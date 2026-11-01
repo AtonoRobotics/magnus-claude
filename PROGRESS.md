@@ -2,7 +2,8 @@
 
 ## Now (2026-10-29)
 
-- **Recall only, step 4: memory is recalled (owner, 2026-11-01; branch `memory-recalled`).** The kernel no longer keeps what a remembered fact says; every reader recalls it through the person's wall.
+- **Each person's own connections (owner, 2026-11-01; branch `own-connections`).** The organisation provides a connector; each person signs in with their own account, and only their runs use it. Next: the app's connectors in the Library, as the spec's card ("connectors does not match the spec in the app").
+- **Recall only, step 4: memory is recalled (owner, 2026-11-01; merged in #61).** The kernel no longer keeps what a remembered fact says; every reader recalls it through the person's wall.
 - **Recall only, step 2: the recall path (owner, 2026-11-01; merged in #60).** `Recall` reads a person's content through their wall; the owner's read of a person's memory is recalled that way. Next: chats and tasks (step 3).
 - **Recall only, step 1: whose each row of content is (owner, 2026-11-01; merged in #59).** Every content row records its person; a per-person reader role sees only that person's rows, and not the log. Nothing reads through it yet (step 2).
 - **Recall only, behind per-person walls: the plan (owner, 2026-11-01; merged in #58).** `docs/proposals/recall-only.md`: content leaves the kernel's memory and is read per request through row-level security, in seven steps; two questions for the owner.
