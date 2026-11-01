@@ -18,7 +18,10 @@ const SERVERS: [(&str, &str, &str); 4] = [
 ];
 
 fn client() -> (String, String) {
-    let get = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} is not set: the real Google tests need the organisation's Google client (repository secrets GOOGLE_MCP_CLIENT_ID and GOOGLE_MCP_CLIENT_SECRET)"));
+    // CI passes a secret that does not exist as an empty value.
+    let get = |k: &str| {
+        std::env::var(k).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| panic!("{k} is not set: the real Google tests need the organisation's Google client (repository secrets GOOGLE_MCP_CLIENT_ID and GOOGLE_MCP_CLIENT_SECRET)"))
+    };
     (get("GOOGLE_MCP_CLIENT_ID"), get("GOOGLE_MCP_CLIENT_SECRET"))
 }
 
