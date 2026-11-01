@@ -114,7 +114,7 @@
 ## How to resume
 
 - Toolchain: `export PATH=$HOME/.cargo/bin:$PATH` (rust-toolchain.toml pins 1.99.1).
-- Postgres: `docker start magnus-claude-pg` (127.0.0.1:54340; its admin address is the tests' default in `tests/invariants/src/pg.rs`). CI starts it and Keycloak itself (`dev/services.sh`). Search: `docker start magnus-searxng`.
+- Postgres: `dev/postgres.sh` (`magnus-claude-pg`, 127.0.0.1:54340, made again with `--again`; its admin address is the tests' default in `tests/invariants/src/pg.rs`). CI starts it and Keycloak itself (`dev/services.sh`). Search: `docker start magnus-searxng`.
 - Sandbox assets: `sandbox/build.sh` writes `sandbox/out/{vmlinux,rootfs.ext4}` (gitignored). Grader image: `docker build --target rootfs -t magnus-grader sandbox/cache`.
 - Dev appliance: config, state and binaries in `~/.magnus-appliance/`.
   - Start: `~/.magnus-appliance/bin/magnus serve --config ~/.magnus-appliance/magnus.toml`.

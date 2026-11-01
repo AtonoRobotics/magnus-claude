@@ -114,12 +114,14 @@ jobs:
           (cd dist && sha256sum Magnus_* > SHA256SUMS)
       # The update test's two AppImages (desktop/tests/update-builds.sh),
       # built beside the tests, which mostly wait on time; the installed-app
-      # tests wait for them.
+      # tests wait for them. At the lowest CPU priority: the tests have time
+      # limits and the builds none (three browser tests timed out at the
+      # end of run 41267885346 while these compiled on every core).
       - name: Start the update test's two builds
         if: env.MAGNUS_TESTED != '1'
         run: |
           t="$RUNNER_TEMP/update-test" && rm -rf "$t" && mkdir -p "$t"
-          (desktop/tests/update-builds.sh "$MAGNUS_VERSION" "$t" > "$t/build.log" 2>&1; echo $? > "$t/build.status") &
+          (nice -n 19 desktop/tests/update-builds.sh "$MAGNUS_VERSION" "$t" > "$t/build.log" 2>&1; echo $? > "$t/build.status") &
       - name: Install the app from its package
         if: env.MAGNUS_TESTED != '1'
         run: |
@@ -147,8 +149,11 @@ jobs:
       - name: Test runner
         if: env.MAGNUS_TESTED != '1'
         run: cargo nextest --version 2>/dev/null | grep -q "^cargo-nextest $NEXTEST " || cargo install --locked "cargo-nextest@$NEXTEST"
+      # The browser flows keep a screenshot of a failed step (kept below).
       - name: Unit, invariant and scratch tests
         if: env.MAGNUS_TESTED != '1'
+        env:
+          MAGNUS_SHOTS: ${{ runner.temp }}/shots
         run: cargo nextest run -p magnus -p magnus-invariants -p magnus-scratch --no-fail-fast
       - name: The update test's two builds
         if: env.MAGNUS_TESTED != '1'
