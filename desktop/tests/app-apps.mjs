@@ -1,6 +1,6 @@
-// The owner adds an app for everyone by its address in Settings, Connectors,
-// in the installed app, then connects it with their own account from its
-// card in the Library: the shell opens a loopback address on this computer,
+// An app the admin added for everyone (in the admin console, never in the
+// app: the test adds it through the API), which the owner connects with
+// their own account from its card in the Library: the shell opens a loopback address on this computer,
 // the app's sign-in page sends its code there, and the shell hands it to the
 // appliance. Then the owner lets the worker read the app's events, and
 // accepts a change to that tool's definition on the connector.
@@ -18,15 +18,6 @@ const [wd, app, url, fingerprint, provider, person, appUrl] =
 const d = await open(wd, app, process.env.MAGNUS_SHOTS, "apps");
 
 await pinAndSignIn(d, { url, fingerprint, provider, person });
-
-await d.step("add the calendar for everyone by its address", async () => {
-  await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
-  await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Connectors']"));
-  await d.xpath("//h2[normalize-space()='Connectors']");
-  await d.type(d.css("#aurl"), appUrl);
-  await d.click(d.button("Add"));
-  await d.css('[data-app="calendar"]');
-});
 
 await d.step("connect it from its card in the Library; the code comes back to this computer", async () => {
   // Settings has no workspace sidebar: the Library by its address.

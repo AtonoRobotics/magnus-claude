@@ -1,11 +1,11 @@
-// Connectors in the Library, as a person sees them (connectors spec, The
-// connector card and Library), with the real catalog: Google's Gmail,
-// Calendar, Drive and Chat, online through the organisation's registration
-// with Google (set by the test from CI's secrets). Each card is its name,
-// one plain sentence and one button, with no protocol words; a connector
-// opens to what it allows. Connecting is the desktop app's, at Google's own
-// page. The owner sees the registration set and adds an app by its
-// address, the one field. No fakes (owner, 2026-11-01).
+// Connectors in the Library, as a person sees them (connectors spec rev 46,
+// What the user sees, The connector card and Library), with the real
+// catalog: Google's Gmail, Calendar, Drive and Chat, already set up. Each
+// card is its name, one plain sentence and one button, with no protocol
+// words; a connector opens to what it allows. Connecting is the desktop
+// app's, at Google's own page. Nothing on the connect path, and nothing in
+// the owner's Connectors settings, asks anyone to type anything: no client
+// ID, secret or address. No fakes (owner, 2026-11-01).
 //
 // MAGNUS_URL, MAGNUS_PERSON, MAGNUS_PASSWORD  where and who (the owner)
 // MAGNUS_CHROMIUM  Chrome to drive; MAGNUS_SHOTS  where to keep screenshots
@@ -36,6 +36,8 @@ const step = async (name, f) => {
 };
 const T = 60_000;
 const PROTOCOL = /\b(oauth|scopes?|tokens?|mcp|port|https?:)/i;
+// Text a person could type in, other than the Library's own search box.
+const typed = scope => page.locator(`${scope} input:not([type=search]):not([type=checkbox]):not([type=radio]):not([type=file]):not([type=hidden]), ${scope} textarea`).count();
 
 await step("sign in", async () => {
   await page.goto(base);
@@ -62,9 +64,11 @@ await step("a search finds connectors too", async () => {
   await page.locator("#detail [data-connector=google-gmail]").waitFor({ timeout: T });
 });
 
-await step("connecting happens in the desktop app, on the app's own page", async () => {
+await step("connecting happens in the desktop app, on the app's own page, and asks nothing here", async () => {
+  if (await typed("#detail")) throw new Error("the Library asks for something to be typed");
   await page.locator("#detail [data-connector=google-gmail]").getByRole("button", { name: "Connect" }).click();
   await page.getByText("Connect apps from the Magnus desktop app.").waitFor({ timeout: T });
+  for (const scope of ["#detail", "[role=dialog]", ".sheet", ".toast"]) if (await typed(scope)) throw new Error(`connecting asks for something to be typed in Magnus (${scope})`);
 });
 
 await step("a connector opens to what it allows, in plain words", async () => {
@@ -78,15 +82,13 @@ await step("a connector opens to what it allows, in plain words", async () => {
   if (await d.getByRole("button", { name: "Disconnect" }).count()) throw new Error("Disconnect is offered for an app the person has not connected");
 });
 
-await step("the owner sees the Google registration set, and adds an app by its address alone", async () => {
+await step("the owner's Connectors settings are the catalog's apps, and ask for nothing", async () => {
   await page.getByRole("link", { name: "Settings" }).click();
   await page.getByRole("link", { name: "Connectors" }).click();
-  const reg = page.locator("[data-registration=google]");
-  await reg.getByText("Set", { exact: true }).waitFor({ timeout: T });
   await page.locator('[data-app="google-gmail"]').getByText("from the catalog").waitFor({ timeout: T });
-  const form = page.locator(".card", { hasText: "Add an app for everyone" });
-  const fields = await form.locator("input, select, textarea").count();
-  if (fields !== 1) throw new Error(`adding an app asks for ${fields} fields, not its address alone`);
+  const said = await page.locator("main").innerText();
+  if (/client (id|secret)|registration|its address/i.test(said)) throw new Error(`the settings ask for setup: ${said}`);
+  if (await typed("main")) throw new Error("the owner's Connectors settings ask for something to be typed");
 });
 
 await step("from Settings, the Library's address opens the Library", async () => {
