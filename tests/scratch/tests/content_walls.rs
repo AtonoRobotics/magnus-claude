@@ -140,6 +140,69 @@ async fn the_owner_reads_a_persons_memory_recalled_through_their_wall() {
     assert_eq!(moved, 1);
     let facts = read().await;
     assert!(!facts.iter().any(|f| f.to_string().contains(&fact)), "carol's memory read past her wall: {facts:?}");
-    // Carol's own view is unchanged until step 4 moves it too.
-    assert!(carol.get("/v1/memory").await.1.to_string().contains(&fact));
+    // Her own view is recalled the same way (step 4).
+    assert!(!carol.get("/v1/memory").await.1.to_string().contains(&fact));
+}
+
+/// A person's memory is recalled, not kept (step 4): their memory view,
+/// memory search and the trash show what the content store says, for
+/// them, whatever the kernel read before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persons_memory_is_recalled_from_the_content_store_for_them() {
+    let (fact, edited) = (canary("carol-fact"), canary("edited"));
+    let said = fact.clone();
+    let m = FakeModel::start(script(move |c| {
+        let said = said.clone();
+        async move {
+            let pass = c.offered_tools() == ["memory_write".to_string()];
+            let first = c.messages().first().map(|m| m.to_string()).unwrap_or_default();
+            match c.turn() {
+                0 if !pass && first.contains("Remember that") => tool("memory_write", json!({ "fact": format!("Carol's code name is {said}.") })),
+                0 if !pass && first.contains("code name") => tool("memory_search", json!({ "query": "code name" })),
+                _ if !pass && first.contains("code name") => Reply::Text(format!("Found: {}", c.text())),
+                _ => Reply::Text("Noted.".into()),
+            }
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let carol = app.api("carol");
+    let chat = |text: &'static str| {
+        let carol = carol.clone();
+        async move {
+            let (st, v) = carol.post("/v1/chat", json!({ "text": text })).await;
+            assert_eq!(st.as_u16(), 201, "{v}");
+            carol.wait_settled(v["task_id"].as_str().unwrap()).await
+        }
+    };
+    chat("Remember that my code name matters.").await;
+    let kept = carol.get("/v1/memory").await.1;
+    assert!(kept.to_string().contains(&fact), "{kept}");
+    let id = kept["memory"][0]["id"].as_str().unwrap().to_string();
+
+    // What the content store says is what she is shown.
+    let admin = app.db.admin().await;
+    let changed = admin
+        .execute("UPDATE public.content SET body = jsonb_set(body, '{fact}', to_jsonb($2::text)) WHERE body->>'fact' LIKE '%' || $1 || '%'", &[&fact, &format!("Carol's code name is {edited}.")])
+        .await
+        .unwrap();
+    assert_eq!(changed, 1);
+    let shown = carol.get("/v1/memory").await.1.to_string();
+    assert!(shown.contains(&edited) && !shown.contains(&fact), "her memory view is not recalled: {shown}");
+    let found = chat("What is my code name?").await;
+    let answer = found.to_string();
+    assert!(answer.contains(&edited) && !answer.contains(&fact), "memory search is not recalled: {answer}");
+
+    // In the trash, its title is recalled too.
+    assert!(carol.post("/v1/trash", json!({ "item": id })).await.0.is_success());
+    let trash = carol.get("/v1/trash").await.1.to_string();
+    assert!(trash.contains(&edited), "{trash}");
+    assert!(carol.post(&format!("/v1/trash/{id}/restore"), json!({})).await.0.is_success());
+
+    // A row the database says is not hers is not shown to her, nor found.
+    admin.execute("UPDATE public.content SET person = 'bob' WHERE body->>'fact' LIKE '%' || $1 || '%'", &[&edited]).await.unwrap();
+    let shown = carol.get("/v1/memory").await.1.to_string();
+    assert!(!shown.contains(&edited), "her memory view read past her wall: {shown}");
+    let answer = chat("What is my code name?").await.to_string();
+    assert!(!answer.contains(&edited), "memory search read past her wall: {answer}");
 }

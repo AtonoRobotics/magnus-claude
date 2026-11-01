@@ -42,3 +42,30 @@ impl Recall {
         Ok(rows.iter().map(|r| (r.get::<_, i64>(0), r.get::<_, Value>(1))).collect())
     }
 }
+
+/// A remembered fact as it is shown: its record and what it says.
+pub struct Remembered {
+    pub entry: crate::state::MemoryEntry,
+    pub fact: String,
+    pub topic: Option<String>,
+}
+
+impl crate::kernel::Kernel {
+    /// A person's remembered facts that `keep` selects, newest last, each
+    /// with what it says recalled for them. A fact the content store does
+    /// not give them (deleted, or not theirs) is left out.
+    pub async fn remembered(&self, person: &str, keep: impl Fn(&crate::state::MemoryEntry) -> bool) -> Result<Vec<Remembered>> {
+        let entries: Vec<crate::state::MemoryEntry> = self.read(|s| s.memory.iter().filter(|m| m.person == person && keep(m)).cloned().collect());
+        let seqs: Vec<i64> = entries.iter().map(|m| m.seq).collect();
+        let content = self.recall.content(person, &seqs).await?;
+        Ok(entries
+            .into_iter()
+            .filter_map(|entry| {
+                let c = content.get(&entry.seq)?;
+                let fact = c["fact"].as_str()?.to_string();
+                let topic = c["topic"].as_str().map(String::from);
+                Some(Remembered { entry, fact, topic })
+            })
+            .collect())
+    }
+}

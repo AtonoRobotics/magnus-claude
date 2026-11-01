@@ -197,13 +197,10 @@ async fn person_data(State(k): K, h: HeaderMap, Path((id, what)): Path<(String, 
         "files" => k.read(|s| crate::library::files_matching(s, &target, &[], None)),
         // Recalled from the content store as the person, through the wall.
         "memory" => {
-            let kept: Vec<(String, i64, chrono::DateTime<chrono::Utc>)> = k.read(|s| s.memory.iter().filter(|m| m.person == target.id).map(|m| (m.id.clone(), m.seq, m.at)).collect());
-            let seqs: Vec<i64> = kept.iter().map(|(_, seq, _)| *seq).collect();
-            let content = match k.recall.content(&target.id, &seqs).await {
-                Ok(c) => c,
+            match k.remembered(&target.id, |_| true).await {
+                Ok(r) => r.into_iter().map(|r| json!({ "id": r.entry.id, "fact": r.fact, "topic": r.topic, "at": r.entry.at })).collect(),
                 Err(e) => return internal(e),
-            };
-            kept.into_iter().filter_map(|(id, seq, at)| content.get(&seq).map(|c| json!({ "id": id, "fact": c["fact"], "topic": c["topic"], "at": at }))).collect()
+            }
         }
         _ => return err(StatusCode::NOT_FOUND, "tasks, chats, files or memory"),
     };
