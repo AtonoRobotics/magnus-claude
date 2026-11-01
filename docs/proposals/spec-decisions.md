@@ -12,7 +12,7 @@ a sixth of the connectors spec exists (one owner-added MCP server per app,
 with OAuth, refresh and revocation). The authentication design reverses
 several decisions recorded on 2026-10-30 and 2026-10-31. One bug the review
 found is fixed separately (two owners demoting each other at once left no
-owner; branch `last-owner`). Everything below waits on a ruling; nothing in
+owner; fixed in #50). Everything below waits on a ruling; nothing in
 it is built until you rule, and the four marked **invariant** also need your
 approval to change a protected test.
 
@@ -69,7 +69,7 @@ approval to change a protected test.
 
 ## Order once ruled
 
-Known bugs first (the owner race is done), then: identity by `sub` (3), the
+Known bugs first (the owner race is done, #50), then: identity by `sub` (3), the
 kill switch and new work (11), schedules of a person turned off (12),
 config tokens on loopback (13); then the authentication foundations, the
 admin console, and the connectors, each in its own pull request, as

@@ -148,6 +148,24 @@ for (const [name, look] of LOOKS) {
   await page.close();
 }
 
+// A closed panel is gone: in a window narrow enough that the panel lies over
+// the conversation, nothing covers the conversation while it is closed.
+{
+  const page = await open(LOOKS[0][1]);
+  await page.setViewportSize({ width: 1000, height: 800 });
+  await page.waitForTimeout(500);
+  const hit = await page.evaluate(() => {
+    const d = document.querySelector("#detail");
+    const m = document.querySelector("main").getBoundingClientRect();
+    const e = document.elementFromPoint(m.right - 40, m.top + m.height / 2);
+    return { hidden: d.hidden, over: !!e?.closest("#detail"), what: e ? (e.id || e.className || e.tagName) : null };
+  });
+  if (!hit.hidden) failures.push("narrow: the panel is open on arrival");
+  else if (hit.over) failures.push(`narrow: the closed panel covers the conversation (${hit.what})`);
+  console.log("checked the closed panel");
+  await page.close();
+}
+
 await browser.close();
 if (failures.length) { console.error(failures.map(f => `FAIL ${f}`).join("\n")); process.exit(1); }
 console.log("looks done");

@@ -116,6 +116,9 @@ async fn set_roles(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): J
     if k.read(|s| s.provider_rights.get(&id).is_some_and(|(_, r)| r.is_some())) {
         return err(StatusCode::CONFLICT, "the identity provider names this person's roles; change them there");
     }
+    // Checked and recorded under the decision lock: two owners taking the
+    // role from each other at once must leave one.
+    let _decide = k.decide.lock().await;
     let still_owned = k.cfg.people.iter().filter(|c| c.id != id).filter_map(|c| k.person(&c.id)).any(|p| p.is_owner()) || roles.iter().any(|r| r == "owner");
     if !still_owned {
         return err(StatusCode::CONFLICT, "someone must keep the owner role");
