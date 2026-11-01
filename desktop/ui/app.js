@@ -866,7 +866,7 @@ async function showThread(main, thread) {
     if (!el) return;
     const grew = paint(el, body);
     motion(el, ui);
-    for (const e of entries.filter(e => e.view)) fill($(`iframe[data-shown="${CSS.escape(e.id)}"]`, main), e.view);
+    for (const e of entries.filter(e => e.view)) fill($(`iframe[data-shown="${CSS.escape(e.id)}"]`, main), e.view, e.task_id);
     for (const [id, view, , task] of ui.composed) fill($(`iframe[data-view="${CSS.escape(id)}"]`, el), view, task);
     listen(entries);
     loadGlimpses(el);
@@ -1130,6 +1130,8 @@ function msgActions(e, ui) {
   return `<div class="msg-actions small" role="toolbar" aria-label="Actions">${acts.map(([a, l]) => `<button class="icon" data-msg-act="${a}" title="${l}"><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[a]}</svg><span class="sr">${l}</span></button>`).join("")}</div>${share}`;
 }
 
+// A chat result's files its deliverable does not already show.
+const unshown = e => (e.files || []).filter(f => !(e.view || []).some(c => (c.type === "file" || c.type === "image") && c.file === f.name));
 function entry(e, ui = {}) {
   switch (e.kind) {
     case "message": return ui.editing === e.id
@@ -1148,7 +1150,8 @@ function entry(e, ui = {}) {
     }
     case "result": return `<div class="result" data-result="${esc(e.task_id)}"><details data-key="result:${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
       <div class="pre">${esc(e.summary || "")}</div>${ENDED.includes(e.status) ? verdictBar(e.task_id, e.verdict) : ""}</details>
-      ${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}<a class="small see" href="#/task/${enc(e.task_id)}" data-open="task:${esc(e.task_id)}">See the outcome</a></div>`;
+      ${e.view ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" data-shown="${esc(e.id)}"></iframe>` : ""}
+      ${unshown(e).length ? `<div class="previews">${unshown(e).map(filePreview).join("")}</div>` : ""}<a class="small see" href="#/task/${enc(e.task_id)}" data-open="task:${esc(e.task_id)}">See the outcome</a></div>`;
     case "schedule_card": {
       const b = e.budget || {};
       if (e.state !== "open") return `<div data-card="${esc(e.card)}">${scheduleLine(e)}</div>`;
