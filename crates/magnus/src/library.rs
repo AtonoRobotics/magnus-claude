@@ -42,20 +42,21 @@ fn actor(p: &Person) -> String {
 
 /// Where a file came from: the task that delivered it, the chat it was
 /// uploaded in or given to, the task it was given to, or the library.
-fn origin(s: &St, f: &LibFile) -> Value {
+/// `w` holds the recalled words of the person's tasks.
+fn origin(s: &St, f: &LibFile, w: &crate::recall::Words) -> Value {
     let task_ref = |task: &str| {
         let t = s.tasks.get(task)?;
         let r = s.runs.get(&t.run_id)?;
         Some(match t.chat.as_ref() {
-            Some(c) if c.turn => json!({ "kind": "chat", "thread": c.thread, "task_id": t.task_id, "title": crate::api::title_of(t, r) }),
-            c => json!({ "kind": "task", "task_id": t.task_id, "title": crate::api::title_of(t, r), "thread": c.map(|c| c.thread.clone()) }),
+            Some(c) if c.turn => json!({ "kind": "chat", "thread": c.thread, "task_id": t.task_id, "title": crate::api::title_of(t, Some(r), w) }),
+            c => json!({ "kind": "task", "task_id": t.task_id, "title": crate::api::title_of(t, Some(r), w), "thread": c.map(|c| c.thread.clone()) }),
         })
     };
     if let Some(v) = f.run.as_ref().and_then(|r| s.runs.get(r)).and_then(|r| task_ref(&r.task)) {
         return v;
     }
     if let Some(t) = f.thread.as_ref() {
-        let title = s.tasks.values().filter(|t2| t2.chat.as_ref().is_some_and(|c| &c.thread == t && c.turn)).min_by_key(|t2| t2.created_at).map(|t2| t2.text.chars().take(80).collect::<String>());
+        let title = s.tasks.values().filter(|t2| t2.chat.as_ref().is_some_and(|c| &c.thread == t && c.turn)).min_by_key(|t2| t2.created_at).map(|t2| w.text(t2.seq).chars().take(80).collect::<String>());
         return json!({ "kind": "chat", "thread": t, "title": title });
     }
     if let Some(v) = s.tasks.values().filter(|t| t.files.contains(&f.id)).min_by_key(|t| t.created_at).and_then(|t| task_ref(&t.task_id)) {
@@ -68,11 +69,13 @@ pub(crate) fn project_ref(s: &St, item: &str) -> Value {
     s.project_of(item).and_then(|p| s.projects.get(&p)).map_or(Value::Null, |p| json!({ "id": p.id, "name": p.name }))
 }
 
-pub(crate) fn file_json(s: &St, f: &LibFile) -> Value {
+/// `w` holds the recalled words of the file's person's tasks
+/// (`Kernel::person_words`), for where it came from.
+pub(crate) fn file_json(s: &St, f: &LibFile, w: &crate::recall::Words) -> Value {
     json!({
         "id": f.id, "name": f.name, "media_type": f.media_type, "size": f.size, "at": f.at,
         "source": if f.run.is_some() { "delivered" } else { "uploaded" },
-        "origin": origin(s, f),
+        "origin": origin(s, f, w),
         "project": project_ref(s, &f.id),
         "taint": { "untrusted": f.label.untrusted, "private": f.label.private },
     })
@@ -91,7 +94,11 @@ async fn list(State(k): K, h: HeaderMap, Query(q): Query<HashMap<String, String>
         Ok(t) => t,
         Err(e) => return internal(e),
     };
-    let files = k.read(|s| files_matching(s, &p, &terms, &texts, q.get("project").map(String::as_str)));
+    let words = match k.person_words(&p.id).await {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
+    let files = k.read(|s| files_matching(s, &p, &terms, &texts, q.get("project").map(String::as_str), &words));
     Json(json!({ "files": files })).into_response()
 }
 
@@ -99,12 +106,12 @@ async fn list(State(k): K, h: HeaderMap, Query(q): Query<HashMap<String, String>
 /// text, newest first; `want` keeps one project's (`none`: in no project).
 /// `texts` holds the search text of their text files, recalled for them
 /// (`Kernel::file_texts`).
-pub(crate) fn files_matching(s: &St, p: &Person, terms: &[String], texts: &HashMap<String, String>, want: Option<&str>) -> Vec<Value> {
+pub(crate) fn files_matching(s: &St, p: &Person, terms: &[String], texts: &HashMap<String, String>, want: Option<&str>, w: &crate::recall::Words) -> Vec<Value> {
     let mut v: Vec<(&LibFile, Value)> = s
         .files
         .values()
         .filter(|f| f.person == p.id)
-        .map(|f| (f, file_json(s, f)))
+        .map(|f| (f, file_json(s, f, w)))
         .filter(|(_, j)| match want {
             None => true,
             Some("none") => j["project"].is_null(),
@@ -129,7 +136,7 @@ async fn upload(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
     };
     let thread = b["thread"].as_str().map(String::from);
     if let Some(t) = &thread {
-        if k.threads(&p.id).iter().all(|x| x["thread"] != t.as_str()) {
+        if !k.has_thread(&p.id, t) {
             return err(StatusCode::NOT_FOUND, "no such thread");
         }
     }
@@ -146,7 +153,8 @@ async fn upload(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
                     return internal(e);
                 }
             }
-            let v = k.read(|s| s.files.get(&id).map(|f| file_json(s, f)));
+            let words = k.person_words(&p.id).await.unwrap_or_default();
+            let v = k.read(|s| s.files.get(&id).map(|f| file_json(s, f, &words)));
             (StatusCode::CREATED, Json(v.unwrap_or(json!({ "id": id })))).into_response()
         }
         Ok(Err(r)) => r,
@@ -202,7 +210,11 @@ async fn info(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
         Ok(p) => p,
         Err(r) => return r,
     };
-    match k.read(|s| s.files.get(&id).filter(|f| f.person == p.id).map(|f| file_json(s, f))) {
+    let words = match k.person_words(&p.id).await {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
+    match k.read(|s| s.files.get(&id).filter(|f| f.person == p.id).map(|f| file_json(s, f, &words))) {
         Some(mut v) => {
             v["preview"] = json!({ "chars": crate::compose::PREVIEW_CHARS, "rows": crate::compose::MAX_ROWS });
             Json(v).into_response()
@@ -291,24 +303,31 @@ async fn project(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response 
         Err(r) => return r,
     };
     let Some(mut v) = k.read(|s| s.projects.get(&id).filter(|x| x.person == p.id).map(|x| project_json(s, x))) else { return err(StatusCode::NOT_FOUND, "no such project") };
-    let threads: Vec<Value> = k.threads(&p.id).into_iter().filter(|t| t["project"]["id"] == id.as_str()).collect();
+    let threads: Vec<Value> = match k.threads(&p.id).await {
+        Ok(t) => t.into_iter().filter(|t| t["project"]["id"] == id.as_str()).collect(),
+        Err(e) => return internal(e),
+    };
+    let words = match k.person_words(&p.id).await {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
     let (tasks, schedules, files) = k.read(|s| {
         let inside = |item: &str| s.project_of(item).as_deref() == Some(id.as_str());
         let tasks: Vec<Value> = s
             .tasks
             .values()
             .filter(|t| t.person == p.id && !t.is_chat_turn() && inside(&t.task_id))
-            .filter_map(|t| s.runs.get(&t.run_id).map(|r| crate::api::task_row(&k, s, &p, t, r)))
+            .filter_map(|t| s.runs.get(&t.run_id).map(|r| crate::api::task_row(&k, s, &p, t, r, &words)))
             .collect();
         let schedules: Vec<Value> = s
             .schedules
             .values()
             .filter(|x| x.person == p.id && inside(&x.id))
-            .map(|x| json!({ "id": x.id, "title": x.title.clone().unwrap_or_else(|| x.text.clone()), "text": x.text, "next": x.next_due() }))
+            .map(|x| json!({ "id": x.id, "title": words.title(x.seq).unwrap_or_else(|| words.text(x.seq).to_string()), "text": words.text(x.seq), "next": x.next_due() }))
             .collect();
         let mut files: Vec<&LibFile> = s.files.values().filter(|f| f.person == p.id && inside(&f.id)).collect();
         files.sort_by(|a, b| b.at.cmp(&a.at));
-        (tasks, schedules, files.into_iter().map(|f| file_json(s, f)).collect::<Vec<_>>())
+        (tasks, schedules, files.into_iter().map(|f| file_json(s, f, &words)).collect::<Vec<_>>())
     });
     v["threads"] = json!(threads);
     v["tasks"] = json!(tasks);
@@ -355,7 +374,7 @@ async fn move_item(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response 
         s.tasks.get(&item).is_some_and(|t| t.person == p.id && !t.is_chat_turn())
             || s.schedules.get(&item).is_some_and(|x| x.person == p.id)
             || s.files.get(&item).is_some_and(|f| f.person == p.id)
-    }) || k.threads(&p.id).iter().any(|t| t["thread"] == item.as_str());
+    }) || k.has_thread(&p.id, &item);
     if !mine {
         return err(StatusCode::NOT_FOUND, "no such task, chat, schedule or file");
     }
