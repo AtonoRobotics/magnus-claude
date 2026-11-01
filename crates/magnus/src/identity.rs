@@ -15,6 +15,9 @@ use anyhow::Result;
 pub struct Rights {
     pub groups: Option<Vec<String>>,
     pub roles: Option<Vec<String>>,
+    /// The provider's lasting identifier for the account (OIDC `sub`),
+    /// which a username reused by a new account does not carry over.
+    pub subject: Option<String>,
 }
 
 /// Where to send the person's browser, and for how long the sign-in waits.

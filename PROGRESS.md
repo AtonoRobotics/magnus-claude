@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **Identity by `sub` (owner's ruling 3, 2026-11-01; branch `identity-sub`).** A person is bound to their provider account at their first sign-in; an account made again under their username is refused until the owner clears the binding.
 - **The owner's specs, for decision (2026-11-01; branch `spec-decisions`).** `docs/proposals/spec-decisions.md`: the admin console is almost unbuilt, about a sixth of the connectors spec exists, and the authentication design reverses several recorded decisions; 22 questions with proposed answers, four of them touching invariant tests. Waiting on the owner's rulings; then the fixes it orders (identity by `sub`, new work under the kill switch, schedules of a person turned off, config tokens on loopback), each its own pull request.
 - **Spec review fixes (2026-11-01; merged in #50).** From reviewing the owner's three spec documents (Connectors, Admin Console, Authentication & Isolation) against the code: someone now stays owner however many role changes race in. The review's other findings are choices for the owner, in `docs/proposals/spec-decisions.md` (branch `spec-decisions`).
 - **A closed panel is gone (2026-11-01; merged in #48).** #46 left the closed task panel covering the conversation in windows 1100px wide or narrower; fixed, with a check in the looks test.
