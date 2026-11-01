@@ -4,8 +4,8 @@
 //! Google, Alpha Vector's Desktop OAuth client (owner: "connectors should be
 //! built for developer org accounts and users have their own oauth sign
 //! in"). This finds each live server's sign-in from the server itself and
-//! starts a person's sign-in at Google. Its client comes from the CI's
-//! repository secrets `GOOGLE_MCP_CLIENT_ID` and `GOOGLE_MCP_CLIENT_SECRET`.
+//! starts a person's sign-in at Google. Its client ID is Alpha Vector's,
+//! from `catalog/registrations.toml`.
 
 use magnus_invariants::*;
 use serde_json::{json, Value};
@@ -18,11 +18,13 @@ const SERVERS: [(&str, &str, &str); 4] = [
 ];
 
 fn client() -> (String, String) {
-    // CI passes a secret that does not exist as an empty value.
-    let get = |k: &str| {
-        std::env::var(k).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| panic!("{k} is not set: the real Google tests need the organisation's Google client (repository secrets GOOGLE_MCP_CLIENT_ID and GOOGLE_MCP_CLIENT_SECRET)"))
-    };
-    (get("GOOGLE_MCP_CLIENT_ID"), get("GOOGLE_MCP_CLIENT_SECRET"))
+    // Alpha Vector's Google client ID is public, kept in the catalog. These
+    // tests never reach the token exchange, the one step that uses the
+    // client secret, so they send a stand-in for it.
+    let path = magnus_invariants::appliance::workspace_root().join("catalog/registrations.toml");
+    let r: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    let id = r["google"]["client_id"].as_str().expect("catalog/registrations.toml names Alpha Vector's Google client").to_string();
+    (id, "not-used-before-the-token-exchange".into())
 }
 
 fn names(list: &Value) -> Vec<String> {
