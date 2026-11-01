@@ -26,6 +26,10 @@ jobs:
       # one before it.
       - uses: actions/checkout@v7
         with: { clean: false, fetch-depth: 0 }
+      # Postgres and Keycloak, which the tests and the deploy use, up and
+      # answering (they may still be starting after a reboot).
+      - name: Build box services
+        run: dev/services.sh
       # The browser sidecar's packages (some suites drive a browser).
       # The sandbox guest built from this commit (sandbox/image.sh).
       - name: Sandbox image

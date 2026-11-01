@@ -38,6 +38,10 @@ jobs:
       # before it.
       - uses: actions/checkout@v7
         with: { clean: false, fetch-depth: 0 }
+      # Postgres and Keycloak, which the tests and the deploy use, up and
+      # answering (they may still be starting after a reboot).
+      - name: Build box services
+        run: dev/services.sh
       # The version every step builds, tests and publishes. A tag's is the
       # app's own; any other build is a pre-release of the next version,
       # numbered by run so each is newer than the one before (apps only move
