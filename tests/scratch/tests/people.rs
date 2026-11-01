@@ -150,3 +150,39 @@ async fn groups_and_roles_come_from_keycloak_at_each_sign_in() {
     assert_eq!(groups(&me), ["staff"], "{me}");
     assert!(!has_role(&me, "approver:irreversible"), "{me}");
 }
+
+/// A person is the identity provider's account that first signed in as
+/// them, not a username: an account made again under the same username is
+/// refused until the owner lets it in (owner's rulings, 2026-11-01).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_made_again_under_the_same_username_is_not_the_old_person() {
+    let m = FakeModel::start(worker()).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let kc = Keycloak::start().await;
+    kc.add_person("carol").await;
+    kc.configure(&mut app).await;
+    let alice = app.api("alice");
+    let bound = |v: &Value| v["people"].as_array().unwrap().iter().find(|p| p["id"] == "carol").unwrap()["account_bound"].clone();
+
+    // Her first sign-in here is on Keycloak's page.
+    let (st, v) = kc.app_sign_in(&app, "carol").await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(bound(&alice.get("/v1/people").await.1), json!(true), "carol's first sign-in did not bind her account");
+    // Her own account again: still her.
+    let (st, v) = kc.app_password(&app, "carol", &password_of("carol"), None).await;
+    assert_eq!(st, 200, "{v}");
+
+    // Someone else's account, made under her username.
+    kc.delete("carol").await;
+    kc.add_person("carol").await;
+    let (st, v) = kc.app_password(&app, "carol", &password_of("carol"), None).await;
+    assert_eq!(st, 403, "an account made again under carol's username became carol: {v}");
+
+    // The owner lets the new account be carol.
+    assert_eq!(app.api("carol").send(reqwest::Method::DELETE, "/v1/people/carol/account", None).await.0, 403, "carol cleared her own binding");
+    assert_eq!(alice.send(reqwest::Method::DELETE, "/v1/people/carol/account", None).await.0, 204);
+    assert_eq!(bound(&alice.get("/v1/people").await.1), json!(false));
+    let (st, v) = kc.app_password(&app, "carol", &password_of("carol"), None).await;
+    assert_eq!(st, 200, "the owner let the new account in, and it was refused: {v}");
+    assert_eq!(bound(&alice.get("/v1/people").await.1), json!(true));
+}

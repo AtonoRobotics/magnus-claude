@@ -28,8 +28,17 @@ pub(crate) fn err(code: StatusCode, msg: impl Into<String>) -> Response {
 }
 
 pub(crate) fn internal(e: anyhow::Error) -> Response {
+    if let Some(k) = e.downcast_ref::<crate::kernel::KillSwitchOn>() {
+        return err(StatusCode::CONFLICT, k.to_string());
+    }
     tracing::error!("api: {e:#}");
     err(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+}
+
+/// New work is refused while the kill switch is on, before anything about
+/// it is recorded (owner's ruling 11).
+pub(crate) fn refused_by_kill_switch(k: &crate::kernel::Kernel) -> Option<Response> {
+    k.read(|s| s.kill_switch).then(|| internal(crate::kernel::KillSwitchOn.into()))
 }
 
 /// Which listener a request came in on.
@@ -423,6 +432,28 @@ async fn provider_answered(k: &Kernel, t: Transport, label: String, polled: crat
             if k.cfg.person(&person).is_none() {
                 tracing::warn!("identity: {person} signed in at {label} but is not a person on this appliance");
                 return err(StatusCode::FORBIDDEN, format!("You signed in as {person}, who is not a person on this appliance. Ask the owner to add you."));
+            }
+            // A person is the provider's account that first signed in as
+            // them (its `sub`), not a username: an account made again, or
+            // renamed, under the same name is someone else (owner's
+            // rulings, 2026-11-01).
+            if let Some(sub) = rights.subject.clone() {
+                let _decide = k.decide.lock().await;
+                match k.read(|s| s.subjects.get(&person).cloned()) {
+                    Some(bound) if bound != sub => {
+                        tracing::warn!("identity: an account at {label} other than {person}'s signed in as {person}; refused");
+                        return err(
+                            StatusCode::FORBIDDEN,
+                            format!("This {label} account is not the one {person} signed in with before, so it cannot be {person} here. If {person}'s account was made again, ask the owner to let it sign in."),
+                        );
+                    }
+                    Some(_) => {}
+                    None => {
+                        if let Err(e) = k.emit(&format!("person:{person}"), Ev::SubjectBound { person: person.clone(), subject: Some(sub) }).await {
+                            return internal(e);
+                        }
+                    }
+                }
             }
             // What the provider says the person may do now counts from here
             // on, for every decision about them (E2).

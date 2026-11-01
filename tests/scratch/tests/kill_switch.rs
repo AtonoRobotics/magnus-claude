@@ -218,3 +218,50 @@ async fn releasing_the_switch_and_its_notices_are_one_write() {
     assert_eq!((next.0.as_str(), next.2.as_deref()), ("item", Some("notice")), "{rows:?}");
     assert_eq!(next.1, rows[release].1, "the release and its notice were written apart: {rows:?}");
 }
+
+/// While the kill switch is on, new work is refused, not queued: a task, a
+/// chat message, or a task made from a chat message is answered "the kill
+/// switch is on" and nothing is created. Released, work starts again
+/// (owner's ruling 11, 2026-11-01).
+#[tokio::test(flavor = "multi_thread")]
+async fn new_work_is_refused_while_the_kill_switch_is_on() {
+    let m = FakeModel::start(script(|c| async move {
+        if c.body["system"].to_string().contains("talking with the person you work for in a chat") {
+            return Reply::Text("Noted.".into());
+        }
+        fail("nothing to do")
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/chat", json!({ "text": "Remember the agenda." })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let thread = v["thread"].as_str().unwrap().to_string();
+    alice.wait_settled(v["task_id"].as_str().unwrap()).await;
+    let entry = eventually("the message in the thread", PATIENCE, || async {
+        let (_, c) = alice.get(&format!("/v1/chat/{thread}")).await;
+        c["entries"].as_array()?.iter().find(|e| e["kind"] == "message").and_then(|e| e["id"].as_str().map(String::from))
+    })
+    .await;
+    let tasks = || async { alice.tasks().await["tasks"].as_array().unwrap().len() };
+    let before = tasks().await;
+
+    assert!(alice.post("/v1/kill-switch", json!({ "engaged": true })).await.0.is_success());
+    for (what, (st, v)) in [
+        ("a task", alice.post("/v1/tasks", json!({ "text": "Email bob a hello." })).await),
+        ("a chat message", alice.post("/v1/chat", json!({ "text": "And another thing.", "thread": thread })).await),
+        ("a task from a chat message", alice.post(&format!("/v1/chat/{thread}/entries/{entry}/task"), json!({})).await),
+        ("a message sent again", alice.post(&format!("/v1/chat/{thread}/entries/{entry}/resend"), json!({})).await),
+    ] {
+        assert_eq!(st.as_u16(), 409, "{what} was accepted under the kill switch: {v}");
+        assert!(v["error"].as_str().unwrap_or_default().contains("kill switch is on"), "{what}: {v}");
+    }
+    assert_eq!(tasks().await, before, "work was created under the kill switch");
+    // The message sent again under the switch is still in the thread.
+    let (_, c) = alice.get(&format!("/v1/chat/{thread}")).await;
+    assert!(c["entries"].as_array().unwrap().iter().any(|e| e["id"] == json!(entry)), "a refused resend hid the message: {c}");
+
+    assert!(alice.post("/v1/kill-switch", json!({ "engaged": false })).await.0.is_success());
+    let (st, v) = alice.post("/v1/tasks", json!({ "text": "Email bob a hello." })).await;
+    assert_eq!(st.as_u16(), 201, "released, new work is still refused: {v}");
+}
