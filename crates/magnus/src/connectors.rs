@@ -83,6 +83,79 @@ struct Tokens {
     #[serde(default)]
     lifetime: Option<i64>,
     client: Client,
+    /// When the person signed in (Unix seconds).
+    #[serde(default)]
+    connected_at: Option<i64>,
+    /// The account they signed in as, where the app's answer names it.
+    #[serde(default)]
+    account: Option<String>,
+}
+
+/// The account a sign-in's answer names, from its ID token's claims, for
+/// the person to see which account they connected (not for any decision:
+/// the token came straight from the app's token endpoint).
+fn account_of(answer: &Value) -> Option<String> {
+    use base64::Engine;
+    let claims = answer["id_token"].as_str()?.split('.').nth(1)?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(claims.trim_end_matches('=')).ok()?;
+    let c: Value = serde_json::from_slice(&raw).ok()?;
+    ["email", "preferred_username", "name"].iter().find_map(|k| c[*k].as_str().map(String::from))
+}
+
+/// Where one person stands with one of the organisation's apps.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Standing {
+    /// Signed in and working.
+    Connected,
+    /// Signed in once, and the sign-in no longer works (refused at refresh,
+    /// or revoked at the app): one button signs in again.
+    NeedsAttention,
+    /// Not signed in.
+    Available,
+}
+
+impl Standing {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Standing::Connected => "connected",
+            Standing::NeedsAttention => "needs_attention",
+            Standing::Available => "available",
+        }
+    }
+}
+
+/// An app's name as people read it: "google-calendar" is "Google calendar".
+pub fn title(name: &str) -> String {
+    let words = name.replace(['-', '_'], " ");
+    let mut c = words.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
+/// What an app lets Magnus do, in plain words, from the classes of its
+/// tools: one sentence for its card, and one line per kind of action.
+pub fn allows(c: &Connector) -> (String, Vec<String>) {
+    const KINDS: [(&str, &str, &str); 4] = [
+        ("read", "read", "Reads"),
+        ("reversible_write", "make changes that can be undone", "Changes that can be undone"),
+        ("irreversible", "make changes that cannot be undone, when allowed", "Changes that cannot be undone"),
+        ("financial", "move money, when allowed", "Moves money"),
+    ];
+    let mut can = vec![];
+    let mut lines = vec![];
+    for (risk, verb, head) in KINDS {
+        let tools: Vec<String> = c.tools.iter().filter(|(_, t)| t.risk == risk).map(|(n, _)| n.replace(['_', '-'], " ")).collect();
+        if !tools.is_empty() {
+            can.push(verb);
+            lines.push(format!("{head}: {}", tools.join(", ")));
+        }
+    }
+    let name = title(&c.name);
+    let sentence = match can.as_slice() {
+        [] => format!("Magnus can work in {name} once your organisation sets it up."),
+        [one] => format!("Magnus can {one} in {name}."),
+        [rest @ .., last] => format!("Magnus can {} and {last} in {name}.", rest.join(", ")),
+    };
+    (sentence, lines)
 }
 
 /// A sign-in left unfinished this long is dropped.
@@ -153,6 +226,30 @@ async fn first_json(c: &reqwest::Client, urls: &[String]) -> Option<Value> {
     None
 }
 
+/// What an app calls itself in its protected-resource metadata
+/// (`resource_name`, RFC 9728), from the address its sign-in answer names
+/// or the standard one. None when it does not say. (The name a server gives
+/// at initialize is often its software's, "StatelessServer", so it is not
+/// used.)
+async fn own_name(url: &str) -> Option<String> {
+    let r = http()
+        .post(url)
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "magnus", "version": env!("CARGO_PKG_VERSION") } } }))
+        .send()
+        .await
+        .ok()?;
+    let named = r.headers().get("www-authenticate").and_then(|v| v.to_str().ok()).and_then(|h| {
+        let i = h.find("resource_metadata=\"")? + "resource_metadata=\"".len();
+        Some(h[i..].split('"').next()?.to_string())
+    });
+    // RFC 9728 §3.1: the metadata's standard address is the resource's
+    // path under /.well-known/oauth-protected-resource.
+    let standard = url::Url::parse(url).ok().map(|u| format!("{}/.well-known/oauth-protected-resource{}", u.origin().ascii_serialization(), u.path().trim_end_matches('/')));
+    let urls: Vec<String> = named.into_iter().chain(standard).collect();
+    first_json(&http(), &urls).await?["resource_name"].as_str().map(String::from)
+}
+
 /// Whether an app asks for a sign-in: an unauthenticated initialize answered
 /// with 401. Its protected-resource metadata, when it says where.
 pub async fn asks_sign_in(url: &str) -> Result<Option<Option<String>>> {
@@ -209,10 +306,19 @@ async fn discover(app_url: &str, resource_metadata: Option<String>) -> Result<(V
 
 impl Kernel {
     /// Every app: the config file's, then those the owner added.
+    /// The organisation's apps: the config file's, those the owner added,
+    /// and the catalog's whose provider registration is set (or that need
+    /// none).
     pub fn connectors(&self) -> Vec<Connector> {
         let mut all = self.cfg.connectors.clone();
-        let added: Vec<Connector> = self.read(|s| s.connectors.values().cloned().collect());
+        let (added, registered): (Vec<Connector>, std::collections::BTreeSet<String>) = self.read(|s| (s.connectors.values().cloned().collect(), s.registrations.clone()));
         all.extend(added.into_iter().filter(|c| self.cfg.connectors.iter().all(|f| f.name != c.name)));
+        for m in crate::catalog::manifests() {
+            let online = m.registration == "dcr" || m.provider.as_ref().is_some_and(|p| registered.contains(p));
+            if online && all.iter().all(|c| c.name != m.id) {
+                all.push(crate::catalog::connector(m));
+            }
+        }
         all
     }
 
@@ -279,9 +385,21 @@ impl Kernel {
         if asm["code_challenge_methods_supported"].as_array().is_some_and(|m| !m.iter().any(|x| x == "S256")) {
             bail!("the app's authorization server does not support PKCE (S256), which MCP requires");
         }
-        let (client_id, client_secret) = match (&c.client_id, s("registration_endpoint")) {
-            (Some(id), _) => (id.clone(), None),
-            (None, Some(reg)) => {
+        // A catalog connector signs in through the organisation's
+        // registration with its provider (Alpha Vector's client there).
+        let registered: Option<(String, Option<String>)> = match &c.registration {
+            Some(provider) => {
+                let raw = self.vault.get(&crate::catalog::registration_name(provider))?.ok_or_else(|| anyhow!("your organisation has not set up its {provider} registration yet"))?;
+                let v: Value = serde_json::from_str(raw.expose()).context("stored registration")?;
+                let id = v["client_id"].as_str().ok_or_else(|| anyhow!("the {provider} registration has no client ID"))?.to_string();
+                Some((id, v["client_secret"].as_str().map(String::from)))
+            }
+            None => None,
+        };
+        let (client_id, client_secret) = match (registered, &c.client_id, s("registration_endpoint")) {
+            (Some(r), _, _) => r,
+            (None, Some(id), _) => (id.clone(), None),
+            (None, None, Some(reg)) => {
                 let r = http()
                     .post(&reg)
                     .json(&json!({
@@ -296,7 +414,7 @@ impl Kernel {
                 let v: Value = r.json().await?;
                 (v["client_id"].as_str().ok_or_else(|| anyhow!("registration returned no client id"))?.to_string(), v["client_secret"].as_str().map(String::from))
             }
-            (None, None) => bail!("the app's authorization server does not register clients; register Magnus there and give its client id"),
+            (None, None, None) => bail!("the app's authorization server does not register clients; register Magnus there and give its client id"),
         };
         let verifier = random();
         let state = random();
@@ -310,8 +428,15 @@ impl Kernel {
                 .append_pair("code_challenge_method", "S256")
                 .append_pair("state", &state)
                 .append_pair("resource", &c.url);
+            // Exactly what the app's manifest asks for, where it names it.
+            let scopes = if c.scopes.is_empty() { scopes } else { c.scopes.clone() };
             if !scopes.is_empty() {
                 q.append_pair("scope", &scopes.join(" "));
+            }
+            // A refresh token that lasts (Google gives one only when asked
+            // for offline access).
+            if authorize.starts_with("https://accounts.google.com/") {
+                q.append_pair("access_type", "offline").append_pair("prompt", "consent");
             }
         }
         let client = Client { token_endpoint: token, revocation_endpoint: s("revocation_endpoint"), client_id, client_secret, resource: c.url.clone() };
@@ -358,10 +483,44 @@ impl Kernel {
             expires_at: v["expires_in"].as_i64().map(|s| chrono::Utc::now().timestamp() + s),
             lifetime: v["expires_in"].as_i64(),
             client: p.client,
+            connected_at: Some(chrono::Utc::now().timestamp()),
+            account: account_of(&v),
         };
         self.vault.put(&connection_name(app, person), &serde_json::to_string(&t)?)?;
         self.live_tools.lock().await.remove(&connection_name(app, person));
         Ok(())
+    }
+
+    /// Where `person` stands with an app, and when they signed in and as
+    /// whom, where known.
+    pub async fn standing(&self, c: &Connector, person: &str) -> (Standing, Option<i64>, Option<String>) {
+        if c.credential.is_none() || c.auth.as_deref() != Some(OAUTH) {
+            return (if self.connected(c, person) { Standing::Connected } else { Standing::Available }, None, None);
+        }
+        let Ok(Some(raw)) = self.vault.get(&connection_name(&c.name, person)) else { return (Standing::Available, None, None) };
+        let t: Option<Tokens> = serde_json::from_str(raw.expose()).ok();
+        let (at, account) = t.map(|t| (t.connected_at, t.account)).unwrap_or_default();
+        let works = self.connector_secret(c, person).await.ok().flatten().is_some();
+        (if works { Standing::Connected } else { Standing::NeedsAttention }, at, account)
+    }
+
+    /// What Magnus did through an app for a person, newest first: each
+    /// call's tool in plain words, its task, when, and whether it worked.
+    pub fn recent_uses(&self, app: &str, person: &str, n: usize) -> Vec<Value> {
+        let prefix = format!("{app}__");
+        let mut uses: Vec<(chrono::DateTime<chrono::Utc>, Value)> = self.read(|s| {
+            s.runs
+                .values()
+                .filter(|r| r.person == person)
+                .flat_map(|r| r.intents.values().filter(|i| i.tool.starts_with(&prefix)).map(move |i| (r, i)))
+                .map(|(r, i)| {
+                    let done = i.result.as_ref().map(|x| !x.is_error);
+                    (i.at, json!({ "action": i.tool[prefix.len()..].replace(['_', '-'], " "), "task": r.task, "at": i.at, "worked": done }))
+                })
+                .collect()
+        });
+        uses.sort_by(|a, b| b.0.cmp(&a.0));
+        uses.into_iter().take(n).map(|(_, v)| v).collect()
     }
 
     /// Whether `person` can use an app now: it takes no sign-in, or they
@@ -442,11 +601,78 @@ type K = AxState<Arc<Kernel>>;
 pub fn router() -> Router<Arc<Kernel>> {
     Router::new()
         .route("/v1/connectors", axum::routing::get(list).post(add))
-        .route("/v1/connectors/{name}", delete(remove))
+        .route("/v1/connectors/{name}", axum::routing::get(detail).delete(remove))
         .route("/v1/connectors/{name}/tools/{tool}", put(classify))
         .route("/v1/connectors/{name}/sign-in", post(sign_in))
         .route("/v1/connectors/{name}/sign-in/complete", post(sign_in_complete))
         .route("/v1/connectors/{name}/connection", delete(disconnect))
+        .route("/v1/registrations", axum::routing::get(registrations))
+        .route("/v1/registrations/{provider}", put(set_registration).delete(clear_registration))
+}
+
+/// The organisation's registrations with providers (Alpha Vector's client
+/// with each), which the catalog's connectors sign people in through: for
+/// each, whether it is set and which connectors it brings online. Never
+/// the client's ID or secret.
+async fn registrations(AxState(k): K, h: HeaderMap) -> Response {
+    if let Err(r) = owner(&k, &h) {
+        return r;
+    }
+    let set = k.read(|s| s.registrations.clone());
+    let out: Vec<Value> = crate::catalog::providers()
+        .into_iter()
+        .map(|p| {
+            let connectors: Vec<String> = crate::catalog::manifests().iter().filter(|m| m.provider.as_deref() == Some(p.as_str())).map(|m| m.name.clone()).collect();
+            json!({ "provider": p, "set": set.contains(&p), "connectors": connectors })
+        })
+        .collect();
+    Json(json!({ "registrations": out })).into_response()
+}
+
+/// The owner sets the organisation's registration with a provider: its
+/// client ID and secret go to the vault; the log records only that it was
+/// set, by whom.
+async fn set_registration(AxState(k): K, h: HeaderMap, Path(provider): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if !crate::catalog::providers().contains(&provider) {
+        return err(StatusCode::NOT_FOUND, "no catalog connector signs in through that provider");
+    }
+    let id = b["client_id"].as_str().map(str::trim).unwrap_or_default();
+    let secret = b["client_secret"].as_str().map(str::trim).unwrap_or_default();
+    if id.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "the registration needs its client ID");
+    }
+    let v = json!({ "client_id": id, "client_secret": (!secret.is_empty()).then_some(secret) });
+    if let Err(e) = k.vault.put(&crate::catalog::registration_name(&provider), &v.to_string()) {
+        return internal(e);
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::RegistrationSet { provider, set: true }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// The owner clears a registration: its connectors leave everyone's
+/// Library. People's sign-ins made through it stay in the vault, unused,
+/// until it is set again or they disconnect.
+async fn clear_registration(AxState(k): K, h: HeaderMap, Path(provider): Path<String>) -> Response {
+    let p = match owner(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if !crate::catalog::providers().contains(&provider) {
+        return err(StatusCode::NOT_FOUND, "no catalog connector signs in through that provider");
+    }
+    if let Err(e) = k.vault.remove(&crate::catalog::registration_name(&provider)) {
+        return internal(e);
+    }
+    match k.emit(&format!("person:{}", p.id), Ev::RegistrationSet { provider, set: false }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => internal(e),
+    }
 }
 
 macro_rules! owner {
@@ -472,10 +698,11 @@ async fn list(AxState(k): K, h: HeaderMap) -> Response {
     let mut out = vec![];
     for c in k.connectors() {
         let from_app = added.contains(&c.name) && k.cfg.connectors.iter().all(|f| f.name != c.name);
+        let mut card = card(&k, &c, &p.id).await;
         let secret = k.connector_secret(&c, &p.id).await.ok().flatten();
         let signed_in = c.credential.is_none() || secret.is_some();
         if !p.is_owner() {
-            out.push(json!({ "name": c.name, "auth": c.auth, "signed_in": signed_in, "problem": (!signed_in).then_some("sign in to this app") }));
+            out.push(card);
             continue;
         }
         let (tools, problem) = if !signed_in {
@@ -496,12 +723,68 @@ async fn list(AxState(k): K, h: HeaderMap) -> Response {
                 Err(e) => (vec![], Some(format!("{e:#}"))),
             }
         };
-        out.push(json!({
-            "name": c.name, "url": c.url, "audience": c.audience, "label": c.label, "access_groups": c.access_groups,
-            "auth": c.auth, "source": if from_app { "app" } else { "config" }, "signed_in": signed_in, "problem": problem, "tools": tools,
-        }));
+        let admin = json!({
+            "url": c.url, "audience": c.audience, "label": c.label, "access_groups": c.access_groups,
+            "source": if c.catalog { "catalog" } else if from_app { "app" } else { "config" }, "problem": problem, "tools": tools,
+        });
+        for (k, v) in admin.as_object().into_iter().flatten() {
+            card[k] = v.clone();
+        }
+        out.push(card);
     }
     Json(json!({ "connectors": out })).into_response()
+}
+
+/// A name for an app: what it calls itself, else the first part of its
+/// host that says something ("mcp.notion.com" is "notion"), made unique.
+fn name_from(url: &str, own: Option<&str>, taken: impl Fn(&str) -> bool) -> String {
+    let host = url::Url::parse(url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
+    let from_host = host.split('.').find(|p| !["mcp", "www", "api", "app", "server"].contains(p) && !p.is_empty() && !p.chars().all(|c| c.is_ascii_digit())).unwrap_or("app").to_string();
+    let base: String = own
+        .map(|n| n.trim().replace([' ', '_'], "-"))
+        .filter(|n| !n.is_empty())
+        .unwrap_or(from_host)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .to_lowercase();
+    let base = if base.is_empty() { "app".to_string() } else { base };
+    let mut name = base.clone();
+    let mut n = 2;
+    while taken(&name) {
+        name = format!("{base}-{n}");
+        n += 1;
+    }
+    name
+}
+
+/// One app as a person's card shows it (connectors spec, The connector
+/// card and Library): its name, one sentence on what Magnus can do with
+/// it, where they stand, and, signed in, as whom, since when and when last
+/// used. No protocol words.
+async fn card(k: &Kernel, c: &Connector, person: &str) -> Value {
+    let (standing, at, account) = k.standing(c, person).await;
+    let (sentence, allows) = allows(c);
+    let summary = c.summary.clone().unwrap_or(sentence);
+    let last = k.recent_uses(&c.name, person, 1).first().map(|u| u["at"].clone());
+    json!({
+        "name": c.name, "title": c.title.clone().unwrap_or_else(|| title(&c.name)), "summary": summary, "allows": allows, "catalog": c.catalog,
+        "state": standing.as_str(), "signed_in": standing == Standing::Connected, "signs_in": c.auth.as_deref() == Some(OAUTH),
+        "connected_at": at.and_then(|s| chrono::DateTime::from_timestamp(s, 0)), "account": account, "last_used": last,
+    })
+}
+
+/// One app's card for the person asking, with the last things Magnus did
+/// through it for them (from the event log).
+async fn detail(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some(c) = k.connector(&name) else { return err(StatusCode::NOT_FOUND, "no such app") };
+    let mut v = card(&k, &c, &p.id).await;
+    v["recent"] = json!(k.recent_uses(&c.name, &p.id, 10));
+    Json(v).into_response()
 }
 
 /// Add an app by its MCP address. Whether it needs a sign-in is asked of
@@ -509,7 +792,14 @@ async fn list(AxState(k): K, h: HeaderMap) -> Response {
 async fn add(AxState(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
     let p = owner!(k, h);
     let s = |f: &str| b[f].as_str().map(str::trim).unwrap_or_default().to_string();
-    let (name, url, audience, label) = (s("name"), s("url"), s("audience"), s("label"));
+    let (mut name, url, audience, label) = (s("name"), s("url"), s("audience"), s("label"));
+    // The address is the one field the owner fills in (connectors spec):
+    // the name comes from the app. (The app's form sends what it returns
+    // and what reaches it at their most guarded; they stay named here.)
+    if name.is_empty() {
+        let own = own_name(&url).await;
+        name = name_from(&url, own.as_deref(), |n| k.connector(n).is_some() || crate::tools::builtin_apps().contains(&n));
+    }
     if name.is_empty() || name.contains("__") || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
         return err(StatusCode::BAD_REQUEST, "the name must be letters, digits, '-' or '_', without '__'");
     }
@@ -553,6 +843,11 @@ async fn add(AxState(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
         tools: Default::default(),
         auth: oauth.then(|| OAUTH.to_string()),
         client_id: b["client_id"].as_str().map(String::from),
+        scopes: vec![],
+        registration: None,
+        title: None,
+        summary: None,
+        catalog: false,
     };
     if let Err(e) = k.emit(&format!("person:{}", p.id), Ev::ConnectorAdded { connector: c }).await {
         return internal(e);
@@ -653,5 +948,21 @@ async fn disconnect(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Re
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => err(StatusCode::NOT_FOUND, "you are not signed in to this app"),
         Err(e) => internal(e),
+    }
+}
+
+#[cfg(test)]
+mod naming {
+    /// An app added by its address is named by what it calls itself, else
+    /// by the part of its host that says something, made unique.
+    #[test]
+    fn an_app_is_named_from_its_address() {
+        let none = |_: &str| false;
+        assert_eq!(super::name_from("https://mcp.notion.com/mcp", None, none), "notion");
+        assert_eq!(super::name_from("https://mcp.linear.app/mcp", None, none), "linear");
+        assert_eq!(super::name_from("https://drivemcp.googleapis.com/mcp/v1", None, none), "drivemcp");
+        assert_eq!(super::name_from("https://mcp.example.com/mcp", Some("Team Calendar"), none), "team-calendar");
+        assert_eq!(super::name_from("http://127.0.0.1:8080/mcp", None, none), "app");
+        assert_eq!(super::name_from("https://mcp.notion.com/mcp", None, |n| n == "notion"), "notion-2");
     }
 }

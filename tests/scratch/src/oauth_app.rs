@@ -84,7 +84,7 @@ async fn mcp(State((base, st)): S, h: HeaderMap, Json(req): Json<Value>) -> Resp
 }
 
 async fn resource(State((base, _)): S) -> Json<Value> {
-    Json(json!({ "resource": format!("{base}/mcp"), "authorization_servers": [base] }))
+    Json(json!({ "resource": format!("{base}/mcp"), "resource_name": "Calendar", "authorization_servers": [base] }))
 }
 
 async fn metadata(State((base, _)): S) -> Json<Value> {

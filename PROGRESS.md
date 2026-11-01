@@ -2,7 +2,9 @@
 
 ## Now (2026-10-29)
 
-- **Each person's own connections (owner, 2026-11-01; branch `own-connections`).** The organisation provides a connector; each person signs in with their own account, and only their runs use it. Next: the app's connectors in the Library, as the spec's card ("connectors does not match the spec in the app").
+- **Real connectors, from the catalog (owner, 2026-11-01; branch `catalog`).** No fakes: connector tests run against the real services. The catalog brings Google's Gmail, Calendar, Drive and Chat online through the organisation's Google registration, each person signing in with their own account; their manifests match the live servers. Next: real calls through a test account's sign-in, then Notion and Linear, then Microsoft 365 and Slack once their registrations exist.
+- **Connectors in the Library, as the spec's cards (owner, 2026-11-01; branch `catalog`).** Every person's Library groups the organisation's apps as cards with one plain sentence and one button; a connector opens to as whom, since when, what it allows, recent actions and Disconnect. The owner adds an app by its address alone in Settings. Next: the card in chat, tasks and approvals, and Magnus's catalog tools.
+- **Each person's own connections (owner, 2026-11-01; merged in #62).** The organisation provides a connector; each person signs in with their own account, and only their runs use it. Next: the app's connectors in the Library, as the spec's card ("connectors does not match the spec in the app").
 - **Recall only, step 4: memory is recalled (owner, 2026-11-01; merged in #61).** The kernel no longer keeps what a remembered fact says; every reader recalls it through the person's wall.
 - **Recall only, step 2: the recall path (owner, 2026-11-01; merged in #60).** `Recall` reads a person's content through their wall; the owner's read of a person's memory is recalled that way. Next: chats and tasks (step 3).
 - **Recall only, step 1: whose each row of content is (owner, 2026-11-01; merged in #59).** Every content row records its person; a per-person reader role sees only that person's rows, and not the log. Nothing reads through it yet (step 2).

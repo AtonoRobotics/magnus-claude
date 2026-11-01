@@ -74,6 +74,8 @@ pub struct ResultRec {
 pub struct Intent {
     pub call_id: String,
     pub tool: String,
+    /// When it was recorded.
+    pub at: DateTime<Utc>,
     pub input: Value,
     pub issuer: String,
     /// pending until a result for this key is recorded
@@ -617,6 +619,9 @@ pub struct State {
     pub skipped_releases: std::collections::BTreeSet<String>,
     /// Apps the owner added from the app (config-file apps are not here).
     pub connectors: BTreeMap<String, crate::config::Connector>,
+    /// Providers the organisation has a registration with (its client ID
+    /// and secret are in the vault).
+    pub registrations: std::collections::BTreeSet<String>,
     /// Secrets the kill switch emptied from the vault, latest engagement
     /// only: what the owner signs in to or enters again.
     pub revoked: BTreeMap<String, Revoked>,
@@ -987,6 +992,13 @@ impl State {
             Ev::ConnectorRemoved { name } => {
                 self.connectors.remove(name);
             }
+            Ev::RegistrationSet { provider, set } => {
+                if *set {
+                    self.registrations.insert(provider.clone());
+                } else {
+                    self.registrations.remove(provider);
+                }
+            }
             Ev::ToolClassified { connector, tool, risk } => {
                 if let Some(c) = self.connectors.get_mut(connector) {
                     match risk {
@@ -1341,7 +1353,7 @@ impl State {
                     r.actions += 1;
                     r.intents.insert(
                         key.clone(),
-                        Intent { call_id: call_id.clone(), tool: tool.clone(), input: input.clone(), issuer: issuer.clone(), result: None },
+                        Intent { call_id: call_id.clone(), tool: tool.clone(), at: e.at, input: input.clone(), issuer: issuer.clone(), result: None },
                     );
                 }
             }
