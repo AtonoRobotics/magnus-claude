@@ -867,8 +867,9 @@ async function showThread(main, thread) {
     const el = $("#thread", main);
     if (!el) return;
     const grew = paint(el, body);
+    keepHeights(el);
     motion(el, ui);
-    for (const e of entries.filter(e => e.view)) fill($(`iframe[data-shown="${CSS.escape(e.id)}"]`, main), e.view);
+    for (const e of entries.filter(e => e.view)) fill($(`iframe[data-shown="${CSS.escape(e.id)}"]`, main), e.view, e.task_id);
     for (const [id, view, , task] of ui.composed) fill($(`iframe[data-view="${CSS.escape(id)}"]`, el), view, task);
     listen(entries);
     loadGlimpses(el);
@@ -1138,7 +1139,7 @@ function entry(e, ui = {}) {
       ? `<div class="msg me editing"><label class="sr" for="edit-${esc(e.id)}">Edit and resend</label><textarea id="edit-${esc(e.id)}" rows="3" data-draft="edit-${esc(e.id)}"></textarea>
         <div class="row small"><button class="primary" data-msg-act="edit-send">Send</button><button class="link" data-msg-act="edit-cancel">Cancel</button></div></div>`
       : `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div>${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}</div>`;
-    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div>${e.view ? `<iframe class="composed" sandbox="allow-same-origin" title="What Magnus showed" data-shown="${esc(e.id)}"></iframe>` : ""}${verdictBar(e.task_id, e.verdict)}</div>`;
+    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div>${e.view ? shownFrame(e.id, "What Magnus showed") : ""}${verdictBar(e.task_id, e.verdict)}</div>`;
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
       : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}</div>${e.status === "running" ? `<div class="pre" data-live="${esc(e.task_id)}">${esc(ui.live?.[e.task_id] || "")}</div>` : ""}</div>${waitingCard(e.waiting_item, ui)}`;
@@ -1150,6 +1151,7 @@ function entry(e, ui = {}) {
     }
     case "result": return `<div class="result" data-result="${esc(e.task_id)}"><details data-key="result:${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
       <div class="pre">${esc(e.summary || "")}</div>${ENDED.includes(e.status) ? verdictBar(e.task_id, e.verdict) : ""}</details>
+      ${e.view ? shownFrame(e.id, "The deliverable") : ""}
       ${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}<a class="small see" href="#/task/${enc(e.task_id)}" data-open="task:${esc(e.task_id)}">See the outcome</a></div>`;
     case "schedule_card": {
       const b = e.budget || {};
@@ -1373,12 +1375,26 @@ async function fileData(view, t) {
 // The look in effect, for what a frame draws: its tokens, and light or dark.
 const look = () => { const l = window.Theme?.look; return l ? [Theme.tokens(l), l.mode] : []; };
 
+// The height each composed frame in a conversation last had, by its entry:
+// a redraw of the thread makes the frame anew, and drawn at its known height
+// the thread keeps its layout (and its scroll) while the frame loads again.
+const frameHeights = {};
+// (Set after the thread is drawn, not in its markup, so the markup stays the
+// same and a loaded frame does not make the thread draw itself again.)
+const shownFrame = (id, title) => `<iframe class="composed" sandbox="allow-same-origin" title="${title}" data-shown="${esc(id)}"></iframe>`;
+const keepHeights = el => $$("iframe[data-shown]", el).forEach(f => { if (frameHeights[f.dataset.shown]) f.style.height = frameHeights[f.dataset.shown] + "px"; });
 async function fill(frame, view, taskId, task) {
   if (!frame || frame._drawn) return;
   frame._drawn = true;
   const t = task || (view?.some(c => c.type === "image" || c.type === "file") ? await api("GET", `/v1/tasks/${enc(taskId)}`) : null);
   frame.srcdoc = Compose.documentFor(view, await fileData(view, t), fontCss(), t?.preview, ...look());
-  frame.onload = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* sized by CSS */ } };
+  frame.onload = () => {
+    try {
+      const h = frame.contentDocument.documentElement.scrollHeight + 4;
+      frame.style.height = h + "px";
+      if (frame.dataset.shown) frameHeights[frame.dataset.shown] = h;
+    } catch { /* sized by CSS */ }
+  };
 }
 
 async function respond(btn, root) {
