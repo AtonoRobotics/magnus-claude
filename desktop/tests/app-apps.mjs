@@ -29,7 +29,8 @@ await d.step("add the calendar for everyone by its address", async () => {
 });
 
 await d.step("connect it from its card in the Library; the code comes back to this computer", async () => {
-  await d.click(d.xpath("//nav//a[normalize-space()='Library']"));
+  // Settings has no workspace sidebar: the Library by its address.
+  await d.run(`location.hash = "#/library"`);
   await d.click(d.button("Connect", "//li[@data-connector='calendar']"));
   const link = await d.attr(d.css("#connect-open"), "data-url");
   // The person's browser: the app's page approves and redirects to the shell's loopback address.

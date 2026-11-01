@@ -89,6 +89,11 @@ await step("the owner sees the Google registration set, and adds an app by its a
   if (fields !== 1) throw new Error(`adding an app asks for ${fields} fields, not its address alone`);
 });
 
+await step("from Settings, the Library's address opens the Library", async () => {
+  await page.evaluate(() => { location.hash = "#/library"; });
+  await page.locator("#detail [data-connector=google-gmail]").waitFor({ timeout: T });
+});
+
 if (errors.length) { console.error(`FAIL page errors: ${errors.join("; ")}`); await browser.close(); process.exit(1); }
 await browser.close();
 console.log("connectors passed");
