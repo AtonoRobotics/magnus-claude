@@ -120,11 +120,6 @@ jobs:
         run: |
           t="$RUNNER_TEMP/update-test" && rm -rf "$t" && mkdir -p "$t"
           (desktop/tests/update-builds.sh "$MAGNUS_VERSION" "$t" > "$t/build.log" 2>&1; echo $? > "$t/build.status") &
-      # The appliance's release programs, started beside the tests too, for
-      # the build kept for master (below) or master's own deploy.
-      - name: Start the appliance's release build
-        if: env.MAGNUS_TESTED != '1' && !startsWith(github.ref, 'refs/tags/')
-        run: (cargo build --release --workspace --bins > "$RUNNER_TEMP/release-build.log" 2>&1 &)
       - name: Install the app from its package
         if: env.MAGNUS_TESTED != '1'
         run: |
@@ -199,7 +194,10 @@ jobs:
       # the merge, which publishes it unchanged (above, "Tested already"):
       # keyed by the files' tree, so it is used only for exactly these files.
       # The newest two are kept: the one under review and, while master's
-      # run for the one before may still be waiting, that one.
+      # run for the one before may still be waiting, that one. The
+      # appliance's release programs are built here, after the tests: built
+      # beside them (a third build with the update test's two), they slowed
+      # the tests until an appliance missed its 30 s start (run 41265192814).
       - name: Keep this build for master
         if: github.event_name == 'pull_request'
         run: |
