@@ -470,17 +470,37 @@ impl Schedule {
         }
         let (h, m) = self.daily_at.as_deref()?.split_once(':')?;
         let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
-        use chrono::{Local, TimeZone};
-        let local = after.with_timezone(&Local);
-        let mut day = local.date_naive();
-        loop {
-            let t = Local.from_local_datetime(&day.and_hms_opt(h, m, 0)?).earliest()?;
-            if t > local {
-                return Some(t.with_timezone(&Utc));
-            }
-            day = day.succ_opt()?;
-        }
+        next_daily(after, self.last_fired.is_some(), h, m, &chrono::Local)
     }
+}
+
+/// The next time a daily schedule at `h:m` (wall-clock time in `tz`) is due
+/// after `after`, which is its last firing when `fired`, else its creation.
+/// When clocks go back, the time comes twice: the schedule is due at the first
+/// still ahead, once a day (made in between, at the second; never at both).
+/// When clocks go forward past it, it is due as the clocks resume, an hour on.
+fn next_daily<Tz: chrono::TimeZone>(after: DateTime<Utc>, fired: bool, h: u32, m: u32, tz: &Tz) -> Option<DateTime<Utc>> {
+    use chrono::LocalResult;
+    let local = after.with_timezone(tz);
+    let mut day = local.date_naive();
+    for _ in 0..3 {
+        let at = day.and_hms_opt(h, m, 0)?;
+        let t = match tz.from_local_datetime(&at) {
+            LocalResult::Single(t) => t,
+            LocalResult::Ambiguous(first, _) if first > local => first,
+            LocalResult::Ambiguous(_, second) if !fired => second,
+            LocalResult::Ambiguous(_, _) => {
+                day = day.succ_opt()?;
+                continue;
+            }
+            LocalResult::None => tz.from_local_datetime(&(at + chrono::Duration::hours(1))).earliest()?,
+        };
+        if t > local {
+            return Some(t.with_timezone(&Utc));
+        }
+        day = day.succ_opt()?;
+    }
+    None
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -1560,6 +1580,30 @@ mod tests {
     use super::State;
     use crate::log::Event;
     use serde_json::json;
+
+    /// A daily time in Los Angeles across both of its clock changes (owner's
+    /// CI, 2026-11-01: schedules made in the repeated hour did not fire).
+    #[test]
+    fn a_daily_schedule_is_due_once_a_day_across_clock_changes() {
+        use chrono::{TimeZone, Utc};
+        let la = chrono_tz::America::Los_Angeles;
+        let utc = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        // Clocks go back at 02:00 PDT on 2026-11-01; 01:00-02:00 comes twice.
+        // Made in the first 01:14 (PDT), due at the first 01:16.
+        assert_eq!(super::next_daily(utc("2026-11-01T08:14:00Z"), false, 1, 16, &la), Some(utc("2026-11-01T08:16:00Z")));
+        // Made in the second 01:14 (PST), due at the second 01:16, not tomorrow.
+        assert_eq!(super::next_daily(utc("2026-11-01T09:14:00Z"), false, 1, 16, &la), Some(utc("2026-11-01T09:16:00Z")));
+        // Having fired at the first 01:16, not again at the second: tomorrow.
+        assert_eq!(super::next_daily(utc("2026-11-01T08:16:00Z"), true, 1, 16, &la), Some(utc("2026-11-02T09:16:00Z")));
+        // Fired the day before: the first 01:16.
+        assert_eq!(super::next_daily(utc("2026-10-31T08:16:00Z"), true, 1, 16, &la), Some(utc("2026-11-01T08:16:00Z")));
+        // Clocks go forward at 02:00 PST on 2027-03-14; 02:30 does not happen.
+        // Due as they resume, at 03:30 PDT, and on the next day at 02:30 again.
+        assert_eq!(super::next_daily(utc("2027-03-14T09:00:00Z"), false, 2, 30, &la), Some(utc("2027-03-14T10:30:00Z")));
+        assert_eq!(super::next_daily(utc("2027-03-14T10:30:00Z"), true, 2, 30, &la), Some(utc("2027-03-15T09:30:00Z")));
+        // An ordinary day.
+        assert_eq!(super::next_daily(la.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap().with_timezone(&Utc), false, 8, 0, &la), Some(utc("2026-06-02T15:00:00Z")));
+    }
 
     fn ev(seq: i64, actor: &str, ev: serde_json::Value) -> Event {
         Event { seq, at: chrono::Utc::now(), actor: actor.into(), ev: serde_json::from_value(ev).unwrap() }
