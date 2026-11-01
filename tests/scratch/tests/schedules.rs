@@ -15,7 +15,7 @@
 
 use magnus_invariants::appliance::workspace_root;
 use magnus_invariants::{mcp, *};
-use magnus_scratch::{chromium, reconfigure, set_password, PASSWORD};
+use magnus_scratch::{chromium, reconfigure, set_password, shots, PASSWORD};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -239,7 +239,7 @@ async fn a_schedule_that_keeps_failing_pauses_until_its_person_resumes_it() {
         .env("MAGNUS_PASSWORD", PASSWORD)
         .env("MAGNUS_SCHEDULE", &id)
         .env("MAGNUS_CHROMIUM", chromium())
-        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .envs(shots())
         .output()
         .await
         .unwrap();

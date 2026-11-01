@@ -278,3 +278,17 @@ pub fn chromium() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/ms-playwright/chromium-1234/chrome-linux64/chrome"))
 }
+
+/// Where a browser check keeps its screenshots, when `MAGNUS_SHOTS` is set:
+/// a folder of its own under it, named for the test and numbered for each
+/// check the test runs, so checks running at once, or one after another in
+/// one test, do not write over each other's evidence (CI run 41279528035:
+/// two sign-in flows numbered their screenshots into one folder). Nextest
+/// runs each test in its own process, on a thread named for the test.
+pub fn shots() -> Option<(&'static str, String)> {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let root = std::env::var("MAGNUS_SHOTS").ok()?;
+    let test = std::thread::current().name().unwrap_or("test").replace("::", "-");
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    Some(("MAGNUS_SHOTS", format!("{root}/{test}/{n}")))
+}

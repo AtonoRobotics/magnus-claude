@@ -43,7 +43,7 @@ async fn run(how: Sign) {
         .env("MAGNUS_CHAT_QUESTION", CHAT_QUESTION)
         .env("MAGNUS_CHAT_ANSWER", CHAT_ANSWER)
         .env("MAGNUS_CHROMIUM", chromium())
-        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .envs(shots())
         .output()
         .await
         .unwrap();
