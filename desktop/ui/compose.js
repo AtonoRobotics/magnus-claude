@@ -229,7 +229,7 @@ const Compose = (() => {
     img { max-width: 100%; border: 1px solid var(--line); border-radius: 4px; }
     .area { fill: none; stroke: var(--line); }
     .pt { fill: var(--bar); }
-    .tl { list-style: none; padding: 0; margin: 0; }
+    .tl { list-style: none; padding: 0; margin: 0; max-width: none; }
     .tl li { display: flex; gap: 14px; padding: 14px 16px; margin: 0; border-bottom: 1px solid var(--hair); }
     .tl li:last-child { border-bottom: 0; }
     .tl .when { flex: 0 0 52px; font-size: 12px; font-weight: 600; color: var(--accent-text); text-transform: uppercase; font-variant-numeric: tabular-nums; }
