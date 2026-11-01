@@ -40,6 +40,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { clean: false }
+      # Postgres and Keycloak, which the tests and the deploy use, up and
+      # answering (they may still be starting after a reboot).
+      - name: Build box services
+        run: dev/services.sh
       # The sandbox guest built from this commit (sandbox/image.sh).
       - name: Sandbox image
         run: |

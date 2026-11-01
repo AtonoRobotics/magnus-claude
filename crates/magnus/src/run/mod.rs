@@ -20,12 +20,16 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const INSTRUCTIONS: &str = include_str!("../../instructions/agent.md");
+/// Both prompts end with Magnus's character (`instructions/character.md`;
+/// DECISIONS.md, "Identity and characters"): every run speaks in it, on
+/// every model, and its text is in the instructions version each model call
+/// logs.
+pub const INSTRUCTIONS: &str = concat!(include_str!("../../instructions/agent.md"), "\n", include_str!("../../instructions/character.md"));
 pub(crate) const MAX_RESULT_IN_CONTEXT: usize = 40_000;
 
 /// What a chat turn runs under: answer, start a task, propose a schedule,
 /// or ask.
-pub const CHAT_INSTRUCTIONS: &str = include_str!("../../instructions/chat.md");
+pub const CHAT_INSTRUCTIONS: &str = concat!(include_str!("../../instructions/chat.md"), "\n", include_str!("../../instructions/character.md"));
 
 pub fn instructions_version() -> String {
     version_of("agent.md", INSTRUCTIONS)
