@@ -160,8 +160,9 @@ pub const MODULES: &[Module] = &[
     },
 ];
 
-fn summary(s: &State, r: &Run, stall: u32) -> Value {
-    let title = s.tasks.get(&r.task).map(|t| t.text.chars().take(100).collect::<String>()).unwrap_or_default();
+/// `w` holds the recalled words of the runs' tasks (`Kernel::all_words`).
+fn summary(s: &State, r: &Run, stall: u32, w: &crate::recall::Words) -> Value {
+    let title = s.tasks.get(&r.task).map(|t| w.text(t.seq).chars().take(100).collect::<String>()).unwrap_or_default();
     json!({
         "run": r.id, "task": r.task, "person": r.person, "title": title,
         "status": status_str(r.status), "reason": r.reason,
@@ -192,6 +193,10 @@ async fn runs(AxState(k): K, h: HeaderMap, Query(q): Query<RunQuery>) -> Respons
     dev!(k, h);
     let stall = k.cfg.observability.stall_minutes;
     let ids: Option<BTreeSet<String>> = q.ids.as_ref().map(|i| i.split(',').map(String::from).collect());
+    let w = match k.all_words().await {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
     let mut list: Vec<Value> = k.read(|s| {
         let mut rs: Vec<&Run> = s.runs.values().collect();
         rs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -200,7 +205,7 @@ async fn runs(AxState(k): K, h: HeaderMap, Query(q): Query<RunQuery>) -> Respons
             .filter(|r| q.experiment.as_deref().is_none_or(|e| r.experiment.as_ref().is_some_and(|x| x.id == e)))
             .filter(|r| q.failure.as_deref().is_none_or(|f| failure(s, r, stall) == Some(f)))
             .filter(|r| ids.as_ref().is_none_or(|i| i.contains(&r.id)))
-            .map(|r| summary(s, r, stall))
+            .map(|r| summary(s, r, stall, &w))
             .collect()
     });
     list.truncate(q.limit.unwrap_or(500));
@@ -410,7 +415,11 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
         }
         out.push(Value::Object(st));
     }
-    let s = k.read(|s| summary(s, &run, k.cfg.observability.stall_minutes));
+    let w = match k.all_words().await {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
+    let s = k.read(|s| summary(s, &run, k.cfg.observability.stall_minutes, &w));
     Json(json!({ "run": s, "steps": out, "actions": actions, "records": records, "harness": harness, "events": events.len() })).into_response()
 }
 
@@ -589,6 +598,10 @@ struct ExpQuery {
 async fn experiment(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Query(q): Query<ExpQuery>) -> Response {
     dev!(k, h);
     let stall = k.cfg.observability.stall_minutes;
+    let w = match k.all_words().await {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
     let v = k.read(|s| {
         let rs: Vec<&Run> = s.runs.values().filter(|r| r.experiment.as_ref().is_some_and(|t| t.id == id)).collect();
         if rs.is_empty() {
@@ -669,8 +682,8 @@ async fn experiment(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Query(q
                 }));
             }
         }
-        let requests = request_rows(s, &id);
-        let compared = if requests.is_empty() { Value::Null } else { compare(s, &id, &requests, q.base.as_deref()) };
+        let requests = request_rows(s, &id, &w);
+        let compared = if requests.is_empty() { Value::Null } else { compare(s, &id, &requests, q.base.as_deref(), &w) };
         Some(json!({ "id": id, "k": kk, "cases": cases, "configs": configs, "paired": paired, "requests": requests, "compare": compared }))
     });
     match v {
@@ -684,7 +697,7 @@ async fn experiment(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Query(q
 /// policy stop (ask or deny) on the way, and the cost and time of it all,
 /// until each run first ended or stopped (for the person, or to wait), and
 /// the person's verdict on the outcome.
-fn request_trial(s: &State, r: &Run) -> Value {
+fn request_trial(s: &State, r: &Run, w: &crate::recall::Words) -> Value {
     let kids: Vec<&Run> = s
         .tasks
         .values()
@@ -716,10 +729,10 @@ fn request_trial(s: &State, r: &Run) -> Value {
     json!({
         "case": tag.case, "trial": tag.trial, "config": config_key(r), "run": r.id, "task": r.task,
         "thread": s.tasks.get(&r.task).and_then(|t| t.chat.as_ref()).map(|c| c.thread.clone()),
-        "text": s.tasks.get(&r.task).map(|t| t.text.clone()),
+        "text": s.tasks.get(&r.task).map(|t| w.text(t.seq).to_string()),
         "choice": choice, "answer": (!answer.is_empty()).then_some(answer),
         "tasks": kids.iter().map(|k| json!({
-            "task": k.task, "title": s.tasks.get(&k.task).map(|t| crate::api::title_of(t, k)),
+            "task": k.task, "title": s.tasks.get(&k.task).map(|t| crate::api::title_of(t, Some(k), w)),
             "status": status_str(k.status), "reason": k.reason, "stopped_for": k.suspensions,
         })).collect::<Vec<_>>(),
         "stops": stops,
@@ -756,12 +769,12 @@ fn rank(v: &str) -> usize {
 }
 
 /// The request trials of one experiment, in case, model and trial order.
-fn request_rows(s: &State, id: &str) -> Vec<Value> {
+fn request_rows(s: &State, id: &str, w: &crate::recall::Words) -> Vec<Value> {
     let mut rows: Vec<Value> = s
         .runs
         .values()
         .filter(|r| r.experiment.as_ref().is_some_and(|t| t.id == id) && s.tasks.get(&r.task).is_some_and(|t| t.is_chat_turn()))
-        .map(|r| request_trial(s, r))
+        .map(|r| request_trial(s, r, w))
         .collect();
     rows.sort_by_key(|v| (v["case"].as_str().unwrap_or_default().to_string(), v["config"].as_str().unwrap_or_default().to_string(), v["trial"].as_u64()));
     rows
@@ -771,7 +784,7 @@ fn request_rows(s: &State, id: &str) -> Vec<Value> {
 /// latest earlier experiment sharing a request): each request on each model,
 /// side by side, what changed between them, and once every trial here has
 /// settled, how many improved, stayed the same or regressed by verdict.
-fn compare(s: &State, id: &str, rows: &[Value], base: Option<&str>) -> Value {
+fn compare(s: &State, id: &str, rows: &[Value], base: Option<&str>, w: &crate::recall::Words) -> Value {
     let started = |e: &str| s.runs.values().filter(|r| r.experiment.as_ref().is_some_and(|t| t.id == e)).map(|r| r.created_at).min();
     let cases: BTreeSet<&str> = rows.iter().filter_map(|r| r["case"].as_str()).collect();
     let base_id = base.map(String::from).or_else(|| {
@@ -787,7 +800,7 @@ fn compare(s: &State, id: &str, rows: &[Value], base: Option<&str>) -> Value {
         others.into_iter().max_by_key(|(_, at)| *at).map(|(e, _)| e)
     });
     let Some(base_id) = base_id else { return Value::Null };
-    let before = request_rows(s, &base_id);
+    let before = request_rows(s, &base_id, w);
     let key = |r: &Value| (r["case"].as_str().unwrap_or_default().to_string(), r["model"].as_str().unwrap_or_default().to_string(), r["trial"].as_u64());
     let earlier: BTreeMap<_, &Value> = before.iter().map(|r| (key(r), r)).collect();
     let (mut improved, mut unchanged, mut regressed, mut unjudged) = (0, 0, 0, 0);

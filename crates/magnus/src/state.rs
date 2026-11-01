@@ -221,19 +221,20 @@ impl Run {
 }
 
 #[derive(Clone, Debug, Serialize)]
+/// A task's record. What the person asked (its text), the title the model
+/// gave it and the scope the person confirmed are not kept here: they are
+/// recalled from the content store, for its person, when a request needs
+/// them (recall only, step 3a), from the event `seq` names.
 pub struct Task {
     pub task_id: String,
     pub run_id: String,
     pub person: String,
-    pub text: String,
     pub created_at: DateTime<Utc>,
     pub chat: Option<crate::events::ChatOrigin>,
-    /// The short title the model gave it when starting it, if any.
-    pub title: Option<String>,
     /// The schedule that started it, if any.
     pub schedule: Option<String>,
-    /// The scope the person confirmed for that schedule, which its run is told.
-    pub scope: Option<String>,
+    /// The event that created it: where its words are recalled from.
+    pub seq: i64,
     /// Library files the person gave it.
     pub files: Vec<String>,
     /// The project it started in, as it stood then.
@@ -402,11 +403,12 @@ pub struct PlaybookItem {
     pub added_at: DateTime<Utc>,
 }
 
+/// A schedule's record. What its runs are asked (its text), its title and
+/// scope are recalled from the event `seq` names, as a task's are.
 #[derive(Clone, Debug)]
 pub struct Schedule {
     pub id: String,
     pub person: String,
-    pub text: String,
     pub every_minutes: Option<u32>,
     pub daily_at: Option<String>,
     pub created: DateTime<Utc>,
@@ -414,9 +416,8 @@ pub struct Schedule {
     pub budget: Option<crate::config::Budget>,
     pub card: Option<String>,
     pub label: Label,
-    pub title: Option<String>,
-    /// What the person confirmed each run does, on the chat card.
-    pub scope: Option<String>,
+    /// The event that set it: where its words are recalled from.
+    pub seq: i64,
     /// Firings that could not start a task: when, and why.
     pub failures: Vec<(DateTime<Utc>, String)>,
     pub until: Option<DateTime<Utc>>,
@@ -541,9 +542,37 @@ pub struct Update {
 #[derive(Clone, Debug)]
 pub struct Trashed {
     pub person: String,
+    /// Its title, when the state has it; else `title_from` says where it is
+    /// recalled from.
     pub title: String,
+    pub title_from: Option<TitleFrom>,
     pub at: DateTime<Utc>,
     held: Held,
+}
+
+/// Where a trashed item's title is recalled from: the event that holds a
+/// task's words, its title (else its text), or its text alone.
+#[derive(Clone, Copy, Debug)]
+pub enum TitleFrom {
+    Title(i64),
+    Text(i64),
+}
+
+impl TitleFrom {
+    pub fn seq(&self) -> i64 {
+        match self {
+            TitleFrom::Title(s) | TitleFrom::Text(s) => *s,
+        }
+    }
+
+    /// The title, from the recalled content of `seq()`.
+    pub fn title(&self, words: &Value) -> String {
+        let text = words["text"].as_str().unwrap_or_default();
+        match self {
+            TitleFrom::Title(_) => words["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(text).to_string(),
+            TitleFrom::Text(_) => text.to_string(),
+        }
+    }
 }
 
 /// What a trashed item took out of the state, to put back if restored. A
@@ -817,45 +846,49 @@ impl State {
     }
 
     /// Take an item out of every view, into the trash.
-    fn take(&mut self, item: &str) -> Option<(String, Held)> {
+    fn take(&mut self, item: &str) -> Option<(String, Option<TitleFrom>, Held)> {
         if let Some((_, task)) = item.split_once(':') {
             let t = self.tasks.get(task)?;
             let thread = t.chat.as_ref()?.thread.clone();
-            let title = match item.starts_with("m:") {
-                true => t.text.clone(),
-                false => self.runs.get(&t.run_id).and_then(|r| r.summary.clone()).unwrap_or_default(),
+            // A message's title is what the person said, recalled when listed.
+            let (title, from) = match item.starts_with("m:") {
+                true => (String::new(), Some(TitleFrom::Text(t.seq))),
+                false => (self.runs.get(&t.run_id).and_then(|r| r.summary.clone()).unwrap_or_default(), None),
             };
-            return Some((title, Held::Entry { thread }));
+            return Some((title, from, Held::Entry { thread }));
         }
-        let title_of = |t: &Task| t.title.clone().unwrap_or_else(|| t.text.clone());
         if item.starts_with("task_") {
             let t = self.tasks.remove(item)?;
             let r = self.runs.remove(&t.run_id).map(Box::new);
             let ids: Vec<String> = self.items.values().filter(|i| i.task.as_deref() == Some(item)).map(|i| i.id.clone()).collect();
             let items = ids.iter().filter_map(|id| self.items.remove(id)).collect();
-            return Some((title_of(&t), Held::Task(Box::new(t), r, items)));
+            return Some((String::new(), Some(TitleFrom::Title(t.seq)), Held::Task(Box::new(t), r, items)));
         }
         if item.starts_with("thread_") {
             let ids: Vec<String> = self.tasks.values().filter(|t| t.chat.as_ref().is_some_and(|c| c.turn && c.thread == item)).map(|t| t.task_id.clone()).collect();
             let mut turns: Vec<(Task, Option<Run>)> = ids.iter().filter_map(|id| self.tasks.remove(id)).map(|t| { let r = self.runs.remove(&t.run_id); (t, r) }).collect();
             turns.sort_by_key(|(t, _)| t.created_at);
             let branch = self.branches.remove(item);
-            let title = turns.first().map(|(t, _)| t.text.clone()).or_else(|| branch.as_ref().map(|b| b.title.clone()))?;
-            return Some((title, Held::Thread { id: item.into(), turns, branch }));
+            // A conversation's title is its first message, recalled when listed.
+            let (title, from) = match turns.first() {
+                Some((t, _)) => (String::new(), Some(TitleFrom::Text(t.seq))),
+                None => (branch.as_ref()?.title.clone(), None),
+            };
+            return Some((title, from, Held::Thread { id: item.into(), turns, branch }));
         }
         if let Some(f) = self.files.remove(item) {
-            return Some((f.name.clone(), Held::File(Box::new(f))));
+            return Some((f.name.clone(), None, Held::File(Box::new(f))));
         }
         if let Some(p) = self.projects.remove(item) {
-            return Some((p.name.clone(), Held::Project(p)));
+            return Some((p.name.clone(), None, Held::Project(p)));
         }
         if let Some(i) = self.memory.iter().position(|m| m.id == item) {
             // Its title in the trash is its fact, recalled when listed.
             let m = self.memory.remove(i);
-            return Some((String::new(), Held::Memory(m)));
+            return Some((String::new(), None, Held::Memory(m)));
         }
         let k = self.knowledge.remove(item)?;
-        Some((k.title.clone(), Held::Knowledge(Box::new(k))))
+        Some((k.title.clone(), None, Held::Knowledge(Box::new(k))))
     }
 
     /// Which events hold a trashed item's own content. A task's or a
@@ -1079,13 +1112,12 @@ impl State {
                 self.signed_in_before.insert(person.clone());
             }
             Ev::SignedOut { .. } => {}
-            Ev::ScheduleSet { id, person, text, every_minutes, daily_at, budget, card, label, title, until, max_runs, scope } => {
+            Ev::ScheduleSet { id, person, every_minutes, daily_at, budget, card, label, until, max_runs, .. } => {
                 self.schedules.insert(
                     id.clone(),
                     Schedule {
                         id: id.clone(),
                         person: person.clone(),
-                        text: text.clone(),
                         every_minutes: *every_minutes,
                         daily_at: daily_at.clone(),
                         created: e.at,
@@ -1093,8 +1125,7 @@ impl State {
                         budget: budget.clone(),
                         card: card.clone(),
                         label: label.unwrap_or_default(),
-                        title: title.clone(),
-                        scope: scope.clone(),
+                        seq: e.seq,
                         failures: vec![],
                         until: *until,
                         max_runs: *max_runs,
@@ -1114,8 +1145,8 @@ impl State {
             }
             Ev::MemoryForgotten { id } => self.memory.retain(|m| &m.id != id),
             Ev::Trashed { item, person } => {
-                if let Some((title, held)) = self.take(item) {
-                    self.trash.insert(item.clone(), Trashed { person: person.clone(), title, at: e.at, held });
+                if let Some((title, title_from, held)) = self.take(item) {
+                    self.trash.insert(item.clone(), Trashed { person: person.clone(), title, title_from, at: e.at, held });
                 }
             }
             Ev::Restored { item } => {
@@ -1222,7 +1253,7 @@ impl State {
                     (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: false }),
                 );
             }
-            Ev::TaskCreated { task, run, person, text, config, attachments, experiment, chat, label, title, files, project, scope } => {
+            Ev::TaskCreated { task, run, person, config, attachments, experiment, chat, label, files, project, .. } => {
                 // Playbook items the run starts with carry the taint of the
                 // runs that wrote them (I2, M1), and a task from chat that of
                 // the turn that started it.
@@ -1243,13 +1274,11 @@ impl State {
                         task_id: task.clone(),
                         run_id: run.clone(),
                         person: person.clone(),
-                        text: text.clone(),
                         created_at: e.at,
                         chat: chat.clone(),
-                        title: title.clone(),
                         // Known from the start, so its first step knows it is scheduled.
                         schedule: e.actor.strip_prefix("schedule:").map(String::from),
-                        scope: scope.clone(),
+                        seq: e.seq,
                         files: files.clone(),
                         project: project.clone(),
                         verdict: None,

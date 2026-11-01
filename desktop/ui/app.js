@@ -1698,7 +1698,7 @@ function connectorAction(c) {
   const state = Connecting[c.name] ? "connecting" : c.state;
   return {
     connecting: `<p class="small">Finish signing in in your browser, then come back here.</p><button class="link small" data-act="connect-page" id="connect-open" data-url="${esc(Connecting[c.name] || "")}">Open the sign-in page again</button>`,
-    available: `<button class="primary" data-act="connect" data-app="${esc(c.name)}">Connect</button>`,
+    available: c.ready === false ? `<span class="small muted">Not ready on this appliance yet</span>` : `<button class="primary" data-act="connect" data-app="${esc(c.name)}">Connect</button>`,
     needs_attention: `<button class="primary" data-act="connect" data-app="${esc(c.name)}">Sign in again</button>`,
     connected: `<span class="chip ok">Connected</span>`,
   }[state] || "";
@@ -1977,10 +1977,12 @@ async function modelsSection(main) {
 
 // ---------- Connectors: the organisation's apps (owner) ----------
 
-// The owner adds an app for everyone by its address, the one field in the
-// connector system (connectors spec); each person then connects it with
-// their own sign-in in their Library. The owner decides what each of its
-// tools may do; a tool left "not offered" is never shown to the worker.
+// The organisation's apps: the whole catalog, already set up, and any
+// server the admin added (in the admin console, never here). Nothing here
+// asks for a client ID, secret or address (connectors spec rev 46, "What
+// the user sees"); each person connects from their Library. The owner
+// decides what an added server's tools may do; a tool left "not offered"
+// is never shown to the worker.
 const RISKS = [["", "Not offered"], ["read", "Reads only"], ["reversible_write", "Changes things (undoable)"], ["irreversible", "Changes things (cannot undo)"], ["financial", "Moves money"], ["prohibited", "Never"]];
 // A tool whose definition changed is blocked until the owner accepts it;
 // the decision is the inbox item's, shown again on its connector.
@@ -1988,17 +1990,8 @@ const changesFor = name => App.inbox.filter(i => i.status === "open" && (i.kind 
   || i.kind === "tool_review" && (i.details?.tools || []).some(t => String(t.tool).startsWith(`${name}__`))));
 async function connectorsSection(main) {
   const draw = async () => {
-    // Not while the owner is typing a registration in.
-    if ([...main.querySelectorAll("[data-reg-id], [data-reg-secret]")].some(i => i.value)) return;
-    const [{ connectors }, { registrations }] = await Promise.all([api("GET", "/v1/connectors"), api("GET", "/v1/registrations")]);
-    paint(main, `<h2>Connectors</h2><p class="muted">The apps your organisation provides. Each appears in everyone's Library, and each person connects it with their own account; no one acts through anyone else's.</p>
-      ${registrations.map(r => `<div class="card" data-registration="${esc(r.provider)}"><div class="spread"><strong>Your organisation's ${esc(r.provider.charAt(0).toUpperCase() + r.provider.slice(1))} registration</strong>
-          ${r.set ? `<span class="chip ok">Set</span>` : `<span class="chip warn">Not set</span>`}</div>
-        <div class="small muted">Brings ${esc(r.connectors.join(", "))} to everyone's Library. People still sign in with their own accounts.</div>
-        <div class="grid2" style="margin-top:8px"><label>Client ID<input data-reg-id="${esc(r.provider)}" autocomplete="off"></label>
-          <label>Client secret<input type="password" data-reg-secret="${esc(r.provider)}" autocomplete="off"></label></div>
-        <div class="row" style="margin-top:10px"><button class="primary" data-act="set-registration" data-provider="${esc(r.provider)}">${r.set ? "Replace" : "Set"}</button>
-          ${r.set ? `<button class="link" data-act="clear-registration" data-provider="${esc(r.provider)}">Clear</button>` : ""}</div></div>`).join("")}
+    const { connectors } = await api("GET", "/v1/connectors");
+    paint(main, `<h2>Connectors</h2><p class="muted">The apps in Magnus's catalog, already set up for your organisation. Each is in everyone's Library, and each person connects it with their own account; no one acts through anyone else's.</p>
       ${connectors.map(c => `<div class="card" data-app="${esc(c.name)}"><div class="spread"><strong>${esc(c.title)}</strong>
           <span class="row">${c.source === "config" ? `<span class="chip">set in the config file</span>` : c.source === "catalog" ? `<span class="chip">from the catalog</span>` : `<button class="link" data-act="remove" data-app="${esc(c.name)}">Remove for everyone</button>`}</span></div>
         <div class="small muted">${esc(c.summary)}</div>
@@ -2008,10 +2001,7 @@ async function connectorsSection(main) {
             <td><select data-tool="${esc(t.name)}" data-app="${esc(c.name)}" aria-label="What ${esc(t.name)} may do" ${c.source === "app" ? "" : "disabled"}>
               ${RISKS.map(([v, l]) => `<option value="${v}" ${(t.risk || "") === v ? "selected" : ""}>${esc(l)}${v && v === t.suggested && !t.risk ? " (the app's hint)" : ""}</option>`).join("")}</select></td></tr>`).join("")}</tbody></table>`
           : c.signed_in ? "" : `<p class="small">Connect it in your Library to see its tools and choose what each may do.</p>`}
-      </div>`).join("") || `<p class="empty">No apps yet.</p>`}
-      <div class="card"><strong>Add an app for everyone</strong>
-        <label style="margin-top:8px">Its address<input id="aurl" placeholder="https://app.example.com" autocomplete="off"></label>
-        <div class="row" style="margin-top:10px"><button class="primary" data-act="add">Add</button></div></div>`);
+      </div>`).join("") || `<p class="empty">No apps yet.</p>`}`);
   };
   main.onchange = async e => {
     const s = e.target.closest("select[data-tool]"); if (!s) return;
@@ -2026,30 +2016,6 @@ async function connectorsSection(main) {
     const b = e.target.closest("button[data-act]"); if (!b) return;
     const app = b.dataset.app;
     try {
-      if (b.dataset.act === "add") {
-        const url = $("#aurl", main).value.trim();
-        if (!url) return toast("Give the app's address.");
-        b.disabled = true;
-        // Its results are taken as private and possibly others' words, and
-        // what is sent there as reaching anyone, until the owner says otherwise.
-        const r = await api("POST", "/v1/connectors", { url, audience: "public", label: "private+untrusted" });
-        toast(`${r.name || "The app"} is in everyone's Library. Connect it there with your own account.`);
-        await draw();
-      }
-      if (b.dataset.act === "set-registration") {
-        const p = b.dataset.provider;
-        const client_id = $(`[data-reg-id="${CSS.escape(p)}"]`, main).value.trim(), client_secret = $(`[data-reg-secret="${CSS.escape(p)}"]`, main).value.trim();
-        if (!client_id) return toast("Give the registration's client ID.");
-        await api("PUT", `/v1/registrations/${enc(p)}`, { client_id, client_secret });
-        main.querySelectorAll("[data-reg-id], [data-reg-secret]").forEach(i => { i.value = ""; });
-        toast("Saved in the appliance's vault.");
-        await draw();
-      }
-      if (b.dataset.act === "clear-registration") {
-        if (!confirm("Clear this registration? Its connectors leave everyone's Library until it is set again.")) return;
-        await api("DELETE", `/v1/registrations/${enc(b.dataset.provider)}`);
-        await draw();
-      }
       if (b.dataset.act === "remove") {
         if (!confirm(`Remove ${app} for everyone? Every person's sign-in to it is ended, and the worker can no longer use it.`)) return;
         await api("DELETE", `/v1/connectors/${enc(app)}`);

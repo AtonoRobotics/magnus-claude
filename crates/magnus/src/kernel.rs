@@ -282,7 +282,7 @@ impl Kernel {
                     // turned back on and resume them.
                     let schedules: Vec<crate::state::Schedule> = self.read(|s| s.schedules.values().filter(|x| x.person == person && x.next_due().is_some()).cloned().collect());
                     for sc in schedules {
-                        let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                        let title = self.schedule_title_for_notice(&sc).await;
                         let reason = format!("{} has turned your account off", id.label());
                         let notice = self.notice_to(None, None, person.clone(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": reason } }));
                         self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason, task: None }), ("kernel", notice)]).await;
@@ -356,7 +356,10 @@ impl Kernel {
                 // Stop it with a notice rather than retry it unseen (K24).
                 let running = k.read(|s| s.runs.get(&run).is_some_and(|r| r.status == Status::Running));
                 if running {
-                    let title = k.read(|s| s.runs.get(&run).cloned()).map(|r| k.title_of(&r)).unwrap_or_default();
+                    let title = match k.read(|s| s.runs.get(&run).cloned()) {
+                        Some(r) => k.title_of(&r).await,
+                        None => String::new(),
+                    };
                     if let Err(e2) = k.suspend_with_notice(&run, "error", format!("Stopped by an error: {title}"), serde_json::json!({ "error": format!("{e:#}") })).await {
                         tracing::error!("run {run}: could not record the error: {e2:#}");
                     }
@@ -501,7 +504,7 @@ impl Kernel {
             let finished: Vec<(crate::state::Schedule, String)> =
                 self.read(|s| s.schedules.values().filter_map(|x| x.finished(now).map(|why| (x.clone(), why))).collect());
             for (sc, why) in finished {
-                let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                let title = self.schedule_title_for_notice(&sc).await;
                 let notice = self.notice_to(None, None, sc.person.clone(), format!("A schedule ended: {title}"), serde_json::json!({ "reason": "schedule_ended", "evidence": { "schedule": sc.id, "why": why } }));
                 self.tell(vec![("kernel", Ev::ScheduleEnded { id: sc.id.clone(), reason: why, run: None }), ("kernel", notice)]).await;
             }
@@ -521,7 +524,7 @@ impl Kernel {
                 (hold, release)
             });
             for (sc, task, why) in hold {
-                let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                let title = self.schedule_title_for_notice(&sc).await;
                 let notice = self.notice_to(Some(task.clone()), None, sc.person.clone(), format!("A schedule paused until you answer its run: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why, "task": task } }));
                 self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: Some(task) }), ("kernel", notice)]).await;
             }
@@ -531,7 +534,7 @@ impl Kernel {
             let due_schedules: Vec<crate::state::Schedule> =
                 self.read(|s| if s.kill_switch { vec![] } else { s.schedules.values().filter(|x| x.next_due().is_some_and(|t| t <= now)).cloned().collect() });
             for sc in due_schedules {
-                let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
+                let title = self.schedule_title_for_notice(&sc).await;
                 // Not while its last run is open: running, or waiting on
                 // someone. Runs that pile up waiting flood the inbox
                 // (2026-10-30: 75 runs of one test schedule).
@@ -551,15 +554,23 @@ impl Kernel {
                 // A scheduled task acts for the person who set it up (K54),
                 // within the schedule's budget.
                 // Its runs start in the project the schedule is in now.
-                let o = NewRun {
-                    // A schedule's own limits, within the appliance's today.
-                    budget: sc.budget.as_ref().map(|b| b.within(&self.cfg.budget)),
-                    label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label),
-                    project: self.read(|s| s.project_of(&sc.id)),
-                    scope: sc.scope.clone(),
-                    ..Default::default()
+                // What it asks, and the scope its person confirmed, recalled
+                // for them; a recall that fails is a firing that failed.
+                let started = match self.words_of(&sc.person, sc.seq).await {
+                    Ok(w) => {
+                        let o = NewRun {
+                            // A schedule's own limits, within the appliance's today.
+                            budget: sc.budget.as_ref().map(|b| b.within(&self.cfg.budget)),
+                            label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label),
+                            project: self.read(|s| s.project_of(&sc.id)),
+                            scope: w.opt(sc.seq, "scope"),
+                            ..Default::default()
+                        };
+                        self.create_run(&format!("schedule:{}", sc.id), &sc.person, w.text(sc.seq).to_string(), vec![], o).await
+                    }
+                    Err(e) => Err(e),
                 };
-                match self.create_run(&format!("schedule:{}", sc.id), &sc.person, sc.text.clone(), vec![], o).await {
+                match started {
                     Ok((task, _)) => {
                         let _ = self.emit("kernel", Ev::ScheduleFired { id: sc.id.clone(), task }).await;
                     }
@@ -654,9 +665,23 @@ impl Kernel {
         self.notice_to(Some(run.task.clone()), Some(run.id.clone()), run.person.clone(), summary, details)
     }
 
-    /// The task's title, or the start of what the person asked.
-    pub fn title_of(&self, run: &crate::state::Run) -> String {
-        self.read(|s| s.tasks.get(&run.task).map(|t| t.title.clone().unwrap_or_else(|| t.text.chars().take(80).collect()))).unwrap_or_default()
+    /// The task's title, or the start of what the person asked, recalled
+    /// for its person. A notice still goes when it cannot be recalled.
+    pub async fn title_of(&self, run: &crate::state::Run) -> String {
+        let Some(t) = self.read(|s| s.tasks.get(&run.task).cloned()) else { return String::new() };
+        self.task_title(&t, Some(run)).await.unwrap_or_else(|e| {
+            tracing::warn!("recall the title of {}: {e:#}", t.task_id);
+            String::new()
+        })
+    }
+
+    /// A schedule's title for a notice: a notice still goes when it cannot
+    /// be recalled.
+    pub async fn schedule_title_for_notice(&self, sc: &crate::state::Schedule) -> String {
+        self.schedule_title(sc).await.unwrap_or_else(|e| {
+            tracing::warn!("recall the title of schedule {}: {e:#}", sc.id);
+            String::new()
+        })
     }
 
     /// The run's last few tool results, for a notice's evidence.

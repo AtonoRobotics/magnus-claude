@@ -125,7 +125,7 @@ async fn the_owner_adds_an_app_each_person_signs_in_with_their_own_account_and_t
     let (st, _) = alice.send(reqwest::Method::DELETE, "/v1/connectors/calendar", None).await;
     assert_eq!(st, 204);
     let (_, list) = alice.get("/v1/connectors").await;
-    assert!(list["connectors"].as_array().unwrap().is_empty(), "{list}");
+    assert!(!list["connectors"].as_array().unwrap().iter().any(|c| c["name"] == "calendar"), "{list}");
 }
 
 /// A tool whose definition the app changes after the worker first saw it is
