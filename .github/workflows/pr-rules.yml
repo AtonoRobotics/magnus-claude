@@ -1,0 +1,32 @@
+# The pull request rules (CLAUDE.md, "How work lands"; release/pr-rules.sh),
+# on every pull request: one open at a time in the order opened, into
+# master only, holding master's current commit. Same build box as the other
+# checks (desktop/README.md, "Release checks").
+name: pr-rules
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  rules:
+    runs-on: [self-hosted, linux, magnus-linux]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0, ref: "${{ github.event.pull_request.head.sha }}" }
+      - name: The pull request rules
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch -q origin master
+          MAGNUS_OPEN_PRS=$(gh pr list --state open --limit 100 --json number -q '.[].number' | tr '\n' ' ')
+          export MAGNUS_OPEN_PRS
+          release/pr-rules.sh "$PR" "$HEAD" "$BASE" "$(git rev-parse origin/master)"

@@ -4,13 +4,14 @@
 # (DECISIONS.md, "Appliance updates"). Run by CI on the build box after the
 # release's tests pass; the signing key never leaves that machine.
 #
-#   release/publish.sh appliance VERSION UPDATES_DIR NOTES_FILE PROGRAM...
+#   release/publish.sh appliance VERSION UPDATES_DIR NOTES_FILE PROGRAM_OR_DIR...
 #   release/publish.sh desktop   VERSION UPDATES_DIR NOTES_FILE DIST_DIR [CHANNEL]
 #
 # The desktop app's CHANNEL (DECISIONS.md, "Release channels") is
 # production (the default: tagged releases, in desktop/), test (master, in
 # desktop/test/) or development (pull requests, in desktop/development/);
-# test and development keep only their latest packages.
+# test and development keep only their latest packages; the appliance's
+# directory its latest and the one before.
 #
 # Every package is signed with `tauri signer sign --app-version`, so the
 # signature binds the version it was published as. latest.json is written
@@ -22,13 +23,22 @@
 # was built from (a pull request lacking another's work, or a tag of an
 # older commit): an app would lose what it has. latest.json records that
 # commit: MAGNUS_COMMIT (a pull request's head), or HEAD; the release is the
-# checkout at HEAD (for a pull request, its merge with master).
+# checkout at HEAD (for a pull request, its merge with master). It also
+# records the pull request (MAGNUS_PR) and `base`, the master commit the
+# build stood on. When the build there is an earlier push of the same pull
+# request (its commits replaced), or of one closed without merging
+# (MAGNUS_GIVEN_UP lists those, as CI finds them), its own work was given up
+# on purpose: the release need only hold its base, so master's work still
+# never goes back, and a closed pull request cannot stop every later one.
 set -eu
 
 what=$1 version=$2 updates=$3 notes=$4
 shift 4
 key=${MAGNUS_RELEASE_KEY:-$HOME/.magnus-release/update.key}
 commit=${MAGNUS_COMMIT:-$(git rev-parse HEAD)}
+pr=${MAGNUS_PR:-}
+# A pull request's checkout is its merge with master: master is the first parent.
+if [ "$commit" != "$(git rev-parse HEAD)" ]; then base=$(git rev-parse HEAD^1); else base=$commit; fi
 [ -r "$key" ] || { echo "no release key at $key" >&2; exit 1; }
 
 sign() {
@@ -50,18 +60,20 @@ sys.exit(0 if key(sys.argv[2]) < key(json.load(open(sys.argv[1]))["version"]) el
 EOF
 }
 
-# The commit $1/latest.json was built from, if it names one.
+# A field of $1/latest.json (commit, base, pr), if it names one.
 built_from() {
-  [ -f "$1/latest.json" ] && python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("commit", ""))' "$1/latest.json"
+  [ -f "$1/latest.json" ] && python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$1/latest.json" "${2:-commit}"
 }
 
 # latest.json from its fields, by python so the notes are quoted correctly.
 manifest() {
   python3 -I - "$@" <<'EOF'
 import json, sys, datetime
-out, kind, version, notes, commit = sys.argv[1:6]
-m = {"version": version, "notes": open(notes).read().strip(), "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "commit": commit}
-rest = sys.argv[6:]
+out, kind, version, notes, commit, base, pr = sys.argv[1:8]
+m = {"version": version, "notes": open(notes).read().strip(), "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "commit": commit, "base": base}
+if pr:
+    m["pr"] = int(pr)
+rest = sys.argv[8:]
 if kind == "appliance":
     m["file"], m["signature"] = rest[0], rest[1]
 else:
@@ -87,21 +99,34 @@ if older "$dir"; then
   exit 0
 fi
 was=$(built_from "$dir" || true)
-if [ -n "$was" ] && ! git merge-base --is-ancestor "$was" HEAD 2>/dev/null; then
+was_pr=$(built_from "$dir" pr || true)
+given_up=
+if [ -n "$was_pr" ]; then
+  [ "$was_pr" = "$pr" ] && given_up=yes
+  for n in $(echo "${MAGNUS_GIVEN_UP:-}" | tr ',' ' '); do [ "$n" = "$was_pr" ] && given_up=yes; done
+fi
+if [ -n "$given_up" ]; then
+  was_base=$(built_from "$dir" base || true)
+  if [ -n "$was_base" ] && ! git merge-base --is-ancestor "$was_base" HEAD 2>/dev/null; then
+    echo "not publishing $what $version: it was built without master at $was_base, which $dir/latest.json stood on; bring this branch up to date with master" >&2
+    exit 3
+  fi
+elif [ -n "$was" ] && ! git merge-base --is-ancestor "$was" HEAD 2>/dev/null; then
   echo "not publishing $what $version: it was built without $was, which $dir/latest.json was built from; bring this branch up to date with that commit's work" >&2
   exit 3
 fi
 
 case $what in
 appliance)
+  previous=$( [ -f "$dir/latest.json" ] && python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["file"])' "$dir/latest.json" || true)
   mkdir -p "$dir"
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
-  for p in "$@"; do cp "$p" "$stage/"; done
+  for p in "$@"; do cp -r "$p" "$stage/"; done
   echo "$version" > "$stage/VERSION"
   file=magnus-appliance-$version.tar.gz
   tar -C "$stage" -czf "$dir/$file" .
-  manifest "$dir/latest.json" appliance "$version" "$notes" "$commit" "$file" "$(sign "$dir/$file")"
+  manifest "$dir/latest.json" appliance "$version" "$notes" "$commit" "$base" "$pr" "$file" "$(sign "$dir/$file")"
   ;;
 desktop)
   dist=$1
@@ -109,12 +134,19 @@ desktop)
   linux=Magnus_${version}_amd64.AppImage
   windows=Magnus_${version}_x64-setup.exe
   cp "$dist/$linux" "$dist/$windows" "$dir/"
-  manifest "$dir/latest.json" desktop "$version" "$notes" "$commit" \
+  manifest "$dir/latest.json" desktop "$version" "$notes" "$commit" "$base" "$pr" \
     linux-x86_64 "$linux" "$(sign "$dir/$linux")" \
     windows-x86_64 "$windows" "$(sign "$dir/$windows")"
   ;;
 esac
 mv "$dir/latest.json.tmp" "$dir/latest.json"
+# The appliance's packages: this one and the one before it; the installed
+# releases themselves are kept by the appliance (`<dir>.prev`).
+if [ "$what" = appliance ]; then
+  for f in "$dir"/magnus-appliance-*; do
+    case $f in "$dir/$file" | "$dir/$file.sig" | "$dir/$previous" | "$dir/$previous.sig") ;; *) rm -f "$f" ;; esac
+  done
+fi
 if [ "$what" = desktop ] && [ "$channel" != production ]; then
   for f in "$dir"/Magnus_*; do
     case $f in "$dir/$linux" | "$dir/$windows" | "$dir/$linux.sig" | "$dir/$windows.sig") ;; *) rm -f "$f" ;; esac

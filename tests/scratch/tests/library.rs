@@ -139,7 +139,7 @@ async fn a_file_uploaded_into_a_project_is_used_by_a_task_there_and_its_output_l
         .env("MAGNUS_PRICES", PRICES)
         .env("MAGNUS_INSTRUCTIONS", INSTRUCTIONS)
         .env("MAGNUS_CHROMIUM", chromium())
-        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .envs(shots())
         .output()
         .await
         .unwrap();

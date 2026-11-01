@@ -108,9 +108,13 @@ const isDev = () => App.me?.roles?.includes("developer");
 const drafts = {};
 function paint(el, html) {
   if (!el || el._html === html) return false;
-  $$("[data-draft]", el).forEach(i => { drafts[i.dataset.draft] = i.value; });
+  // A card can be shown in several places at once (its conversation, the
+  // panel, Needs you), each copy with the same draft key: the copy being
+  // typed in is the draft, and only a region that held the focus takes it.
+  const active = document.activeElement;
+  $$("[data-draft]", el).forEach(i => { if (!(active !== i && active?.dataset?.draft === i.dataset.draft)) drafts[i.dataset.draft] = i.value; });
   const opened = new Set($$("details[data-key]", el).filter(d => d.open).map(d => d.dataset.key));
-  const focused = document.activeElement?.dataset?.draft;
+  const focused = el.contains(active) ? active?.dataset?.draft : undefined;
   el.innerHTML = html;
   el._html = html;
   $$("details[data-key]", el).forEach(d => { if (opened.has(d.dataset.key)) d.open = true; });
@@ -177,22 +181,24 @@ function nav() {
   // A project's conversations sit under it; the rest, each with its icon.
   const conv = (t, nested = true) => `<a href="#/chat/${enc(t.thread)}" class="${nested ? "conv" : ""}${t.thread === App.thread ? " on" : ""}"${t.thread === App.thread ? ` aria-current="page"` : ""} title="${esc(t.title)}">${nested ? "" : icon("chat")}<span class="ttl">${esc(t.title)}</span></a>`;
   const loose = App.threads.filter(t => !t.project);
+  const here = App.threads.find(t => t.thread === App.thread);
   const running = App.tasks.filter(t => t.status === "running").length;
   const count = n => n ? `<span class="count">${n}</span>` : "";
   return `
     ${ready ? `<div class="update-ready" title="${esc(ready.notes || "")}"><div class="small">Magnus ${esc(ready.version)} is ready.</div>
       <button class="primary small" data-act="restart-update">Restart to update</button></div>` : ""}
     <button class="needs${waiting.length ? " some" : ""}${on("needs")}" data-open="needs" title="${blocking ? `${blocking} waiting on you now` : "Approvals, questions and reviews"}">${icon("bell")}<span class="ttl">Needs you</span><span class="pill${blocking ? "" : " quiet"}" data-needs-count>${waiting.length}</span></button>
-    <div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more${on("projects")}" title="All projects, and a new one">All</a></div>
-    ${App.projects.map(p => `<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" class="${on(`project:${p.id}`).trim()}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>
-      ${App.threads.filter(t => t.project?.id === p.id).map(conv).join("")}`).join("") || `<p class="small faint pad">None yet.</p>`}
-    ${loose.length ? `<div class="group"><span>Conversations</span></div>${loose.map(t => conv(t, false)).join("")}` : ""}
-    <div class="group"><span>Across everything</span></div>
+    <div class="sect"><div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more${on("projects")}" title="All projects, and a new one">All</a></div>
+    ${App.projects.map(p => `<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" class="${[on(`project:${p.id}`).trim(), here?.project?.id === p.id ? "cur" : ""].filter(Boolean).join(" ")}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>
+      ${App.threads.filter(t => t.project?.id === p.id).map(t => conv(t)).join("")}`).join("") || `<p class="small faint pad">None yet.</p>`}</div>
+    ${loose.length ? `<div class="sect"><div class="group"><span>Conversations</span></div>${loose.map(t => conv(t, false)).join("")}</div>` : ""}
+    <div class="sect"><div class="group"><span>Across everything</span></div>
     <div class="views">
       <a href="#/tasks" data-open="tasks" class="${on("tasks").trim()}">${icon("tasks")}<span class="ttl">Tasks</span>${running ? `<span class="count">${running} running</span>` : ""}</a>
       <a href="#/schedules" data-open="schedules" class="${on("schedules").trim()}">${icon("calendar")}<span class="ttl">Schedules</span>${count(App.schedules.length)}</a>
-      <a href="#/library" data-open="library" class="${on("library").trim()}">${icon("file")}<span class="ttl">Library</span></a></div>
-    <div class="foot">${link("#/trash", "Trash", "trash")}
+      <a href="#/library" data-open="library" class="${on("library").trim()}">${icon("file")}<span class="ttl">Library</span></a>
+      ${link("#/trash", "Trash", "trash")}</div></div>
+    <div class="foot">
     ${isDev() ? `<div class="group"><span>Developer</span></div>
       ${link("#/dev/runs", "Runs")}
       ${link("#/dev/experiments", "Experiments")}
@@ -200,8 +206,8 @@ function nav() {
       ${link("#/dev/policy", "Policy")}
       ${link("#/dev/playbook", "Playbook")}` : ""}
     <div class="who"><span class="avatar" aria-hidden="true">${esc((App.me?.name || "?").trim().charAt(0).toUpperCase())}</span>
-      <div class="whoami"><div class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</div><div class="faint small ttl">${esc(App.appliance)}</div>
-      <button class="link small" data-act="sign-out">Sign out</button></div>
+      <div class="whoami" data-appliance="${esc(App.appliance)}"><div class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</div>
+      <button class="link" data-act="sign-out">Sign out</button></div>
       <a href="#/settings" class="icon-btn${route.startsWith("#/settings") ? " on" : ""}" title="Settings">${icon("gear")}<span class="sr">Settings</span></a></div></div>`;
 }
 const sidebar = () => paint($("#side"), nav());
@@ -1003,7 +1009,7 @@ function standing(t) {
 function taskCard(t) {
   const why = t.status === "suspended" ? WAITING[t.waiting_on] || "" : t.status === "running" ? "working on it" : "";
   const [ic, pill] = standing(t);
-  return `<li class="tcard" data-chat-task="${esc(t.task_id)}" data-status="${esc(t.status)}"><a class="rg-row" href="#/task/${enc(t.task_id)}" data-open="task:${esc(t.task_id)}" title="${esc(t.text)}">
+  return `<li class="tcard" data-chat-task="${esc(t.task_id)}" data-status="${esc(t.status)}"><a class="rg-row${Panel.what === `task:${t.task_id}` ? " open" : ""}" href="#/task/${enc(t.task_id)}" data-open="task:${esc(t.task_id)}" title="${esc(t.text)}">
     <span class="st ${ic}">${icon(ic)}</span><span class="rg-main"><span class="ttl">${esc(t.title)}</span>${why ? `<span class="sub why">${esc(why)}</span>` : `<span class="sub">${esc(firstLine(t.text))}</span>`}</span>${pill}${icon("chev", "chev")}</a></li>`;
 }
 // A schedule where it was confirmed: a row that opens it, with when it runs
@@ -1364,15 +1370,20 @@ async function fileData(view, t) {
   }
   return out;
 }
+// The look in effect, for what a frame draws: its tokens, and light or dark.
+const look = () => { const l = window.Theme?.look; return l ? [Theme.tokens(l), l.mode] : []; };
+
 async function fill(frame, view, taskId, task) {
   if (!frame || frame._drawn) return;
   frame._drawn = true;
   const t = task || (view?.some(c => c.type === "image" || c.type === "file") ? await api("GET", `/v1/tasks/${enc(taskId)}`) : null);
-  frame.srcdoc = Compose.documentFor(view, await fileData(view, t), fontCss(), t?.preview);
+  frame.srcdoc = Compose.documentFor(view, await fileData(view, t), fontCss(), t?.preview, ...look());
   frame.onload = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* sized by CSS */ } };
 }
 
 async function respond(btn, root) {
+  // Sent once, however many handlers see the click.
+  if (btn.disabled) return;
   const id = btn.dataset.item;
   let [decision, scope] = btn.dataset.decision.split(":");
   const body = { decision };
@@ -1507,7 +1518,13 @@ function openPanel(what) {
   el.hidden = false;
   document.body.classList.add("with-detail");
   sidebar();
+  markOpen();
   return drawPanel();
+}
+// The conversation's row for what the panel shows is marked, without
+// redrawing the thread.
+function markOpen() {
+  for (const r of document.querySelectorAll(".rg-row[data-open]")) r.classList.toggle("open", r.dataset.open === Panel.what);
 }
 function closePanel() {
   stopPanelLive();
@@ -1518,6 +1535,7 @@ function closePanel() {
   el.hidden = true;
   document.body.classList.remove("with-detail");
   paint(el, "");
+  markOpen();
   if ($("#side")) sidebar();
 }
 function stopPanelLive() {
@@ -1593,10 +1611,10 @@ async function taskView(id, composed) {
   const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="pview"></iframe>` : running ? "" : `<p class="empty">No result yet.</p>`}
     ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
     ${files.length ? `<div class="frows">${files.map(f => fileRow(f, t.project)).join("")}</div>` : ""}
-    ${ENDED.includes(t.status) ? verdictBar(t.task_id, t.verdict) : ""}
     ${t.outcome_view && t.summary ? `<h3>Summary</h3><p data-summary>${esc(t.summary)}</p>` : ""}
-    <h3>Checks</h3>${doneLine(t)}${criteria(t)}
-    <p class="small muted foot-note num" data-cost>${esc(t.model?.adapter)} · ${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} steps · ${t.usage?.actions ?? 0} actions · ${cost}</p>`;
+    <h3>Checks</h3><div class="checklist">${doneLine(t)}${criteria(t)}</div>
+    ${ENDED.includes(t.status) ? verdictBar(t.task_id, t.verdict) : ""}
+    <p class="foot-note num" data-cost title="${esc(t.model?.adapter)} · ${t.usage?.actions ?? 0} actions">${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} steps · ${cost}</p>`;
   const contract = `<h3>Request</h3><p class="request">${esc(t.text)}</p>
     ${t.files?.length ? `<p class="small"><span class="muted">Your files:</span> ${t.files.map(fileChip).join(" ")}</p>` : ""}
     <h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}`;
@@ -1642,7 +1660,7 @@ async function fileView(id) {
         else if (Compose.TEXT.test(f.media_type)) files[f.name] = { text: decodeText(await Magnus.dataUrl(path, f.media_type)), media_type: f.media_type };
       } catch (e) { toast(e.message); }
       const frame = $("#fview", el);
-      frame.srcdoc = Compose.documentFor([{ type: "file", file: f.name }], files, fontCss(), f.preview);
+      frame.srcdoc = Compose.documentFor([{ type: "file", file: f.name }], files, fontCss(), f.preview, ...look());
       frame.onload = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* sized by CSS */ } };
     },
   };
@@ -1988,7 +2006,7 @@ function appearanceSection(el) {
       <h3 id="mat-h">Material</h3><div class="materials" role="radiogroup" aria-labelledby="mat-h">${Theme.MATERIALS.map(([k, l, hint]) => radio("material", k, l,
         `<span class="mprev ${k}" aria-hidden="true"><span class="ms"></span><span class="mm"></span></span><span class="mt"><span class="ml">${esc(l)}</span><span class="small muted">${esc(hint)}</span></span>`, "material")).join("")}</div>
       ${p.material === "glass" && os.reduceTransparency ? `<p class="small muted" data-look-note>Your computer asks for less transparency, so Magnus stays solid.</p>` : ""}
-      <h3 id="acc-h">Accent</h3><div class="swatches" role="radiogroup" aria-labelledby="acc-h">${Theme.ACCENTS.map(a => radio("accent", a.id, a.label, `<span class="sr">${esc(a.label)}</span>`, "swatch", `--swatch:${a.swatch};background:${a.swatch}`)).join("")}</div>
+      <h3 id="acc-h">Accent color</h3><div class="swatches" role="radiogroup" aria-labelledby="acc-h">${Theme.ACCENTS.map(a => radio("accent", a.id, a.label, `<span class="sr">${esc(a.label)}</span>`, "swatch", `--swatch:${a.swatch};background:${a.swatch}`)).join("")}</div>
       <h3 id="mot-h">Motion</h3><div class="seg" role="radiogroup" aria-labelledby="mot-h">${Theme.MOTIONS.map(([k, l]) => radio("motion", k, l)).join("")}</div>
       <p class="small muted" data-motion-hint>${esc(Theme.MOTION_HINTS[p.motion])}${look.motion !== p.motion ? " Your computer asks for reduced motion, so Magnus uses quick fades." : ""}</p>
       <p class="small faint">Magnus also follows your computer's settings for reduced motion and reduced transparency.</p></div>`);
@@ -2089,6 +2107,9 @@ async function updatesSection(el) {
         ${appl ? `<div class="small muted">${appl.automatic ? "Updates install on their own." : "Updates install when you choose."}${appl.previous ? ` Rolls back to ${esc(appl.previous)} if one fails.` : ""}</div>
           ${appl.latest ? `<h3>What's new in ${esc(appl.latest.version)}</h3><div class="notes">${para(appl.latest.notes)}</div>` : ""}` : ""}</div>`);
   };
+  // A look that ends while this is showing (a download finishing) shows here
+  // too, not only in the sidebar.
+  App.redrawUpdates = () => el.isConnected ? draw() : (App.redrawUpdates = null);
   el.onclick = async e => {
     const b = e.target.closest("button[data-act]"); if (!b) return;
     try {
@@ -2116,7 +2137,8 @@ async function dataSection(el) {
         ${requests.length ? `<table class="t small" data-deletions style="margin-top:10px"><tbody>${requests.map(q => `<tr><td>${esc(q.what)}${isOwner() && q.person !== App.me.id ? ` <span class="faint">(${esc(q.person)})</span>` : ""}</td>
           <td>${q.decision ? `<span class="chip ${STATE[q.decision]?.[0] || ""}">${esc(STATE[q.decision]?.[1] || q.decision)}</span>${q.note ? ` <span class="muted">${esc(q.note)}</span>` : ""}` : `<span class="chip warn">asked</span> due ${esc(new Date(q.due).toLocaleDateString())}`}</td></tr>`).join("")}</tbody></table>` : ""}</div>
       ${backups ? `<h3>Backups</h3><div class="card"><div class="spread"><span class="small muted">${backups.files.length ? `${backups.files.length} kept for ${esc(backups.keep_days)} days` : "None yet."}${backups.latest ? ` · last ${esc(when(backups.latest.at))}${backups.latest.restored ? ", restored to check it" : `, <span style="color:var(--bad)">did not restore: ${esc(backups.latest.detail)}</span>`}` : ""}</span>
-        <button data-act="backup">Back up now</button></div></div>` : ""}`);
+        <button data-act="backup">Back up now</button></div>
+        ${backups.on_appliance_disk ? `<p class="small" data-backup-disk style="color:var(--warn)">They are on the appliance's own disk, so a lost disk loses them too: set <span class="mono">[backup] dir</span> to another disk, and keep a copy of the backup key off the appliance.</p>` : ""}</div>` : ""}`);
   };
   el.onchange = async e => {
     const c = e.target.closest("input[data-pref]"); if (!c) return;
@@ -2147,6 +2169,7 @@ let background = [];
 async function refreshUpdate(look = false) {
   try { App.update = await (look ? Magnus.updateLook() : Magnus.updateState()); } catch { App.update = await Magnus.updateState().catch(() => null); }
   if ($("#side")) sidebar();
+  await App.redrawUpdates?.();
 }
 
 async function restartToUpdate() {
@@ -2214,7 +2237,8 @@ function stop() {
   window.onhashchange = null;
   Panel.what = null;
   App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null;
-  // What one person was typing is not shown to the next who signs in here.
+  // What one person was typing or filtering by is not the next one's here.
+  Panel.lib = { q: "", project: "" };
   for (const k of Object.keys(drafts)) delete drafts[k];
 }
 

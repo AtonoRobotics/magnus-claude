@@ -26,8 +26,8 @@ page.on("dialog", d => { dialogs.push(d.message()); d.accept(); });
 const T = 60_000;
 let n = 0;
 const step = async (name, f) => {
-  try { await f(); if (shots) await page.screenshot({ path: join(shots, `killswitch-${String(++n).padStart(2, "0")}-${name.replace(/\W+/g, "-")}.png`), fullPage: true }); console.log(`ok   ${name}`); }
-  catch (e) { if (shots) await page.screenshot({ path: join(shots, "killswitch-FAILED.png"), fullPage: true }); console.error(`FAIL ${name}: ${e.message}`); await browser.close(); process.exit(1); }
+  try { await f(); if (shots) await page.screenshot({ path: join(shots, `killswitch-${String(++n).padStart(2, "0")}-${name.replace(/\W+/g, "-")}.png`), fullPage: true }).catch(e => console.error(`screenshot not kept: ${e.message.split("\n")[0]}`)); console.log(`ok   ${name}`); }
+  catch (e) { if (shots) await page.screenshot({ path: join(shots, "killswitch-FAILED.png"), fullPage: true }).catch(e => console.error(`screenshot not kept: ${e.message.split("\n")[0]}`)); console.error(`FAIL ${name}: ${e.message}`); await browser.close(); process.exit(1); }
 };
 
 await step("sign in", async () => {

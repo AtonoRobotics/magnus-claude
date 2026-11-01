@@ -15,7 +15,7 @@
 
 use magnus_invariants::appliance::workspace_root;
 use magnus_invariants::{mcp, *};
-use magnus_scratch::{chromium, reconfigure, set_password, PASSWORD};
+use magnus_scratch::{chromium, reconfigure, set_password, shots, PASSWORD};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -67,6 +67,17 @@ async fn notice(api: &Api, starts: &str, schedule: &str) -> Value {
     .await
 }
 
+/// The event written just before notice `n` (an inbox item), and whether
+/// both have one time. One statement gives its rows one time, so the same
+/// time means one write (K24): no crash between them leaves a schedule
+/// ended or paused untold, and nobody sees it so before its notice.
+async fn written_with(app: &Appliance, n: &Value) -> (String, bool) {
+    let rows = app.db.admin().await.query("SELECT kind, at::text, body->>'id' FROM public.events ORDER BY seq", &[]).await.unwrap();
+    let rows: Vec<(String, String, Option<String>)> = rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect();
+    let w = rows.windows(2).find(|w| w[1].0 == "item" && w[1].2.as_deref() == n["id"].as_str()).unwrap_or_else(|| panic!("no event for notice {n}"));
+    (w[0].0.clone(), w[0].1 == w[1].1)
+}
+
 /// The loop, replayed: a scheduled run proposes a schedule (refused) and
 /// then waits on an approval. The next firing starts nothing while it
 /// waits; once it ends, the schedule runs again.
@@ -108,6 +119,7 @@ async fn a_scheduled_run_cannot_set_up_a_schedule_and_its_schedule_waits_for_it(
     assert!(s["budget"]["max_usd"].is_number(), "no budget shown: {s}");
     let n = notice(&alice, "A schedule paused until you answer its run", &id).await;
     assert_eq!(n["details"]["evidence"]["task"], first.as_str(), "{n}");
+    assert_eq!(written_with(&app, &n).await, ("schedule_paused".into(), true), "the pause and its notice are two writes");
     assert_eq!(alice.post(&format!("/v1/schedules/{id}/resume"), json!({})).await.0.as_u16(), 409, "resumed past the run waiting on her");
     // Past when it would have fired: nothing started, nothing skipped.
     tokio::time::sleep(MINUTE).await;
@@ -160,6 +172,7 @@ async fn a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run() {
     // Its own run ends it, and the run goes on to finish.
     let n = notice(&alice, "A schedule ended itself", &own).await;
     assert_eq!(n["details"]["evidence"]["why"], "the bell has rung", "{n}");
+    assert_eq!(written_with(&app, &n).await, ("schedule_ended".into(), true), "the end and its notice are two writes");
     assert!(schedule(&alice, &own).await.is_none(), "it ended itself but is still set");
     let rung = tasks_with(&alice, "Ring the bell.").await;
     assert_eq!(rung.len(), 1);
@@ -178,12 +191,24 @@ async fn a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run() {
 
     let n = notice(&alice, "A schedule ended", &dated).await;
     assert!(n["details"]["evidence"]["why"].as_str().unwrap().contains("reached its end"), "{n}");
+    assert_eq!(written_with(&app, &n).await, ("schedule_ended".into(), true), "the end and its notice are two writes");
     assert_eq!(tasks_with(&alice, "Water the plants.").await.len(), 1, "it ran past its end");
 
     eventually("the second schedule ends after two runs", MINUTE * 2, || async { schedule(&alice, &twice).await.is_none().then_some(()) }).await;
     let n = notice(&alice, "A schedule ended", &twice).await;
     assert!(n["details"]["evidence"]["why"].as_str().unwrap().contains("ran 2 times"), "{n}");
+    assert_eq!(written_with(&app, &n).await, ("schedule_ended".into(), true), "the end and its notice are two writes");
     assert_eq!(tasks_with(&alice, "Count the stars.").await.len(), 2);
+
+    // The kettle's run is told its wait has ended in the same write that
+    // resumes it.
+    let rows = || async {
+        let rows = app.db.admin().await.query("SELECT kind, at::text FROM public.events ORDER BY seq", &[]).await.unwrap();
+        let rows: Vec<(String, String)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        rows.windows(2).find(|w| w[1].0 == "resumed").map(|w| (w[0].0.clone(), w[0].1 == w[1].1))
+    };
+    let resumed = eventually("the kettle's run resumes after its wait", MINUTE * 2, rows).await;
+    assert_eq!(resumed, ("notice".to_string(), true), "the wait's end told apart from the resume");
 }
 
 /// Runs that keep failing pause their schedule, and its person is told.
@@ -203,6 +228,7 @@ async fn a_schedule_that_keeps_failing_pauses_until_its_person_resumes_it() {
     assert!(s["next"].is_null(), "a paused schedule has a next run: {s}");
     let n = notice(&alice, "A schedule paused", &id).await;
     assert!(n["details"]["evidence"]["why"].as_str().unwrap().contains("last 2 runs failed"), "{n}");
+    assert_eq!(written_with(&app, &n).await, ("schedule_paused".into(), true), "the pause and its notice are two writes");
     assert_eq!(app.api("carol").post(&format!("/v1/schedules/{id}/resume"), json!({})).await.0.as_u16(), 404, "someone else resumed it");
 
     assert!(set_password(&app, "alice", PASSWORD));
@@ -213,7 +239,7 @@ async fn a_schedule_that_keeps_failing_pauses_until_its_person_resumes_it() {
         .env("MAGNUS_PASSWORD", PASSWORD)
         .env("MAGNUS_SCHEDULE", &id)
         .env("MAGNUS_CHROMIUM", chromium())
-        .envs(std::env::var("MAGNUS_SHOTS").ok().map(|s| ("MAGNUS_SHOTS", s)))
+        .envs(shots())
         .output()
         .await
         .unwrap();

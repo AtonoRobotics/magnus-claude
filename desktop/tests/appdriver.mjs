@@ -34,21 +34,43 @@ export async function open(wd, app, shots, prefix) {
     }
     throw new Error(`timed out waiting for ${what}${last ? `: ${last.message}` : ""}`);
   };
+  // Where each element was found, to find it again: the app redraws parts
+  // of its page (its navigation, as counts change), and an element found
+  // just before a redraw is gone ("stale element reference") when used.
+  const how = new Map();
   const find = (using, value) => d.until(value, async () => {
     const els = await call("POST", s("/elements"), { using, value });
-    return els.length ? els[0][E] : null;
+    if (!els.length) return null;
+    how.set(els[0][E], [using, value]);
+    return els[0][E];
   });
+  const on = async (el, act) => {
+    let id = await el;
+    const end = Date.now() + T;
+    for (;;) {
+      try { return await act(id); }
+      catch (e) {
+        if (!/stale element reference/.test(e.message) || !how.has(id) || Date.now() > end) throw e;
+        id = await find(...how.get(id));
+      }
+    }
+  };
   d.css = v => find("css selector", v);
   d.xpath = v => find("xpath", v);
   d.button = (label, within = "") => d.xpath(`${within}//button[normalize-space()='${label}']`);
-  d.click = async el => call("POST", s(`/element/${await el}/click`), {});
-  d.type = async (el, text) => call("POST", s(`/element/${await el}/value`), { text });
-  d.clear = async el => call("POST", s(`/element/${await el}/clear`), {});
-  d.text = async el => call("GET", s(`/element/${await el}/text`));
-  d.attr = async (el, name) => call("GET", s(`/element/${await el}/attribute/${name}`));
+  d.click = el => on(el, id => call("POST", s(`/element/${id}/click`), {}));
+  d.type = (el, text) => on(el, id => call("POST", s(`/element/${id}/value`), { text }));
+  d.clear = el => on(el, id => call("POST", s(`/element/${id}/clear`), {}));
+  d.text = el => on(el, id => call("GET", s(`/element/${id}/text`)));
+  d.attr = (el, name) => on(el, id => call("GET", s(`/element/${id}/attribute/${name}`)));
   d.seen = t => d.until(`"${t}"`, () => d.run("return document.body.innerText.includes(arguments[0])", t));
   let n = 0;
-  const shot = async name => { if (shots) writeFileSync(join(shots, `${prefix}-${String(++n).padStart(2, "0")}-${name}.png`), Buffer.from(await call("GET", s("/screenshot")), "base64")); };
+  const shot = async name => {
+    if (!shots) return;
+    const file = join(shots, `${prefix}-${String(++n).padStart(2, "0")}-${name}.png`);
+    // Evidence only: a screenshot that cannot be taken fails no check.
+    try { writeFileSync(file, Buffer.from(await call("GET", s("/screenshot")), "base64")); } catch (e) { console.error(`screenshot not kept: ${String(e.message).split("\n")[0]}`); }
+  };
   d.close = () => call("DELETE", s("")).catch(() => {});
   d.step = async (name, f) => {
     try { await f(); await shot(name); console.log(`ok   ${name}`); }

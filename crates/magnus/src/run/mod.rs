@@ -20,12 +20,16 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const INSTRUCTIONS: &str = include_str!("../../instructions/agent.md");
+/// Both prompts end with Magnus's character (`instructions/character.md`;
+/// DECISIONS.md, "Identity and characters"): every run speaks in it, on
+/// every model, and its text is in the instructions version each model call
+/// logs.
+pub const INSTRUCTIONS: &str = concat!(include_str!("../../instructions/agent.md"), "\n", include_str!("../../instructions/character.md"));
 pub(crate) const MAX_RESULT_IN_CONTEXT: usize = 40_000;
 
 /// What a chat turn runs under: answer, start a task, propose a schedule,
 /// or ask.
-pub const CHAT_INSTRUCTIONS: &str = include_str!("../../instructions/chat.md");
+pub const CHAT_INSTRUCTIONS: &str = concat!(include_str!("../../instructions/chat.md"), "\n", include_str!("../../instructions/character.md"));
 
 pub fn instructions_version() -> String {
     version_of("agent.md", INSTRUCTIONS)
@@ -458,10 +462,10 @@ impl Kernel {
             "task_fail" => {
                 let reason = input["reason"].as_str().unwrap_or("no reason given").to_string();
                 self.result(rid, call_id, "Recorded.", false).await?;
-                self.emit("model", Ev::Failed { run: rid.into(), reason: reason.clone(), by: "model".into() }).await?;
+                // A failure is never silent (K24): the person's inbox says so, with the evidence, in the same write.
+                let notice = self.notice_of(&run, format!("Failed: {}", self.title_of(&run)), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run) } }));
+                self.emit_all(vec![("model", Ev::Failed { run: rid.into(), reason, by: "model".into() }), ("kernel", notice)]).await?;
                 self.on_stop(rid, true).await;
-                // A failure is never silent (K24): the person's inbox says so, with the evidence.
-                self.notice(&run, format!("Failed: {}", self.title_of(&run)), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run) } })).await?;
                 self.after_end(rid);
                 return Ok(Flow::Stop);
             }
@@ -516,10 +520,9 @@ impl Kernel {
             "end_schedule" => match self.read(|s| s.tasks.get(&run.task).and_then(|t| t.schedule.clone()).filter(|id| s.schedules.contains_key(id)).map(|id| (id.clone(), s.schedules[&id].clone()))) {
                 Some((id, sc)) => {
                     let reason = input["reason"].as_str().map(str::trim).filter(|r| !r.is_empty()).unwrap_or("its run ended it").to_string();
-                    self.emit("model", Ev::ScheduleEnded { id: id.clone(), reason: reason.clone(), run: Some(rid.to_string()) }).await?;
                     let title = sc.title.clone().unwrap_or_else(|| sc.text.chars().take(80).collect());
-                    self.post_notice(Some(run.task.clone()), Some(rid.to_string()), sc.person.clone(), format!("A schedule ended itself: {title}"), json!({ "reason": "schedule_ended", "evidence": { "schedule": id, "why": reason } }))
-                        .await?;
+                    let notice = self.notice_to(Some(run.task.clone()), Some(rid.to_string()), sc.person.clone(), format!("A schedule ended itself: {title}"), json!({ "reason": "schedule_ended", "evidence": { "schedule": id, "why": reason } }));
+                    self.emit_all(vec![("model", Ev::ScheduleEnded { id, reason, run: Some(rid.to_string()) }), ("kernel", notice)]).await?;
                     self.result(rid, call_id, "The schedule has ended; no more runs will start. This run goes on.", false).await?;
                 }
                 None => self.result(rid, call_id, "This task was not started by a schedule that is still set. A retry will not help.", true).await?,
@@ -668,13 +671,14 @@ impl Kernel {
     pub(crate) async fn end_chat_turn(self: &Arc<Self>, run: &Run, answer: String) -> Result<()> {
         let rid = run.id.as_str();
         let run = self.read(|s| s.runs.get(rid).cloned()).unwrap_or_else(|| run.clone());
-        self.emit("kernel", Ev::Completed { run: rid.into(), summary: answer, view: run.shown(), spoken: None }).await?;
-        self.on_stop(rid, true).await;
-        // What the person asked for and did not happen is in the inbox too (K24).
+        // What the person asked for and did not happen is in the inbox too (K24), in the same write as the turn's end.
         let unfinished = self.unfinished_chat_actions(&run);
+        let mut evs = vec![("kernel", Ev::Completed { run: rid.into(), summary: answer, view: run.shown(), spoken: None })];
         if !unfinished.is_empty() {
-            self.notice(&run, format!("Not done: {}", self.title_of(&run)), json!({ "reason": "chat_action_failed", "evidence": unfinished })).await?;
+            evs.push(("kernel", self.notice_of(&run, format!("Not done: {}", self.title_of(&run)), json!({ "reason": "chat_action_failed", "evidence": unfinished }))));
         }
+        self.emit_all(evs).await?;
+        self.on_stop(rid, true).await;
         self.after_end(rid);
         Ok(())
     }

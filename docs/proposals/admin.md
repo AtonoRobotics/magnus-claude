@@ -1,6 +1,9 @@
 # Admin console
 
-Status: proposal, for the owner's decision. Owner's request (2026-10-30):
+Status: proposal, for the owner's decision; since followed by the owner's
+"Magnus Admin Console Spec" (2026-11-01,
+https://claude.ai/artifact/3Ej2KCssZbFYfR4p1LEwGP), which holds wherever the
+two differ. Owner's request (2026-10-30):
 "There should be an admin account that has access to everything in the
 organization. It should be laid out to be admin and not the normal app.
 Reconciling issues and solving problems should be easy to do in bulk."
