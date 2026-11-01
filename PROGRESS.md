@@ -2,7 +2,7 @@
 
 ## Now (2026-10-29)
 
-- **Per-person walls in the database: the plan (owner's ruling 9, 2026-11-01; branch `data-walls-plan`).** `docs/proposals/data-walls.md`, in four steps; what the walls guard and what they cannot.
+- **Recall only, behind per-person walls: the plan (owner, 2026-11-01; branch `data-walls-plan`).** `docs/proposals/recall-only.md`: content leaves the kernel's memory and is read per request through row-level security, in seven steps; two questions for the owner.
 - **Identity by `sub` (owner's ruling 3, 2026-11-01; branch `identity-sub`).** A person is bound to their provider account at their first sign-in; an account made again under their username is refused until the owner clears the binding.
 - **The owner's specs, ruled (2026-11-01; merged in #52).** The owner answered `docs/proposals/spec-decisions.md`: no passkeys (typed password stays), 3-8 and 10-13 approved, and the admin's access to people's data is a policy (organisation's data by default, private when the policy says so). 9 (per-person walls in the database) approved after explanation. Open: 15-22. Next, each its own pull request: identity by `sub`, the kill switch refusing new work, schedules paused for a person turned off, config tokens on loopback, the data-access policy, then the walls' plan and the walls.
 - **Spec review fixes (2026-11-01; merged in #50).** From reviewing the owner's three spec documents (Connectors, Admin Console, Authentication & Isolation) against the code: someone now stays owner however many role changes race in. The review's other findings are choices for the owner, in `docs/proposals/spec-decisions.md` (branch `spec-decisions`).
