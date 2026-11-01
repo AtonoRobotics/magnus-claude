@@ -1,0 +1,24 @@
+id = "google-calendar"
+version = "1.0.0"
+name = "Google Calendar"
+summary = "Magnus can read your calendars and events, find times that work, and add or change events with your approval."
+kind = "remote"
+endpoint = "https://calendarmcp.googleapis.com/mcp/v1"
+# Events and replies reach their attendees, who may be anyone.
+audience = "public"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.calendarlist.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar.events.freebusy"]
+
+# Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).
+[tools]
+list_calendars = "read"
+list_events = "read"
+search_events = "read"
+get_event = "read"
+suggest_time = "read"
+create_event = "irreversible"
+update_event = "irreversible"
+delete_event = "irreversible"
+respond_to_event = "irreversible"

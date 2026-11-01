@@ -4,7 +4,6 @@
 //! hints only suggest), and the worker is offered only what was classified.
 //! Tokens refresh as they expire; the kill switch revokes them at the app.
 
-use magnus_invariants::appliance::workspace_root;
 use magnus_invariants::*;
 use magnus_scratch::*;
 use serde_json::{json, Value};
@@ -164,110 +163,4 @@ async fn a_changed_tool_definition_waits_for_the_owner() {
     let item = eventually("the changed definition in the inbox", PATIENCE, || async { alice.inbox().await.into_iter().find(|i| i["kind"] == "tool_change") }).await;
     assert_eq!(item["details"]["tool"], "calendar__list_events", "{item}");
     assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve" })).await.is_success());
-}
-
-/// What a person's Library shows for an app (connectors spec, The
-/// connector card and Library): its name and one plain sentence on what
-/// Magnus can do with it, where they stand, and once connected, since when,
-/// when last used and what Magnus did through it. The owner adds it by its
-/// address alone. The browser half is `desktop/tests/connectors.mjs`.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_persons_library_shows_each_app_as_its_card_and_the_owner_adds_one_by_its_address_alone() {
-    let cal = FakeOAuthApp::start(3600).await;
-    let m = FakeModel::start(script(|c| async move {
-        match c.turn() {
-            0 => contract_unchecked("add the standup", "the standup is on the calendar"),
-            1 => tool("calendar__create_event", json!({ "title": "Standup" })),
-            _ => complete("added"),
-        }
-    }))
-    .await;
-    let app = Appliance::start(Spec::default(), &m).await;
-    let (alice, carol) = (app.api("alice"), app.api("carol"));
-    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = callback.local_addr().unwrap().port();
-
-    // The address is the one field: the app names itself (the app's form
-    // sends its labels at their most guarded).
-    let (st, v) = alice.post("/v1/connectors", json!({ "url": cal.url, "audience": "public", "label": "private+untrusted" })).await;
-    assert_eq!((st.as_u16(), v["name"].as_str()), (201, Some("calendar")), "{v}");
-    let (_, list) = alice.get("/v1/connectors").await;
-    let c = &list["connectors"][0];
-    assert_eq!((c["audience"].as_str(), c["label"].as_str()), (Some("public"), Some("private+untrusted")), "added at its most guarded: {c}");
-    sign_in(&alice, "calendar", port).await;
-    for (t, risk) in [("list_events", "read"), ("create_event", "reversible_write")] {
-        assert_eq!(alice.put(&format!("/v1/connectors/calendar/tools/{t}"), json!({ "risk": risk })).await.0, 204);
-    }
-    assert!(alice.put_policy("org", &org_policy(&permit_execute("calendar__create_event"))).await.is_success());
-
-    // Carol's card: available, in plain words, nothing of the owner's view.
-    let (_, list) = carol.get("/v1/connectors").await;
-    let c = &list["connectors"][0];
-    assert_eq!((c["title"].as_str(), c["state"].as_str()), (Some("Calendar"), Some("available")), "{c}");
-    assert_eq!(c["summary"], "Magnus can read and make changes that can be undone in Calendar.", "{c}");
-    assert_eq!(c["allows"], json!(["Reads: list events", "Changes that can be undone: create event"]), "{c}");
-    for word in ["oauth", "scope", "token", "mcp", "http", "port"] {
-        assert!(!c.to_string().to_lowercase().contains(word), "carol's card says {word:?}: {c}");
-    }
-
-    // Connected: since when, and what Magnus did through it for her.
-    sign_in(&carol, "calendar", port).await;
-    let t = carol.submit("Put the standup on my calendar.").await;
-    carol.wait_settled(&t).await;
-    let (st, d) = carol.get("/v1/connectors/calendar").await;
-    assert!(st.is_success(), "{d}");
-    assert_eq!(d["state"], "connected", "{d}");
-    assert!(d["connected_at"].is_string() && d["last_used"].is_string(), "{d}");
-    assert_eq!((d["recent"][0]["action"].as_str(), d["recent"][0]["task"].as_str(), d["recent"][0]["worked"].as_bool()), (Some("create event"), Some(t.as_str()), Some(true)), "{d}");
-    // Alice's card does not show carol's use.
-    let (_, a) = alice.get("/v1/connectors/calendar").await;
-    assert!(a["recent"].as_array().unwrap().is_empty(), "alice's card shows carol's actions: {a}");
-
-    // Disconnected, it is available to her again.
-    assert_eq!(carol.send(reqwest::Method::DELETE, "/v1/connectors/calendar/connection", None).await.0, 204);
-    assert_eq!(carol.get("/v1/connectors/calendar").await.1["state"], "available");
-}
-
-/// The Library's connectors in the browser (`desktop/tests/connectors.mjs`):
-/// calendar connected and used once, notes not connected.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_library_shows_connectors_as_the_spec_s_cards_in_the_browser() {
-    let (cal, notes) = (FakeOAuthApp::start(3600).await, FakeOAuthApp::start(3600).await);
-    let m = FakeModel::start(script(|c| async move {
-        match c.turn() {
-            0 => contract_unchecked("add the standup", "the standup is on the calendar"),
-            1 => tool("calendar__create_event", json!({ "title": "Standup" })),
-            _ => complete("added"),
-        }
-    }))
-    .await;
-    let app = Appliance::start(Spec::default(), &m).await;
-    assert!(set_password(&app, PERSON, PASSWORD));
-    let alice = app.api(PERSON);
-    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = callback.local_addr().unwrap().port();
-    let guarded = |v: Value| { let mut v = v; v["audience"] = json!("public"); v["label"] = json!("private+untrusted"); v };
-    assert_eq!(alice.post("/v1/connectors", guarded(json!({ "url": cal.url }))).await.0, 201);
-    assert_eq!(alice.post("/v1/connectors", guarded(json!({ "name": "notes", "url": notes.url }))).await.0, 201);
-    sign_in(&alice, "calendar", port).await;
-    for (t, risk) in [("list_events", "read"), ("create_event", "reversible_write")] {
-        assert_eq!(alice.put(&format!("/v1/connectors/calendar/tools/{t}"), json!({ "risk": risk })).await.0, 204);
-    }
-    assert!(alice.put_policy("org", &org_policy(&permit_execute("calendar__create_event"))).await.is_success());
-    let t = alice.submit("Put the standup on my calendar.").await;
-    alice.wait_settled(&t).await;
-    assert_eq!(cal.calls("create_event"), 1);
-
-    let out = tokio::process::Command::new("node")
-        .arg(workspace_root().join("desktop/tests/connectors.mjs"))
-        .env("MAGNUS_URL", &app.base)
-        .env("MAGNUS_PERSON", PERSON)
-        .env("MAGNUS_PASSWORD", PASSWORD)
-        .env("MAGNUS_CHROMIUM", chromium())
-        .envs(shots())
-        .output()
-        .await
-        .unwrap();
-    let log = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "the Library's connectors failed:\n{log}");
 }

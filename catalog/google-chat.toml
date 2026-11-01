@@ -1,0 +1,19 @@
+id = "google-chat"
+version = "1.0.0"
+name = "Google Chat"
+summary = "Magnus can read and search your Chat conversations and send messages for you."
+kind = "remote"
+endpoint = "https://chatmcp.googleapis.com/mcp/v1"
+# Messages reach a conversation's members, who may be outside the organisation.
+audience = "public"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "google"
+scopes = ["https://www.googleapis.com/auth/chat.spaces.readonly", "https://www.googleapis.com/auth/chat.memberships.readonly", "https://www.googleapis.com/auth/chat.messages.readonly", "https://www.googleapis.com/auth/chat.messages.create"]
+
+# Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).
+[tools]
+list_messages = "read"
+search_messages = "read"
+search_conversations = "read"
+send_message = "irreversible"

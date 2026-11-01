@@ -1,0 +1,40 @@
+id = "google-gmail"
+version = "1.0.0"
+name = "Gmail"
+summary = "Magnus can search and read your email, write drafts for you to send, and file, label or trash messages."
+kind = "remote"
+endpoint = "https://gmailmcp.googleapis.com/mcp/v1"
+# Its tools write drafts, labels and the trash in the person's own mailbox:
+# what reaches it stays theirs (it cannot send). What comes back is their
+# private mail, written by others.
+audience = "private"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "google"
+scopes = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.compose", "https://www.googleapis.com/auth/gmail.modify"]
+
+# Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).
+[tools]
+search_threads = "read"
+get_thread = "read"
+get_message = "read"
+list_drafts = "read"
+get_draft = "read"
+list_labels = "read"
+create_draft = "reversible_write"
+create_label = "reversible_write"
+label_message = "reversible_write"
+unlabel_message = "reversible_write"
+label_thread = "reversible_write"
+unlabel_thread = "reversible_write"
+update_message_labels = "reversible_write"
+trash_message = "reversible_write"
+untrash_message = "reversible_write"
+trash_thread = "reversible_write"
+untrash_thread = "reversible_write"
+mark_message_spam = "reversible_write"
+unmark_message_spam = "reversible_write"
+mark_thread_spam = "reversible_write"
+unmark_thread_spam = "reversible_write"
+apply_sensitive_message_label = "irreversible"
+apply_sensitive_thread_label = "irreversible"

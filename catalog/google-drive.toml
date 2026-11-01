@@ -1,0 +1,23 @@
+id = "google-drive"
+version = "1.0.0"
+name = "Google Drive"
+summary = "Magnus can find and read your files, and create or copy files for you."
+kind = "remote"
+endpoint = "https://drivemcp.googleapis.com/mcp/v1"
+# Its tools create and copy files in the person's own Drive (it cannot share).
+audience = "private"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "google"
+scopes = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file"]
+
+# Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).
+[tools]
+search_files = "read"
+list_recent_files = "read"
+get_file_metadata = "read"
+get_file_permissions = "read"
+read_file_content = "read"
+download_file_content = "read"
+create_file = "reversible_write"
+copy_file = "reversible_write"

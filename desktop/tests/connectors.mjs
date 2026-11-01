@@ -1,10 +1,11 @@
 // Connectors in the Library, as a person sees them (connectors spec, The
-// connector card and Library): grouped by where they stand, each card its
-// name, one plain sentence and one button, with no protocol words; a
-// connected one opens to as whom, since when, what it allows, what Magnus
-// did through it, and Disconnect. The owner adds an app by its address, the
-// one field. The test arranges: calendar connected for the person and used
-// once, notes not connected.
+// connector card and Library), with the real catalog: Google's Gmail,
+// Calendar, Drive and Chat, online through the organisation's registration
+// with Google (set by the test from CI's secrets). Each card is its name,
+// one plain sentence and one button, with no protocol words; a connector
+// opens to what it allows. Connecting is the desktop app's, at Google's own
+// page. The owner sees the registration set and adds an app by its
+// address, the one field. No fakes (owner, 2026-11-01).
 //
 // MAGNUS_URL, MAGNUS_PERSON, MAGNUS_PASSWORD  where and who (the owner)
 // MAGNUS_CHROMIUM  Chrome to drive; MAGNUS_SHOTS  where to keep screenshots
@@ -44,53 +45,46 @@ await step("sign in", async () => {
   await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
-await step("the Library groups the organisation's apps by where the person stands", async () => {
+await step("the Library lists the catalog's Google apps, available to connect", async () => {
   await page.getByRole("link", { name: "Library", exact: true }).click();
-  const connected = page.locator("#detail .cgroup[data-group=connected]");
   const available = page.locator("#detail .cgroup[data-group=available]");
-  await connected.getByText("Connected", { exact: true }).first().waitFor({ timeout: T });
-  await connected.locator("[data-connector=calendar]").waitFor({ timeout: T });
-  await available.locator("[data-connector=notes]").getByRole("button", { name: "Connect" }).waitFor({ timeout: T });
-  const said = await page.locator("#detail .clist").allInnerTexts();
-  if (PROTOCOL.test(said.join(" "))) throw new Error(`a card shows a protocol word: ${said.join(" | ")}`);
-  if (!said.join(" ").includes("Magnus can read and make changes that can be undone in Calendar.")) throw new Error(`the calendar card does not say what Magnus can do: ${said}`);
+  for (const name of ["google-gmail", "google-calendar", "google-drive", "google-chat"]) await available.locator(`[data-connector=${name}]`).getByRole("button", { name: "Connect" }).waitFor({ timeout: T });
+  const said = (await page.locator("#detail .clist").allInnerTexts()).join(" ");
+  if (PROTOCOL.test(said)) throw new Error(`a card shows a protocol word: ${said}`);
+  for (const t of ["Gmail", "Google Calendar", "Google Drive", "Google Chat", "Magnus can search and read your email"]) if (!said.includes(t)) throw new Error(`the cards do not say "${t}": ${said}`);
 });
 
 await step("a search finds connectors too", async () => {
-  await page.getByLabel(/Search files and connectors/).fill("notes");
-  await page.locator("#detail [data-connector=calendar]").waitFor({ state: "detached", timeout: T });
-  await page.locator("#detail [data-connector=notes]").waitFor({ timeout: T });
+  await page.getByLabel(/Search files and connectors/).fill("drive");
+  await page.locator("#detail [data-connector=google-gmail]").waitFor({ state: "detached", timeout: T });
+  await page.locator("#detail [data-connector=google-drive]").waitFor({ timeout: T });
   await page.getByLabel(/Search files and connectors/).fill("");
-  await page.locator("#detail [data-connector=calendar]").waitFor({ timeout: T });
+  await page.locator("#detail [data-connector=google-gmail]").waitFor({ timeout: T });
 });
 
 await step("connecting happens in the desktop app, on the app's own page", async () => {
-  await page.locator("#detail [data-connector=notes]").getByRole("button", { name: "Connect" }).click();
+  await page.locator("#detail [data-connector=google-gmail]").getByRole("button", { name: "Connect" }).click();
   await page.getByText("Connect apps from the Magnus desktop app.").waitFor({ timeout: T });
 });
 
-await step("a connected app opens to as whom, since when, what it allows and what Magnus did", async () => {
-  await page.locator("#detail [data-connector=calendar]").getByRole("link", { name: "Calendar" }).click();
+await step("a connector opens to what it allows, in plain words", async () => {
+  await page.locator("#detail [data-connector=google-gmail]").getByRole("link", { name: "Gmail" }).click();
   const d = page.locator("#detail");
-  await d.getByRole("heading", { name: "Calendar" }).waitFor({ timeout: T });
-  for (const t of ["Connected as", "Last used", "What it allows", "Reads: list events", "Changes that can be undone: create event", "Recent actions", "Create event"]) await d.getByText(t, { exact: true }).first().waitFor({ timeout: T });
+  await d.getByRole("heading", { name: "Gmail" }).waitFor({ timeout: T });
+  for (const t of ["What it allows", "Recent actions", "Magnus has not used it for you yet."]) await d.getByText(t, { exact: true }).first().waitFor({ timeout: T });
   const text = await d.innerText();
+  if (!/Reads: .*search threads/.test(text)) throw new Error(`it does not say what Magnus may read: ${text}`);
   if (PROTOCOL.test(text)) throw new Error(`the connector's page shows a protocol word: ${text}`);
+  if (await d.getByRole("button", { name: "Disconnect" }).count()) throw new Error("Disconnect is offered for an app the person has not connected");
 });
 
-await step("Disconnect ends the person's sign-in; the app is available to them again", async () => {
-  await page.locator("#detail").getByRole("button", { name: "Disconnect" }).click();
-  await page.getByText("Disconnected.").waitFor({ timeout: T });
-  if (!dialogs.some(m => m.includes("Your sign-in is ended at the app"))) throw new Error(`no confirmation said what it does: ${dialogs}`);
-  await page.getByRole("link", { name: "Library", exact: true }).click();
-  await page.locator("#detail .cgroup[data-group=available] [data-connector=calendar]").waitFor({ timeout: T });
-});
-
-await step("the owner adds an app for everyone by its address alone", async () => {
+await step("the owner sees the Google registration set, and adds an app by its address alone", async () => {
   await page.getByRole("link", { name: "Settings" }).click();
   await page.getByRole("link", { name: "Connectors" }).click();
+  const reg = page.locator("[data-registration=google]");
+  await reg.getByText("Set", { exact: true }).waitFor({ timeout: T });
+  await page.locator('[data-app="google-gmail"]').getByText("from the catalog").waitFor({ timeout: T });
   const form = page.locator(".card", { hasText: "Add an app for everyone" });
-  await form.waitFor({ timeout: T });
   const fields = await form.locator("input, select, textarea").count();
   if (fields !== 1) throw new Error(`adding an app asks for ${fields} fields, not its address alone`);
 });

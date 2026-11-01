@@ -619,6 +619,9 @@ pub struct State {
     pub skipped_releases: std::collections::BTreeSet<String>,
     /// Apps the owner added from the app (config-file apps are not here).
     pub connectors: BTreeMap<String, crate::config::Connector>,
+    /// Providers the organisation has a registration with (its client ID
+    /// and secret are in the vault).
+    pub registrations: std::collections::BTreeSet<String>,
     /// Secrets the kill switch emptied from the vault, latest engagement
     /// only: what the owner signs in to or enters again.
     pub revoked: BTreeMap<String, Revoked>,
@@ -988,6 +991,13 @@ impl State {
             }
             Ev::ConnectorRemoved { name } => {
                 self.connectors.remove(name);
+            }
+            Ev::RegistrationSet { provider, set } => {
+                if *set {
+                    self.registrations.insert(provider.clone());
+                } else {
+                    self.registrations.remove(provider);
+                }
             }
             Ev::ToolClassified { connector, tool, risk } => {
                 if let Some(c) = self.connectors.get_mut(connector) {

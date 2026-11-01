@@ -1988,10 +1988,19 @@ const changesFor = name => App.inbox.filter(i => i.status === "open" && (i.kind 
   || i.kind === "tool_review" && (i.details?.tools || []).some(t => String(t.tool).startsWith(`${name}__`))));
 async function connectorsSection(main) {
   const draw = async () => {
-    const { connectors } = await api("GET", "/v1/connectors");
+    // Not while the owner is typing a registration in.
+    if ([...main.querySelectorAll("[data-reg-id], [data-reg-secret]")].some(i => i.value)) return;
+    const [{ connectors }, { registrations }] = await Promise.all([api("GET", "/v1/connectors"), api("GET", "/v1/registrations")]);
     paint(main, `<h2>Connectors</h2><p class="muted">The apps your organisation provides. Each appears in everyone's Library, and each person connects it with their own account; no one acts through anyone else's.</p>
+      ${registrations.map(r => `<div class="card" data-registration="${esc(r.provider)}"><div class="spread"><strong>Your organisation's ${esc(r.provider.charAt(0).toUpperCase() + r.provider.slice(1))} registration</strong>
+          ${r.set ? `<span class="chip ok">Set</span>` : `<span class="chip warn">Not set</span>`}</div>
+        <div class="small muted">Brings ${esc(r.connectors.join(", "))} to everyone's Library. People still sign in with their own accounts.</div>
+        <div class="grid2" style="margin-top:8px"><label>Client ID<input data-reg-id="${esc(r.provider)}" autocomplete="off"></label>
+          <label>Client secret<input type="password" data-reg-secret="${esc(r.provider)}" autocomplete="off"></label></div>
+        <div class="row" style="margin-top:10px"><button class="primary" data-act="set-registration" data-provider="${esc(r.provider)}">${r.set ? "Replace" : "Set"}</button>
+          ${r.set ? `<button class="link" data-act="clear-registration" data-provider="${esc(r.provider)}">Clear</button>` : ""}</div></div>`).join("")}
       ${connectors.map(c => `<div class="card" data-app="${esc(c.name)}"><div class="spread"><strong>${esc(c.title)}</strong>
-          <span class="row">${c.source === "config" ? `<span class="chip">set in the config file</span>` : `<button class="link" data-act="remove" data-app="${esc(c.name)}">Remove for everyone</button>`}</span></div>
+          <span class="row">${c.source === "config" ? `<span class="chip">set in the config file</span>` : c.source === "catalog" ? `<span class="chip">from the catalog</span>` : `<button class="link" data-act="remove" data-app="${esc(c.name)}">Remove for everyone</button>`}</span></div>
         <div class="small muted">${esc(c.summary)}</div>
         ${changesFor(c.name).map(i => card(i, [])).join("")}
         ${c.tools.length ? `<table class="t small" style="margin-top:10px"><thead><tr><th>Tool</th><th>What the app says it does</th><th>May</th></tr></thead><tbody>
@@ -2025,6 +2034,20 @@ async function connectorsSection(main) {
         // what is sent there as reaching anyone, until the owner says otherwise.
         const r = await api("POST", "/v1/connectors", { url, audience: "public", label: "private+untrusted" });
         toast(`${r.name || "The app"} is in everyone's Library. Connect it there with your own account.`);
+        await draw();
+      }
+      if (b.dataset.act === "set-registration") {
+        const p = b.dataset.provider;
+        const client_id = $(`[data-reg-id="${CSS.escape(p)}"]`, main).value.trim(), client_secret = $(`[data-reg-secret="${CSS.escape(p)}"]`, main).value.trim();
+        if (!client_id) return toast("Give the registration's client ID.");
+        await api("PUT", `/v1/registrations/${enc(p)}`, { client_id, client_secret });
+        main.querySelectorAll("[data-reg-id], [data-reg-secret]").forEach(i => { i.value = ""; });
+        toast("Saved in the appliance's vault.");
+        await draw();
+      }
+      if (b.dataset.act === "clear-registration") {
+        if (!confirm("Clear this registration? Its connectors leave everyone's Library until it is set again.")) return;
+        await api("DELETE", `/v1/registrations/${enc(b.dataset.provider)}`);
         await draw();
       }
       if (b.dataset.act === "remove") {
