@@ -113,6 +113,7 @@ section.conv .thread, section.conv #composer, section.conv #banners { width: 100
 .hello { margin-top: 24px; }
 #composer { position: sticky; bottom: 0; background: var(--main); padding-top: 8px; padding-bottom: 24px; }
 aside.detail { background: var(--panel); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); border-left: 1px solid var(--panel-edge); height: 100vh; overflow-y: auto; padding: 0; min-width: 0; display: flex; flex-direction: column; }
+aside.detail[hidden] { display: none; }
 .detail-head { position: sticky; top: 0; z-index: 2; background: var(--panel); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 20px 24px 14px; }
 .detail-body { flex: 1; display: flex; flex-direction: column; padding: 0 24px 24px; min-height: 0; }
 .detail-head .close { color: var(--muted); }
