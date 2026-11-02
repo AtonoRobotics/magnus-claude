@@ -257,10 +257,12 @@ pub async fn callback(State(c): State<Arc<Console>>, axum::extract::ConnectInfo(
     let refresh = b["refresh_token"].as_str().unwrap_or_default().to_string();
     let now = Utc::now();
     let clear_login = set_cookie(LOGIN_COOKIE, "", 0);
+    // A password typed for this sign-in, not the provider's session let
+    // through without one.
+    let fresh = auth_time.is_some_and(|t| t >= p.started.timestamp() - 1);
     match p.step_up {
         Some(sid) => {
             // The same admin, with a password just typed.
-            let fresh = auth_time.is_some_and(|t| t >= p.started.timestamp() - 1);
             let mut sessions = c.store.sessions.lock().unwrap();
             match sessions.get_mut(&sid) {
                 Some(s) if s.sub == sub && fresh => {
@@ -276,7 +278,7 @@ pub async fn callback(State(c): State<Arc<Console>>, axum::extract::ConnectInfo(
         }
         None => {
             let sid = crate::connectors::random();
-            let s = Session { sub, name, csrf: crate::connectors::random(), refresh_token: refresh, started: now, seen: now, refreshed: now, stepped_up: Some(now) };
+            let s = Session { sub, name, csrf: crate::connectors::random(), refresh_token: refresh, started: now, seen: now, refreshed: now, stepped_up: fresh.then_some(now) };
             c.store.sessions.lock().unwrap().insert(sid.clone(), s);
             let session = format!("{COOKIE}={sid}; Path=/; Secure; HttpOnly; SameSite=Strict");
             let mut r = Redirect::to(&p.then).into_response();
