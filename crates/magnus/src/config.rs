@@ -402,6 +402,10 @@ impl Default for Backup {
 pub struct Bundle {
     #[serde(default = "permission_seconds")]
     pub permission_seconds: u64,
+    /// When the curator runs each night ("HH:MM", UTC), as the admin sets
+    /// it; none: only on demand.
+    #[serde(default)]
+    pub curator_at: Option<String>,
 }
 
 fn permission_seconds() -> u64 {
@@ -410,7 +414,7 @@ fn permission_seconds() -> u64 {
 
 impl Default for Bundle {
     fn default() -> Self {
-        Bundle { permission_seconds: permission_seconds() }
+        Bundle { permission_seconds: permission_seconds(), curator_at: None }
     }
 }
 

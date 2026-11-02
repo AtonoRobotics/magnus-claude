@@ -254,6 +254,72 @@ impl Kernel {
         Ok(task)
     }
 
+    /// The curator: ordinary runs given the goal of keeping the bundle
+    /// accurate and useful, and the kernel's brief. One run per person whose
+    /// grant reads the documents it names (K1): a document drawn from a
+    /// source goes to whoever connected it, the rest to the owner. The
+    /// brief now lists documents past `stale_after` and drafts waiting on
+    /// an owner; corrections, rejections, unread conventions and people's
+    /// edits join it with outcomes (step 8). The tasks started.
+    pub async fn curate(self: &std::sync::Arc<Self>) -> Result<Vec<String>> {
+        let owner = self.owners().first().map(|p| p.id.clone()).ok_or_else(|| anyhow::anyhow!("no owner"))?;
+        let since = self.read(|s| s.last_curated);
+        let docs: Vec<crate::state::BundleDoc> = self.read(|s| s.bundle.values().filter(|d| d.scope == "org").cloned().collect());
+        let contents = self.log.contents(&docs.iter().map(|d| d.seq()).collect::<Vec<_>>()).await?;
+        let mut briefs: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for d in &docs {
+            let status = contents.get(&d.seq()).and_then(|c| c["frontmatter"]["status"].as_str().map(String::from));
+            let mut why = vec![];
+            if let Some(at) = d.stale_after {
+                why.push(format!("an item it lists changed at its source on {}", at.format("%Y-%m-%d %H:%M UTC")));
+            }
+            if status.as_deref() == Some("draft") && matches!(d.kind.as_str(), "type" | "convention") {
+                why.push("a draft waiting on an owner's review".into());
+            }
+            if why.is_empty() {
+                continue;
+            }
+            let by = d.sources.iter().filter_map(|s| parse_locator(s).map(|(src, _)| src.to_string())).find_map(|src| self.read(|s| s.source_connected_by.get(&src).cloned())).unwrap_or_else(|| owner.clone());
+            briefs.entry(by).or_default().push(format!("- {}: {}", d.path, why.join("; ")));
+        }
+        if briefs.is_empty() {
+            briefs.insert(owner.clone(), vec![]);
+        }
+        let mut tasks = vec![];
+        for (person, lines) in briefs {
+            let since = since.map(|t| format!(" since the last curation ({})", t.format("%Y-%m-%d %H:%M UTC"))).unwrap_or_default();
+            let brief = if lines.is_empty() { format!("Nothing stands out{since}.") } else { format!("What stands out{since}:\n{}", lines.join("\n")) };
+            let text = format!("Curate the organisation's context bundle. Goal: keep it accurate and useful, every change an audited, reversible version: recheck documents against their sources, edit or deprecate what is out of date, and ask owners to review what needs it.\n\n{brief}");
+            let (task, _) = self.create_run("kernel:curator", &person, text, vec![], crate::kernel::NewRun::default()).await?;
+            tasks.push(task);
+        }
+        self.emit("kernel", crate::events::Ev::Curated { tasks: tasks.clone() }).await?;
+        Ok(tasks)
+    }
+
+    /// The curator each night at `[bundle] curator_at`, when it is set.
+    pub fn watch_curator(self: &std::sync::Arc<Self>) {
+        let Some(at) = self.cfg.bundle.curator_at.clone() else { return };
+        let Ok(time) = chrono::NaiveTime::parse_from_str(&at, "%H:%M") else {
+            tracing::warn!("[bundle] curator_at {at:?} is not HH:MM: the curator runs only on demand");
+            return;
+        };
+        let k = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let now = chrono::Utc::now();
+                let mut next = now.date_naive().and_time(time).and_utc();
+                if next <= now {
+                    next += chrono::Duration::days(1);
+                }
+                tokio::time::sleep((next - now).to_std().unwrap_or_default()).await;
+                if let Err(e) = k.curate().await {
+                    tracing::warn!("the curator: {e:#}");
+                }
+            }
+        });
+    }
+
     /// The person a recipient is: by their address, or their id.
     pub fn person_for(&self, recipient: &str) -> Option<String> {
         let r = recipient.to_lowercase();

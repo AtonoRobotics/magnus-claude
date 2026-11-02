@@ -701,6 +701,8 @@ pub struct ConnectorSetting {
 
 #[derive(Default)]
 pub struct State {
+    /// When the curator last started: its brief covers what changed since.
+    pub last_curated: Option<DateTime<Utc>>,
     /// Who first connected each of the org's sources (`connected_by`): the
     /// survey, the curator and the change watch use their grant (K1).
     pub source_connected_by: HashMap<String, String>,
@@ -1630,6 +1632,7 @@ impl State {
             }
             // The audit trail is read from the log, not kept in memory.
             Ev::Audit { .. } => {}
+            Ev::Curated { .. } => self.last_curated = Some(e.at),
             Ev::SourceConnected { source, by } => {
                 self.source_connected_by.entry(source.clone()).or_insert_with(|| by.clone());
             }

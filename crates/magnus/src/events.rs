@@ -608,6 +608,10 @@ pub enum Ev {
         #[serde(default)]
         rule: Option<String>,
     },
+    /// The curator was started, its runs by task (org context spec).
+    Curated {
+        tasks: Vec<String>,
+    },
     /// One of the org's sources was connected for the first time, by `by`:
     /// its survey runs under their grant (org context spec, survey run).
     SourceConnected {
