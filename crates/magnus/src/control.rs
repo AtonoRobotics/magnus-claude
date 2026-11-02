@@ -36,6 +36,10 @@ pub async fn serve(k: Arc<Kernel>, state_dir: &Path) -> Result<()> {
         .route("/v1/people/{person}/sessions", axum::routing::get(sessions).delete(end_sessions))
         .route("/v1/people/{person}/sessions/{id}", axum::routing::delete(end_session))
         .route("/v1/people/{person}/turn-off", post(turn_off))
+        .route("/v1/people/{person}/schedules", axum::routing::get(person_schedules))
+        .route("/v1/people/{person}/schedules/{id}/{change}", post(person_schedule))
+        .route("/v1/people/{person}/data/{what}", post(person_data))
+        .route("/v1/people/{person}/erase", post(erase_person))
         .route("/v1/admin/connectors", axum::routing::get(connectors).post(add_connector))
         .route("/v1/admin/connectors/{name}", axum::routing::patch(connector_settings).delete(remove_connector))
         .route("/v1/admin/connectors/{name}/credential", axum::routing::put(set_credential).delete(revoke_credential))
@@ -259,5 +263,58 @@ async fn set_credential(State(k): State<Arc<Kernel>>, axum::extract::Path(name):
 async fn revoke_credential(State(k): State<Arc<Kernel>>, axum::extract::Path(name): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
     let Some(actor) = actor(&b) else { return no_actor() };
     done(k.revoke_connector_credential(&actor, &name).await)
+}
+
+// One person, as root acts on them (admin console spec, Users): their
+// schedules suspended and resumed, their data read, their data deleted. The
+// console names people by their provider `sub`; one never seen here has
+// nothing to show and nothing to delete.
+
+fn person_refused((st, m): crate::person_admin::Refusal) -> Response {
+    (st, Json(json!({ "error": m }))).into_response()
+}
+
+async fn person_schedules(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): axum::extract::Path<String>) -> Response {
+    let Some(person) = person_of(&k, &sub) else { return Json(json!({ "schedules": [] })).into_response() };
+    match k.person_schedules(&person).await {
+        Ok(v) => Json(json!({ "schedules": v })).into_response(),
+        Err(r) => person_refused(r),
+    }
+}
+
+async fn person_schedule(State(k): State<Arc<Kernel>>, axum::extract::Path((sub, id, change)): axum::extract::Path<(String, String, String)>, Json(b): Json<Value>) -> Response {
+    let (Some(actor), Some(person)) = (actor(&b), person_of(&k, &sub)) else { return person_refused((StatusCode::NOT_FOUND, "no such schedule".into())) };
+    let on = match change.as_str() {
+        "resume" => true,
+        "suspend" => false,
+        _ => return person_refused((StatusCode::NOT_FOUND, "suspend or resume".into())),
+    };
+    let by = text(&b, "name").unwrap_or_else(|| "an admin".into());
+    match k.admin_schedule(&actor, &by, &person, &id, on).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => person_refused(r),
+    }
+}
+
+/// A read: a POST, since it is recorded and the person is told.
+async fn person_data(State(k): State<Arc<Kernel>>, axum::extract::Path((sub, what)): axum::extract::Path<(String, String)>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return person_refused((StatusCode::BAD_REQUEST, "name who reads it".into())) };
+    let Some(target) = person_of(&k, &sub).and_then(|p| k.person(&p)) else {
+        return person_refused((StatusCode::NOT_FOUND, "they have never signed in to Magnus: there is no data of theirs here".into()));
+    };
+    let by = text(&b, "name").unwrap_or_else(|| "An admin".into());
+    match k.read_person_data(&actor, &by, &target, &what, b["item"].as_str()).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => person_refused(r),
+    }
+}
+
+async fn erase_person(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return person_refused((StatusCode::BAD_REQUEST, "name who deletes it".into())) };
+    let Some(person) = person_of(&k, &sub) else { return Json(json!({ "never_here": true })).into_response() };
+    match k.erase_person(&actor, &person).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => person_refused(r),
+    }
 }
 

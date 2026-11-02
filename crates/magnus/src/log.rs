@@ -523,6 +523,17 @@ impl Log {
         Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
+    /// The events whose content is a person's: everything they wrote and
+    /// everything written for them, by the store's own record of whose each
+    /// row is.
+    pub async fn person_content_seqs(&self, person: &str) -> Result<Vec<i64>> {
+        if !self.store {
+            return Ok(vec![]);
+        }
+        let rows = self.client().await?.query("SELECT seq FROM public.content WHERE person = $1 ORDER BY seq", &[&person]).await.context("find a person's content")?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
     /// Delete the content of these events.
     pub async fn delete_content(&self, seqs: &[i64]) -> Result<u64> {
         if !self.store {

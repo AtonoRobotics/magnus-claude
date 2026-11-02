@@ -969,6 +969,12 @@ async fn timeline(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response
         Err(r) => return r,
     };
     let Some((_, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
+    Json(timeline_of(&run)).into_response()
+}
+
+/// A run's steps, each with its tool calls, the boundary's decisions and
+/// their results; its notices and verifications.
+pub(crate) fn timeline_of(run: &Run) -> Value {
     let mut steps = vec![];
     for reply in &run.replies {
         let mut calls = vec![];
@@ -998,7 +1004,7 @@ async fn timeline(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response
         steps.push(json!({ "step": reply.step, "text": said, "calls": calls }));
     }
     let notices: Vec<Value> = run.notices.iter().map(|(step, seq, text)| json!({ "step": step, "seq": seq, "text": text })).collect();
-    Json(json!({ "steps": steps, "notices": notices, "verifications": run.verified.iter().map(|(c, v)| json!({ "criterion": c, "passed": v.0, "evidence": v.1, "by": v.2 })).collect::<Vec<_>>() })).into_response()
+    json!({ "steps": steps, "notices": notices, "verifications": run.verified.iter().map(|(c, v)| json!({ "criterion": c, "passed": v.0, "evidence": v.1, "by": v.2 })).collect::<Vec<_>>() })
 }
 
 async fn resume(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {

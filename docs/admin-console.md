@@ -38,8 +38,8 @@ Each line names the pull request that built it, or the one building it.
 ## Authority and audit
 
 - [x] Only `magnus-admin` holds `magnus_root` (BYPASSRLS) (#70)
-- [ ] Every read or write of a person's private data through the console is audited: admin, person, resource, action, time (Users › Data)
-- [ ] Deleting a person's data destroys their key (Users › Delete)
+- [x] Every read or write of a person's private data through the console is audited: admin, person, resource, action, time (`admin-users-detail`; `admin_people.rs`)
+- [x] Deleting a person's data leaves it unrecoverable: removed from the store and every backup (no per-person key exists: DECISIONS.md) (`admin-users-detail`; `admin_people.rs`)
 - [x] Credentials are write-only everywhere (before #68; the console's routes, `admin_connectors.rs`)
 - [x] The last admin cannot be removed, turned off or demoted (#72; `admin_users.rs`)
 - [x] Every console action in the append-only log with who, what, when, source and before/after; `magnus_root` cannot change it (#70; `admin_audit.rs`)
@@ -82,9 +82,9 @@ Each line names the pull request that built it, or the one building it.
 - [x] List: name, email, role, status, last sign-in, sessions; Invite, Resend, Cancel (#72)
 - [x] Overview tab: role (step-up), turn off or on, end all sessions; turning off pauses their schedules (#72)
 - [x] Sessions tab, with End (#72)
-- [ ] Schedules and triggers tab, with Suspend and Resume
-- [ ] Data tab: their tasks, chats, files and memory, each access audited, with the banner saying so (ruling 14)
-- [ ] Delete tab: the account and their key, with step-up and their email typed
+- [x] Schedules and triggers tab, with Suspend and Resume; Magnus has no triggers but schedules (`admin-users-detail`; `admin_people.rs`)
+- [x] Data tab: their tasks, chats, files and memory, and one of each, each access audited and told to them, with the banner saying so; none while the policy keeps data private (ruling 14) (`admin-users-detail`; `admin_people.rs`)
+- [x] Delete tab: the account and everything of theirs, from the store and the backups, with step-up and their email typed (no per-person key exists: DECISIONS.md) (`admin-users-detail`; `admin_people.rs`)
 
 ### Security
 
@@ -133,7 +133,7 @@ Sign-in and authority
 
 Data and audit
 - [x] As the user API's role, a cross-person read returns nothing (before #68)
-- [ ] An admin's read of a person's data succeeds and is in the audit log with admin, person, resource and time
+- [x] An admin's read of a person's data succeeds and is in the audit log with admin, person, resource and time (`admin_people.rs`)
 - [x] No admin endpoint ever returns a credential value (`admin-connectors`; `admin_connectors.rs`, every reading route and the stream; re-run as each section adds routes)
 - [x] `magnus_root` cannot change an audit entry (`admin_audit.rs`)
 

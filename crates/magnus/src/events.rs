@@ -265,6 +265,16 @@ pub enum Ev {
     PersonDataRead {
         person: String,
         what: String,
+        /// One task, conversation, file or memory, when one was opened.
+        #[serde(default)]
+        item: Option<String>,
+    },
+    /// Root deleted a person's data (admin console spec, Users › Delete):
+    /// their tasks, runs, conversations, files, memory, schedules and inbox
+    /// leave the appliance's state; their content leaves the store (the
+    /// `Removed` before it names what), and their sign-ins the vault.
+    PersonErased {
+        person: String,
     },
     /// The owner set a person's roles in Settings; they replace the config's
     /// unless the identity provider names the person's roles.

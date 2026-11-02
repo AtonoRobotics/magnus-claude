@@ -33,6 +33,7 @@ pub mod library;
 pub mod log;
 pub mod identity;
 pub mod oidc;
+pub mod person_admin;
 pub mod policy;
 pub mod recall;
 pub mod run;
