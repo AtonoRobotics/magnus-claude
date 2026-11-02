@@ -44,6 +44,7 @@ pub mod run;
 pub mod sandbox;
 pub mod settings;
 pub mod spawn;
+pub mod sources;
 pub mod speech;
 pub mod state;
 pub mod tls;

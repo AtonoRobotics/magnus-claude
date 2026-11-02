@@ -31,6 +31,15 @@ remove_access = "https://myaccount.google.com/connections"
 scopes = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.compose", "https://www.googleapis.com/auth/gmail.modify"]
 
 # Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).
+# The org context's search and fetch (org context build spec): Gmail's own
+# search, and a thread read as plain text.
+[source]
+search = "search_threads"
+query = "query"
+fetch = "get_thread"
+id = "threadId"
+fetch_args = { messageFormat = "PLAIN_TEXT" }
+
 [tools]
 search_threads = "read"
 get_thread = "read"
