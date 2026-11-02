@@ -222,16 +222,16 @@ one commit), 2026-11-02.
 - [x] Two views: Discover the whole catalog; Yours connected, needs attention, and programs not yet enabled (`connectors.mjs`; Yours tested empty only)
 - [x] One search box taking a name or a description of what is wanted (`connectors.mjs`: "drive", "find a time"; word matching over names, sentences, publishers and abilities)
 - [x] Category chips: Email and chat, Files, Code, Work, Design and CAD (`connectors.mjs`)
-- [ ] Sections in Discover: On this computer (never filled), Needs attention (untested), Popular (`connectors.mjs`); an empty section is not shown (`connectors.mjs`)
+- [ ] Sections in Discover: On this computer (never filled: local connectors), Needs attention (`library_states.rs`), Popular (`connectors.mjs`); an empty section is not shown (`connectors.mjs`)
 - [ ] The card: icon (provider's own: not yet), name, review mark, one sentence, publisher (`connectors.mjs` for all but the icon)
 - [x] The card's action: a plus to connect (`connectors.mjs`)
-- [ ] The card's action: a check when connected (drawn, untested with a real connection)
+- [x] The card's action: a check when connected (`library_states.rs` with `library-states.mjs`, a real sign-in and call: the check, and "Connected as" the account)
 - [ ] The card's action: a spinner while signing in on the provider's page (drawn, untested)
-- [ ] The card's action: sign in again when it needs attention (drawn, untested)
+- [x] The card's action: sign in again when it needs attention (`library_states.rs`, after the app refuses the sign-in)
 - [ ] The card's action: Enable for a program on this computer (drawn for a `local` state the appliance never sends)
 - [ ] Icons: each provider's own mark from its listing, used as its brand guidelines allow (none in the repository)
 - [x] Connector page, not connected: name, icon, publisher and review mark; abilities; each scope as its plain line; "You sign in on …'s own page. Magnus never sees your password, and you can disconnect at any time."; one Connect button (`connectors.mjs`)
-- [ ] Connector page, connected: Connected mark; the account (email, workspace or tenant); what it can and cannot do; when connected and last used; recent actions from the event log; Disconnect (drawn in `app.js` `connectorBody`; DECISIONS.md: "tested with real calls in the next pull request", never done)
+- [x] Connector page, connected: Connected mark; the account (email, workspace or tenant); what it can and cannot do; when connected and last used; recent actions from the event log; Disconnect (`library_states.rs` with `library-states.mjs`: a real sign-in naming its account and a real call, in every look and at phone width)
 
 ### Inside work
 

@@ -42,6 +42,8 @@ pub struct AppState {
     pub share_scope: Option<String>,
     /// The scope each code and each token was granted.
     scopes: HashMap<String, String>,
+    /// The account a sign-in is to, named in an ID token beside the tokens.
+    pub account: Option<String>,
     /// Tools it no longer lists: retired from the app.
     pub retired: Vec<String>,
     /// Answer refreshes without `expires_in` (it is only recommended).
@@ -185,7 +187,12 @@ async fn token(State((base, st)): S, Form(f): Form<HashMap<String, String>>) -> 
             if client != g("client_id") || redirect != g("redirect_uri") || proof != challenge {
                 return oauth_error(400, "invalid_grant");
             }
-            Json(issue(&mut s, scope)).into_response()
+            let mut t = issue(&mut s, scope);
+            if let Some(email) = &s.account {
+                let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json!({ "email": email }).to_string());
+                t["id_token"] = json!(format!("e30.{claims}.sig"));
+            }
+            Json(t).into_response()
         }
         // Rotation: a refresh token is good once.
         "refresh_token" => {

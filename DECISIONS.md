@@ -896,3 +896,13 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Their sign-ins stay in the vault unused: turning someone off is not removing them, and they may be back.
 - They are back when they sign in again (`SignedIn` clears it), since the provider let them in. Being turned back on at the provider alone changes nothing here until then, because no session can act for them before it.
 - Test: `a_person_turned_off_has_no_apps_until_they_are_back` (turned_off_apps.rs, Keycloak). Carol's task waits on an approval to read her calendar, and Keycloak turns her off. Approved after that, the call is refused and never reaches the app, and nothing is revoked. Turned back on and signed in again, her next task's call goes through with the same sign-in.
+
+## The Library and an app's page, tested through a connection's life (2026-11-02, `library-states`)
+
+- The connectors spec, Library and The connector card. The connected page and the card's check and "sign in again" were drawn (`connectorBody`, `connectorAction`) but never shown with a real connection. DECISIONS.md said they would be "tested with real calls in the next pull request", and they never were.
+- Nothing in the app needed changing. The fake app now names the account in an ID token beside its tokens, as Google does, so the page's account line is exercised.
+- Test: `the_library_follows_a_connection_from_connected_to_needing_a_new_sign_in` (library_states.rs, with `library-states.mjs`). Carol signs in and a task reads her calendar.
+  - In Yours, the card shows a check and "Connected as carol@calendar.test".
+  - The page shows Connected, the account, when it was connected and last used, "List events" linking to the task, and Disconnect.
+  - After the app refuses her sign-in, the card asks to sign in again, Discover lists it under Needs attention, and the page says so with one button.
+  - Every view is checked in light, dark and glass and at phone width, with no protocol words.
