@@ -369,7 +369,7 @@ impl Kernel {
         };
         let (label, sources) = if let Some(taint) = memory {
             taint
-        } else if a.tool == "knowledge_search" {
+        } else if a.tool == "knowledge_search" || a.tool == "bundle_read" || a.tool == "bundle_search" {
             // What the search returned decides; a result that says nothing is untrusted and private.
             let d = out.as_ref().ok().and_then(|(_, _, d)| d.clone()).unwrap_or_default();
             (Label { untrusted: d["untrusted"] != false, private: d["private"] != false }, vec![f.app.clone()])
@@ -841,6 +841,7 @@ impl Kernel {
                 }
                 // memory_search is answered in execute(), with its taint from the same lookup.
                 "knowledge_search" => Ok(self.knowledge_search(&a.run, &s("query")).await?),
+                "bundle_read" | "bundle_search" | "bundle_write" => Ok(self.bundle_tool(&a.run, &a.tool, &a.input).await?),
                 "knowledge_add" => Ok(self.knowledge_add(&a.run, &a.input).await?),
                 "project_read" => {
                     let name = s("name");

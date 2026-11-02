@@ -50,5 +50,8 @@
   "pause_schedule": "Pause one of the person's schedules: no more runs start until it is resumed; a run already going goes on.",
   "resume_schedule": "Resume a paused schedule.",
   "edit_schedule": "Change when one of the person's schedules runs (every_minutes, or daily_at \"HH:MM\", appliance local time) and when it ends (until, an RFC 3339 time; max_runs). Give only what changes. What each run does stays: to change that, cancel the schedule and propose another.",
-  "cancel_schedule": "Cancel one of the person's schedules: no more runs, and a run of it still going stops."
+  "cancel_schedule": "Cancel one of the person's schedules: no more runs, and a run of it still going stops.",
+  "bundle_read": "Read a document of the organisation's context bundle by its path (as /index.md links it): its frontmatter and body. Links to what the person cannot see are removed.",
+  "bundle_search": "Search the bundle's documents the person can see for every word of query: paths with kind, title, description and status. kinds narrows it (source, type, entity, convention, people, index, log, user).",
+  "bundle_write": "Write a version of a bundle document (OKF v0.2, the Magnus profile). path: /index.md or /<dir>/index.md (headings and bulleted links, no frontmatter), /sources/<slug>.md (type Source), /types/<slug>.md (type Entity Type), /entities/<type>/<slug>.md (type: the type's title), /conventions/<area>/<slug>.md (type Convention), /people/<area>.md (type Area), /<area>/log.md (dated entries, newest first), or /users/<you>/... for the person's own. frontmatter: the fields its kind needs, scope (org, or user with owner_user), generated {by: magnus/<version>, at: an ISO 8601 time with offset}, sources [{resource}]. Links are bundle paths or source URIs. A document that breaks a rule is refused with the reason; fix it and write again."
 }

@@ -151,6 +151,7 @@ pub fn content_walls_sql(role: &str) -> String {
 pub const CONTENT_OWNERS: &str = "UPDATE public.content c SET person = o.person FROM (
     SELECT e.seq, CASE
         WHEN e.kind IN ('knowledge_added', 'playbook') THEN NULL
+        WHEN e.kind = 'bundle_written' THEN e.body->>'owner_user'
         WHEN e.kind = 'item_resolved' THEN (SELECT i.body->>'person' FROM public.events i
             WHERE i.kind = 'item' AND i.body->>'id' = e.body->>'id' ORDER BY i.seq LIMIT 1)
         WHEN e.kind = 'schedule_ended' THEN (SELECT x.body->>'person' FROM public.events x
@@ -472,6 +473,20 @@ impl Log {
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD.decode(b["data_b64"].as_str().unwrap_or_default())?;
         Ok(Some((b["name"].as_str().unwrap_or("file").into(), b["media_type"].as_str().unwrap_or("application/octet-stream").into(), bytes)))
+    }
+
+    /// The content of these events, as the kernel reads it (its own role
+    /// sees every row): for what the kernel guards itself, such as the org
+    /// context bundle's documents, whose visibility it decides (K2).
+    pub async fn contents(&self, seqs: &[i64]) -> Result<std::collections::HashMap<i64, Value>> {
+        if seqs.is_empty() {
+            return Ok(Default::default());
+        }
+        // Joined with the events, so content kept in an event (no content
+        // store) reads the same.
+        let sql = format!("SELECT e.seq, e.body, c.body FROM {} WHERE e.seq = ANY($1)", self.rows());
+        let rows = self.client().await?.query(&sql, &[&seqs]).await.context("read content")?;
+        Ok(rows.iter().map(|r| (r.get::<_, i64>(0), join(r.get(1), r.get(2)))).collect())
     }
 
     /// The events whose content an item holds, that still have it.

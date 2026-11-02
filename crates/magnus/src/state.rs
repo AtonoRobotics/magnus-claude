@@ -378,6 +378,33 @@ pub struct MemoryEntry {
     pub seq: i64,
 }
 
+/// A document in the org context bundle, as the kernel guards it: where it
+/// is, whose, its versions, and what it lists as sources. Its frontmatter
+/// and body are in the content store (`bundle.rs`).
+#[derive(Clone, Debug)]
+pub struct BundleDoc {
+    pub path: String,
+    pub kind: String,
+    pub scope: String,
+    pub owner_user: Option<String>,
+    pub label: Label,
+    pub sources: Vec<String>,
+    /// Each version: its number, the event holding it, when and by whom.
+    pub versions: Vec<(u32, i64, DateTime<Utc>, String)>,
+    /// The person whose run wrote the current version, under whose grant
+    /// its sources were read.
+    pub writer: Option<String>,
+}
+
+impl BundleDoc {
+    pub fn version(&self) -> u32 {
+        self.versions.last().map_or(0, |v| v.0)
+    }
+    pub fn seq(&self) -> i64 {
+        self.versions.last().map_or(0, |v| v.1)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PolicyVersion {
     pub layer: String,
@@ -703,6 +730,8 @@ pub struct State {
     /// Latest conformance result per adapter id: (version, model, passed, report).
     pub conformance: HashMap<String, (String, String, bool, Value)>,
     pub playbook: BTreeMap<String, PlaybookItem>,
+    /// The org context bundle, by path.
+    pub bundle: BTreeMap<String, BundleDoc>,
     /// Every policy a layer ever had, oldest first.
     pub policy_history: Vec<PolicyVersion>,
     /// Model and harness changes, for version notices (U5): (seq, at, what, value).
@@ -731,6 +760,8 @@ impl State {
         use crate::events::Ev;
         match ev {
             Ev::KnowledgeAdded { .. } | Ev::Playbook { .. } => return None,
+            // An org document is nobody's; a person's own is theirs.
+            Ev::BundleWritten { owner_user, .. } => return owner_user.clone(),
             Ev::ItemResolved { id, .. } => return self.items.get(id).map(|i| i.person.clone()),
             Ev::ScheduleEnded { id, .. } => return self.schedules.get(id).map(|s| s.person.clone()),
             _ => {}
@@ -1677,6 +1708,17 @@ impl State {
             }
             Ev::AdapterVerified { adapter_id, version, model, passed, report, .. } => {
                 self.conformance.insert(adapter_id.clone(), (version.clone(), model.clone(), *passed, report.clone()));
+            }
+            Ev::BundleWritten { path, version, doc_kind: kind, scope, owner_user, actor, run, label, sources, .. } => {
+                let writer = run.as_ref().and_then(|r| self.runs.get(r)).map(|r| r.person.clone());
+                let d = self.bundle.entry(path.clone()).or_insert_with(|| BundleDoc { path: path.clone(), kind: kind.clone(), scope: scope.clone(), owner_user: owner_user.clone(), label: *label, sources: vec![], versions: vec![], writer: None });
+                d.writer = writer;
+                d.kind = kind.clone();
+                d.scope = scope.clone();
+                d.owner_user = owner_user.clone();
+                d.label = *label;
+                d.sources = sources.clone();
+                d.versions.push((*version, e.seq, e.at, actor.clone()));
             }
             Ev::Memory { id, person, run, label, sources, by, .. } => self.memory.push(MemoryEntry {
                 id: id.clone(),
