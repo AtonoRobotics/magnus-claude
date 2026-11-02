@@ -1794,7 +1794,11 @@ impl State {
             Ev::BundleWritten { path, version, doc_kind: kind, scope, owner_user, actor, run, label, sources, .. } => {
                 let writer = run.as_ref().and_then(|r| self.runs.get(r)).map(|r| r.person.clone());
                 let d = self.bundle.entry(path.clone()).or_insert_with(|| BundleDoc { path: path.clone(), kind: kind.clone(), scope: scope.clone(), owner_user: owner_user.clone(), label: *label, sources: vec![], versions: vec![], writer: None });
-                d.writer = writer;
+                // An admin's version (no run) keeps the writer whose run
+                // read its sources (K2).
+                if run.is_some() {
+                    d.writer = writer;
+                }
                 d.kind = kind.clone();
                 d.scope = scope.clone();
                 d.owner_user = owner_user.clone();
