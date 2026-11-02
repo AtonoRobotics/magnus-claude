@@ -15,7 +15,11 @@ use axum::{Extension, Json};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-fn failed(e: anyhow::Error) -> Response {
+pub(super) fn failed(e: anyhow::Error) -> Response {
+    if let Some(r) = e.downcast_ref::<super::kernel::Refused>() {
+        let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::BAD_REQUEST);
+        return (status, Json(json!({ "error": "refused", "message": r.message }))).into_response();
+    }
     if let Some(r) = e.downcast_ref::<Refused>() {
         let status = match r.status {
             404 => StatusCode::NOT_FOUND,
@@ -28,13 +32,13 @@ fn failed(e: anyhow::Error) -> Response {
     (StatusCode::BAD_GATEWAY, Json(json!({ "error": "unavailable", "message": format!("{e:#}") }))).into_response()
 }
 
-fn refuse(status: StatusCode, error: &str, message: &str) -> Response {
+pub(super) fn refuse(status: StatusCode, error: &str, message: &str) -> Response {
     (status, Json(json!({ "error": error, "message": message }))).into_response()
 }
 
 /// Record the change, then make it: nothing changes that the audit log
 /// does not hold. A change that then fails is recorded as failed too.
-async fn recorded<F>(c: &Console, a: &Admin, action: &str, target: &str, before: Option<Value>, after: Option<Value>, change: F) -> Result<Value, Response>
+pub(super) async fn recorded<F>(c: &Console, a: &Admin, action: &str, target: &str, before: Option<Value>, after: Option<Value>, change: F) -> Result<Value, Response>
 where
     F: std::future::Future<Output = anyhow::Result<Value>>,
 {
@@ -52,11 +56,11 @@ where
 
 /// An id as the provider and the kernel make them: nothing that could
 /// become another path.
-fn plain(id: &str) -> bool {
+pub(super) fn plain(id: &str) -> bool {
     !id.is_empty() && id.len() <= 100 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn actor(a: &Admin) -> String {
+pub(super) fn actor(a: &Admin) -> String {
     format!("admin:{}", a.session.sub)
 }
 

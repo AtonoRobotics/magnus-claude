@@ -686,6 +686,12 @@ pub struct State {
     /// Providers the organisation has a registration with (its client ID
     /// and secret are in the vault).
     pub registrations: std::collections::BTreeSet<String>,
+    /// The admin's settings for each app: on or off, and who may use it.
+    pub connector_settings: BTreeMap<String, (bool, Option<Vec<String>>)>,
+    /// When each organisation credential was last set or revoked: an app's
+    /// key by the app's name, a provider's client secret as
+    /// `registration:<provider>`. Never the value.
+    pub credential_changed: BTreeMap<String, (bool, DateTime<Utc>)>,
     /// What was done in the admin console, oldest first: each entry's seq,
     /// when, and the action as written.
     pub audit: Vec<(i64, DateTime<Utc>, Value)>,
@@ -1070,12 +1076,22 @@ impl State {
                 self.last_backup = Some((file.clone(), *ok, detail.clone(), e.at));
             }
             Ev::ConnectorAdded { connector } => {
+                if connector.credential.is_some() && connector.auth.as_deref() != Some(crate::connectors::OAUTH) {
+                    self.credential_changed.insert(connector.name.clone(), (true, e.at));
+                }
                 self.connectors.insert(connector.name.clone(), connector.clone());
+            }
+            Ev::ConnectorSettings { name, enabled, access_groups } => {
+                self.connector_settings.insert(name.clone(), (*enabled, access_groups.clone()));
+            }
+            Ev::CredentialSet { connector, set } => {
+                self.credential_changed.insert(connector.clone(), (*set, e.at));
             }
             Ev::ConnectorRemoved { name } => {
                 self.connectors.remove(name);
             }
             Ev::RegistrationSet { provider, set } => {
+                self.credential_changed.insert(format!("registration:{provider}"), (*set, e.at));
                 if *set {
                     self.registrations.insert(provider.clone());
                 } else {

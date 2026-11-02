@@ -328,8 +328,7 @@ async function operationsView(view) {
 
 async function auditView(view, seq) {
   if (!$("#audit-filter", view)) {
-    view.innerHTML = `<h1>Security</h1><h2>Audit</h2>
-      <form class="row" id="audit-filter" role="search">
+    view.innerHTML = `<form class="row" id="audit-filter" role="search">
         <label>Who <input name="actor" autocomplete="off"></label>
         <label>Action <input name="action" autocomplete="off"></label>
         <label>On <input name="target" autocomplete="off"></label>
@@ -374,6 +373,185 @@ function rowLinks(el) {
     r.onclick = e => { if (!e.target.closest("button, a, input")) location.hash = r.dataset.href; };
     r.onkeydown = e => { if (e.key === "Enter") location.hash = r.dataset.href; };
   }
+}
+
+// ---- Security ----------------------------------------------------------
+//
+// Its four parts as tabs: Sign-in, Agent policy, Connectors and
+// credentials, Audit.
+
+const SECURITY_TABS = [["sign-in", "Sign-in"], ["policy", "Agent policy"], ["connectors", "Connectors and credentials"], ["audit", "Audit"]];
+
+function securityView(view, rest) {
+  const tab = SECURITY_TABS.some(([k]) => k === rest[0]) ? rest[0] : "connectors";
+  if (!$("#sec-tabs", view)) {
+    view.innerHTML = `<h1>Security</h1><nav class="ad-tabs" id="sec-tabs" aria-label="Security">${SECURITY_TABS.map(([k, l]) => `<a href="#/security/${k}" data-tab="${k}">${l}</a>`).join("")}</nav><div id="sec"></div>`;
+  }
+  for (const a of $$("#sec-tabs a", view)) { if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
+  const box = $("#sec", view);
+  if (box.dataset.tab !== tab) { box.dataset.tab = tab; box.innerHTML = ""; UI.closePanel(); }
+  if (tab === "audit") return auditView(box, rest[1]);
+  if (tab === "connectors") return connectorsView(box, rest[1]);
+  box.innerHTML = UI.empty("Not built yet.", "docs/admin-console.md lists what this holds when it is done.");
+}
+
+// Security › Connectors and credentials: the organisation's apps, their
+// status, how people reach them, their scopes and last use; a row opens the
+// app, where it is turned off or on, who may use it is set, and the
+// organisation's credential is set, rotated or revoked. A credential is
+// never shown, only whether it is set and when.
+
+const CONN_STATUS = { ready: ["ok", "Ready"], needs_credential: ["warn", "Needs its credential"], needs_review: ["warn", "Tools not reviewed"], off: ["", "Off"] };
+const SIGN_IN = { own_account: "Each person's own account", org_key: "The organisation's key", none: "No sign-in" };
+const AUDIENCE = [["private", "Only the person"], ["internal", "People in the organisation"], ["public", "Anyone"]];
+const LABEL = [["principal", "Trusted, not private"], ["private", "Private"], ["untrusted", "Untrusted"], ["private+untrusted", "Private and untrusted"]];
+const credName = c => (c.credential.kind === "client_secret" ? `${c.registration ? c.registration[0].toUpperCase() + c.registration.slice(1) : "The provider"}'s client secret` : "The organisation's key");
+const day = t => (t ? new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "");
+
+async function connectorsView(box, name) {
+  if (!$("#conn-rows", box)) {
+    box.innerHTML = `<div class="row ad-bar">
+        <input id="conn-q" type="search" placeholder="Find an app" aria-label="Find an app" autocomplete="off">
+        <select id="conn-f" aria-label="Show"><option value="">All apps</option><option value="attention">Needs attention</option><option value="off">Off</option><option value="used">Used by someone</option></select>
+        <button class="primary" id="conn-add">Add an app</button>
+      </div><div id="conn-rows"></div>`;
+    $("#conn-q", box).oninput = () => drawConnectors(box);
+    $("#conn-f", box).onchange = () => drawConnectors(box);
+    $("#conn-add", box).onclick = () => addConnector(box);
+    await loadConnectors(box);
+  }
+  if (!name) return UI.closePanel();
+  connectorPanel(box, name);
+}
+
+async function loadConnectors(box) {
+  const el = $("#conn-rows", box);
+  if (!box.conns) UI.loading(el, "the organisation's apps");
+  try { box.conns = (await api("GET", "/connectors")).connectors; drawConnectors(box); }
+  catch (e) { UI.error(el, "The organisation's apps could not be read.", e, () => loadConnectors(box)); }
+}
+
+function drawConnectors(box) {
+  const el = $("#conn-rows", box);
+  const q = $("#conn-q", box).value.trim().toLowerCase(), f = $("#conn-f", box).value;
+  const all = box.conns || [];
+  const rows = all.filter(c => (!q || `${c.title} ${c.name}`.toLowerCase().includes(q))
+    && (!f || (f === "attention" && (c.status === "needs_credential" || c.status === "needs_review")) || (f === "off" && !c.enabled) || (f === "used" && c.last_used)));
+  el.innerHTML = rows.length ? `<div class="ad-scroll"><table class="t small"><thead><tr><th>App</th><th>Status</th><th>Sign-in</th><th>Scopes</th><th>Credential</th><th class="n">Signed in</th><th>Last used</th></tr></thead><tbody>${rows.map(c => {
+      const [cls, label] = CONN_STATUS[c.status] || ["", c.status];
+      return `<tr class="click" data-href="#/security/connectors/${esc(c.name)}" tabindex="0">
+        <td><strong>${esc(c.title)}</strong> <span class="muted mono">${esc(c.name)}</span></td>
+        <td><span class="chip ${cls}">${esc(label)}</span></td>
+        <td>${esc(SIGN_IN[c.sign_in] || c.sign_in)}</td>
+        <td>${c.scopes.length ? `${c.scopes.length} scope${c.scopes.length === 1 ? "" : "s"}` : "–"}</td>
+        <td>${c.credential.kind === "none" ? "–" : c.credential.set ? `Set ${esc(day(c.credential.changed_at))}` : `<span class="chip warn">Not set</span>`}</td>
+        <td class="n">${esc(c.signed_in)}</td><td>${esc(c.last_used ? when(c.last_used) : "Never")}</td></tr>`;
+    }).join("")}</tbody></table></div>`
+    : UI.empty(all.length ? "No app matches." : "The organisation has no apps yet.", all.length ? "Clear the search or the filter." : "Add one by its address.");
+  rowLinks(el);
+}
+
+async function connectorPanel(box, name) {
+  const c = (box.conns || []).find(x => x.name === name);
+  const back = "#/security/connectors";
+  if (!c) { const b = UI.panel("App", "", back); b.innerHTML = UI.empty("No such app."); return; }
+  const [cls, label] = CONN_STATUS[c.status] || ["", c.status];
+  const reload = async () => { await loadConnectors(box); if (location.hash === `${back}/${name}`) connectorPanel(box, name); };
+  const audience = (AUDIENCE.find(([k]) => k === c.audience) || [, c.audience])[1];
+  const returns = (LABEL.find(([k]) => k === c.label) || [, c.label])[1];
+  const body = UI.panel(c.title, `
+    <p class="small"><span class="chip ${cls}">${esc(label)}</span> <span class="muted">${esc({ catalog: "From the catalog", added: "Added by its address", config: "In the appliance's config file" }[c.source])}</span></p>
+    <dl class="kv small">
+      <dt>Name</dt><dd class="mono">${esc(c.name)}</dd>
+      <dt>Address</dt><dd class="mono ad-wrap">${esc(c.url)}</dd>
+      <dt>Sign-in</dt><dd>${esc(SIGN_IN[c.sign_in] || c.sign_in)}</dd>
+      <dt>Scopes</dt><dd>${c.scopes.length ? c.scopes.map(x => `<div class="mono ad-wrap">${esc(x)}</div>`).join("") : "–"}</dd>
+      <dt>What reaches it</dt><dd>${esc(audience)}</dd>
+      <dt>What it returns</dt><dd>${esc(returns)}</dd>
+      <dt>Signed in</dt><dd>${esc(c.signed_in)} ${c.signed_in === 1 ? "person" : "people"}</dd>
+      <dt>Last used</dt><dd>${esc(c.last_used ? when(c.last_used) : "Never")}</dd>
+    </dl>
+    <h3>For the organisation</h3>
+    <div class="row ad-bar">${c.enabled ? `<button id="cn-off" class="danger">Turn off</button>` : `<button id="cn-on" class="primary">Turn on</button>`}</div>
+    <p class="small muted">${c.enabled ? "Turned off, no one is offered it and no task reaches it. People's sign-ins stay until revoked." : "It is off: no one is offered it and no task reaches it."}</p>
+    <form id="cn-groups" class="ad-form"><label>Who may use it <input name="groups" value="${esc(c.access_groups.join(", "))}" placeholder="Everyone" autocomplete="off" aria-describedby="cn-groups-how"></label>
+      <p class="small muted" id="cn-groups-how">Groups, separated by commas. Empty: everyone in the organisation.</p>
+      <div class="row"><button>Save</button></div></form>
+    <h3>Credential</h3>
+    ${c.credential.kind === "none"
+      ? `<p class="small">${c.sign_in === "own_account" ? "Each person signs in with their own account. The organisation holds no credential for it." : "It takes no credential."}</p>
+         ${c.signed_in ? `<div class="row ad-bar"><button id="cn-revoke" class="danger">Revoke every sign-in</button></div>` : ""}`
+      : `<p class="small">${esc(credName(c))}: ${c.credential.set ? `<strong>set</strong>${c.credential.changed_at ? `, ${esc(when(c.credential.changed_at))}` : ""}` : "<strong>not set</strong>"}. It is never shown again, here or anywhere.</p>
+         ${c.credential.kind === "client_secret" ? `<p class="small muted">It serves every ${esc(c.registration)} app: setting it here sets it for all of them.</p>` : ""}
+         <form id="cn-cred" class="ad-form"><label>${c.credential.set ? "New value" : "Value"} <input name="value" type="password" autocomplete="new-password" spellcheck="false" required></label>
+           <div class="row"><button class="primary">${c.credential.set ? "Rotate" : "Set"}</button>${c.credential.set ? ` <button type="button" id="cn-revoke" class="danger">Revoke</button>` : ""}</div></form>`}
+    ${c.source === "added" ? `<h3>Remove</h3><p class="small muted">Removing it revokes every sign-in to it and deletes its key.</p><div class="row"><button id="cn-remove" class="danger">Remove ${esc(c.title)}</button></div>` : ""}`, back);
+  const setOn = on => act("PATCH", `/connectors/${name}`, { enabled: on }, async () => {
+    UI.toast(on ? `${c.title} is on.` : `${c.title} is off for everyone.`, () => act("PATCH", `/connectors/${name}`, { enabled: !on }, reload));
+    await reload();
+  });
+  $("#cn-off", body)?.addEventListener("click", () => setOn(false));
+  $("#cn-on", body)?.addEventListener("click", () => setOn(true));
+  $("#cn-groups", body).onsubmit = e => {
+    e.preventDefault();
+    const groups = new FormData(e.target).get("groups").split(",").map(x => x.trim()).filter(Boolean);
+    const was = c.access_groups;
+    act("PATCH", `/connectors/${name}`, { access_groups: groups }, async () => {
+      UI.toast(groups.length ? `Only ${groups.join(", ")} may use ${c.title}.` : `Everyone may use ${c.title}.`, () => act("PATCH", `/connectors/${name}`, { access_groups: was }, reload));
+      await reload();
+    });
+  };
+  const cred = $("#cn-cred", body);
+  if (cred) cred.onsubmit = e => {
+    e.preventDefault();
+    const value = new FormData(e.target).get("value");
+    e.target.reset();
+    act("PUT", `/connectors/${name}/credential`, { value }, async () => { UI.toast(`${credName(c)} is ${c.credential.set ? "rotated" : "set"}.`); await reload(); });
+  };
+  const rev = $("#cn-revoke", body);
+  if (rev) rev.onclick = async () => {
+    const shared = c.credential.kind === "client_secret" ? ` Every person's sign-in to each ${c.registration} app ends.` : c.signed_in ? ` ${c.signed_in} sign-in${c.signed_in === 1 ? "" : "s"} end.` : "";
+    if (await UI.confirm({ title: c.credential.kind === "none" ? `Revoke every sign-in to ${c.title}?` : `Revoke ${credName(c).toLowerCase()}?`, body: `It is revoked at the app and deleted here.${shared} People sign in again once it is set.`, verb: "Revoke", danger: true, typed: c.name }))
+      act("DELETE", `/connectors/${name}/credential`, null, async v => { UI.toast(`Revoked: ${v?.sign_ins_revoked ?? 0} sign-ins ended.`); await reload(); });
+  };
+  const rm = $("#cn-remove", body);
+  if (rm) rm.onclick = async () => {
+    if (await UI.confirm({ title: `Remove ${c.title}?`, body: "Every sign-in to it is revoked, its key deleted, and it leaves the Library.", verb: "Remove", danger: true, typed: c.name }))
+      act("DELETE", `/connectors/${name}`, null, async () => { UI.toast(`${c.title} is removed.`); location.hash = back; await loadConnectors(box); });
+  };
+}
+
+function addConnector(box) {
+  const d = document.createElement("dialog");
+  d.className = "ad-sheet";
+  d.setAttribute("aria-labelledby", "add-title");
+  d.innerHTML = `<form id="add-form">
+    <h2 id="add-title">Add an app</h2>
+    <p class="small muted">By its MCP address. Magnus asks the app whether people sign in to it with their own accounts.</p>
+    <label>Address <input name="url" type="url" required placeholder="https://" autocomplete="off"></label>
+    <label>What reaches it <select name="audience">${AUDIENCE.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select></label>
+    <label>What it returns <select name="label">${LABEL.map(([k, l]) => `<option value="${k}" ${k === "private+untrusted" ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    <label>The organisation's key, if it takes one <input name="token" type="password" autocomplete="new-password" spellcheck="false"></label>
+    <label>Who may use it <input name="groups" placeholder="Everyone" autocomplete="off"></label>
+    <p class="error" id="add-error" hidden></p>
+    <div class="row ad-sheet-actions"><button type="button" id="add-cancel">Cancel</button><button class="primary">Add</button></div>
+  </form>`;
+  document.body.append(d);
+  d.addEventListener("close", () => d.remove());
+  $("#add-cancel", d).onclick = () => d.close();
+  $("#add-form", d).onsubmit = async e => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target));
+    const body = { url: f.url, audience: f.audience, label: f.label, token: f.token || undefined, access_groups: f.groups.split(",").map(x => x.trim()).filter(Boolean) };
+    try {
+      const v = await api("POST", "/connectors", body);
+      d.close();
+      UI.toast(`${v.name} is added.${v.sign_in ? " People sign in to it with their own accounts." : ""}`);
+      await loadConnectors(box);
+      location.hash = `#/security/connectors/${v.name}`;
+    } catch (err) { const el = $("#add-error", d); el.textContent = err.message; el.hidden = false; }
+  };
+  d.showModal();
 }
 
 // ---- Users -------------------------------------------------------------
@@ -500,7 +678,7 @@ async function userPanel(view, id, tab) {
 const SECTIONS = {
   overview: view => overviewView(view),
   users: (view, rest) => usersView(view, rest[0], rest[1]),
-  security: (view, rest) => (rest[0] === "audit" || !rest[0] ? auditView(view, rest[1]) : null),
+  security: (view, rest) => securityView(view, rest),
   operations: view => operationsView(view),
 };
 
@@ -513,12 +691,13 @@ function section() {
   let view = $("#view");
   // A different section starts its screen afresh; within one, the list
   // stays and only the panel changes.
-  if (!view || view.dataset.section !== `${name}/${parts[1] && name !== "users" ? parts[1] : ""}`) {
+  const keep = name === "users" || name === "security";
+  if (!view || view.dataset.section !== `${name}/${parts[1] && !keep ? parts[1] : ""}`) {
     view?.remove();
     UI.closePanel();
     view = document.createElement("section");
     view.id = "view";
-    view.dataset.section = `${name}/${parts[1] && name !== "users" ? parts[1] : ""}`;
+    view.dataset.section = `${name}/${parts[1] && !keep ? parts[1] : ""}`;
     $("#main").prepend(view);
   }
   const draw = SECTIONS[name];

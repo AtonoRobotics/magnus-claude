@@ -198,6 +198,21 @@ pub enum Ev {
         provider: String,
         set: bool,
     },
+    /// An admin turned one of the organisation's apps on or off, or set who
+    /// may use it (admin console spec, Security › Connectors and
+    /// credentials). `access_groups` None keeps the app's own.
+    ConnectorSettings {
+        name: String,
+        enabled: bool,
+        #[serde(default)]
+        access_groups: Option<Vec<String>>,
+    },
+    /// The organisation's credential for an app (its key) was set, or
+    /// revoked. The value is in the vault, never here.
+    CredentialSet {
+        connector: String,
+        set: bool,
+    },
     /// The owner classified one of an app's tools (None: not offered).
     ToolClassified {
         connector: String,

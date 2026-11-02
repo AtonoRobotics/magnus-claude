@@ -97,3 +97,7 @@ button.danger { background: #B42318; border-color: #B42318; color: #fff; }
   .ad-panel { position: fixed; inset: 52px 0 56px 0; max-height: none; margin: 0; padding: 0 16px 24px; z-index: 4; border-left: 0; background: var(--main); }
   .ad-panel-head { background: var(--main); }
 }
+.ad-wrap { overflow-wrap: anywhere; }
+.ad-form { display: grid; gap: 4px; margin: 4px 0 12px; }
+.ad-form input, .ad-form select, .ad-form textarea { width: 100%; box-sizing: border-box; }
+.ad-panel h3 { margin: 20px 0 6px; }

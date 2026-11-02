@@ -35,7 +35,11 @@ pub async fn serve(k: Arc<Kernel>, state_dir: &Path) -> Result<()> {
         .route("/v1/people", axum::routing::get(people))
         .route("/v1/people/{person}/sessions", axum::routing::get(sessions).delete(end_sessions))
         .route("/v1/people/{person}/sessions/{id}", axum::routing::delete(end_session))
-        .route("/v1/people/{person}/turn-off", post(turn_off)).with_state(k);
+        .route("/v1/people/{person}/turn-off", post(turn_off))
+        .route("/v1/admin/connectors", axum::routing::get(connectors).post(add_connector))
+        .route("/v1/admin/connectors/{name}", axum::routing::patch(connector_settings).delete(remove_connector))
+        .route("/v1/admin/connectors/{name}/credential", axum::routing::put(set_credential).delete(revoke_credential))
+        .with_state(k);
     axum::serve(l, app).await?;
     Ok(())
 }
@@ -210,3 +214,50 @@ async fn turn_off(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): axum::
     let ended = k.turn_off(&person, &format!("{actor} turned {person} off in the admin console"), "An administrator has turned your account off").await;
     Json(json!({ "sessions_ended": ended, "schedules_paused": due })).into_response()
 }
+
+// The organisation's apps and their credentials (admin console spec,
+// Security › Connectors and credentials), as `actor`: the kernel's own
+// operations, the same the app's owner routes use. Credentials go in and
+// never come out.
+
+fn done(r: Result<Value, crate::connectors::Refusal>) -> Response {
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err((st, m)) => (st, Json(json!({ "error": m }))).into_response(),
+    }
+}
+
+fn no_actor() -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who does this" }))).into_response()
+}
+
+async fn connectors(State(k): State<Arc<Kernel>>) -> Response {
+    Json(json!({ "connectors": k.admin_connectors() })).into_response()
+}
+
+async fn add_connector(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return no_actor() };
+    done(k.add_connector(&actor, &b).await)
+}
+
+async fn connector_settings(State(k): State<Arc<Kernel>>, axum::extract::Path(name): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return no_actor() };
+    let groups = b.get("access_groups").and_then(|g| g.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+    done(k.connector_settings(&actor, &name, b["enabled"].as_bool(), groups).await)
+}
+
+async fn remove_connector(State(k): State<Arc<Kernel>>, axum::extract::Path(name): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return no_actor() };
+    done(k.remove_connector(&actor, &name).await)
+}
+
+async fn set_credential(State(k): State<Arc<Kernel>>, axum::extract::Path(name): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return no_actor() };
+    done(k.set_connector_credential(&actor, &name, b["value"].as_str().unwrap_or_default()).await)
+}
+
+async fn revoke_credential(State(k): State<Arc<Kernel>>, axum::extract::Path(name): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return no_actor() };
+    done(k.revoke_connector_credential(&actor, &name).await)
+}
+

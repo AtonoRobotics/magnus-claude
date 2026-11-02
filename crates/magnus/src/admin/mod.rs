@@ -12,6 +12,7 @@
 
 pub mod auth;
 pub mod cert;
+pub mod connectors;
 pub mod directory;
 pub mod kernel;
 pub mod live;
@@ -169,6 +170,9 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/api/v1/users/{id}/sessions", axum::routing::delete(users::end_sessions))
         .route("/api/v1/users/{id}/sessions/{sid}", axum::routing::delete(users::end_session))
         .route("/api/v1/users/{id}/invite", axum::routing::post(users::resend).delete(users::cancel))
+        .route("/api/v1/connectors", get(connectors::list).post(connectors::add))
+        .route("/api/v1/connectors/{id}", axum::routing::patch(connectors::update).delete(connectors::remove))
+        .route("/api/v1/connectors/{id}/credential", axum::routing::put(connectors::set_credential).delete(connectors::revoke_credential))
         .route("/api/v1/audit", get(audit_list))
         .route("/api/v1/audit.csv", get(audit_csv))
         .route("/api/v1/{*rest}", axum::routing::any(api_not_found))
