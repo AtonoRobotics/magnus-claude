@@ -1006,3 +1006,10 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Both system prompts name it beside the bundle's other tools, and say that the org's systems themselves are searched with `org_search` and read with `org_fetch`. Still nothing about the organisation itself.
 - Test: `an_entity_is_found_by_its_identity_or_name_only_by_whom_may_see_it` (entity_resolve.rs).
 
+## Org context, step 4c: who sees an org document follows its sources (2026-11-02, `org-context-4c`)
+
+- K2 with K3: an org document drawn from items in the org's sources is seen by whoever the sources say can read every one of them, not only by the person whose run wrote it. Before a bundle read, search, entity lookup or index rendering, the kernel asks each source, under the person's own grant, about every listed item it has no fresh answer for (its reader for that item: answered is a yes; refused, or the source out of their reach, is a no). A search hit or an item read sets the answer too.
+- Answers are kept for `[bundle] permission_seconds` (an hour, K3's expiry), then asked again, so access revoked at the source takes the document out of view within that time (T4); a rendered index changes when an answer does. The cache is in memory, not in the log: it is what a source said lately, rebuilt by asking.
+- An item whose source the kernel cannot ask (its locator names no source with a reader, such as an address written by hand) is seen only by the person whose run read it, as before. Change events from the sources (step 6) will drop answers early.
+- Test: `who_sees_an_org_document_follows_what_each_person_can_read_at_its_sources` (org_permissions.rs).
+

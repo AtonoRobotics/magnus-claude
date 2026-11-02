@@ -12,6 +12,35 @@ use crate::tools::Label;
 use anyhow::Result;
 use serde_json::{json, Value};
 
+/// Whether a person can read a source item, as the source last said (K3),
+/// and when it was asked; and a count of changes, for caches built on it.
+type Permits = std::collections::HashMap<(String, String), (bool, std::time::Instant)>;
+
+fn permits() -> &'static std::sync::Mutex<(Permits, u64)> {
+    static P: std::sync::OnceLock<std::sync::Mutex<(Permits, u64)>> = std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// What is known of `person` reading `item`, while it is fresh.
+pub fn permit(person: &str, item: &str, ttl: std::time::Duration) -> Option<bool> {
+    let p = permits().lock().unwrap();
+    p.0.get(&(person.to_string(), item.to_string())).filter(|(_, at)| at.elapsed() < ttl).map(|(ok, _)| *ok)
+}
+
+pub fn set_permit(person: &str, item: &str, ok: bool) {
+    let mut p = permits().lock().unwrap();
+    let before = p.0.insert((person.to_string(), item.to_string()), (ok, std::time::Instant::now())).map(|x| x.0);
+    if before != Some(ok) {
+        p.1 += 1;
+    }
+}
+
+/// Changes to what is known, so a cache of what someone may see can tell
+/// when to look again.
+pub fn permits_generation() -> u64 {
+    permits().lock().unwrap().1
+}
+
 /// A locator names the source and the item's id there: `<source>://<id>`.
 pub fn locator(source: &str, id: &str) -> String {
     format!("{source}://{id}")
@@ -80,6 +109,47 @@ fn answer(text: &str, structured: Option<Value>) -> Value {
 }
 
 impl Kernel {
+    /// Whether an item's locator names a source the kernel can ask.
+    pub fn askable(&self, item: &str) -> bool {
+        parse_locator(item).is_some_and(|(s, _)| self.connector(s).is_some_and(|c| c.source.as_ref().is_some_and(|x| x.fetch.is_some())))
+    }
+
+    /// K3: whether `person` can read `item`, from what the source last said
+    /// while fresh, else asked of the source now under their grant (their
+    /// reader refused, or the source out of their reach, is a no).
+    pub async fn can_read(&self, person: &str, item: &str) -> bool {
+        let ttl = std::time::Duration::from_secs(self.cfg.bundle.permission_seconds);
+        if let Some(ok) = permit(person, item, ttl) {
+            return ok;
+        }
+        let ok = match parse_locator(item) {
+            Some((source, id)) => match self.sources_for(person, &[source.to_string()]).into_iter().next() {
+                Some((c, s)) => match &s.fetch {
+                    Some(fetch) => {
+                        let mut args: serde_json::Map<String, Value> = s.fetch_args.clone().into_iter().collect();
+                        args.insert(s.id.clone(), json!(id));
+                        self.source_call(person, &c, fetch, &Value::Object(args)).await.is_ok()
+                    }
+                    None => false,
+                },
+                None => false,
+            },
+            None => false,
+        };
+        set_permit(person, item, ok);
+        ok
+    }
+
+    /// Ask the sources about every item `docs` list that `person` has no
+    /// fresh answer for, so visibility (K2) can be decided from what is known.
+    pub async fn check_sources(&self, person: &str, docs: &[crate::state::BundleDoc]) {
+        let ttl = std::time::Duration::from_secs(self.cfg.bundle.permission_seconds);
+        let mut items: Vec<String> = docs.iter().filter(|d| d.scope == "org").flat_map(|d| d.sources.clone()).filter(|s| self.askable(s) && permit(person, s, ttl).is_none()).collect();
+        items.sort();
+        items.dedup();
+        futures::future::join_all(items.iter().map(|i| self.can_read(person, i))).await;
+    }
+
     /// The sources `person` may reach now, with each one's search facts.
     fn sources_for(&self, person: &str, only: &[String]) -> Vec<(Connector, crate::config::Source)> {
         let Some(p) = self.person(person) else { return vec![] };
@@ -143,6 +213,10 @@ impl Kernel {
             match r {
                 Ok((v, l)) => {
                     let h = hits(&name, &id_field, &v, limit);
+                    // The source found them for the person: they can read them.
+                    for x in &h {
+                        set_permit(&person, x["locator"].as_str().unwrap_or_default(), true);
+                    }
                     status.push(json!({ "source": name, "hits": h.len() }));
                     label = label.join(l);
                     apps.push(name);
@@ -167,7 +241,9 @@ impl Kernel {
         let Some(fetch) = s.fetch.clone() else { return Ok((format!("{source} has no reader: open what its search gave."), true, clean)) };
         let mut args: serde_json::Map<String, Value> = s.fetch_args.clone().into_iter().collect();
         args.insert(s.id.clone(), json!(id));
-        match self.source_call(&person, &c, &fetch, &Value::Object(args)).await {
+        let r = self.source_call(&person, &c, &fetch, &Value::Object(args)).await;
+        set_permit(&person, l, r.is_ok());
+        match r {
             Ok((v, label)) => {
                 let content = match &v {
                     Value::String(t) => t.clone(),
