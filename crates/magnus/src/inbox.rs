@@ -388,6 +388,7 @@ impl Kernel {
                 label,
                 data: None,
                 sources: vec![],
+                items: vec![],
                 check: false,
             },
         )

@@ -468,7 +468,12 @@ impl Kernel {
         let s = |k: &str| input[k].as_str().unwrap_or_default().to_string();
         Ok(match tool {
             "bundle_read" => match self.bundle_read(&person, &s("path")).await? {
-                Some((fm, body, label, version)) => (render(&fm, &body), false, Some(json!({ "path": s("path"), "version": version, "untrusted": label.untrusted, "private": label.private }))),
+                Some((fm, body, label, version)) => {
+                    // A document drawn from source items tells what they say:
+                    // they count among what the run read (K5).
+                    let items: Vec<String> = fm["sources"].as_array().into_iter().flatten().filter_map(|x| x["resource"].as_str()).filter(|r| self.askable(r)).map(String::from).collect();
+                    (render(&fm, &body), false, Some(json!({ "path": s("path"), "version": version, "untrusted": label.untrusted, "private": label.private, "items": items })))
+                }
                 None => (format!("{}: no such document, or not one the person can see", s("path")), true, Some(json!({ "untrusted": false, "private": false }))),
             },
             "entity_resolve" => {

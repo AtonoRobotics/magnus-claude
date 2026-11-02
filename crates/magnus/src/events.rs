@@ -624,6 +624,9 @@ pub enum Ev {
         /// The apps the content came from, for the audience rule.
         #[serde(default)]
         sources: Vec<String>,
+        /// The source items it read (their locators), for shared output (K5).
+        #[serde(default)]
+        items: Vec<String>,
         /// The result of a contract check: compared by the kernel, never
         /// given to the model as content, so it taints nothing.
         #[serde(default)]

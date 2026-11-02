@@ -494,6 +494,7 @@ impl Kernel {
                 label: Label::PRINCIPAL,
                 data: None,
                 sources: vec![],
+                items: vec![],
                 check: false,
             },
         )

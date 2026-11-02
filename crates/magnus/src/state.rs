@@ -112,6 +112,8 @@ pub struct Run {
     pub private: bool,
     /// Apps whose private content this run has read.
     pub private_from: std::collections::BTreeSet<String>,
+    /// The org's source items this run has read (K5).
+    pub read_items: std::collections::BTreeSet<String>,
     pub model_calls: u32,
     pub actions: u32,
     pub usd: f64,
@@ -1530,6 +1532,7 @@ impl State {
                         // thread, a schedule's source) has no app to name:
                         // the unnamed source, as for a result without one,
                         // so readers and the audience rule still see it.
+                        read_items: Default::default(),
                         private_from: if uploads {
                             ["library".to_string()].into()
                         } else if pb.private {
@@ -1619,8 +1622,11 @@ impl State {
                     r.decisions.push(DecisionRec { seq: e.seq, call_id: call_id.clone(), tool: tool.clone(), stage: stage.clone(), outcome: outcome.clone(), rule: rule.clone() });
                 }
             }
-            Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, sources, check } => {
+            Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, sources, items, check } => {
                 if let Some(r) = self.runs.get_mut(run) {
+                    if !*check {
+                        r.read_items.extend(items.iter().cloned());
+                    }
                     let rec = ResultRec { seq: e.seq, text: text.clone(), is_error: *is_error, status: status.clone(), data: data.clone(), label: *label };
                     if let Some(k) = key {
                         if let Some(i) = r.intents.get_mut(k) {
