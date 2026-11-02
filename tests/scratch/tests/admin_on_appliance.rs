@@ -1,10 +1,13 @@
 //! The admin console set up on an appliance by `release/admin-on-appliance.sh`
 //! (DECISIONS.md, "The admin console on strix-alpha"): from an appliance's
-//! config with no `[admin]`, it writes a hostname on the local network,
-//! listens only on the machine's address there, takes only that network, and
-//! makes the organisation's CA and the console's certificate from it. The
-//! console starts on what it wrote and answers its hostname over TLS that
-//! the new CA verifies, and nothing else; run again, it writes nothing more.
+//! config with no `[admin]`, it writes the machine's Tailscale name as the
+//! console's hostname and its addresses as aliases, listens only on the
+//! machine's address, takes only that network, and makes the organisation's
+//! CA and the console's certificate from it, naming every name. The console
+//! starts on what it wrote and answers each of its names over TLS that the
+//! new CA verifies, and nothing else; run again, it writes nothing more. A
+//! section an earlier run wrote, with one name, is brought up to every name
+//! and keeps its database password.
 
 use magnus_invariants::appliance::{bin, workspace_root};
 use magnus_invariants::*;
@@ -18,6 +21,7 @@ fn run(config: &std::path::Path, lan: &str, port: u16) {
         .arg("--config-only")
         .env("MAGNUS_ADMIN_LAN", lan)
         .env("MAGNUS_ADMIN_TAILSCALE", "none")
+        .env("MAGNUS_ADMIN_TSNAME", "strix.example-tailnet.ts.net")
         .env("MAGNUS_ADMIN_PORT", port.to_string())
         .output()
         .unwrap();
@@ -42,16 +46,20 @@ async fn the_setup_writes_an_admin_console_that_answers_its_hostname_on_the_netw
 
     let ip = lan_ip();
     let port = std::net::TcpListener::bind((ip, 0)).unwrap().local_addr().unwrap().port();
+    // What #78's first run wrote on strix-alpha: one name, no aliases.
+    let before = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("{before}\n# The admin console (written by release/admin-on-appliance.sh; admin console spec).\n[admin]\nhostname = \"strix-alpha.local\"\nlisten = [\"{ip}:{port}\"]\nallow = [\"{ip}/32\"]\ntls_cert = \"x\"\ntls_key = \"y\"\ndatabase_url = \"postgres://magnus_root:kept@127.0.0.1:1/magnus\"\n")).unwrap();
     run(&config, &format!("{ip}/24"), port);
     let written = std::fs::read_to_string(&config).unwrap();
     let cfg: toml::Table = written.parse().unwrap();
     let a = cfg["admin"].as_table().unwrap();
     let host = a["hostname"].as_str().unwrap().to_string();
-    assert!(host.ends_with(".local"), "{host}");
+    assert_eq!(host, "strix.example-tailnet.ts.net");
+    assert_eq!(a["aliases"].as_array().unwrap(), &vec![toml::Value::from(ip.to_string())], "the address is not an alias");
     assert_eq!(a["listen"].as_array().unwrap(), &vec![toml::Value::from(format!("{ip}:{port}"))]);
     let net = a["allow"].as_array().unwrap()[0].as_str().unwrap().to_string();
     assert!(net.ends_with("/24") && !net.starts_with("0.0.0.0"), "{net}");
-    assert!(a["database_url"].as_str().unwrap().starts_with("postgres://magnus_root:"));
+    assert_eq!(a["database_url"].as_str().unwrap(), "postgres://magnus_root:kept@127.0.0.1:1/magnus", "the database password was not kept");
     let tls = app.dir.path().join("admin-tls");
     let mode = |f: &str| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(tls.join(f)).unwrap().permissions()) & 0o777;
     assert_eq!((mode("ca.key"), mode("console.key")), (0o600, 0o600), "a key is readable by others");
@@ -68,6 +76,11 @@ async fn the_setup_writes_an_admin_console_that_answers_its_hostname_on_the_netw
     let browser = reqwest::Client::builder().add_root_certificate(ca).resolve(&host, addr).no_proxy().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let r = browser.get(format!("https://{host}:{port}/")).send().await.expect("the console's certificate is not trusted through the new CA");
     assert!(r.status().is_success() || r.status().is_redirection(), "{}", r.status());
+    // By its address too, as a computer on the LAN types it.
+    let ca = reqwest::Certificate::from_pem(&std::fs::read(tls.join("ca.pem")).unwrap()).unwrap();
+    let by_ip = reqwest::Client::builder().add_root_certificate(ca).no_proxy().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let r = by_ip.get(format!("https://{ip}:{port}/")).send().await.expect("the certificate does not name the address");
+    assert!(r.status().is_success() || r.status().is_redirection(), "the console did not answer its address: {}", r.status());
     let other = browser.get(format!("https://{host}:{port}/")).header("Host", "elsewhere.example").send().await.unwrap();
     assert_eq!(other.status().as_u16(), 404, "the console answered another hostname");
     let _ = child.start_kill();

@@ -100,6 +100,11 @@ pub struct Appliance {
 #[derive(Deserialize, Clone, Debug)]
 pub struct Admin {
     pub hostname: String,
+    /// Other names the console answers to, on the same networks: the
+    /// machine's name on the VPN and its addresses, so the console opens
+    /// however a computer reaches the appliance (owner, 2026-11-02).
+    #[serde(default)]
+    pub aliases: Vec<String>,
     pub listen: Vec<String>,
     pub allow: Vec<String>,
     pub tls_cert: PathBuf,

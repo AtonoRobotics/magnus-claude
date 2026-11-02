@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **The admin console answers every name it is reached by (owner, 2026-11-02; branch `admin-names`).** strix-alpha.local never resolves on the owner's computers; the console now answers its Tailscale name, 192.168.0.50 and 100.92.130.94, with one certificate naming all of them, at port 7443.
 - **The admin console on strix-alpha (owner, 2026-11-02; branch `admin-on-appliance`).** Each master build now sets up and starts the console beside the appliance at `https://strix-alpha.local:7443`, from the organisation's own CA, registered in the realm with the owner holding `admin`, and carries Google's client secret into the vault once the repository has it. The org context queue (steps 2 to 7b, committed on their branches) waits behind this and working connectors.
 - **A schedule is approved once, then runs on its own (owner, 2026-11-02; merged in #77).** Confirming a schedule covers the policy's asks in its runs for actions its person may approve, except moving money; the verifier judges its runs' unchecked criteria; the Rule of Two and the audience rule still ask each time.
 - **Org context, step 1: the bundle (owner, 2026-11-02; merged in #76).** The owner's org context build spec replaces the memory spec and comes before behavior steps 3-7; `docs/proposals/org-context.md` plans it. Magnus writes, reads and searches an OKF v0.2 bundle through the kernel, every write checked and versioned, each person seeing only what they may. Next: context assembly (the rendered index), then per-user memory.
