@@ -1063,3 +1063,18 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - A document drawn from an item no source can be asked about is now seen by the person whose run read it and by whoever connected that source, whose grant reads it, so the curator can recheck it.
 - Test: `the_curator_gets_the_kernels_brief_each_run_under_the_grant_that_reads_it` (curator.rs).
 
+## Recall only, step 3c (results): what a tool returned is recalled (2026-11-02, `results-recalled`)
+
+- The owner's "recall only" (2026-11-01) and the connectors spec, Isolation of results: "what comes through a connection is kept in the content store under its person and recalled only for them". The content store already held each tool result under the run's person (step 1). The kernel also kept a copy of every result's text in memory, and everything that needed it read that copy, so the wall around an app's answers was a filter in code.
+- Step 3c is split again: this pull request covers tool results; a run's own replies (what the model wrote) follow.
+- A result's record stays in memory, because decisions need it under one lock: its event, whether it failed, its status and its label. Its text does not. Every reader recalls it for the run's person through their wall, one read per request (`Kernel::result_texts`):
+  - the run's context at each model call;
+  - a task's steps, for the person and for the owner's read of their tasks;
+  - the citations `knowledge_add` checks;
+  - the lost-run check;
+  - a repeated call's earlier answer;
+  - a failure's notice;
+  - a chat turn's unfinished actions.
+- A result the store does not give the person (deleted, or not theirs) reads as empty. Building the context can now fail on the recall, and a failure stops the run with its error, as for files (step 5).
+- A result's structured data (cards, images, what `find_tools` found) stays in memory until 3d, which moves cards and outputs.
+- Test: `what_an_app_returned_is_recalled_from_the_content_store_for_its_person` (content_walls.rs). The calendar's answer is edited in the content store while Carol's run waits. Her run's next model call and her task's steps show the edit, and once the row is made Bob's, her steps no longer show it.

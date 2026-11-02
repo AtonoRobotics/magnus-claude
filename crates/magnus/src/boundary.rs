@@ -336,7 +336,10 @@ impl Kernel {
                     return self.deny(a, "idempotency", "this step was already used for a different request", false, None).await;
                 }
                 self.decision(a, "dedupe", "idempotency", "already done", None).await?;
-                return self.record(a, Some(key), &prev.status, prev.text, prev.is_error, f.label, prev.data).await;
+                // What it returned then, recalled for the run's person.
+                let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
+                let text = self.recall.fields(&person, &[prev.seq], &["text"]).await?.remove(&prev.seq).and_then(|v| v["text"].as_str().map(String::from)).unwrap_or_default();
+                return self.record(a, Some(key), &prev.status, text, prev.is_error, f.label, prev.data).await;
             }
             Some(Intent { input, result: None, .. }) => {
                 if input != a.input {

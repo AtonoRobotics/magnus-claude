@@ -63,8 +63,10 @@ impl Reply {
 
 #[derive(Clone, Debug)]
 pub struct ResultRec {
+    /// The event that holds what the tool returned: its text is recalled
+    /// for the run's person when a request needs it, never kept here
+    /// (recall only, step 3c; connectors spec, Isolation of results).
     pub seq: i64,
-    pub text: String,
     pub is_error: bool,
     pub status: String,
     pub data: Option<Value>,
@@ -193,12 +195,13 @@ impl Run {
     }
 
     /// Tool calls from the latest reply that have no result yet, in order.
-    /// Every tool call with its result, in the order the model made them.
-    pub fn results_in_order(&self) -> Vec<Value> {
+    /// Every tool call with its result, in the order the model made them,
+    /// with what each returned from `texts` (recalled, by call id).
+    pub fn results_in_order(&self, texts: &HashMap<String, String>) -> Vec<Value> {
         self.replies
             .iter()
             .flat_map(|r| r.calls())
-            .filter_map(|(id, name, _)| self.results.get(&id).map(|x| serde_json::json!({ "tool": name, "text": x.text, "is_error": x.is_error, "status": x.status, "seq": x.seq })))
+            .filter_map(|(id, name, _)| self.results.get(&id).map(|x| serde_json::json!({ "tool": name, "text": texts.get(&id).cloned().unwrap_or_default(), "is_error": x.is_error, "status": x.status, "seq": x.seq })))
             .collect()
     }
 
@@ -1655,12 +1658,12 @@ impl State {
                     r.decisions.push(DecisionRec { seq: e.seq, call_id: call_id.clone(), tool: tool.clone(), stage: stage.clone(), outcome: outcome.clone(), rule: rule.clone() });
                 }
             }
-            Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, sources, items, check } => {
+            Ev::ToolResult { run, call_id, key, status, is_error, label, data, sources, items, check, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     if !*check {
                         r.read_items.extend(items.iter().cloned());
                     }
-                    let rec = ResultRec { seq: e.seq, text: text.clone(), is_error: *is_error, status: status.clone(), data: data.clone(), label: *label };
+                    let rec = ResultRec { seq: e.seq, is_error: *is_error, status: status.clone(), data: data.clone(), label: *label };
                     if let Some(k) = key {
                         if let Some(i) = r.intents.get_mut(k) {
                             i.result = Some(rec.clone());

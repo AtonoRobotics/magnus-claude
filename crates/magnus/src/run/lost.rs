@@ -53,7 +53,7 @@ struct Call {
 /// The no-progress signal in the run's latest steps, if any: which pattern,
 /// in words the model can act on, and the reply where the loop began (the
 /// checkpoint to go back to).
-pub fn signal(run: &Run, t: &Thresholds) -> Option<(String, u32)> {
+pub fn signal(run: &Run, t: &Thresholds, texts: &std::collections::HashMap<String, String>) -> Option<(String, u32)> {
     let from = run.lost_since as usize;
     let replies = run.replies.get(from..).unwrap_or_default();
     // Replies in a row that asked for nothing.
@@ -70,7 +70,7 @@ pub fn signal(run: &Run, t: &Thresholds) -> Option<(String, u32)> {
                 continue;
             }
             let Some(res) = run.results.get(&id) else { continue };
-            calls.push((from + i, Call { tool: name, input, result: res.text.clone(), error: res.is_error }));
+            calls.push((from + i, Call { tool: name, input, result: texts.get(&id).cloned().unwrap_or_default(), error: res.is_error }));
         }
     }
     let n = calls.len();
@@ -114,7 +114,8 @@ impl crate::kernel::Kernel {
         if !reset && !escalate {
             return Ok(None);
         }
-        let Some((signal, from)) = signal(run, &c.lost) else { return Ok(None) };
+        let texts = self.result_texts(run).await?;
+        let Some((signal, from)) = signal(run, &c.lost, &texts) else { return Ok(None) };
         let to = run.replies.len() as u32;
         let target = c.escalate_to.as_deref().and_then(|t| t.split_once('/')).filter(|t| *t != run.model());
         let first = run.cuts.is_empty() && run.escalated.is_none();

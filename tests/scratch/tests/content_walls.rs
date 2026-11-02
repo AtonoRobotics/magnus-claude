@@ -300,3 +300,82 @@ async fn a_persons_requests_are_recalled_from_the_content_store_for_them() {
         assert!(!v.contains(&edited), "her {name} view read past her wall: {v}");
     }
 }
+
+/// What an app returned to a run is recalled from the content store for the
+/// run's person whenever the run or a view needs it (recall only, step 3c;
+/// connectors spec, Isolation of results): edited in the store, the run's
+/// next model call and her task's steps show the edit; a row the database
+/// says is not hers is shown to neither.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_an_app_returned_is_recalled_from_the_content_store_for_its_person() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    let cal = magnus_scratch::FakeOAuthApp::start(3600).await;
+    let (said, edited) = (canary("said"), canary("edited"));
+    let go = Arc::new(AtomicBool::new(false));
+    let last: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let (g, l, title) = (go.clone(), last.clone(), said.clone());
+    let m = FakeModel::start(script(move |c| {
+        let (g, l, title) = (g.clone(), l.clone(), title.clone());
+        async move {
+            match c.turn() {
+                0 => contract_unchecked("list the events", "the events are listed"),
+                1 => tool("calendar__create_event", json!({ "title": title })),
+                2 => tool("calendar__list_events", json!({})),
+                // Wait for the test to edit the store, then take one more
+                // step, so the next call's context is built after the edit.
+                3 => {
+                    for _ in 0..600 {
+                        if g.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    tool("calendar__create_event", json!({ "title": "after" }))
+                }
+                _ => {
+                    *l.lock().unwrap() = Some(c.body.clone());
+                    complete("listed")
+                }
+            }
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private+untrusted" })).await;
+    assert!(st.is_success(), "{v}");
+    for t in ["list_events", "create_event"] {
+        assert_eq!(alice.put(&format!("/v1/connectors/calendar/tools/{t}"), json!({ "risk": "read" })).await.0, 204);
+    }
+    let carol = app.api("carol");
+    let (_, v) = carol.post("/v1/connectors/calendar/sign-in", json!({ "redirect_uri": "http://127.0.0.1:9/callback" })).await;
+    let (code, state) = magnus_scratch::FakeOAuthApp::browse(v["authorize_url"].as_str().unwrap()).await;
+    assert_eq!(carol.post("/v1/connectors/calendar/sign-in/complete", json!({ "state": state, "code": code })).await.0, 204);
+    let task = carol.submit("What is on my calendar?").await;
+    let steps = || async { carol.get(&format!("/v1/tasks/{task}/timeline")).await.1.to_string() };
+    eventually("the calendar's answer in her task's steps", PATIENCE, || async { steps().await.contains(&said).then_some(()) }).await;
+
+    // The content store now says something else.
+    let admin = app.db.admin().await;
+    let changed = admin
+        .execute(
+            "UPDATE public.content SET body = jsonb_set(body, '{text}', to_jsonb(replace(body->>'text', $1, $2))) WHERE body->>'text' LIKE '%' || $1 || '%'",
+            &[&said, &edited],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed, 1, "the calendar's answer is not one row of the store");
+    go.store(true, Ordering::SeqCst);
+    carol.wait_item(&task, "review").await;
+    let ctx = last.lock().unwrap().clone().expect("no model call after the edit").to_string();
+    let results: Vec<String> = serde_json::from_str::<serde_json::Value>(&ctx).unwrap()["messages"].as_array().unwrap().iter().flat_map(|m| m["content"].as_array().cloned().unwrap_or_default()).filter(|b| b["type"] == "tool_result").map(|b| b.to_string()).collect();
+    assert!(results.iter().any(|r| r.contains(&edited)) && results.iter().all(|r| !r.contains(&said)), "the run's context did not recall the app's answer: {results:?}");
+    let shown = steps().await;
+    assert!(shown.contains(&edited), "her task's steps are not recalled: {shown}");
+
+    // A row the database says is not hers is not shown to her.
+    admin.execute("UPDATE public.content SET person = 'bob' WHERE body->>'text' LIKE '%' || $1 || '%'", &[&edited]).await.unwrap();
+    let shown = steps().await;
+    assert!(!shown.contains(&edited), "her task's steps read past her wall: {shown}");
+}

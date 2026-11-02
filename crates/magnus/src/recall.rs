@@ -63,6 +63,19 @@ impl Recall {
     }
 }
 
+impl crate::kernel::Kernel {
+    /// What each of `run`'s tool calls returned, by call id, recalled for
+    /// the run's person through their wall (recall only, step 3c). A result
+    /// the content store does not give them (deleted, or not theirs) is
+    /// left out.
+    pub async fn result_texts(&self, run: &crate::state::Run) -> Result<HashMap<String, String>> {
+        let ids: Vec<(String, i64)> = run.results.iter().map(|(id, r)| (id.clone(), r.seq)).collect();
+        let seqs: Vec<i64> = ids.iter().map(|(_, s)| *s).collect();
+        let got = self.recall.fields(&run.person, &seqs, &["text"]).await?;
+        Ok(ids.into_iter().filter_map(|(id, s)| got.get(&s).map(|v| (id, v["text"].as_str().unwrap_or_default().to_string()))).collect())
+    }
+}
+
 /// A remembered fact as it is shown: its record and what it says.
 pub struct Remembered {
     pub entry: crate::state::MemoryEntry,

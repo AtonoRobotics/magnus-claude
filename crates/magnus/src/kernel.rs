@@ -708,16 +708,21 @@ impl Kernel {
     }
 
     /// The run's last few tool results, for a notice's evidence.
-    pub fn last_results(&self, run: &crate::state::Run) -> Vec<serde_json::Value> {
+    pub async fn last_results(&self, run: &crate::state::Run) -> Vec<serde_json::Value> {
         let r = self.read(|s| s.runs.get(&run.id).cloned()).unwrap_or_else(|| run.clone());
-        r.results_in_order().into_iter().rev().take(3).collect()
+        let texts = self.result_texts(&r).await.unwrap_or_else(|e| {
+            tracing::warn!("recall the results of run {}: {e:#}", r.id);
+            Default::default()
+        });
+        r.results_in_order(&texts).into_iter().rev().take(3).collect()
     }
 
     /// In a chat turn: the actions the person asked for (start a task,
     /// propose a schedule) that failed and were not made good later, with
     /// the reason.
-    pub fn unfinished_chat_actions(&self, run: &crate::state::Run) -> Vec<serde_json::Value> {
+    pub async fn unfinished_chat_actions(&self, run: &crate::state::Run) -> anyhow::Result<Vec<serde_json::Value>> {
         let r = self.read(|s| s.runs.get(&run.id).cloned()).unwrap_or_else(|| run.clone());
+        let texts = self.result_texts(&r).await?;
         let mut out: Vec<serde_json::Value> = vec![];
         for tool in ["create_task", "create_schedule"] {
             // Each attempt with its title and whether it worked, in order.
@@ -726,7 +731,7 @@ impl Kernel {
                 .iter()
                 .flat_map(|x| x.calls())
                 .filter(|(_, name, _)| name == tool)
-                .filter_map(|(id, _, input)| r.results.get(&id).map(|x| (input["title"].as_str().unwrap_or_default().trim().to_lowercase(), x.is_error, x.text.clone())))
+                .filter_map(|(id, _, input)| r.results.get(&id).map(|x| (input["title"].as_str().unwrap_or_default().trim().to_lowercase(), x.is_error, texts.get(&id).cloned().unwrap_or_default())))
                 .collect();
             // A failed attempt is made good by a later success of the same
             // thing (the same title, or any title when it had none); one
@@ -747,7 +752,7 @@ impl Kernel {
                 out.push(serde_json::json!({ "tool": tool, "attempts": tried.iter().filter(|t| t.1).count(), "error": failed.last() }));
             }
         }
-        out
+        Ok(out)
     }
 }
 

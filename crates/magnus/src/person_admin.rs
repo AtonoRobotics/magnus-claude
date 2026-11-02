@@ -103,7 +103,8 @@ impl Kernel {
             ("tasks", Some(id)) => {
                 let found = self.read(|s| s.tasks.get(id).filter(|t| t.person == target.id).and_then(|t| s.runs.get(&t.run_id).map(|r| (crate::api::task_row(self, s, target, t, r, &words), r.clone()))));
                 let (row, run) = found.ok_or_else(none)?;
-                json!({ "task": row, "timeline": crate::api::timeline_of(&run) })
+                let texts = self.result_texts(&run).await.map_err(failed)?;
+                json!({ "task": row, "timeline": crate::api::timeline_of(&run, &texts) })
             }
             ("chats", None) => json!(self.threads(&target.id).await.map_err(failed)?),
             ("chats", Some(id)) => json!({ "thread": id, "entries": self.thread_entries(&target.id, id).await.map_err(failed)?.ok_or_else(none)? }),

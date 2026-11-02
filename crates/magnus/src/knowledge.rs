@@ -329,7 +329,7 @@ impl Kernel {
     /// Check each citation against the run's own tool results: the quote
     /// must be in what a call to that source returned. Verified by two
     /// independent sources, or by one system of record.
-    fn check_citations(&self, run: &Run, citations: &[Value]) -> Result<Value, String> {
+    fn check_citations(&self, run: &Run, citations: &[Value], texts: &std::collections::HashMap<String, String>) -> Result<Value, String> {
         let calls: Vec<(String, String, Value)> = run.replies.iter().flat_map(|r| r.calls()).collect();
         let mut evidence = vec![];
         for (i, c) in citations.iter().enumerate() {
@@ -343,7 +343,7 @@ impl Kernel {
             if matching.is_empty() {
                 return Err(format!("citation {i}: this task read nothing from {source:?}; cite a URL it fetched or an app it used"));
             }
-            let found = matching.iter().find(|(id, ..)| run.results.get(id).is_some_and(|r| !r.is_error && normal(&r.text).contains(&normal(quote))));
+            let found = matching.iter().find(|(id, ..)| run.results.get(id).is_some_and(|r| !r.is_error && texts.get(id).is_some_and(|t| normal(t).contains(&normal(quote)))));
             let (tool, input) = found.map(|(_, t, i)| (t.clone(), i.clone())).unwrap_or_else(|| (matching[0].1.clone(), matching[0].2.clone()));
             let from = source_of(&tool, &input);
             let record = from.strip_prefix("app:").and_then(|a| self.connector(a)).is_some_and(|c| c.system_of_record);
@@ -378,7 +378,9 @@ impl Kernel {
         if citations.is_empty() {
             return Ok(("Research enters the knowledge base with its citations: give at least one (source and quote).".into(), true, None));
         }
-        let verification = match self.check_citations(&run, &citations) {
+        // What the run read, recalled for its person: a quote is found only there.
+        let texts = self.result_texts(&run).await?;
+        let verification = match self.check_citations(&run, &citations, &texts) {
             Ok(v) => v,
             Err(why) => return Ok((format!("Not filed: {why}."), true, None)),
         };

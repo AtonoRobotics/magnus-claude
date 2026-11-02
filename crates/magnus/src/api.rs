@@ -981,12 +981,15 @@ async fn timeline(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response
         Err(r) => return r,
     };
     let Some((_, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
-    Json(timeline_of(&run)).into_response()
+    match k.result_texts(&run).await {
+        Ok(texts) => Json(timeline_of(&run, &texts)).into_response(),
+        Err(e) => internal(e),
+    }
 }
 
 /// A run's steps, each with its tool calls, the boundary's decisions and
 /// their results; its notices and verifications.
-pub(crate) fn timeline_of(run: &Run) -> Value {
+pub(crate) fn timeline_of(run: &Run, texts: &std::collections::HashMap<String, String>) -> Value {
     let mut steps = vec![];
     for reply in &run.replies {
         let mut calls = vec![];
@@ -1006,7 +1009,7 @@ pub(crate) fn timeline_of(run: &Run) -> Value {
                         "call_id": id, "tool": name, "input": input,
                         "issuer": run.intents.get(id).map(|i| i.issuer.clone()).unwrap_or_else(|| "model".into()),
                         "decisions": decisions,
-                        "result": r.map(|r| r.text.chars().take(4000).collect::<String>()),
+                        "result": r.map(|_| texts.get(id).map(|t| t.chars().take(4000).collect::<String>()).unwrap_or_default()),
                         "is_error": r.map(|r| r.is_error), "status": r.map(|r| r.status.clone()),
                     }));
                 }

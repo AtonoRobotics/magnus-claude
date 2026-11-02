@@ -167,6 +167,8 @@ impl Kernel {
         let notes = |i: usize| run.cuts.iter().filter(move |c| c.from as usize == i).map(|c| Block::Text { text: c.note.clone() });
         first.extend(notes(0));
         msgs.push(Message { role: Role::User, content: first, state: None });
+        // What the run's tools returned, recalled for its person.
+        let texts = self.result_texts(run).await?;
         for (i, reply) in run.replies.iter().enumerate() {
             if cut(i) {
                 // A later reset can start inside an earlier one's cut: its
@@ -185,7 +187,7 @@ impl Kernel {
             let mut sources = vec![];
             for (id, tool, _) in reply.calls() {
                 if let Some(r) = run.results.get(&id) {
-                    let mut content = vec![Block::Text { text: clip(&r.text) }];
+                    let mut content = vec![Block::Text { text: clip(texts.get(&id).map(String::as_str).unwrap_or_default()) }];
                     if let Some(img) = r.data.as_ref().and_then(|d| d["image_b64"].as_str()) {
                         content.push(Block::Image { media_type: "image/png".into(), data_b64: img.to_string() });
                     }
@@ -589,7 +591,7 @@ impl Kernel {
                 let reason = input["reason"].as_str().unwrap_or("no reason given").to_string();
                 self.result(rid, call_id, "Recorded.", false).await?;
                 // A failure is never silent (K24): the person's inbox says so, with the evidence, in the same write.
-                let notice = self.notice_of(&run, format!("Failed: {}", self.title_of(&run).await), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run) } }));
+                let notice = self.notice_of(&run, format!("Failed: {}", self.title_of(&run).await), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run).await } }));
                 self.emit_all(vec![("model", Ev::Failed { run: rid.into(), reason, by: "model".into() }), ("kernel", notice)]).await?;
                 self.on_stop(rid, true).await;
                 self.after_end(rid);
@@ -798,7 +800,7 @@ impl Kernel {
         let rid = run.id.as_str();
         let run = self.read(|s| s.runs.get(rid).cloned()).unwrap_or_else(|| run.clone());
         // What the person asked for and did not happen is in the inbox too (K24), in the same write as the turn's end.
-        let unfinished = self.unfinished_chat_actions(&run);
+        let unfinished = self.unfinished_chat_actions(&run).await?;
         let mut evs = vec![("kernel", Ev::Completed { run: rid.into(), summary: answer, view: run.shown(), spoken: None })];
         if !unfinished.is_empty() {
             evs.push(("kernel", self.notice_of(&run, format!("Not done: {}", self.title_of(&run).await), json!({ "reason": "chat_action_failed", "evidence": unfinished }))));
