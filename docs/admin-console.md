@@ -17,7 +17,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] The configured hostname only, else 404; every name it is reached by (#68, #79; `admin_reach.rs`, `admin_on_appliance.rs`)
 - [x] The tunnel's public names shown under Operations › Network, the console never among them (`admin-operations`); the ingress itself is the tunnel's config
 - [x] TLS 1.3 only (#68; `admin_reach.rs`)
-- [ ] A certificate browsers already trust: ACME DNS-01 under a domain the organisation controls, or the organisation's own CA (today: a CA made on the appliance, trusted by hand)
+- [x] A certificate browsers already trust: ACME DNS-01 under the tailnet's domain, issued through tailscaled (Let's Encrypt) for the console's Tailscale name and renewed by the console; or the organisation's own CA (`admin-certificate`; `admin_certificate.rs`, `admin_on_appliance.rs`)
 - [x] The kill switch from the appliance's own console: `magnus kill` / `magnus release` (before #68)
 
 ## Authentication and session
@@ -104,7 +104,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] Health: kernel, event log, identity provider, console; CPU, memory, disk; recent errors (#71)
 - [x] Health: cloudflared, running microVMs, live (`admin-operations`; `admin_operations.rs`)
 - [x] Updates: version, available update with notes, install and rollback with step-up; the desktop app's channels and published versions, and everyone's channel (`admin-operations`; `admin_operations.rs`)
-- [x] Network: tunnel status and public hostnames, the admin hostname, the allowlist (a change that would shut out the admin's own address refused), certificate expiry (`admin-operations`; `admin_operations.rs`); renewal comes with the trusted certificate
+- [x] Network: tunnel status and public hostnames, the admin hostname, the allowlist (a change that would shut out the admin's own address refused), certificate expiry (`admin-operations`; `admin_operations.rs`); Renew, with why the trusted certificate could not be issued (`admin-certificate`; `admin_certificate.rs`)
 
 ## Server and API
 
@@ -113,7 +113,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] Postgres as `magnus_root`, insert and select only on the log (#70)
 - [x] The provider's admin API through `magnus-admin-svc` with `private_key_jwt`, realm-management in the realm only (#72)
 - [x] The kill switch the kernel's own, persisted, refusing new runs while on (#71, before)
-- [ ] Every endpoint in the spec's table: all built (`admin-shell` to `admin-knowledge`) but `POST /network/certificate/renew`, which comes with the trusted certificate; `POST /modules` and `DELETE /modules/{id}` answer 409 (modules come with the release)
+- [x] Every endpoint in the spec's table (`admin-shell` to `admin-certificate`); `POST /modules` and `DELETE /modules/{id}` answer 409, because modules come with the release (owner's ruling 22)
 - [x] Every change audited before it answers; a step-up endpoint without a fresh check returns 401 `step_up_required` (#70, #69)
 
 ## Invariant tests

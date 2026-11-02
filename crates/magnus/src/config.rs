@@ -154,6 +154,23 @@ pub struct Admin {
     /// realm), shown under Operations › Network; the console is never one.
     #[serde(default)]
     pub public_hostnames: Vec<String>,
+    /// A certificate browsers already trust, for `hostname` (admin console
+    /// spec, Access). `"tailscale"`: the machine's tailnet has it issued
+    /// (Let's Encrypt, by ACME DNS-01 under the tailnet's domain) into
+    /// `trusted_cert` and `trusted_key`, and the console renews it. The
+    /// console serves it to browsers naming `hostname`, and `tls_cert` (the
+    /// organisation's own CA's) to every other name, and to all of them
+    /// until it is issued. None: `tls_cert` is the organisation's, renewed
+    /// by it and read again on Operations › Network › Renew.
+    #[serde(default)]
+    pub trusted_via: Option<String>,
+    #[serde(default)]
+    pub trusted_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub trusted_key: Option<PathBuf>,
+    /// The `tailscale` program, when not the one on the PATH.
+    #[serde(default)]
+    pub tailscale: Option<PathBuf>,
 }
 
 fn admin_service_client() -> String {

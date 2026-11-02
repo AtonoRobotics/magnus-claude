@@ -53,6 +53,13 @@ block = "\n".join([
     f"allow = {q(allow)}",
     f'tls_cert = "{tls}/console.pem"',
     f'tls_key = "{tls}/console.key"',
+    # On a tailnet, the console's name there gets a certificate browsers
+    # already trust, issued through tailscaled (Let's Encrypt, DNS-01).
+    *([
+        'trusted_via = "tailscale"',
+        f'trusted_cert = "{tls}/trusted.pem"',
+        f'trusted_key = "{tls}/trusted.key"',
+    ] if tsname else []),
     f'database_url = "{url}"',
     "",
 ])

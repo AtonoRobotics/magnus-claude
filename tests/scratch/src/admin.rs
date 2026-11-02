@@ -167,3 +167,92 @@ pub async fn sign_in_with(p_url: &str, at: std::net::SocketAddr, who: &str, expe
 pub fn with_cookie(b: reqwest::RequestBuilder, sid: &str) -> reqwest::RequestBuilder {
     b.header("cookie", format!("__Host-magnus_admin={sid}"))
 }
+
+/// A stand-in for `tailscale cert` (a test fake): it hands the console the
+/// certificate the test has made ready, issued for the name asked by a CA
+/// of the test's own that stands for Let's Encrypt, or fails saying what
+/// tailscale says when the tailnet has HTTPS turned off.
+pub struct FakeTailscale {
+    dir: tempfile::TempDir,
+    ca: rcgen::Certificate,
+    ca_key: rcgen::KeyPair,
+    pub program: PathBuf,
+}
+
+impl FakeTailscale {
+    pub fn new() -> FakeTailscale {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        p.distinguished_name.push(rcgen::DnType::CommonName, "A public CA browsers trust (test)");
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca = p.self_signed(&ca_key).unwrap();
+        let program = dir.path().join("tailscale");
+        let d = dir.path().display();
+        // tailscale cert --cert-file C --key-file K NAME
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\n[ \"$1\" = cert ] || exit 2\necho \"$6\" >> '{d}/asked'\n[ -f '{d}/fail' ] && {{ cat '{d}/fail' >&2; exit 1; }}\n[ \"$6\" = \"$(cat '{d}/name')\" ] || {{ echo \"invalid domain $6\" >&2; exit 1; }}\ncp '{d}/next.pem' \"$3\" && cp '{d}/next.key' \"$5\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        FakeTailscale { dir, ca, ca_key, program }
+    }
+
+    /// The next certificate it hands out, for `name`: its DER.
+    pub fn ready(&self, name: &str) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec![name.to_string()]).unwrap().signed_by(&key, &self.ca, &self.ca_key).unwrap();
+        std::fs::write(self.dir.path().join("name"), name).unwrap();
+        std::fs::write(self.dir.path().join("next.pem"), cert.pem()).unwrap();
+        std::fs::write(self.dir.path().join("next.key"), key.serialize_pem()).unwrap();
+        let _ = std::fs::remove_file(self.dir.path().join("fail"));
+        cert.der().to_vec()
+    }
+
+    /// From now on it fails, saying `why`.
+    pub fn fail(&self, why: &str) {
+        std::fs::write(self.dir.path().join("fail"), why).unwrap();
+    }
+
+    /// How many times it was asked.
+    pub fn asked(&self) -> usize {
+        std::fs::read_to_string(self.dir.path().join("asked")).map(|s| s.lines().count()).unwrap_or(0)
+    }
+
+    /// The CA browsers trust, for a client.
+    pub fn public_ca(&self) -> reqwest::Certificate {
+        reqwest::Certificate::from_pem(self.ca.pem().as_bytes()).unwrap()
+    }
+
+    /// `[admin]` keys that have the console use it, keeping the issued
+    /// certificate in `dir`.
+    pub fn config(&self, dir: &std::path::Path) -> Vec<(&'static str, toml::Value)> {
+        vec![
+            ("trusted_via", "tailscale".into()),
+            ("trusted_cert", dir.join("trusted.pem").display().to_string().into()),
+            ("trusted_key", dir.join("trusted.key").display().to_string().into()),
+            ("tailscale", self.program.display().to_string().into()),
+        ]
+    }
+}
+
+impl Default for FakeTailscale {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The certificate the console presents to a browser naming its hostname,
+/// as DER, through a fresh connection that trusts `ca` alone; or why the
+/// browser refused it.
+pub async fn presented(c: &Console, ca: reqwest::Certificate) -> Result<Vec<u8>, String> {
+    presented_at(c.addr, HOST, ca).await
+}
+
+/// The same, for a console at `addr` named `host`.
+pub async fn presented_at(addr: SocketAddr, host: &str, ca: reqwest::Certificate) -> Result<Vec<u8>, String> {
+    let b = reqwest::Client::builder().add_root_certificate(ca).tls_built_in_root_certs(false).tls_info(true).resolve(host, addr).no_proxy().build().unwrap();
+    let r = b.get(format!("https://{host}:{}/status", addr.port())).send().await.map_err(|e| format!("{e:?}"))?;
+    r.extensions().get::<reqwest::tls::TlsInfo>().and_then(|i| i.peer_certificate()).map(<[u8]>::to_vec).ok_or_else(|| "no certificate seen".to_string())
+}

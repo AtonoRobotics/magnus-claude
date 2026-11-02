@@ -7,11 +7,13 @@
 //! starts on what it wrote and answers each of its names over TLS that the
 //! new CA verifies, and nothing else; run again, it writes nothing more. A
 //! section an earlier run wrote, with one name, is brought up to every name
-//! and keeps its database password.
+//! and keeps its database password. On a tailnet, the console's name
+//! there gets the certificate the tailnet issues, and its addresses keep
+//! the CA's.
 
 use magnus_invariants::appliance::{bin, workspace_root};
 use magnus_invariants::*;
-use magnus_scratch::admin::lan_ip;
+use magnus_scratch::admin::{lan_ip, presented_at, FakeTailscale};
 use std::net::SocketAddr;
 
 fn run(config: &std::path::Path, lan: &str, port: u16) {
@@ -64,9 +66,21 @@ async fn the_setup_writes_an_admin_console_that_answers_its_hostname_on_the_netw
     let mode = |f: &str| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(tls.join(f)).unwrap().permissions()) & 0o777;
     assert_eq!((mode("ca.key"), mode("console.key")), (0o600, 0o600), "a key is readable by others");
 
+    // On a tailnet, its name there gets a certificate browsers trust, kept beside the CA's.
+    assert_eq!(a["trusted_via"].as_str(), Some("tailscale"));
+    assert_eq!((a["trusted_cert"].as_str(), a["trusted_key"].as_str()), (Some(tls.join("trusted.pem").to_str().unwrap()), Some(tls.join("trusted.key").to_str().unwrap())));
+
     // Run again: nothing more is written.
     run(&config, &format!("{ip}/24"), port);
     assert_eq!(std::fs::read_to_string(&config).unwrap().matches("[admin]").count(), 1, "the setup wrote [admin] twice");
+
+    // The tailnet, a stand-in (never this machine's own tailscaled): not
+    // issuing yet, so every name gets the CA's certificate.
+    let ts = FakeTailscale::new();
+    ts.fail("500 Internal Server Error: your Tailscale account does not support getting TLS certs");
+    let written = std::fs::read_to_string(&config).unwrap();
+    assert!(written.trim_end().ends_with(&format!("database_url = \"{}\"", a["database_url"].as_str().unwrap())), "[admin] is not the config's last table");
+    std::fs::write(&config, format!("{}\ntailscale = \"{}\"\n", written.trim_end(), ts.program.display())).unwrap();
 
     // The console starts on it, and answers its hostname over TLS the CA verifies.
     let mut child = tokio::process::Command::new(bin("magnus-admin")).arg("--config").arg(&config).kill_on_drop(true).spawn().unwrap();
@@ -83,5 +97,18 @@ async fn the_setup_writes_an_admin_console_that_answers_its_hostname_on_the_netw
     assert!(r.status().is_success() || r.status().is_redirection(), "the console did not answer its address: {}", r.status());
     let other = browser.get(format!("https://{host}:{port}/")).header("Host", "elsewhere.example").send().await.unwrap();
     assert_eq!(other.status().as_u16(), 404, "the console answered another hostname");
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+
+    // Issued: its tailnet name gets the trusted certificate; its address
+    // still the CA's.
+    let issued = ts.ready(&host);
+    let mut child = tokio::process::Command::new(bin("magnus-admin")).arg("--config").arg(&config).kill_on_drop(true).spawn().unwrap();
+    let seen = eventually("the trusted certificate served", PATIENCE, || async { presented_at(addr, &host, ts.public_ca()).await.ok() }).await;
+    assert_eq!(seen, issued);
+    assert!(std::fs::metadata(tls.join("trusted.key")).is_ok(), "the issued key is not kept beside the CA's");
+    let ca = reqwest::Certificate::from_pem(&std::fs::read(tls.join("ca.pem")).unwrap()).unwrap();
+    let by_ip = reqwest::Client::builder().add_root_certificate(ca).no_proxy().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    by_ip.get(format!("https://{ip}:{port}/")).send().await.expect("the address no longer gets the CA's certificate");
     let _ = child.start_kill();
 }
