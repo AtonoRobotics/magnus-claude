@@ -116,6 +116,7 @@ async fn run(cfg: Config) -> Result<()> {
     crate::trash::schedule(k.clone());
     k.watch_sessions();
     k.watch_sources();
+    k.watch_curator();
     crate::update::schedule(k.clone());
     tokio::spawn(k.clone().sweep());
     // The admin console's way to the kernel: a local socket, never the network.

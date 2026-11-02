@@ -152,6 +152,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/adapters/{id}/sign-in/complete", post(sign_in_complete))
         .route("/v1/sources/{name}/changes", post(source_changes))
         .route("/v1/sources/{name}/survey", post(survey_source))
+        .route("/v1/bundle/curate", post(curate))
         .route("/v1/memory", get(memory).put(edit_memory))
         .route("/v1/memory/forget", post(forget_path))
         .route("/v1/memory/no-longer-true", post(mark_memory))
@@ -1527,6 +1528,21 @@ async fn source_changes(State(k): K, h: HeaderMap, Path(name): Path<String>, Jso
         }
     }
     Json(json!({ "recorded": changes.len() })).into_response()
+}
+
+/// Run the curator now, on the owner's say (the dashboard's "on demand").
+async fn curate(State(k): K, h: HeaderMap) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if !p.is_owner() {
+        return err(StatusCode::FORBIDDEN, "only the owner runs the curator");
+    }
+    match k.curate().await {
+        Ok(tasks) => (StatusCode::CREATED, Json(json!({ "tasks": tasks }))).into_response(),
+        Err(e) => internal(e),
+    }
 }
 
 /// Survey a source again, on the owner's say: a run as whoever connected it.

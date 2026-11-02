@@ -262,7 +262,10 @@ impl Kernel {
             }
             match self.askable(s).then(|| crate::sources::permit(person, s, ttl)).flatten() {
                 Some(ok) => ok,
-                None => writer,
+                // Not asked: the person whose run read it, and whoever
+                // connected its source (whose grant reads it, as the curator
+                // rechecks it).
+                None => writer || crate::sources::parse_locator(s).is_some_and(|(src, _)| self.read(|st| st.source_connected_by.get(src).is_some_and(|b| b == person))),
             }
         })
     }

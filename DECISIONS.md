@@ -1055,3 +1055,11 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - The curator run (nightly at the admin's time, and on demand, with the kernel's brief) is step 7b.
 - Test: `connecting_a_source_surveys_it_into_the_bundle_as_whoever_connected_it` (survey.rs, T15).
 
+## Org context, step 7b: the curator run (2026-11-02, `org-context-7b`)
+
+- The curator runs each night at `[bundle] curator_at` ("HH:MM", UTC; unset: only on demand) and when the owner asks (`POST /v1/bundle/curate`). It is ordinary runs given the goal of keeping the bundle accurate and useful, every change an audited, reversible version, plus the kernel's brief of what stands out since the last curation.
+- K1: one run per person whose grant reads what the brief names. A document drawn from a source goes to the run of whoever connected that source; the rest goes to the owner's.
+- The brief lists documents past `stale_after` and draft types and conventions waiting on an owner's review. Corrections, rejections, conventions unread since the last run and people's edits to Magnus's output join it with outcomes (step 8). A new version takes a document out of the next brief.
+- A document drawn from an item no source can be asked about is now seen by the person whose run read it and by whoever connected that source, whose grant reads it, so the curator can recheck it.
+- Test: `the_curator_gets_the_kernels_brief_each_run_under_the_grant_that_reads_it` (curator.rs).
+
