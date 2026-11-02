@@ -46,6 +46,15 @@ pub async fn serve(k: Arc<Kernel>, state_dir: &Path) -> Result<()> {
         .route("/v1/admin/policy/test", post(policy_test))
         .route("/v1/admin/policy/history", axum::routing::get(policy_history))
         .route("/v1/admin/console-settings", axum::routing::get(console_settings).put(set_console_settings))
+        .route("/v1/admin/modules", axum::routing::get(modules))
+        .route("/v1/admin/modules/{name}", post(set_module))
+        .route("/v1/admin/providers", axum::routing::get(providers))
+        .route("/v1/admin/providers/{id}", axum::routing::patch(set_provider))
+        .route("/v1/admin/providers/{id}/test", post(test_provider))
+        .route("/v1/admin/updates", axum::routing::get(updates))
+        .route("/v1/admin/updates/install", post(install_update))
+        .route("/v1/admin/updates/rollback", post(roll_back_update))
+        .route("/v1/admin/updates/desktop-channel", axum::routing::put(desktop_channel))
         .route("/v1/admin/connectors", axum::routing::get(connectors).post(add_connector))
         .route("/v1/admin/connectors/{name}", axum::routing::patch(connector_settings).delete(remove_connector))
         .route("/v1/admin/connectors/{name}/credential", axum::routing::put(set_credential).delete(revoke_credential))
@@ -105,6 +114,9 @@ async fn list(State(k): State<Arc<Kernel>>, Query(q): Query<HashMap<String, Stri
 /// when, and what it holds stopped (the runs it suspended, the schedules
 /// that do not fire while it is on).
 async fn switch_state(State(k): State<Arc<Kernel>>) -> Response {
+    let stopped: Vec<String> = k.read(|s| s.runs.values().filter(|r| r.status == crate::state::Status::Suspended && r.reason.as_deref() == Some("kill_switch")).map(|r| r.id.clone()).collect());
+    let frozen = stopped.iter().filter(|r| k.sandboxes.kept(r)).count();
+    let running = k.sandboxes.running().await;
     Json(k.read(|s| {
         let halted = s.runs.values().filter(|r| r.status == crate::state::Status::Suspended && r.reason.as_deref() == Some("kill_switch")).count();
         let held = if s.kill_switch { s.schedules.values().filter(|x| x.next_due().is_some()).count() } else { 0 };
@@ -113,6 +125,7 @@ async fn switch_state(State(k): State<Arc<Kernel>>) -> Response {
             "by": s.kill_switch_by.as_ref().map(|(who, _)| who), "at": s.kill_switch_by.as_ref().map(|(_, at)| at),
             "tasks_halted": halted, "schedules_held": held,
             "sign_ins_revoked": s.revoked.len(),
+            "microvms_frozen": frozen, "microvms_running": running,
         })
     }))
     .into_response()
@@ -135,6 +148,7 @@ async fn overview(State(k): State<Arc<Kernel>>) -> Response {
     use crate::state::Status;
     let log_up = k.log.up().await;
     let signed_in = k.accounts.signed_in().len();
+    let vms = k.sandboxes.running().await;
     let day = chrono::Utc::now() - chrono::Duration::hours(24);
     let v = k.read(|s| {
         let mut failed: Vec<&crate::state::Run> = s.runs.values().filter(|r| r.status == Status::Failed).collect();
@@ -145,7 +159,7 @@ async fn overview(State(k): State<Arc<Kernel>>) -> Response {
             "version": crate::update::version(), "log_up": log_up, "kill_switch": s.kill_switch,
             "running_tasks": s.runs.values().filter(|r| r.status == Status::Running).count(),
             "waiting_tasks": s.runs.values().filter(|r| r.status == Status::Suspended).count(),
-            "signed_in": signed_in,
+            "signed_in": signed_in, "microvms_running": vms,
             "knowledge_changes_24h": knowledge + memory,
             "recent_errors": failed.iter().take(10).map(|r| json!({ "run": r.id, "task": r.task, "person": r.person, "reason": r.reason, "at": r.ended_at })).collect::<Vec<_>>(),
         })
@@ -373,10 +387,88 @@ async fn console_settings(State(k): State<Arc<Kernel>>) -> Response {
 
 async fn set_console_settings(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
     let Some(actor) = actor(&b) else { return policy_refused((StatusCode::BAD_REQUEST, "name who sets them".into())) };
-    let (Some(idle), Some(hours)) = (b["idle_minutes"].as_i64(), b["session_hours"].as_i64()) else { return policy_refused((StatusCode::BAD_REQUEST, "give idle_minutes and session_hours".into())) };
-    match k.emit(&actor, Ev::ConsoleSettings { idle_minutes: idle, session_hours: hours }).await {
-        Ok(_) => Json(json!({ "idle_minutes": idle, "session_hours": hours })).into_response(),
+    let now = k.read(|s| s.console_settings.clone()).unwrap_or(json!({}));
+    let idle = b["idle_minutes"].as_i64().or(now["idle_minutes"].as_i64()).unwrap_or(30);
+    let hours = b["session_hours"].as_i64().or(now["session_hours"].as_i64()).unwrap_or(12);
+    let allow: Option<Vec<String>> = b.get("allow").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).or_else(|| serde_json::from_value(now["allow"].clone()).ok());
+    match k.emit(&actor, Ev::ConsoleSettings { idle_minutes: idle, session_hours: hours, allow: allow.clone() }).await {
+        Ok(_) => Json(json!({ "idle_minutes": idle, "session_hours": hours, "allow": allow })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
     }
+}
+
+// Operations (admin console spec): the run modules, the model providers and
+// the updates, as the kernel's own operations.
+
+fn ops_refused((st, m): crate::ops_admin::Refusal) -> Response {
+    (st, Json(json!({ "error": m }))).into_response()
+}
+
+fn ops(r: Result<Value, crate::ops_admin::Refusal>) -> Response {
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => ops_refused(e),
+    }
+}
+
+async fn modules(State(k): State<Arc<Kernel>>) -> Response {
+    Json(json!({ "modules": k.admin_modules() })).into_response()
+}
+
+async fn set_module(State(k): State<Arc<Kernel>>, axum::extract::Path(name): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return ops_refused((StatusCode::BAD_REQUEST, "name who sets it".into())) };
+    ops(k.set_module(&actor, &name, b["on"].as_bool()).await)
+}
+
+async fn providers(State(k): State<Arc<Kernel>>) -> Response {
+    Json(json!({ "providers": k.admin_providers().await })).into_response()
+}
+
+async fn test_provider(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    ops(k.test_provider(&id).await)
+}
+
+async fn set_provider(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return ops_refused((StatusCode::BAD_REQUEST, "name who sets it".into())) };
+    ops(k.set_provider(&actor, &id, b["enabled"].as_bool(), b["default_model"].as_str()).await)
+}
+
+async fn updates(State(k): State<Arc<Kernel>>) -> Response {
+    Json(k.admin_updates()).into_response()
+}
+
+/// Install the latest release now; the switch happens after the answer.
+async fn install_update(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return ops_refused((StatusCode::BAD_REQUEST, "name who installs it".into())) };
+    let current = crate::update::version();
+    let to = k.latest_release().and_then(|m| m["version"].as_str().map(String::from));
+    match to {
+        Some(to) if crate::update::newer(&to, &current) && !k.read(|s| s.skipped_releases.contains(&to)) => {
+            tokio::spawn(async move {
+                if let Err(e) = k.update(&actor).await {
+                    tracing::error!("update: {e:#}");
+                }
+            });
+            (StatusCode::ACCEPTED, Json(json!({ "status": "installing", "version": current, "latest": to }))).into_response()
+        }
+        to => Json(json!({ "status": "up_to_date", "version": current, "latest": to })).into_response(),
+    }
+}
+
+/// Go back to the release kept; the switch happens after the answer.
+async fn roll_back_update(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return ops_refused((StatusCode::BAD_REQUEST, "name who rolls it back".into())) };
+    let Some(to) = crate::update::previous_version() else { return ops_refused((StatusCode::CONFLICT, "no earlier release is kept on this appliance".into())) };
+    tokio::spawn(async move {
+        if let Err(e) = k.roll_back(&actor).await {
+            tracing::error!("roll back: {e:#}");
+        }
+    });
+    (StatusCode::ACCEPTED, Json(json!({ "status": "rolling_back", "version": crate::update::version(), "to": to }))).into_response()
+}
+
+async fn desktop_channel(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return ops_refused((StatusCode::BAD_REQUEST, "name who sets it".into())) };
+    ops(k.set_desktop_channel(&actor, b["channel"].as_str().unwrap_or_default()).await)
 }
 

@@ -15,7 +15,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] Its own process, `magnus-admin`, bound only to configured internal addresses: never every address, never loopback (#68; `admin_reach.rs`)
 - [x] Only the organisation's LAN and VPN subnets; loopback refused, so a misrouted tunnel is refused (#68; `admin_reach.rs`)
 - [x] The configured hostname only, else 404; every name it is reached by (#68, #79; `admin_reach.rs`, `admin_on_appliance.rs`)
-- [ ] The tunnel's ingress names only the user API and the realm's paths; no admin hostname in public DNS (Operations › Network shows it; Removals)
+- [x] The tunnel's public names shown under Operations › Network, the console never among them (`admin-operations`); the ingress itself is the tunnel's config
 - [x] TLS 1.3 only (#68; `admin_reach.rs`)
 - [ ] A certificate browsers already trust: ACME DNS-01 under a domain the organisation controls, or the organisation's own CA (today: a CA made on the appliance, trusted by hand)
 - [x] The kill switch from the appliance's own console: `magnus kill` / `magnus release` (before #68)
@@ -62,12 +62,12 @@ Each line names the pull request that built it, or the one building it.
 ### Overview
 
 - [x] Status strip: health, kill switch, version (#71)
-- [ ] Status strip: the tunnel connected or not (Operations › Network)
+- [x] Status strip: the tunnel connected or not (`admin-operations`)
 - [x] Cards: running tasks, people signed in, knowledge changes in 24 hours (#71)
 - [x] The knowledge card opens Activity (`admin-shell`)
 - [x] Alerts: a service down, disk over 85% (#71)
 - [x] Alerts: a certificate expiring within 14 days (`admin-shell`; `admin_shell.rs`, `admin/cert.rs`)
-- [ ] Alerts: the tunnel down; a model provider unreachable (Operations › Network, › Model providers)
+- [x] Alerts: the tunnel down; a model provider unreachable (`admin-operations`)
 
 ### Knowledge
 
@@ -98,13 +98,13 @@ Each line names the pull request that built it, or the one building it.
 ### Operations
 
 - [x] Kill switch: state, who and when, tasks halted, schedules held (#71)
-- [ ] Kill switch: microVMs frozen; Release with step-up from here
-- [ ] Modules: name, version, status, what each provides; enable, disable, install from a package file, remove (step-up)
-- [ ] Model providers: enabled, endpoint, models, a connection test, last error; never a person's own credentials
+- [x] Kill switch: microVMs frozen; Release with step-up from here (`admin-operations`; `admin_operations.rs`)
+- [x] Modules: name, version, status, what each provides; enable, disable (`admin-operations`; `admin_operations.rs`). Install from a package and remove: Magnus's modules come with its release (ruling 22), so both answer 409 and say so; the owner may rule otherwise
+- [x] Model providers: enabled, endpoint, models, a connection test, last error; never a credential (`admin-operations`; `admin_operations.rs`)
 - [x] Health: kernel, event log, identity provider, console; CPU, memory, disk; recent errors (#71)
-- [ ] Health: cloudflared, running microVMs, live
-- [ ] Updates: version, available update with notes, install with step-up; the desktop app's channel and published version
-- [ ] Network: tunnel status and public hostnames, the admin hostname, the allowlist (a change that would shut out the admin's own address refused), certificate expiry and renewal
+- [x] Health: cloudflared, running microVMs, live (`admin-operations`; `admin_operations.rs`)
+- [x] Updates: version, available update with notes, install and rollback with step-up; the desktop app's channels and published versions, and everyone's channel (`admin-operations`; `admin_operations.rs`)
+- [x] Network: tunnel status and public hostnames, the admin hostname, the allowlist (a change that would shut out the admin's own address refused), certificate expiry (`admin-operations`; `admin_operations.rs`); renewal comes with the trusted certificate
 
 ## Server and API
 

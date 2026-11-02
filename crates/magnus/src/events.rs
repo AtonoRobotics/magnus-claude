@@ -107,11 +107,31 @@ pub enum Ev {
         layer: String,
         cedar: String,
     },
+    /// An admin turned a run module on or off for the organisation (None:
+    /// back to the config's), for runs that start from then.
+    ModuleSet {
+        name: String,
+        on: Option<bool>,
+    },
+    /// An admin enabled or disabled a model provider (an adapter).
+    ProviderSet {
+        id: String,
+        enabled: bool,
+    },
+    /// The release channel the desktop apps of everyone but the owner and
+    /// testers follow.
+    DesktopChannelSet {
+        channel: String,
+    },
     /// The admin console's own session lifetimes, as an admin set them
     /// under Security › Sign-in.
     ConsoleSettings {
         idle_minutes: i64,
         session_hours: i64,
+        /// The subnets it takes connections from, as an admin set them
+        /// under Operations › Network (None: the config's).
+        #[serde(default)]
+        allow: Option<Vec<String>>,
     },
     /// An admin's draft of a policy layer (None: dropped). Nothing in force
     /// changes until it is applied.

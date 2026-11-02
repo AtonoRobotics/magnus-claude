@@ -137,9 +137,10 @@ pub struct Listener {
 }
 
 impl Listener {
-    pub async fn bind(addrs: &[SocketAddr], allow: Vec<Subnet>, cfg: rustls::ServerConfig) -> Result<Listener> {
+    /// `allow` is shared: an admin's change to it (Operations › Network)
+    /// takes effect at the next connection.
+    pub async fn bind(addrs: &[SocketAddr], allow: Arc<std::sync::RwLock<Vec<Subnet>>>, cfg: rustls::ServerConfig) -> Result<Listener> {
         let acceptor = TlsAcceptor::from(Arc::new(cfg));
-        let allow = Arc::new(allow);
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let mut local = None;
         for a in addrs {
@@ -157,7 +158,8 @@ impl Listener {
                             continue;
                         }
                     };
-                    if !allowed(&allow, peer.ip()) {
+                    let ok = allowed(&allow.read().unwrap(), peer.ip());
+                    if !ok {
                         tracing::warn!("admin console: refused a connection from {peer}, outside the allowed subnets");
                         drop(sock);
                         continue;

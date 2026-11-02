@@ -94,7 +94,17 @@ pub fn certificates(c: &Console) -> Vec<Value> {
 /// The status strip, the cards and the alerts, each alert naming where it
 /// is fixed.
 pub async fn overview(State(c): State<Arc<Console>>) -> Response {
-    let (k, idp) = tokio::join!(c.kernel.call(Method::GET, "/v1/overview", None), provider_up(&c));
+    let providers = async { tokio::time::timeout(std::time::Duration::from_secs(6), c.kernel.call(Method::GET, "/v1/admin/providers", None)).await.ok().and_then(Result::ok) };
+    let (k, idp, tunnel, providers) = tokio::join!(c.kernel.call(Method::GET, "/v1/overview", None), provider_up(&c), tunnel_up(&c), providers);
+    let mut alerts_extra = vec![];
+    if tunnel == Some(false) {
+        alerts_extra.push(json!({ "what": "The tunnel is not connected: people outside the organisation's network cannot reach Magnus.", "fix": "#/operations/network" }));
+    }
+    for p in providers.as_ref().and_then(|v| v["providers"].as_array()).into_iter().flatten() {
+        if p["enabled"] == true && p["answers"] != true {
+            alerts_extra.push(json!({ "what": format!("The model provider {} is not answering: {}", p["id"].as_str().unwrap_or_default(), p["error"].as_str().unwrap_or("no answer")), "fix": "#/operations/providers" }));
+        }
+    }
     let h = host(&c.state_dir);
     let mut alerts = vec![];
     match &k {
@@ -108,6 +118,7 @@ pub async fn overview(State(c): State<Arc<Console>>) -> Response {
     if h["disk_used"].as_f64().is_some_and(|d| d > 0.85) {
         alerts.push(json!({ "what": format!("The disk is {:.0}% full.", h["disk_used"].as_f64().unwrap_or(0.0) * 100.0), "fix": "#/operations/health" }));
     }
+    alerts.extend(alerts_extra);
     let certs = certificates(&c);
     for x in &certs {
         if let Some(days) = x["days_left"].as_i64().filter(|d| *d < 14) {
@@ -119,7 +130,7 @@ pub async fn overview(State(c): State<Arc<Console>>) -> Response {
     let k = k.unwrap_or(Value::Null);
     Json(json!({
         "certificates": certs,
-        "status": { "healthy": alerts.is_empty(), "kill_switch": k["kill_switch"], "version": k["version"] },
+        "status": { "healthy": alerts.is_empty(), "kill_switch": k["kill_switch"], "version": k["version"], "tunnel": tunnel },
         "cards": { "running_tasks": k["running_tasks"], "waiting_tasks": k["waiting_tasks"], "signed_in": k["signed_in"], "knowledge_changes_24h": k["knowledge_changes_24h"] },
         "alerts": alerts,
     }))
@@ -128,19 +139,192 @@ pub async fn overview(State(c): State<Arc<Console>>) -> Response {
 
 /// Each service, the machine, and the latest errors.
 pub async fn health(State(c): State<Arc<Console>>) -> Response {
-    let (k, idp) = tokio::join!(c.kernel.call(Method::GET, "/v1/overview", None), provider_up(&c));
+    let (k, idp, tunnel) = tokio::join!(c.kernel.call(Method::GET, "/v1/overview", None), provider_up(&c), tunnel_up(&c));
     let kernel_up = k.is_ok();
     let k = k.unwrap_or(Value::Null);
+    let mut services = vec![
+        json!({ "name": "Kernel", "up": kernel_up }),
+        json!({ "name": "Event log (Postgres)", "up": k["log_up"] == true }),
+        json!({ "name": "Identity provider (Keycloak)", "up": idp }),
+        json!({ "name": "Admin console", "up": true }),
+    ];
+    match tunnel {
+        Some(up) => services.push(json!({ "name": "Tunnel (cloudflared)", "up": up })),
+        None => services.push(json!({ "name": "Tunnel (cloudflared)", "up": null, "note": "not set up on this appliance" })),
+    }
     Json(json!({
-        "services": [
-            { "name": "Kernel", "up": kernel_up },
-            { "name": "Event log (Postgres)", "up": k["log_up"] == true },
-            { "name": "Identity provider", "up": idp },
-            { "name": "Admin console", "up": true },
-        ],
+        "services": services,
+        "microvms_running": k["microvms_running"],
         "host": host(&c.state_dir),
         "running_tasks": k["running_tasks"],
         "recent_errors": k["recent_errors"],
     }))
     .into_response()
+}
+
+// The rest of Operations (admin console spec): Modules, Model providers,
+// Updates and Network. Each change is audited before it is made; installing
+// an update, rolling one back and changing the network allowlist need a
+// fresh password.
+
+use super::users::{actor, failed, recorded, refuse};
+
+async fn kernel_get(c: &Console, path: &str) -> Response {
+    match c.kernel.call(Method::GET, path, None).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+fn plain_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 100 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+pub async fn modules(State(c): State<Arc<Console>>) -> Response {
+    kernel_get(&c, "/v1/admin/modules").await
+}
+
+/// Turn a module on or off for the organisation (`on`: true, false, or
+/// null for the config's).
+pub async fn set_module(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    if !plain_id(&id) {
+        return refuse(StatusCode::NOT_FOUND, "not_found", "No such module.");
+    }
+    let before = c.kernel.call(Method::GET, "/v1/admin/modules", None).await.ok().and_then(|v| v["modules"].as_array().and_then(|m| m.iter().find(|x| x["name"] == id.as_str()).map(|x| json!({ "on": x["on"], "set_by_admin": x["set_by_admin"] }))));
+    let body = json!({ "actor": actor(&a), "on": b["on"] });
+    match recorded(&c, &a, "module_set", &id, before, Some(json!({ "on": b["on"] })), c.kernel.call(Method::POST, &format!("/v1/admin/modules/{id}"), Some(&body))).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => r,
+    }
+}
+
+/// Modules are part of Magnus's own release (owner's ruling 22: "module"
+/// stays the removable run modules): there is no package to install or
+/// remove apart from a release, which Updates installs.
+pub async fn module_package() -> Response {
+    refuse(StatusCode::CONFLICT, "not_packaged", "Magnus's modules come with its release and are turned on or off here. A new module arrives with an update.")
+}
+
+pub async fn providers(State(c): State<Arc<Console>>) -> Response {
+    kernel_get(&c, "/v1/admin/providers").await
+}
+
+pub async fn test_provider(State(c): State<Arc<Console>>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    if !plain_id(&id) {
+        return refuse(StatusCode::NOT_FOUND, "not_found", "No such provider.");
+    }
+    match c.kernel.call(Method::POST, &format!("/v1/admin/providers/{id}/test"), Some(&json!({}))).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+/// Enable or disable a provider, or make one of its models the default.
+pub async fn set_provider(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    if !plain_id(&id) {
+        return refuse(StatusCode::NOT_FOUND, "not_found", "No such provider.");
+    }
+    let after = json!({ "enabled": b["enabled"], "default_model": b["default_model"] });
+    let body = json!({ "actor": actor(&a), "enabled": b["enabled"], "default_model": b["default_model"] });
+    match recorded(&c, &a, "provider_set", &id, None, Some(after), c.kernel.call(Method::PATCH, &format!("/v1/admin/providers/{id}"), Some(&body))).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => r,
+    }
+}
+
+pub async fn updates(State(c): State<Arc<Console>>) -> Response {
+    kernel_get(&c, "/v1/admin/updates").await
+}
+
+/// Install the available update now: a fresh password first.
+pub async fn install(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>) -> Response {
+    if let Err(r) = a.step_up() {
+        return r;
+    }
+    match recorded(&c, &a, "update_installed", "appliance", Some(json!({ "version": crate::update::version() })), None, c.kernel.call(Method::POST, "/v1/admin/updates/install", Some(&json!({ "actor": actor(&a) })))).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => r,
+    }
+}
+
+/// Go back to the release kept: a fresh password first.
+pub async fn rollback(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>) -> Response {
+    if let Err(r) = a.step_up() {
+        return r;
+    }
+    match recorded(&c, &a, "update_rolled_back", "appliance", Some(json!({ "version": crate::update::version() })), None, c.kernel.call(Method::POST, "/v1/admin/updates/rollback", Some(&json!({ "actor": actor(&a) })))).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => r,
+    }
+}
+
+/// The channel everyone but the owner and testers follows.
+pub async fn desktop_channel(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Json(b): Json<Value>) -> Response {
+    let body = json!({ "actor": actor(&a), "channel": b["channel"] });
+    match recorded(&c, &a, "desktop_channel_set", "desktop", None, Some(json!({ "channel": b["channel"] })), c.kernel.call(Method::PUT, "/v1/admin/updates/desktop-channel", Some(&body))).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => r,
+    }
+}
+
+/// Whether the tunnel says it is connected, if there is one.
+async fn tunnel_up(c: &Console) -> Option<bool> {
+    let url = c.tunnel_ready.as_ref()?;
+    Some(matches!(tokio::time::timeout(std::time::Duration::from_secs(3), c.idp.http.get(url).send()).await, Ok(Ok(r)) if r.status().is_success()))
+}
+
+/// The console takes an allowlist an admin set before this start.
+pub fn adopt_allow(c: &Console, v: &Value) {
+    let Some(list) = v["allow"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<String>>()) else { return };
+    match super::net::allowlist(&list) {
+        Ok(subnets) => {
+            *c.allow.write().unwrap() = subnets;
+            *c.allow_text.write().unwrap() = list;
+        }
+        Err(e) => tracing::error!("admin console: the allowlist an admin set is not usable, keeping the config's: {e:#}"),
+    }
+}
+
+/// The network: the tunnel and its public names, the console's own name
+/// and addresses, the subnets it takes connections from, and the
+/// certificates with when each ends.
+pub async fn network(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>) -> Response {
+    let tunnel = tunnel_up(&c).await;
+    Json(json!({
+        "tunnel": { "configured": c.tunnel_ready.is_some(), "connected": tunnel, "public_hostnames": c.public_hostnames },
+        "admin": { "hostname": c.hostname, "aliases": c.aliases, "listen": c.listen, "public": false },
+        "allow": *c.allow_text.read().unwrap(),
+        "you": a.peer.ip().to_string(),
+        "certificates": certificates(&c),
+    }))
+    .into_response()
+}
+
+/// Change the subnets the console takes connections from: a fresh password
+/// first, never loopback, and never one that would shut out the admin's
+/// own address.
+pub async fn set_allowlist(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Json(b): Json<Value>) -> Response {
+    if let Err(r) = a.step_up() {
+        return r;
+    }
+    let Some(list) = b["allow"].as_array().map(|x| x.iter().filter_map(|s| s.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect::<Vec<String>>()) else {
+        return refuse(StatusCode::BAD_REQUEST, "invalid", "Give the subnets, such as 192.168.0.0/24.");
+    };
+    let subnets = match super::net::allowlist(&list) {
+        Ok(s) => s,
+        Err(e) => return refuse(StatusCode::BAD_REQUEST, "invalid", &format!("{e:#}")),
+    };
+    if !super::net::allowed(&subnets, a.peer.ip()) {
+        return refuse(StatusCode::CONFLICT, "shuts_you_out", &format!("That list leaves out your own address, {}: you would lose the console. Keep a subnet that holds it.", a.peer.ip()));
+    }
+    let before = json!({ "allow": *c.allow_text.read().unwrap() });
+    let body = json!({ "actor": actor(&a), "allow": list });
+    match recorded(&c, &a, "network_allowlist_changed", "allowlist", Some(before), Some(json!({ "allow": list })), c.kernel.call(Method::PUT, "/v1/admin/console-settings", Some(&body))).await {
+        Ok(_) => {
+            *c.allow.write().unwrap() = subnets;
+            *c.allow_text.write().unwrap() = list.clone();
+            Json(json!({ "allow": list })).into_response()
+        }
+        Err(r) => r,
+    }
 }

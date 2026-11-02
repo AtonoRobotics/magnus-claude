@@ -740,6 +740,13 @@ pub struct State {
     pub bundle: BTreeMap<String, BundleDoc>,
     /// Every policy a layer ever had, oldest first.
     pub policy_history: Vec<PolicyVersion>,
+    /// Run modules an admin turned on or off for the organisation.
+    pub module_settings: BTreeMap<String, bool>,
+    /// Model providers an admin disabled.
+    pub providers_off: std::collections::BTreeSet<String>,
+    /// The desktop channel for everyone but the owner and testers, when an
+    /// admin set one.
+    pub desktop_channel: Option<String>,
     /// The admin console's session lifetimes, as an admin set them.
     pub console_settings: Option<Value>,
     /// Admins' drafts of policy layers, not in force.
@@ -1052,8 +1059,26 @@ impl State {
                 let n = self.policy_history.iter().filter(|p| &p.layer == layer).count();
                 self.version_changes.push((e.seq, e.at, format!("policy:{layer}"), format!("v{n}")));
             }
-            Ev::ConsoleSettings { idle_minutes, session_hours } => {
-                self.console_settings = Some(serde_json::json!({ "idle_minutes": idle_minutes, "session_hours": session_hours }));
+            Ev::ModuleSet { name, on } => match on {
+                Some(on) => {
+                    self.module_settings.insert(name.clone(), *on);
+                }
+                None => {
+                    self.module_settings.remove(name);
+                }
+            },
+            Ev::ProviderSet { id, enabled } => {
+                if *enabled {
+                    self.providers_off.remove(id);
+                } else {
+                    self.providers_off.insert(id.clone());
+                }
+            }
+            Ev::DesktopChannelSet { channel } => {
+                self.desktop_channel = Some(channel.clone());
+            }
+            Ev::ConsoleSettings { idle_minutes, session_hours, allow } => {
+                self.console_settings = Some(serde_json::json!({ "idle_minutes": idle_minutes, "session_hours": session_hours, "allow": allow }));
             }
             Ev::PolicyDrafted { layer, cedar } => match cedar {
                 Some(c) => {

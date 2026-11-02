@@ -412,7 +412,9 @@ impl Kernel {
     /// adapter's catalog as its provider lists it now. An adapter whose
     /// provider does not answer (not signed in, unreachable) offers none.
     pub async fn models(&self) -> Vec<(String, Vec<String>)> {
-        let ids: Vec<String> = self.adapters.list().await.into_iter().map(|(id, ..)| id).collect();
+        // A provider an admin disabled offers nothing.
+        let off = self.read(|s| s.providers_off.clone());
+        let ids: Vec<String> = self.adapters.list().await.into_iter().map(|(id, ..)| id).filter(|id| !off.contains(id)).collect();
         let lists = futures::future::join_all(ids.iter().map(|id| self.adapters.catalog(id))).await;
         ids.into_iter()
             .zip(lists)
@@ -452,7 +454,7 @@ impl Kernel {
         };
         let m = &self.cfg.model;
         let (adapter, model) = o.model.clone().unwrap_or_else(|| self.default_model());
-        let (mut modules, escalate_to) = self.cfg.modules_for(&adapter, &model);
+        let (mut modules, escalate_to) = self.modules_for(&adapter, &model);
         modules.extend(o.modules.clone());
         let config = crate::events::RunConfig {
             adapter,
