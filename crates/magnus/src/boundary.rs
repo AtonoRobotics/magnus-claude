@@ -184,6 +184,8 @@ impl Kernel {
                 text: text.clone(),
                 is_error,
                 label,
+                // The source items it read, as the result's data names them.
+                items: data.as_ref().and_then(|d| d["items"].as_array()).into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect(),
                 data: data.clone(),
                 sources,
                 check: a.issuer == Issuer::Check,
@@ -570,6 +572,17 @@ impl Kernel {
                 format!("this task has read private data and {} reaches a {} audience", f.app, f.audience.as_str()),
                 Some("kernel:audience".into()),
             ));
+        }
+        // Shared output (K5): sending anything to someone other than the
+        // person, after reading the org's source items, asks first when a
+        // recipient cannot read one of them at its source.
+        if !ask.as_ref().is_some_and(|(_, r)| matches!(r.as_deref(), Some("kernel:rule_of_two") | Some(WEB_LOOKUPS))) && f.risk.changes_state() && !run.read_items.is_empty() {
+            let to = crate::sources::recipients(&a.input);
+            let blocked = self.cannot_read(run, &to).await;
+            if !blocked.is_empty() {
+                let who: Vec<String> = blocked.iter().map(|(r, i)| format!("{r} (cannot read {i})")).collect();
+                ask = Some((format!("this sends to someone who cannot read what the task read: {} (shared output)", who.join(", ")), Some("kernel:shared_output".into())));
+            }
         }
         Ok(Ok(ask))
     }

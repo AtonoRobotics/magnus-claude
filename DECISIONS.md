@@ -1028,3 +1028,11 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Only areas whose `ask_channel` is `magnus` (in the app) are asked so far. Any other channel is refused with the reason, until sending through a connector's channel comes with shared output (K5, step 5). Asking the person Magnus works for is refused in favour of `ask_principal`.
 - Test: `magnus_asks_an_areas_owner_and_the_answer_comes_back_to_the_task` (people_ask.rs).
 
+## Org context, step 5a: shared output (2026-11-02, `org-context-5`)
+
+- K5: a call that changes something and sends to someone other than the person, from a run that has read items in the org's sources, asks first when any recipient cannot read one of those items at its source (K3, asked under that recipient's grant). Someone not known here as a person can read none of them. The ask is the kernel's (`kernel:shared_output`), so it is approved once, for that action, like the Rule of Two's, and it names who cannot read what.
+- What a run read is recorded on each tool result as the locators it touched (`items`, a record field, not content): an item fetched, a search's hits (their snippets were read), and the source items of a bundle document read. The run keeps them all.
+- Recipients are read from a call's usual fields (to, cc, bcc, recipients, attendees, participants, email, channel, space), as text, lists or objects with an address, and matched to people by id or by the address in their `email` (new in `[[people]]`). A channel's members are not known yet, so a channel is someone who can read nothing: posting there after reading source items asks.
+- The rule sits beside the Rule of Two and the audience rule and is skipped when the Rule of Two already asks; approvals keep their roles.
+- Test: `sending_to_someone_who_cannot_read_what_the_task_read_asks_first` (shared_output.rs, T6).
+

@@ -658,6 +658,10 @@ pub struct Person {
     pub groups: Vec<String>,
     #[serde(default)]
     pub roles: Vec<String>,
+    /// Where messages reach them, so a recipient is known as this person
+    /// (shared output, K5).
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize, Clone, Debug)]

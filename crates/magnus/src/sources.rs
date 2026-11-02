@@ -108,7 +108,60 @@ fn answer(text: &str, structured: Option<Value>) -> Value {
     structured.unwrap_or_else(|| serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.into())))
 }
 
+/// Who a tool call sends to, as its input names them: addresses and ids in
+/// the usual fields, a list or a comma-separated text, or objects with an
+/// address.
+pub fn recipients(input: &Value) -> Vec<String> {
+    const FIELDS: [&str; 10] = ["to", "cc", "bcc", "recipients", "recipient", "attendees", "participants", "email", "channel", "space"];
+    let mut out = vec![];
+    let mut add = |v: &Value| match v {
+        Value::String(s) => out.extend(s.split([',', ';']).map(|x| x.trim().trim_matches(|c| c == '<' || c == '>').to_lowercase()).filter(|x| !x.is_empty())),
+        Value::Object(o) => {
+            if let Some(s) = o.get("email").or(o.get("address")).or(o.get("id")).and_then(|x| x.as_str()) {
+                out.push(s.trim().to_lowercase());
+            }
+        }
+        _ => {}
+    };
+    for f in FIELDS {
+        match &input[f] {
+            Value::Array(a) => a.iter().for_each(&mut add),
+            v => add(v),
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 impl Kernel {
+    /// The person a recipient is: by their address, or their id.
+    pub fn person_for(&self, recipient: &str) -> Option<String> {
+        let r = recipient.to_lowercase();
+        self.cfg.people.iter().find(|p| p.id.to_lowercase() == r || p.email.as_deref().is_some_and(|e| e.to_lowercase() == r)).map(|p| p.id.clone())
+    }
+
+    /// K5: who among `recipients` cannot read an item the run read, with the
+    /// first such item; someone not known as a person here can read none.
+    pub async fn cannot_read(&self, run: &crate::state::Run, recipients: &[String]) -> Vec<(String, String)> {
+        let mut out = vec![];
+        for r in recipients {
+            match self.person_for(r) {
+                Some(p) if p == run.person => {}
+                Some(p) => {
+                    for item in &run.read_items {
+                        if !self.can_read(&p, item).await {
+                            out.push((r.clone(), item.clone()));
+                            break;
+                        }
+                    }
+                }
+                None => out.push((r.clone(), run.read_items.iter().next().cloned().unwrap_or_default())),
+            }
+        }
+        out
+    }
+
     /// Whether an item's locator names a source the kernel can ask.
     pub fn askable(&self, item: &str) -> bool {
         parse_locator(item).is_some_and(|(s, _)| self.connector(s).is_some_and(|c| c.source.as_ref().is_some_and(|x| x.fetch.is_some())))
@@ -226,7 +279,9 @@ impl Kernel {
             }
         }
         let text = json!({ "hits": all, "sources": status }).to_string();
-        Ok((text, false, Some(json!({ "hits": all, "untrusted": label.untrusted, "private": label.private, "apps": apps }))))
+        // Their snippets were read: they count among what the run read (K5).
+        let items: Vec<&Value> = all.iter().map(|h| &h["locator"]).collect();
+        Ok((text, false, Some(json!({ "hits": all, "untrusted": label.untrusted, "private": label.private, "apps": apps, "items": items }))))
     }
 
     /// `org_fetch`: one item by its locator, under the person's own grant.
@@ -254,7 +309,7 @@ impl Kernel {
                     "source": source, "locator": l, "author": first(&o, &["author", "owner", "owners", "sender", "from"]),
                     "last_modified": first(&o, &["last_modified", "modifiedTime", "modified", "updated", "date"]), "read_at": chrono::Utc::now(),
                 });
-                Ok((format!("{read}\n\n{content}"), false, Some(json!({ "untrusted": label.untrusted, "private": label.private, "apps": [source] }))))
+                Ok((format!("{read}\n\n{content}"), false, Some(json!({ "untrusted": label.untrusted, "private": label.private, "apps": [source], "items": [l] }))))
             }
             Err(why) => Ok((why, true, clean)),
         }
