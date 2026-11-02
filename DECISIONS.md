@@ -917,3 +917,19 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - `a_rate_limit_reaches_the_agent_with_its_wait_and_is_not_retried`;
   - `an_apps_own_error_reaches_the_agent_with_its_code_message_and_data`.
   - In both, the app sees the call once.
+
+## A sign-in's state is signed, and outlives a restart (2026-11-02, `signed-state`)
+
+- The connectors spec, Connect flow: "It signs a `state` naming the appliance, user, connector, a nonce and an expiry." The state was a random value, and a map in memory held what finishing needed (the PKCE verifier, the client, the redirect and the issuer). A restart while the person was on the app's page lost their sign-in. Nothing in the state said whose or which app's it was.
+- The state is now `base64url(claims).base64url(HMAC-SHA256)`. The claims are the appliance's name, the person, the app, a random nonce and an expiry 15 minutes on.
+  - The key and the appliance's name are made once and kept in the vault (`signin_state_key`). The name is random, so the appliance has one before the relay's registry gives it another.
+- What finishing needs stays on the appliance, in the vault under the nonce (`signin_pending_<nonce>`), never in the state. The state passes through the browser and, with the relay, through Alpha Vector, so the verifier and any client secret do not travel with it. Finishing takes the entry out, so a state is good once. Expired entries are dropped when the next sign-in starts.
+- The owner's list of secrets leaves out these `signin_` entries: they are the appliance's own, not secrets the owner keeps.
+- Finishing is refused, before anything is sent to the app, for:
+  - a state this appliance did not sign, or one that was changed;
+  - an expired state;
+  - a state for another person or another app;
+  - a state already used.
+- Tests:
+  - `a_sign_in_survives_a_restart_and_its_state_is_good_once_and_only_for_its_person` (sign_in_state.rs);
+  - `a_sign_in_state_is_signed_names_its_appliance_person_and_app_and_expires` (connectors.rs).

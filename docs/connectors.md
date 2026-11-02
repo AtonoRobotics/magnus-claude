@@ -110,7 +110,7 @@ one commit), 2026-11-02.
 - [x] The user clicks Connect in the Library (`connectors.mjs`, `app-apps.mjs`)
 - [ ] Or on a card the agent placed in chat
 - [x] The appliance keeps the PKCE verifier (`connectors.rs`; `google.rs` checks S256)
-- [ ] It signs a `state` naming the appliance, user, connector, a nonce and an expiry (a random `state` kept in memory, `connectors.rs` `pending`; lost on restart)
+- [x] It signs a `state` naming the appliance, user, connector, a nonce and an expiry (`connectors.rs` `seal_state`/`open_state`, HMAC-SHA256 under a key in the vault; what finishing needs is kept in the vault under the nonce, so a sign-in outlives a restart and is good once; `sign_in_state.rs`, unit tests `sign_in_state`)
 - [ ] The redirect URI is the relay callback (today a loopback address on the person's computer, RFC 8252)
 - [x] The desktop app opens the system browser at the provider's sign-in page; Magnus never sees a password (`app-apps.mjs`)
 - [ ] The provider redirects to the relay, which checks `state`, then sends the browser to the appliance's completion endpoint at its pyrallon.ai address, found from the appliance registry (proposed, not ruled)

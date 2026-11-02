@@ -1162,7 +1162,9 @@ async fn secret_names(State(k): K, h: HeaderMap) -> Response {
         return r;
     }
     match k.vault.names() {
-        Ok(n) => Json(json!({ "names": n })).into_response(),
+        // The appliance's own sign-in key and unfinished sign-ins are not
+        // secrets the owner keeps.
+        Ok(n) => Json(json!({ "names": n.into_iter().filter(|n| !n.starts_with("signin_")).collect::<Vec<_>>() })).into_response(),
         Err(e) => internal(e),
     }
 }

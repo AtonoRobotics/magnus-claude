@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **A signed sign-in state (connectors spec, Connect flow; branch `signed-state`).** The `state` of a sign-in is the appliance's signed claims (appliance, person, app, nonce, expiry); what finishing it needs waits in the vault, so a restart while the person is on the app's page no longer loses their sign-in, and each state finishes once.
 - **An app's errors reach the agent intact (connectors spec, Remote MCP connectors; branch `app-errors`).** A rate limit carries how long the app asks to wait, and an app's own error its code and data; nothing retries for the agent.
 - **The Library and an app's page, tested through a connection's life (connectors spec, Library; branch `library-states`).** With a real sign-in and a real call: the card's check and account, the page's account, dates, recent actions and Disconnect; then, once the app refuses the sign-in, sign in again on the card, under Needs attention, and on the page.
 - **A person's apps when they leave or are turned off (connectors spec, Isolation; branch `person-connections`).** Turned off at the identity provider or by an admin, a person's apps answer no calls for them, their sign-ins kept unused, until they sign in again. Deleted, their sign-ins are revoked at each app (now tested).

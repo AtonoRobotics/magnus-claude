@@ -16,9 +16,8 @@ use crate::vault::Secret;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 pub const OAUTH: &str = "oauth";
 
@@ -44,6 +43,7 @@ pub fn is_sign_in_of(name: &str, app: &str) -> bool {
 }
 
 /// A sign-in waiting for its code.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Pending {
     app: String,
     /// Who is signing in: the sign-in becomes theirs alone.
@@ -55,7 +55,6 @@ struct Pending {
     /// so in its answer (RFC 9207): an answer from another one is refused.
     issuer: String,
     iss_required: bool,
-    at: Instant,
 }
 
 /// Where tokens come from, and who Magnus is there. Kept with the tokens.
@@ -170,9 +169,48 @@ pub fn allows(c: &Connector) -> (String, Vec<String>) {
 /// A sign-in left unfinished this long is dropped.
 const PENDING_FOR: Duration = Duration::from_secs(15 * 60);
 
-fn pending() -> &'static Mutex<HashMap<String, Pending>> {
-    static P: OnceLock<Mutex<HashMap<String, Pending>>> = OnceLock::new();
-    P.get_or_init(Default::default)
+/// Where a sign-in's own state is kept: the vault, so it outlives a restart.
+const PENDING_PREFIX: &str = "signin_pending_";
+/// The appliance's name in a sign-in's state, and the key that signs it.
+const STATE_KEY: &str = "signin_state_key";
+
+/// What a sign-in's `state` says (connectors spec, Connect flow): which
+/// appliance, person and app it is for, a nonce naming what is kept for it,
+/// and when it expires. Signed by the appliance, so it cannot be forged or
+/// changed on its way through the browser.
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+pub(crate) struct SignInState {
+    #[serde(rename = "a")]
+    pub appliance: String,
+    #[serde(rename = "p")]
+    pub person: String,
+    #[serde(rename = "c")]
+    pub app: String,
+    #[serde(rename = "n")]
+    pub nonce: String,
+    /// Unix seconds.
+    #[serde(rename = "e")]
+    pub expires: i64,
+}
+
+/// `claims` as a `state`: its JSON, then its HMAC-SHA256 under `key`.
+pub(crate) fn seal_state(key: &[u8], claims: &SignInState) -> String {
+    let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap_or_default());
+    let tag = ring::hmac::sign(&ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key), body.as_bytes());
+    format!("{body}.{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tag.as_ref()))
+}
+
+/// A `state` this appliance signed, unexpired at `now`; anything else is refused.
+pub(crate) fn open_state(key: &[u8], state: &str, now: i64) -> Result<SignInState> {
+    let (body, tag) = state.split_once('.').ok_or_else(|| anyhow!("this sign-in is unknown; start again"))?;
+    let tag = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(tag).map_err(|_| anyhow!("this sign-in is unknown; start again"))?;
+    ring::hmac::verify(&ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key), body.as_bytes(), &tag).map_err(|_| anyhow!("this sign-in was not started here; start again"))?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(body).map_err(|_| anyhow!("this sign-in is unknown; start again"))?;
+    let claims: SignInState = serde_json::from_slice(&raw).map_err(|_| anyhow!("this sign-in is unknown; start again"))?;
+    if claims.expires <= now {
+        bail!("this sign-in expired; start again");
+    }
+    Ok(claims)
 }
 
 /// One refresh at a time: apps that rotate refresh tokens accept each once.
@@ -471,7 +509,10 @@ impl Kernel {
             (None, None, None) => bail!("the app's authorization server does not register clients; register Magnus there and give its client id"),
         };
         let verifier = random();
-        let state = random();
+        let (appliance, key) = self.state_key()?;
+        let now = chrono::Utc::now().timestamp();
+        let claims = SignInState { appliance, person: person.into(), app: c.name.clone(), nonce: random(), expires: now + PENDING_FOR.as_secs() as i64 };
+        let state = seal_state(&key, &claims);
         let mut u = url::Url::parse(&authorize)?;
         {
             let mut q = u.query_pairs_mut();
@@ -500,17 +541,54 @@ impl Kernel {
             }
         }
         let client = Client { token_endpoint: token, revocation_endpoint: s("revocation_endpoint"), client_id, client_secret, resource: c.url.clone() };
-        let mut p = pending().lock().unwrap();
-        p.retain(|_, x| x.at.elapsed() < PENDING_FOR);
         let iss_required = asm["authorization_response_iss_parameter_supported"] == true;
-        p.insert(state.clone(), Pending { app: c.name.clone(), person: person.into(), verifier, redirect_uri: redirect_uri.into(), client, issuer, iss_required, at: Instant::now() });
+        // What finishing it needs, in the vault under its nonce: the
+        // verifier and the client never travel in the state.
+        self.drop_expired_sign_ins(now);
+        let pending = Pending { app: c.name.clone(), person: person.into(), verifier, redirect_uri: redirect_uri.into(), client, issuer, iss_required };
+        self.vault.put(&format!("{PENDING_PREFIX}{}", claims.nonce), &serde_json::to_string(&json!({ "expires": claims.expires, "pending": pending }))?)?;
         Ok((u.to_string(), state))
+    }
+
+    /// The appliance's name in sign-in states and the key that signs them,
+    /// made once and kept in the vault.
+    fn state_key(&self) -> Result<(String, Vec<u8>)> {
+        let raw = match self.vault.get(STATE_KEY)? {
+            Some(r) => r.expose().to_string(),
+            None => {
+                let v = json!({ "appliance": format!("appliance-{}", &random()[..12]), "key": random() }).to_string();
+                self.vault.put(STATE_KEY, &v)?;
+                v
+            }
+        };
+        let v: Value = serde_json::from_str(&raw).context("the sign-in key")?;
+        let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(v["key"].as_str().unwrap_or_default()).context("the sign-in key")?;
+        Ok((v["appliance"].as_str().unwrap_or_default().to_string(), key))
+    }
+
+    /// Sign-ins left unfinished past their expiry leave the vault.
+    fn drop_expired_sign_ins(&self, now: i64) {
+        let Ok(names) = self.vault.names() else { return };
+        for n in names.into_iter().filter(|n| n.starts_with(PENDING_PREFIX)) {
+            let expired = self.vault.get(&n).ok().flatten().and_then(|r| serde_json::from_str::<Value>(r.expose()).ok()).is_none_or(|v| v["expires"].as_i64().unwrap_or(0) <= now);
+            if expired {
+                let _ = self.vault.remove(&n);
+            }
+        }
     }
 
     /// Finish a sign-in with the code the browser brought back.
     /// Only the person who started it can finish it.
     pub async fn connector_sign_in_complete(&self, app: &str, person: &str, state: &str, code: &str, iss: Option<&str>) -> Result<()> {
-        let p = pending().lock().unwrap().remove(state).filter(|p| p.app == app && p.person == person && p.at.elapsed() < PENDING_FOR).ok_or_else(|| anyhow!("this sign-in expired or is unknown; start again"))?;
+        let (appliance, key) = self.state_key()?;
+        let claims = open_state(&key, state, chrono::Utc::now().timestamp())?;
+        if claims.appliance != appliance || claims.app != app || claims.person != person {
+            bail!("this sign-in is not yours to finish here; start again");
+        }
+        // Once only: what was kept for it leaves the vault as it is used.
+        let kept = self.vault.remove(&format!("{PENDING_PREFIX}{}", claims.nonce))?.ok_or_else(|| anyhow!("this sign-in was already finished or has expired; start again"))?;
+        let kept: Value = serde_json::from_str(kept.expose()).context("a kept sign-in")?;
+        let p: Pending = serde_json::from_value(kept["pending"].clone()).context("a kept sign-in")?;
         // The answer must come from the server the sign-in went to (RFC
         // 9207): otherwise the code and verifier would go to this one's token
         // endpoint for another server's code (a mix-up).
@@ -1233,5 +1311,32 @@ mod naming {
         assert_eq!(super::name_from("https://mcp.example.com/mcp", Some("Team Calendar"), none), "team-calendar");
         assert_eq!(super::name_from("http://127.0.0.1:8080/mcp", None, none), "app");
         assert_eq!(super::name_from("https://mcp.notion.com/mcp", None, |n| n == "notion"), "notion-2");
+    }
+}
+
+#[cfg(test)]
+mod sign_in_state {
+    use super::{open_state, seal_state, SignInState};
+
+    fn claims(expires: i64) -> SignInState {
+        SignInState { appliance: "appliance-a".into(), person: "carol".into(), app: "calendar".into(), nonce: "n1".into(), expires }
+    }
+
+    /// A state this appliance signed opens to what it said, until it expires;
+    /// one changed on the way, signed by another key, or expired is refused.
+    #[test]
+    fn a_sign_in_state_is_signed_names_its_appliance_person_and_app_and_expires() {
+        let key = b"the appliance's own key, 32 bytes";
+        let s = seal_state(key, &claims(1_000));
+        assert_eq!(open_state(key, &s, 999).unwrap(), claims(1_000));
+        assert!(open_state(key, &s, 1_000).unwrap_err().to_string().contains("expired"));
+        assert!(open_state(b"another appliance's key, 32 bytes", &s, 999).is_err(), "another key's state opened");
+        // Bob's name put in Carol's state, its signature kept.
+        let (body, tag) = s.split_once('.').unwrap();
+        use base64::Engine;
+        let raw = String::from_utf8(base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(body).unwrap()).unwrap().replace("carol", "bob");
+        let forged = format!("{}.{tag}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw));
+        assert!(open_state(key, &forged, 999).is_err(), "a changed state opened");
+        assert!(open_state(key, "random-state", 999).is_err());
     }
 }
