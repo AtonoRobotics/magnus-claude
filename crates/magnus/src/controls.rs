@@ -1,0 +1,175 @@
+//! Tasks and schedules under control (behavior spec, Tasks and schedules in
+//! conversation): list and get tasks and schedules, cancel a task, and
+//! pause, resume, edit and cancel a schedule. The same operations serve the
+//! app's buttons and Magnus in a conversation, so the two cannot disagree.
+//! A person controls their own; the owner and admins control anyone's.
+
+use crate::config::Person;
+use crate::events::Ev;
+use crate::kernel::Kernel;
+use serde_json::{json, Value};
+
+/// Why a control was not done: the person sees "no such" for what is not
+/// theirs, so its existence is not told.
+#[derive(Debug, PartialEq)]
+pub enum Refused {
+    NotFound(&'static str),
+    Conflict(String),
+    Invalid(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::NotFound(what) => write!(f, "no such {what}"),
+            Refused::Conflict(m) | Refused::Invalid(m) | Refused::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+fn may_control(who: &Person, owner: &str) -> bool {
+    who.id == owner || who.is_owner() || who.has_role("admin")
+}
+
+impl Kernel {
+    /// The tasks `who` controls (their own; everyone's for the owner and
+    /// admins), newest first.
+    pub fn tasks_for(&self, who: &Person, limit: usize) -> Vec<Value> {
+        let mut v: Vec<Value> = self.read(|s| {
+            s.tasks
+                .values()
+                .filter(|t| may_control(who, &t.person) && t.chat.as_ref().is_none_or(|c| !c.turn))
+                .filter_map(|t| s.runs.get(&t.run_id).map(|r| (t, r)))
+                .map(|(t, r)| json!({ "id": t.task_id, "person": t.person, "status": crate::api::status_str(r.status), "created_at": t.created_at, "schedule": t.schedule, "summary": r.summary }))
+                .collect()
+        });
+        v.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
+        v.truncate(limit);
+        v
+    }
+
+    /// The schedules `who` controls.
+    pub fn schedules_for(&self, who: &Person) -> Vec<Value> {
+        self.read(|s| {
+            s.schedules
+                .values()
+                .filter(|x| may_control(who, &x.person))
+                .map(|x| {
+                    let latest = s.tasks.values().filter(|t| t.schedule.as_deref() == Some(&x.id)).max_by_key(|t| t.created_at).and_then(|t| s.runs.get(&t.run_id).map(|r| json!({ "task": t.task_id, "status": crate::api::status_str(r.status), "at": t.created_at, "summary": r.summary })));
+                    json!({
+                        "id": x.id, "person": x.person, "every_minutes": x.every_minutes, "daily_at": x.daily_at, "until": x.until, "max_runs": x.max_runs,
+                        "runs": x.started, "paused": x.paused, "next": x.next_due(), "latest": latest,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    /// Cancel a task: its run stops, the cancellation is in the log, and
+    /// the answer says what it had already done, the changes that cannot be
+    /// undone first.
+    pub async fn cancel_task(&self, who: &Person, id: &str) -> Result<Value, Refused> {
+        let found = self.read(|s| s.tasks.get(id).filter(|t| may_control(who, &t.person)).and_then(|t| s.runs.get(&t.run_id).cloned()));
+        let Some(run) = found else { return Err(Refused::NotFound("task")) };
+        if run.status.terminal() {
+            return Err(Refused::Conflict(format!("the task has already ended ({})", crate::api::status_str(run.status))));
+        }
+        self.emit(&format!("person:{}", who.id), Ev::Cancelled { run: run.id.clone() }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        self.on_stop(&run.id, true).await;
+        let mut done: Vec<(bool, String)> = run
+            .intents
+            .values()
+            .filter(|i| i.result.as_ref().is_some_and(|r| !r.is_error))
+            .filter_map(|i| crate::boundary::facts(self, &i.tool).filter(|f| f.risk.changes_state()).map(|f| (matches!(f.risk, crate::tools::Risk::Irreversible | crate::tools::Risk::Financial), i.tool.replace("__", ": ").replace('_', " "))))
+            .collect();
+        done.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(json!({
+            "cancelled": id,
+            "cannot_be_undone": done.iter().filter(|d| d.0).map(|d| &d.1).collect::<Vec<_>>(),
+            "already_done": done.iter().filter(|d| !d.0).map(|d| &d.1).collect::<Vec<_>>(),
+        }))
+    }
+
+    fn schedule_owned(&self, who: &Person, id: &str) -> Result<crate::state::Schedule, Refused> {
+        self.read(|s| s.schedules.get(id).filter(|x| may_control(who, &x.person)).cloned()).ok_or(Refused::NotFound("schedule"))
+    }
+
+    /// Pause a schedule: no more runs start until it is resumed; a run
+    /// already going goes on.
+    pub async fn pause_schedule(&self, who: &Person, id: &str) -> Result<(), Refused> {
+        let sc = self.schedule_owned(who, id)?;
+        if sc.paused.is_some() {
+            return Err(Refused::Conflict("the schedule is already paused".into()));
+        }
+        let reason = if who.id == sc.person { "Paused by you".to_string() } else { format!("Paused by {}", who.name) };
+        self.emit(&format!("person:{}", who.id), Ev::SchedulePaused { id: id.into(), reason, task: None }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        Ok(())
+    }
+
+    pub async fn resume_schedule(&self, who: &Person, id: &str) -> Result<(), Refused> {
+        let sc = self.schedule_owned(who, id)?;
+        if sc.paused.is_none() {
+            return Err(Refused::Conflict("the schedule is not paused".into()));
+        }
+        if sc.paused_on.is_some() {
+            return Err(Refused::Conflict("its run is waiting on you: answer it, or resume or cancel that task, and the schedule goes on".into()));
+        }
+        self.emit(&format!("person:{}", who.id), Ev::ScheduleResumed { id: id.into() }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        Ok(())
+    }
+
+    /// Cancel a schedule: no more runs, and a run of it still going stops.
+    pub async fn cancel_schedule(&self, who: &Person, id: &str) -> Result<Value, Refused> {
+        self.schedule_owned(who, id)?;
+        let going: Vec<String> = self.read(|s| s.tasks.values().filter(|t| t.schedule.as_deref() == Some(id)).filter_map(|t| s.runs.get(&t.run_id)).filter(|r| !r.status.terminal()).map(|r| r.id.clone()).collect());
+        self.emit(&format!("person:{}", who.id), Ev::ScheduleRemoved { id: id.into() }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        for run in &going {
+            if self.emit(&format!("person:{}", who.id), Ev::Cancelled { run: run.clone() }).await.is_ok() {
+                self.on_stop(run, true).await;
+            }
+        }
+        Ok(json!({ "cancelled": id, "runs_stopped": going.len() }))
+    }
+
+    /// Change when a schedule runs and when it ends. What each run does
+    /// stays: to change that, cancel it and set up another.
+    pub async fn edit_schedule(&self, who: &Person, id: &str, b: &Value) -> Result<Value, Refused> {
+        let sc = self.schedule_owned(who, id)?;
+        let timing = b.get("every_minutes").is_some_and(|v| !v.is_null()) || b.get("daily_at").is_some_and(|v| !v.is_null());
+        let (every_minutes, daily_at) = if timing { crate::api::rule_for(b, self.cfg.schedules.min_every_minutes).map_err(Refused::Invalid)? } else { (sc.every_minutes, sc.daily_at.clone()) };
+        let (until, max_runs) = crate::api::end_for(b).map_err(Refused::Invalid)?;
+        let until = if b.get("until").is_some() { until } else { sc.until };
+        let max_runs = if b.get("max_runs").is_some() { max_runs } else { sc.max_runs };
+        if max_runs.is_some_and(|m| m <= sc.started) {
+            return Err(Refused::Invalid(format!("it has already run {} times", sc.started)));
+        }
+        self.emit(&format!("person:{}", who.id), Ev::ScheduleChanged { id: id.into(), every_minutes, daily_at: daily_at.clone(), until, max_runs }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        Ok(json!({ "id": id, "every_minutes": every_minutes, "daily_at": daily_at, "until": until, "max_runs": max_runs }))
+    }
+
+    /// One of the control tools Magnus calls in a conversation, for the
+    /// person the conversation is with: what the tool says back, and whether
+    /// it is an error.
+    pub async fn chat_control(&self, person: &str, tool: &str, input: &Value) -> (String, bool, Option<Value>) {
+        let Some(who) = self.person(person) else { return ("no such person".into(), true, None) };
+        let id = input["id"].as_str().unwrap_or_default();
+        let r: Result<Value, Refused> = match tool {
+            "list_tasks" => Ok(json!({ "tasks": self.tasks_for(&who, 30) })),
+            "list_schedules" => Ok(json!({ "schedules": self.schedules_for(&who) })),
+            "cancel_task" => self.cancel_task(&who, id).await,
+            "pause_schedule" => self.pause_schedule(&who, id).await.map(|_| json!({ "paused": id })),
+            "resume_schedule" => self.resume_schedule(&who, id).await.map(|_| json!({ "resumed": id })),
+            "edit_schedule" => self.edit_schedule(&who, id, input).await,
+            "cancel_schedule" => self.cancel_schedule(&who, id).await,
+            _ => Err(Refused::Invalid(format!("{tool} is not a control"))),
+        };
+        match r {
+            Ok(v) => (v.to_string(), false, Some(v)),
+            Err(e) => (e.to_string(), true, None),
+        }
+    }
+}
+
+/// The control tools, as the model calls them.
+pub const TOOLS: [&str; 7] = ["list_tasks", "list_schedules", "cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule"];
