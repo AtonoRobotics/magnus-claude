@@ -301,6 +301,21 @@ fn current(c: &Console, h: &HeaderMap) -> Option<(String, Session)> {
     Some((sid, s))
 }
 
+/// Where a step-up opened in its own window comes back: it closes, and the
+/// console's page, which opened it, carries on with the action.
+pub async fn done() -> Response {
+    let body = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width, initial-scale=1\"><title>Confirmed</title><link rel=stylesheet href=/assets/app.css><link rel=stylesheet href=/assets/admin.css><script src=/assets/theme.js></script><script src=/assets/done.js defer></script><main class=\"ad-main\"><section class=\"card ad-sign-in\"><h1>Confirmed</h1><p class=muted>You can close this window and carry on in the console.</p><div class=row><a class=\"button primary\" href=\"/\">Back to the console</a></div></section></main>";
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
+}
+
+/// Whether a session is still open, for a stream that outlives its request.
+pub fn open(c: &Console, sid: &str) -> bool {
+    let sessions = c.store.sessions.lock().unwrap();
+    let Some(s) = sessions.get(sid) else { return false };
+    let now = Utc::now();
+    now - s.seen <= Duration::minutes(c.idle_minutes) && now - s.started <= Duration::hours(c.session_hours)
+}
+
 fn refused(status: StatusCode, error: &str, message: &str) -> Response {
     (status, Json(json!({ "error": error, "message": message }))).into_response()
 }

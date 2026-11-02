@@ -136,6 +136,12 @@ pub async fn sign_in(p_url: &str, at: std::net::SocketAddr, who: &str, expect: &
 /// The same, then the screen `visit` (e.g. `#/users`) checked in every look
 /// and at phone width.
 pub async fn sign_in_and_visit(p_url: &str, at: std::net::SocketAddr, who: &str, expect: &str, step_up: bool, visit: Option<&str>) -> Result<String, String> {
+    sign_in_with(p_url, at, who, expect, step_up, visit, &[]).await
+}
+
+/// The same, with more of the script's settings (`MAGNUS_SHELL` and its
+/// own, in `desktop/tests/admin-sign-in.mjs`).
+pub async fn sign_in_with(p_url: &str, at: std::net::SocketAddr, who: &str, expect: &str, step_up: bool, visit: Option<&str>, more: &[(&str, String)]) -> Result<String, String> {
     let out = tokio::process::Command::new("node")
         .arg(magnus_invariants::appliance::workspace_root().join("desktop/tests/admin-sign-in.mjs"))
         .env("MAGNUS_ADMIN_URL", p_url)
@@ -145,11 +151,12 @@ pub async fn sign_in_and_visit(p_url: &str, at: std::net::SocketAddr, who: &str,
         .env("MAGNUS_EXPECT", expect)
         .env("MAGNUS_STEP_UP", if step_up { "1" } else { "0" })
         .envs(visit.map(|v| ("MAGNUS_VISIT", v)))
+        .envs(more.iter().map(|(k, v)| (*k, v.as_str())))
         .env("MAGNUS_CHROMIUM", crate::chromium())
         .envs(crate::shots())
         .kill_on_drop(true)
         .output();
-    let out = tokio::time::timeout(std::time::Duration::from_secs(150), out).await.map_err(|_| "the browser did not finish in 150 seconds".to_string())?.unwrap();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(240), out).await.map_err(|_| "the browser did not finish in 240 seconds".to_string())?.unwrap();
     let log = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     if !out.status.success() {
         return Err(log);

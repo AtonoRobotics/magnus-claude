@@ -614,3 +614,19 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - a section with one name, as the first run on strix-alpha wrote it, is brought up to every name and keeps its password;
   - the console answers its Tailscale name and its address, both over TLS the CA verifies.
 
+
+## The admin console's shell: the patterns every screen uses (2026-11-02, `admin-shell`)
+
+- Owner, 2026-11-02: "do not build min slices and give up before the job is done … You build a spec completely not part of it and call that success." The console is built to its spec in full. `docs/admin-console.md` checks every line of the spec, each with the pull request and the test that proves it; the console is reported done only when every line is checked.
+- The spec's shell patterns, in `desktop/admin/admin.js` (`UI`), so each section after this uses them and none is built without them:
+  - lists open a detail panel on the right, full screen at phone width; Escape or × closes it and goes back to the list;
+  - a reversible change shows a toast with Undo for ten seconds;
+  - a destructive one opens a confirm sheet, which can ask for the target's name typed;
+  - a step-up opens the provider's sign-in in its own small window, and the action is sent again once the session holds the fresh password. The window is followed through the session, not its handle, because the console's `Cross-Origin-Opener-Policy: same-origin` cuts the link when it goes to the provider. Where windows are blocked, the whole page goes and comes back, as before;
+  - empty, loading and error states drawn the same everywhere, each error with Try again.
+- Live data: `GET /api/v1/events`, server-sent events. The console looks every two seconds and sends `status` (the kernel and log up, the cards, the kill switch) when it changes. A stream lasts no longer than the provider check (`refresh_seconds`) and ends with its session, so an admin turned off at the provider loses it as they lose every route; the browser reconnects through the guard. The top bar and Overview are drawn from it; the five-second kill switch poll is gone.
+- The admin's menu (spec, Shell: "the signed-in admin's menu (theme, sign out)"): light, dark or match computer, and solid or glass, the desktop app's own `Theme`.
+- Overview: each certificate the appliance serves (the console's, and the appliance's own when it has one) with when it ends, and an alert from 14 days before, linking to Operations › Network. The knowledge card opens Knowledge › Activity.
+- The console now serves the app's fonts (Inter, IBM Plex Mono) at `/assets/fonts/`: its stylesheet asked for them and got 404, so it was not the app's look.
+- Colours that were wrong in dark: the kill switch's button and banner, and danger buttons, were the dark theme's light red with white text (2.1:1). They are now a fixed strong red with white text (6:1) in every look. Status pills are the app's chips.
+- Test: `the_consoles_screens_share_a_live_stream_a_step_up_sheet_panels_sheets_and_undo` (admin_shell.rs), in Chromium against Keycloak: the menu sets the theme; the kill switch's banner arrives over the stream with no reload; Release asks in the sheet, the provider's window takes the password, and the switch is released; a row opens its panel and Escape closes it; a cancelled sheet ends nothing; Turn off's Undo turns the person back on; each is in the audit log. The stream is refused without a session, opens with `status`, and ends at sign-out. Overview names the console's certificate. `the_end_of_a_certificates_validity_is_read_from_its_pem` (admin/cert.rs).

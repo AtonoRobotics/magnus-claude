@@ -13,6 +13,14 @@
 // MAGNUS_VISIT       optional: a screen (e.g. "#/users") to open signed in, which
 //                    must render in light, dark and glass, and at phone width
 //                    with no sideways scroll (admin console spec, invariant tests, UI)
+// MAGNUS_SHELL       optional: "1" to try the patterns every screen uses (admin
+//                    console spec, Shell): the admin's menu sets the theme; the
+//                    kill switch's banner arrives live; Release opens the step-up
+//                    sheet, whose sign-in window comes back to the action; a row
+//                    opens its detail panel and Escape closes it; a confirm sheet
+//                    cancelled changes nothing; Turn off offers Undo. Needs a
+//                    member MAGNUS_OTHER (their name), and the console's step-up
+//                    to lapse in MAGNUS_STEP_UP_SECONDS.
 // MAGNUS_CHROMIUM    Chrome to drive; MAGNUS_SHOTS  where to keep screenshots
 //
 // Prints the console's session cookie (signed in) as its last line.
@@ -44,10 +52,10 @@ const step = async (name, f) => {
 const T = 60_000;
 // On a re-authentication (a step-up), Keycloak shows who is signing in as
 // fixed text and asks only for the password.
-const login = async () => {
-  if (await page.locator("#username").count()) await page.locator("#username").fill(person);
-  await page.locator("#password").fill(password);
-  await Promise.all([page.waitForEvent("load"), page.locator("#kc-login").click()]);
+const login = async (p = page) => {
+  if (await p.locator("#username").count()) await p.locator("#username").fill(person);
+  await p.locator("#password").fill(password);
+  await Promise.all([p.waitForEvent("load"), p.locator("#kc-login").click()]);
 };
 
 await step("the console asks for a sign-in", async () => {
@@ -79,12 +87,68 @@ if (expect === "refused") {
   }
 }
 
+if (process.env.MAGNUS_SHELL === "1" && expect === "admin") {
+  const other = env("MAGNUS_OTHER");
+  const lapse = Number(env("MAGNUS_STEP_UP_SECONDS")) * 1000 + 1500;
+  const csrf = async () => page.evaluate(async () => (await (await fetch("/api/v1/session")).json()).csrf);
+  await step("the admin's menu sets the theme", async () => {
+    await page.goto(`${base}/#/overview`);
+    await page.locator("#view h1").waitFor({ timeout: T });
+    await page.locator("#me-btn").click();
+    await page.getByRole("menuitemradio", { name: "Dark" }).click();
+    if (await page.evaluate(() => document.documentElement.dataset.mode) !== "dark") throw new Error("Dark did not turn the console dark");
+    await page.getByRole("menuitemradio", { name: "Glass" }).click();
+    if (await page.evaluate(() => document.documentElement.dataset.material) !== "glass") throw new Error("Glass did not make the chrome glass");
+    await page.getByRole("menuitemradio", { name: "Light" }).click();
+    await page.getByRole("menuitemradio", { name: "Solid" }).click();
+    await page.keyboard.press("Escape");
+  });
+  await step("the kill switch's banner arrives live", async () => {
+    // Engaged from outside this page's own buttons: only the live stream
+    // can tell the page.
+    const token = await csrf();
+    const r = await page.evaluate(async t => (await fetch("/api/v1/kill-switch/engage", { method: "POST", headers: { "x-csrf-token": t } })).status, token);
+    if (r !== 200) throw new Error(`engaging answered ${r}`);
+    await page.locator("#kill-banner").waitFor({ timeout: 10_000 });
+  });
+  await step("Release asks for the password in a sheet, and goes on", async () => {
+    await page.waitForTimeout(lapse);
+    await page.locator("#kill-release").click();
+    await page.getByRole("heading", { name: "Confirm it's you" }).waitFor({ timeout: T });
+    const [popup] = await Promise.all([page.waitForEvent("popup"), page.locator("#step-go").click()]);
+    await popup.locator("#password").waitFor({ timeout: T });
+    await login(popup);
+    await page.locator("#kill-banner").waitFor({ state: "detached", timeout: T });
+    await page.getByText("Agents may run again.").waitFor({ timeout: T });
+  });
+  await step("a row opens its detail panel, and Escape closes it", async () => {
+    await page.goto(`${base}/#/users`);
+    await page.locator("#users-rows tr.click").first().waitFor({ timeout: T });
+    await page.locator("#users-rows tr.click", { hasText: other }).click();
+    await page.locator("#panel h2", { hasText: other }).waitFor({ timeout: T });
+    await page.locator("#panel").press("Escape");
+    await page.locator("#panel").waitFor({ state: "detached", timeout: T });
+    if (!page.url().endsWith("#/users")) throw new Error(`closing the panel went to ${page.url()}`);
+  });
+  await step("a confirm sheet, cancelled, changes nothing", async () => {
+    await page.locator("#users-rows tr.click", { hasText: other }).click();
+    await page.locator("#u-end").click();
+    await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+    await page.getByRole("dialog").waitFor({ state: "detached", timeout: T });
+  });
+  await step("Turn off offers Undo, and Undo turns them back on", async () => {
+    await page.locator("#u-disable").click();
+    await page.getByRole("button", { name: "Undo" }).click();
+    await page.locator("#u-disable").waitFor({ timeout: T });
+  });
+}
+
 const visit = process.env.MAGNUS_VISIT;
 if (visit && expect === "admin") {
   await step(`${visit} renders in every look and at phone width`, async () => {
     await page.goto(`${base}/${visit}`);
     await page.locator("#view h1").waitFor({ timeout: T });
-    await page.locator("#view table, #view .empty").first().waitFor({ timeout: T });
+    await page.locator("#view table, #main .ad-empty, #panel table").first().waitFor({ timeout: T });
     for (const [mode, material] of [["light", "solid"], ["dark", "solid"], ["light", "glass"], ["dark", "glass"]]) {
       for (const width of [1280, 390]) {
         await page.setViewportSize({ width, height: 800 });

@@ -6,13 +6,15 @@
 //! anything else is not found. Every page is hardened: a strict
 //! Content-Security-Policy, nothing from anywhere but the appliance.
 //!
-//! Its parts so far: the process, its listener and its shell (`net`), and
-//! signing in (`auth`, `session`). The audit log and each section follow as
-//! their own pull requests.
+//! Its parts: the process, its listener and its shell (`net`), signing in
+//! (`auth`, `session`), live data (`live`), and each section's own module.
+//! `docs/admin-console.md` checks every line of the spec against them.
 
 pub mod auth;
+pub mod cert;
 pub mod directory;
 pub mod kernel;
+pub mod live;
 pub mod net;
 pub mod ops;
 pub mod session;
@@ -51,6 +53,9 @@ pub struct Console {
     pub state_dir: std::path::PathBuf,
     /// The organisation's people at the provider, as the console's service account reaches them.
     pub directory: directory::Directory,
+    /// The certificates the appliance serves, by what each is for: Overview
+    /// warns two weeks before one expires.
+    pub certs: Vec<(String, std::path::PathBuf)>,
 }
 
 impl Console {
@@ -122,6 +127,10 @@ pub async fn serve(cfg: Config) -> Result<()> {
         kernel: kernel::Kernel { path: crate::control::socket_path(&cfg.appliance.state_dir) },
         state_dir: cfg.appliance.state_dir.clone(),
         directory,
+        certs: [("The admin console's certificate".to_string(), Some(a.tls_cert.clone())), ("The appliance's certificate".to_string(), cfg.appliance.tls_cert.clone())]
+            .into_iter()
+            .filter_map(|(what, p)| p.map(|p| (what, p)))
+            .collect(),
     });
     let l = net::Listener::bind(&addrs, allow, tls).await?;
     // tap_io gives the listener axum's connect-info: each request's source,
@@ -147,6 +156,7 @@ pub fn router(console: Arc<Console>) -> Router {
     let api = Router::new()
         .route("/api/v1/session", get(session::me).delete(session::logout))
         .route("/api/v1/session/step-up", axum::routing::post(session::confirm))
+        .route("/api/v1/events", get(live::events))
         .route("/api/v1/overview", get(ops::overview))
         .route("/api/v1/health", get(ops::health))
         .route("/api/v1/kill-switch", get(ops::switch_state))
@@ -166,9 +176,11 @@ pub fn router(console: Arc<Console>) -> Router {
     Router::new()
         .route("/", get(shell))
         .route("/assets/{file}", get(asset))
+        .route("/assets/fonts/{file}", get(font))
         .route("/auth/login", get(session::login))
         .route("/auth/step-up", get(session::step_up))
         .route("/auth/callback", get(session::callback))
+        .route("/auth/done", get(session::done))
         .route("/status", get(status))
         .merge(api)
         .fallback(not_found)
@@ -276,9 +288,18 @@ async fn asset(axum::extract::Path(file): axum::extract::Path<String>) -> Respon
         "theme.js" => (include_str!("../../../../desktop/ui/theme.js"), "text/javascript; charset=utf-8"),
         "admin.css" => (include_str!("../../../../desktop/admin/admin.css"), "text/css; charset=utf-8"),
         "admin.js" => (include_str!("../../../../desktop/admin/admin.js"), "text/javascript; charset=utf-8"),
+        "done.js" => (include_str!("../../../../desktop/admin/done.js"), "text/javascript; charset=utf-8"),
         _ => return not_found().await,
     };
     ([(header::CONTENT_TYPE, kind)], body).into_response()
+}
+
+/// The desktop app's own fonts, so the console looks as the app does.
+async fn font(axum::extract::Path(file): axum::extract::Path<String>) -> Response {
+    match crate::api::FONTS.iter().find(|(n, _)| *n == file) {
+        Some((_, body)) => ([(header::CONTENT_TYPE, "font/woff2")], *body).into_response(),
+        None => not_found().await,
+    }
 }
 
 fn html_escape(s: &str) -> String {
