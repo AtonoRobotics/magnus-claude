@@ -701,6 +701,8 @@ pub struct ConnectorSetting {
 
 #[derive(Default)]
 pub struct State {
+    /// Source items deleted at their source (K11): links to them are gone.
+    pub deleted_items: HashSet<String>,
     /// Trashed items by id.
     pub trash: BTreeMap<String, Trashed>,
     /// Conversations removed from the trash: their tasks stay, the thread is gone.
@@ -1369,6 +1371,10 @@ impl State {
                     self.put_back(t.held);
                 }
             }
+            // A bundle document erased outright (K11), not from the trash.
+            Ev::Removed { item, .. } if item.starts_with('/') && !self.trash.contains_key(item) => {
+                self.bundle.remove(item);
+            }
             Ev::Removed { item, .. } => match self.trash.remove(item).map(|t| t.held) {
                 Some(Held::Entry { thread }) => {
                     self.hidden.entry(thread).or_default().insert(item.clone());
@@ -1621,10 +1627,18 @@ impl State {
             }
             // The audit trail is read from the log, not kept in memory.
             Ev::Audit { .. } => {}
-            // K10: every document listing the item is stale from now.
-            Ev::SourceChanged { item, .. } => {
+            // K10: every document listing the item is stale from now. A
+            // deleted item leaves the documents that list it (K11): those
+            // left with no source are erased by the kernel after this.
+            Ev::SourceChanged { item, change, .. } => {
                 for d in self.bundle.values_mut().filter(|d| d.sources.contains(item)) {
                     d.stale_after.get_or_insert(e.at);
+                    if change == "deleted" {
+                        d.sources.retain(|s| s != item);
+                    }
+                }
+                if change == "deleted" {
+                    self.deleted_items.insert(item.clone());
                 }
             }
             Ev::Decision { run, call_id, tool, outcome, stage, rule, .. } => {

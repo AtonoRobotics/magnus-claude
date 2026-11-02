@@ -1041,3 +1041,10 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - A deleted item's erasure (K11) is step 6b; until then a deletion marks its documents stale like any change.
 - Test: `a_change_at_a_source_marks_its_documents_stale_and_its_permissions_asked_again` (source_changes.rs, T11).
 
+## Org context, step 6b: erasure of a deleted source item (2026-11-02, `org-context-6b`)
+
+- K11, for a deleted item: when a source reports an item deleted, a document drawn from it and nothing else outside the bundle is erased. Its every version, and the calls that wrote it in their runs, leave the content store, recorded first as a `removed` event, so an erasure cut short finishes at the next start and the backups are scrubbed of it, as the trash's removals are. A document drawn from it and more stays, stale, no longer listing it, and with links to it turned into their text.
+- Who sees what (K2) no longer counts the deleted item, and what the sources said about it is forgotten.
+- Removing a person's org context (their user-scope documents, and their org documents relabelled `human:removed`) comes with deleting a person in the console (Users 5b), where a person is removed. Memory entries citing a deleted item are documents in the person's memory and go the same way.
+- Test: `a_deleted_item_takes_what_was_drawn_only_from_it` (erasure.rs, T12 for items).
+

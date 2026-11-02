@@ -288,16 +288,27 @@ impl Kernel {
         if let (Some(at), Some(o)) = (d.stale_after, fm.as_object_mut()) {
             o.insert("stale_after".into(), json!(at.to_rfc3339()));
         }
+        // An item deleted at its source is no longer listed (K11).
+        if let Some(list) = fm.get_mut("sources").and_then(|x| x.as_array_mut()) {
+            list.retain(|x| x["resource"].as_str().is_none_or(|r| self.read(|s| !s.deleted_items.contains(r))));
+        }
         Ok(Some((fm, body, d.label, d.version())))
     }
 
     /// A body with every link to a document `person` cannot see turned into
     /// its text; a bullet whose links are all hidden is dropped (K2).
     pub fn without_hidden_links(&self, person: &str, body: &str) -> String {
-        let hidden = |target: &str| self.read(|s| s.bundle.get(target).cloned()).is_some_and(|d| !self.bundle_visible(person, &d));
+        // A link to a document the person cannot see, or to a source item
+        // deleted at its source (K11), loses its target.
+        let hidden = |target: &str| {
+            if !target.starts_with('/') {
+                return self.read(|s| s.deleted_items.contains(target));
+            }
+            self.read(|s| s.bundle.get(target).cloned()).is_some_and(|d| !self.bundle_visible(person, &d))
+        };
         let mut out = vec![];
         for line in body.lines() {
-            let targets: Vec<String> = links(line).into_iter().filter(|t| t.starts_with('/')).collect();
+            let targets: Vec<String> = links(line).into_iter().filter(|t| t.starts_with('/') || self.read(|s| s.deleted_items.contains(t))).collect();
             let gone: Vec<&String> = targets.iter().filter(|t| hidden(t)).collect();
             if !targets.is_empty() && gone.len() == targets.len() && (line.trim_start().starts_with("* ") || line.trim_start().starts_with("- ")) {
                 continue;
