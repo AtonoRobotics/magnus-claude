@@ -445,6 +445,16 @@ pub struct PlaybookItem {
     pub added: u64,
     pub retired: Option<u64>,
     pub added_at: DateTime<Utc>,
+    /// The event that holds its text now: where it is recalled from.
+    pub text_seq: i64,
+}
+
+impl PlaybookItem {
+    /// Where it is in its person's memory (org context spec: the playbook
+    /// becomes user memory).
+    pub fn path(&self) -> String {
+        format!("/users/{}/playbook/{}.md", self.person, self.id)
+    }
 }
 
 /// A schedule's record. What its runs are asked (its text), its title and
@@ -632,6 +642,8 @@ enum Held {
     Knowledge(Box<KnowledgeEntry>),
     /// A document of a person's own memory, under `/users/<person>/`.
     Bundle(Box<BundleDoc>),
+    /// A lesson from earlier tasks, in its person's memory.
+    Lesson(Box<PlaybookItem>),
 }
 
 impl Trashed {
@@ -652,7 +664,7 @@ impl Trashed {
             Held::Project(_) => "project",
             Held::Memory(_) => "memory",
             Held::Knowledge(_) => "knowledge",
-            Held::Bundle(_) => "memory",
+            Held::Bundle(_) | Held::Lesson(_) => "memory",
         }
     }
 
@@ -808,7 +820,9 @@ impl State {
     pub fn content_owner(&self, ev: &crate::events::Ev, runs: &HashMap<String, String>) -> Option<String> {
         use crate::events::Ev;
         match ev {
-            Ev::KnowledgeAdded { .. } | Ev::Playbook { .. } => return None,
+            // The playbook's lessons are their person's memory (org context
+            // spec), so they are found by the default below.
+            Ev::KnowledgeAdded { .. } => return None,
             // An org document is nobody's; a person's own is theirs.
             Ev::BundleWritten { owner_user, .. } => return owner_user.clone(),
             Ev::ItemResolved { id, .. } => return self.items.get(id).map(|i| i.person.clone()),
@@ -911,6 +925,11 @@ impl State {
             _ => match () {
                 _ if self.files.get(item).is_some_and(|f| f.person == person) => true,
                 _ if self.projects.get(item).is_some_and(|p| p.person == person) => true,
+                _ if self.playbook.get(item).is_some_and(|i| i.person == person) => {
+                    // Its text is also in the runs that wrote it.
+                    let runs = self.playbook.get(item).map(|i| i.runs.clone()).unwrap_or_default();
+                    return if runs.iter().all(|r| ended(r)) { Ok(()) } else { Err(Running) };
+                }
                 _ if item.starts_with('/') => {
                     // A document of the person's own memory; its text is
                     // also in the runs that wrote it (invariant 3).
@@ -972,6 +991,11 @@ impl State {
         if let Some(p) = self.projects.remove(item) {
             return Some((p.name.clone(), None, Held::Project(p)));
         }
+        if let Some(i) = self.playbook.remove(item) {
+            // Its title in the trash is its text, recalled when listed.
+            let from = TitleFrom::Text(i.text_seq);
+            return Some((String::new(), Some(from), Held::Lesson(Box::new(i))));
+        }
         if item.starts_with('/') {
             let d = self.bundle.remove(item)?;
             return Some((d.path.clone(), None, Held::Bundle(Box::new(d))));
@@ -1031,6 +1055,21 @@ impl State {
             Held::Knowledge(_) => named(vec!["knowledge_added"], "id", item),
             // Every version, and the calls that wrote or read it in the
             // runs that wrote it.
+            // Every version of a lesson, and the calls that wrote it.
+            Held::Lesson(i) => {
+                let text = serde_json::to_string(&i.text).unwrap_or_default().trim_matches('"').to_string();
+                let mut containing = vec![];
+                for r in &i.runs {
+                    for k in ["intent", "tool_result", "model_reply"] {
+                        for t in [&i.id, &text] {
+                            if !t.trim().is_empty() {
+                                containing.push((k, r.clone(), t.clone()));
+                            }
+                        }
+                    }
+                }
+                Holding { containing, matches: vec![("memory_invalidated", "path", i.path())], ..named(vec!["playbook"], "item", item) }
+            }
             Held::Bundle(d) => {
                 let containing = d.runs.iter().flat_map(|r| ["intent", "tool_result", "model_reply"].into_iter().map(move |k| (k, r.clone(), d.path.clone()))).collect();
                 Holding { containing, ..named(vec!["bundle_written", "memory_invalidated"], "path", item) }
@@ -1077,6 +1116,9 @@ impl State {
             }
             Held::Bundle(d) => {
                 self.bundle.insert(d.path.clone(), *d);
+            }
+            Held::Lesson(i) => {
+                self.playbook.insert(i.id.clone(), *i);
             }
         }
     }
@@ -1648,6 +1690,7 @@ impl State {
                                 added: v,
                                 retired: None,
                                 added_at: e.at,
+                                text_seq: e.seq,
                             },
                         );
                     }
@@ -1655,6 +1698,7 @@ impl State {
                         if let Some(i) = self.playbook.get_mut(item) {
                             if let Some(t) = text {
                                 i.text = t.clone();
+                                i.text_seq = e.seq;
                             }
                             if addresses.is_some() {
                                 i.addresses = addresses.clone();

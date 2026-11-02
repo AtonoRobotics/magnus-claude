@@ -2276,7 +2276,8 @@ async function killSwitchSection(el) {
 async function memorySection(el) {
   let editing = null;
   const GROUPS = [["relationship", "How you want Magnus to work with you", "In every conversation and task of yours."],
-    ["fact", "What Magnus remembers", "Found when it is needed."], ["note", "Magnus's notes about your work", "Kept under your own folder."]];
+    ["fact", "What Magnus remembers", "Found when it is needed."], ["lesson", "Lessons from earlier tasks", "What Magnus learned doing your work, found when a task may need it."],
+    ["note", "Magnus's notes about your work", "Kept under your own folder."]];
   const row = k => `<li class="mem${k.no_longer_true ? " gone" : ""}" data-path="${esc(k.path)}">
     ${editing === k.path ? `<textarea data-edit rows="3" style="width:100%" aria-label="Edit">${esc(k.text || "")}</textarea>
       <div class="row" style="margin-top:6px"><button data-act="save">Save</button><button class="ghost" data-act="cancel">Cancel</button></div>`

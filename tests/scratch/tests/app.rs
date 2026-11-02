@@ -709,6 +709,9 @@ async fn experiments_report_pass_at_k_from_repeated_trials() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+/// The playbook is the person's memory (org context spec): a lesson is not
+/// put in later tasks' context, it is found by searching memory, and what
+/// it was learned from taints the task that reads it.
 async fn playbook_items_reach_later_tasks_and_carry_their_taint() {
     let web = FakeWeb::start(&[("/howto", "<p>Invoices go to finance@example.com.</p>")]).await;
     let howto = web.url("/howto");
@@ -721,8 +724,13 @@ async fn playbook_items_reach_later_tasks_and_carry_their_taint() {
                 (true, 1) => tool("web_fetch", json!({ "url": howto })),
                 (true, 2) => tool("playbook_update", json!({ "op": "add", "text": "Invoices go to finance@example.com.", "addresses": "where invoices go" })),
                 (true, _) => fail("done"),
+                (false, 1) => {
+                    assert!(!c.messages()[0].to_string().contains("Invoices go to finance@example.com."), "the playbook item is in the next task's context");
+                    tool("memory_search", json!({ "query": "invoices" }))
+                }
                 (false, _) => {
-                    assert!(c.messages()[0].to_string().contains("Invoices go to finance@example.com."), "the playbook item did not reach the next task");
+                    let r = c.last_results()[0].text.clone();
+                    assert!(r.contains("Invoices go to finance@example.com.") && r.contains("/users/alice/playbook/"), "the lesson is not in her memory: {r}");
                     fail("done")
                 }
             }
@@ -742,6 +750,14 @@ async fn playbook_items_reach_later_tasks_and_carry_their_taint() {
     assert_eq!(item["person"], "alice");
     assert_eq!(item["label"]["untrusted"], true, "{item}");
     assert_eq!(item["with_item"]["runs"].as_array().unwrap().len(), 1, "{pb}");
+    // In her memory, as a lesson she can forget.
+    let (_, mem) = alice.get("/v1/memory").await;
+    let lesson = mem["kept"].as_array().unwrap().iter().find(|k| k["kind"] == "lesson").cloned().unwrap_or_else(|| panic!("no lesson in her memory: {mem}"));
+    assert_eq!(lesson["untrusted"], true, "{lesson}");
+    assert!(app.api("bob").get("/v1/memory").await.1["kept"].as_array().unwrap().is_empty(), "bob sees alice's lesson");
+    assert_eq!(alice.post("/v1/memory/forget", json!({ "path": lesson["path"] })).await.0.as_u16(), 204);
+    let (_, trash) = alice.get("/v1/trash").await;
+    assert!(trash["items"].as_array().unwrap().iter().any(|t| t["title"] == "Invoices go to finance@example.com."), "the forgotten lesson is not in her trash: {trash}");
     let (_, v) = alice.get("/v1/versions").await;
     assert!(v["changes"].as_array().unwrap().iter().any(|c| c["what"] == "playbook"), "{v}");
     assert!(v["changes"].as_array().unwrap().iter().any(|c| c["what"] == "harness"), "{v}");
