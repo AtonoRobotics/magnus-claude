@@ -140,6 +140,8 @@ mod tests {
             assert!(m.endpoint.starts_with("https://"), "{}", m.id);
             assert!(["dcr", "preregistered"].contains(&m.registration.as_str()), "{}", m.id);
             assert_eq!(m.registration == "preregistered", m.provider.is_some(), "{}", m.id);
+            // Where the person removes Magnus when the app cannot end a sign-in itself.
+            assert!(m.remove_access.as_deref().is_some_and(|u| u.starts_with("https://")), "{}: no page where the person removes Magnus", m.id);
             assert!(crate::tools::Audience::parse(&m.audience).is_some(), "{}", m.id);
             assert!(crate::tools::Label::parse(&m.label).is_some(), "{}", m.id);
             for (t, risk) in &m.tools {
