@@ -1,7 +1,8 @@
 //! An SMTP server for tests: the identity provider sends its real email to
 //! it (plain SMTP, no TLS, no sign-in), and the test reads what arrived.
-//! It listens on this machine's address on its network, which the test
-//! Keycloak reaches from its container.
+//! It listens where the test Keycloak, in its container, reaches this
+//! machine: the gateway of the container's network (`docker inspect`), or
+//! this machine's address on its network when Keycloak runs elsewhere.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -16,23 +17,40 @@ pub struct Mail {
 pub struct Inbox {
     pub addr: SocketAddr,
     mail: Arc<Mutex<Vec<Mail>>>,
+    connections: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// This machine as the test Keycloak's container reaches it: its network's
+/// gateway.
+fn seen_from_keycloak() -> Option<std::net::IpAddr> {
+    let out = std::process::Command::new("docker").args(["inspect", "magnus-claude-kc", "--format", "{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}"]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).split_whitespace().find_map(|g| g.parse().ok())
 }
 
 impl Inbox {
     pub async fn start() -> Inbox {
-        let l = tokio::net::TcpListener::bind((crate::admin::lan_ip(), 0)).await.unwrap();
+        let ip = seen_from_keycloak().unwrap_or_else(crate::admin::lan_ip);
+        let l = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
         let addr = l.local_addr().unwrap();
         let mail: Arc<Mutex<Vec<Mail>>> = Default::default();
-        let m = mail.clone();
+        let connections: Arc<std::sync::atomic::AtomicUsize> = Default::default();
+        let (m, n) = (mail.clone(), connections.clone());
         tokio::spawn(async move {
             while let Ok((s, _)) = l.accept().await {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let m = m.clone();
                 tokio::spawn(async move {
                     let _ = session(s, m).await;
                 });
             }
         });
-        Inbox { addr, mail }
+        Inbox { addr, mail, connections }
+    }
+
+    /// How many connections the server has taken: none means the sender
+    /// never reached it.
+    pub fn connections(&self) -> usize {
+        self.connections.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The first mail to `to`, waiting up to a minute for it.

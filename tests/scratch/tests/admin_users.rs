@@ -95,7 +95,7 @@ async fn an_admin_invites_someone_who_chooses_their_password_from_the_providers_
     // password, and the provider emails the link to choose it.
     let (st, v) = s.send(reqwest::Method::POST, "/users", &alice, Some(json!({ "email": "Dee@Acme.test", "name": "Dee Ray", "role": "member" }))).await;
     assert_eq!(st, StatusCode::CREATED, "{v}");
-    assert_eq!(v["email_sent"], true, "{v}");
+    assert_eq!(v["email_sent"], true, "{v}; the SMTP server at {} took {} connections", inbox.addr, inbox.connections());
     let dee = s.user(&alice, "dee@acme.test").await.expect("the invitation is not in the list");
     assert_eq!((dee["name"].as_str(), dee["role"].as_str(), dee["status"].as_str()), (Some("Dee Ray"), Some("member"), Some("invited")), "{dee}");
     let mail = inbox.wait_for("dee@acme.test").await;
