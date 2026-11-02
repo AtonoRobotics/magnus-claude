@@ -1000,3 +1000,9 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Permission checks against a cache (K3), `entity.resolve` and `people.ask` follow in step 4b.
 - Test: `org_search_asks_every_source_the_person_may_reach_and_org_fetch_reads_as_them` (org_sources.rs).
 
+## Org context, step 4b: entities by identity or name (2026-11-02, `org-context-4b`)
+
+- `entity_resolve` (key or name, optional type) finds the bundle's entity documents whose identity has the key among its values (any case), or whose title is the name, each with its path, type, identity and resource, only those the person may see (K2, T2 for entities). It carries the taint the documents were written under, as a bundle read does.
+- Both system prompts name it beside the bundle's other tools, and say that the org's systems themselves are searched with `org_search` and read with `org_fetch`. Still nothing about the organisation itself.
+- Test: `an_entity_is_found_by_its_identity_or_name_only_by_whom_may_see_it` (entity_resolve.rs).
+

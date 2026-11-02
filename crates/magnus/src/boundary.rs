@@ -385,7 +385,7 @@ impl Kernel {
             let d = out.as_ref().ok().and_then(|(_, _, d)| d.clone()).unwrap_or_default();
             let apps: Vec<String> = d["apps"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
             (Label { untrusted: d["untrusted"] != false, private: d["private"] != false }, if apps.is_empty() { vec![f.app.clone()] } else { apps })
-        } else if matches!(a.tool.as_str(), "knowledge_search" | "bundle_read" | "bundle_search" | "memory_list" | "memory_read") {
+        } else if matches!(a.tool.as_str(), "knowledge_search" | "bundle_read" | "bundle_search" | "entity_resolve" | "memory_list" | "memory_read") {
             // What the search returned decides; a result that says nothing is untrusted and private.
             let d = out.as_ref().ok().and_then(|(_, _, d)| d.clone()).unwrap_or_default();
             (Label { untrusted: d["untrusted"] != false, private: d["private"] != false }, vec![f.app.clone()])
@@ -914,7 +914,7 @@ impl Kernel {
                 }
                 // memory_search is answered in execute(), with its taint from the same lookup.
                 "knowledge_search" => Ok(self.knowledge_search(&a.run, &s("query")).await?),
-                "bundle_read" | "bundle_search" | "bundle_write" => Ok(self.bundle_tool(&a.run, &a.tool, &a.input).await?),
+                "bundle_read" | "bundle_search" | "bundle_write" | "entity_resolve" => Ok(self.bundle_tool(&a.run, &a.tool, &a.input).await?),
                 "memory_list" | "memory_read" | "memory_invalidate" | "memory_forget" => Ok(self.memory_tool(&a.run, &a.tool, &a.input).await?),
                 "org_search" => Ok(self.org_search(&a.run, &a.input).await?),
                 "org_fetch" => Ok(self.org_fetch(&a.run, &a.input).await?),

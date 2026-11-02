@@ -368,6 +368,35 @@ impl Kernel {
     }
 }
 
+impl Kernel {
+    /// `entity.resolve`: entity documents `person` can see whose identity
+    /// has `key` among its values, or whose title is `name` (any case),
+    /// optionally of one type, each with its identity (K2 decides).
+    pub async fn entity_resolve(&self, person: &str, key: &str, name: &str, kind: &str) -> anyhow::Result<(Vec<Value>, Label)> {
+        let (key, name, kind) = (key.trim().to_lowercase(), name.trim().to_lowercase(), kind.trim().to_lowercase());
+        let docs: Vec<crate::state::BundleDoc> = self.read(|s| s.bundle.values().filter(|d| d.kind == "entity").cloned().collect());
+        let seen: Vec<crate::state::BundleDoc> = docs.into_iter().filter(|d| self.bundle_visible(person, d)).collect();
+        let contents = self.log.contents(&seen.iter().map(|d| d.seq()).collect::<Vec<_>>()).await?;
+        let mut label = Label::PRINCIPAL;
+        let mut out = vec![];
+        for d in &seen {
+            let Some(c) = contents.get(&d.seq()) else { continue };
+            let fm = &c["frontmatter"];
+            if !kind.is_empty() && fm["type"].as_str().is_none_or(|t| t.to_lowercase() != kind) {
+                continue;
+            }
+            let ids: Vec<String> = fm["identity"].as_object().into_iter().flatten().map(|(_, v)| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()).to_lowercase()).collect();
+            let by_key = !key.is_empty() && ids.iter().any(|v| *v == key);
+            let by_name = !name.is_empty() && fm["title"].as_str().is_some_and(|t| t.to_lowercase() == name);
+            if by_key || by_name {
+                label = label.join(d.label);
+                out.push(json!({ "path": d.path, "type": fm["type"], "title": fm["title"], "identity": fm["identity"], "resource": fm["resource"], "version": d.version() }));
+            }
+        }
+        Ok((out, label))
+    }
+}
+
 /// Rendered indexes, per person and per the documents they were rendered
 /// from: any write to the bundle makes a new key, so nothing stale is reused.
 fn index_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(String, i64, i64, i64), String>> {
@@ -423,6 +452,14 @@ impl Kernel {
                 Some((fm, body, label, version)) => (render(&fm, &body), false, Some(json!({ "path": s("path"), "version": version, "untrusted": label.untrusted, "private": label.private }))),
                 None => (format!("{}: no such document, or not one the person can see", s("path")), true, Some(json!({ "untrusted": false, "private": false }))),
             },
+            "entity_resolve" => {
+                if s("key").trim().is_empty() && s("name").trim().is_empty() {
+                    return Ok(("Give a key (an identity value such as a domain or an id) or a name.".into(), true, Some(json!({ "untrusted": false, "private": false }))));
+                }
+                let (found, label) = self.entity_resolve(&person, &s("key"), &s("name"), &s("type")).await?;
+                let text = if found.is_empty() { "No entity the person can see matches.".to_string() } else { json!({ "entities": found }).to_string() };
+                (text, false, Some(json!({ "entities": found, "untrusted": label.untrusted, "private": label.private })))
+            }
             "bundle_search" => {
                 let kinds: Vec<String> = input["kinds"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(String::from)).collect();
                 let limit = input["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize;
