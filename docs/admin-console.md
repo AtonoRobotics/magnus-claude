@@ -40,7 +40,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] Only `magnus-admin` holds `magnus_root` (BYPASSRLS) (#70)
 - [ ] Every read or write of a person's private data through the console is audited: admin, person, resource, action, time (Users › Data)
 - [ ] Deleting a person's data destroys their key (Users › Delete)
-- [x] Credentials are write-only everywhere (before #68; checked again under Security › Connectors)
+- [x] Credentials are write-only everywhere (before #68; the console's routes, `admin_connectors.rs`)
 - [x] The last admin cannot be removed, turned off or demoted (#72; `admin_users.rs`)
 - [x] Every console action in the append-only log with who, what, when, source and before/after; `magnus_root` cannot change it (#70; `admin_audit.rs`)
 
@@ -92,7 +92,7 @@ Each line names the pull request that built it, or the one building it.
 - [ ] Agent policy: each Cedar policy set in an editor with highlighting and inline validation errors
 - [ ] Agent policy: a test panel (principal, action, resource, context → the decision and the policies that decided it)
 - [ ] Agent policy: a diff against the live version; Apply with step-up; history and rollback
-- [ ] Connectors and credentials: the organisation's connectors with status, scopes, last used; add, rotate, revoke; credentials write-only, shown "set" and when
+- [x] Connectors and credentials: the organisation's connectors with status, scopes, last used; add, turn off or on, who may use it, set, rotate, revoke, remove; credentials write-only, shown "set" and when (`admin-connectors`; `admin_connectors.rs`)
 - [x] Audit: the whole log, filtered by actor, action, target and time, with CSV (#70)
 
 ### Operations
@@ -134,7 +134,7 @@ Sign-in and authority
 Data and audit
 - [x] As the user API's role, a cross-person read returns nothing (before #68)
 - [ ] An admin's read of a person's data succeeds and is in the audit log with admin, person, resource and time
-- [ ] No admin endpoint ever returns a credential value
+- [x] No admin endpoint ever returns a credential value (`admin-connectors`; `admin_connectors.rs`, every reading route and the stream; re-run as each section adds routes)
 - [x] `magnus_root` cannot change an audit entry (`admin_audit.rs`)
 
 Knowledge

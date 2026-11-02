@@ -305,18 +305,36 @@ async fn discover(app_url: &str, resource_metadata: Option<String>) -> Result<(V
 }
 
 impl Kernel {
-    /// The organisation's apps: the config file's, those the owner added,
-    /// and the whole catalog, already set up (connectors spec rev 46).
+    /// The organisation's apps that are on: the config file's, those the
+    /// owner added, and the whole catalog, already set up (connectors spec
+    /// rev 46), each with who may use it as an admin set it. An app an
+    /// admin turned off is offered to no one and reached by no run.
     pub fn connectors(&self) -> Vec<Connector> {
+        self.all_connectors().into_iter().filter(|(_, on)| *on).map(|(c, _)| c).collect()
+    }
+
+    /// Every app, on or off (admin console spec, Security › Connectors and
+    /// credentials).
+    pub fn all_connectors(&self) -> Vec<(Connector, bool)> {
         let mut all = self.cfg.connectors.clone();
-        let added: Vec<Connector> = self.read(|s| s.connectors.values().cloned().collect());
+        let (added, settings) = self.read(|s| (s.connectors.values().cloned().collect::<Vec<Connector>>(), s.connector_settings.clone()));
         all.extend(added.into_iter().filter(|c| self.cfg.connectors.iter().all(|f| f.name != c.name)));
         for m in crate::catalog::manifests() {
             if all.iter().all(|c| c.name != m.id) {
                 all.push(crate::catalog::connector(m));
             }
         }
-        all
+        all.into_iter()
+            .map(|mut c| match settings.get(&c.name) {
+                Some((on, groups)) => {
+                    if let Some(g) = groups {
+                        c.access_groups = g.clone();
+                    }
+                    (c, *on)
+                }
+                None => (c, true),
+            })
+            .collect()
     }
 
     /// Whether a catalog connector's provider client is complete on this
@@ -613,6 +631,280 @@ use std::sync::Arc;
 
 type K = AxState<Arc<Kernel>>;
 
+/// A refusal: its status and what to tell the person.
+pub type Refusal = (StatusCode, String);
+
+fn refusal(st: StatusCode, m: impl Into<String>) -> Refusal {
+    (st, m.into())
+}
+
+fn failed(e: anyhow::Error) -> Refusal {
+    tracing::error!("connectors: {e:#}");
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
+}
+
+/// The organisation's credential for an app, as an admin sets it: the app's
+/// own key, or the client secret of the provider its people sign in
+/// through. None: each person signs in with their own account, and the
+/// organisation holds nothing for it.
+pub enum OrgCredential {
+    Key(String),
+    Registration(String),
+}
+
+pub fn org_credential(c: &Connector) -> Option<OrgCredential> {
+    if let Some(p) = c.registration.as_deref().filter(|p| crate::catalog::client(p).is_some_and(|cl| cl.needs_secret())) {
+        return Some(OrgCredential::Registration(p.to_string()));
+    }
+    match (&c.credential, c.auth.as_deref()) {
+        (Some(name), a) if a != Some(OAUTH) => Some(OrgCredential::Key(name.clone())),
+        _ => None,
+    }
+}
+
+impl Kernel {
+    /// Every app as an admin sees it (admin console spec, Security ›
+    /// Connectors and credentials): its status, how people reach it, its
+    /// scopes, the organisation's credential (only whether it is set, and
+    /// when), how many people are signed in, and when anyone last used it.
+    pub fn admin_connectors(&self) -> Vec<Value> {
+        let (added, changed, registered, people) = self.read(|s| {
+            (
+                s.connectors.keys().cloned().collect::<Vec<String>>(),
+                s.credential_changed.clone(),
+                s.registrations.clone(),
+                s.runs.values().map(|r| r.person.clone()).collect::<std::collections::BTreeSet<String>>(),
+            )
+        });
+        let vault: Vec<String> = self.vault.names().unwrap_or_default();
+        self.all_connectors()
+            .into_iter()
+            .map(|(c, on)| {
+                let source = if self.cfg.connectors.iter().any(|f| f.name == c.name) {
+                    "config"
+                } else if added.contains(&c.name) {
+                    "added"
+                } else {
+                    "catalog"
+                };
+                let (kind, set, key) = match org_credential(&c) {
+                    Some(OrgCredential::Registration(p)) => ("client_secret", registered.contains(&p), Some(format!("registration:{p}"))),
+                    Some(OrgCredential::Key(name)) => ("key", vault.contains(&name), Some(c.name.clone())),
+                    None => ("none", false, None),
+                };
+                let at = key.as_ref().and_then(|k| changed.get(k)).map(|(_, at)| *at);
+                let signed_in = vault.iter().filter(|n| n.starts_with(&format!("{}__", credential_name(&c.name)))).count();
+                let last_used = people.iter().filter_map(|p| self.recent_uses(&c.name, p, 1).first().and_then(|u| u["at"].as_str().map(String::from))).max();
+                // A catalog app's tools are classified by its signed manifest;
+                // one added by its address waits for the owner's review.
+                let unreviewed = !c.catalog && c.tools.is_empty();
+                let status = if !on {
+                    "off"
+                } else if kind != "none" && !set {
+                    "needs_credential"
+                } else if unreviewed {
+                    "needs_review"
+                } else {
+                    "ready"
+                };
+                json!({
+                    "name": c.name, "title": c.title.clone().unwrap_or_else(|| title(&c.name)), "source": source, "enabled": on, "status": status,
+                    "sign_in": if c.auth.as_deref() == Some(OAUTH) { "own_account" } else if c.credential.is_some() { "org_key" } else { "none" },
+                    "scopes": c.scopes, "url": c.url, "audience": c.audience, "label": c.label, "access_groups": c.access_groups,
+                    "registration": c.registration,
+                    "credential": { "kind": kind, "set": set, "changed_at": at },
+                    "signed_in": signed_in, "last_used": last_used, "tools": c.tools.len(),
+                })
+            })
+            .collect()
+    }
+
+    /// Add an app by its MCP address, as `actor`. Whether it needs a
+    /// sign-in is asked of the app itself.
+    pub async fn add_connector(&self, actor: &str, b: &Value) -> Result<Value, Refusal> {
+        let s = |f: &str| b[f].as_str().map(str::trim).unwrap_or_default().to_string();
+        let (mut name, url, audience, label) = (s("name"), s("url"), s("audience"), s("label"));
+        let taken = |n: &str| self.all_connectors().iter().any(|(c, _)| c.name == n) || crate::tools::builtin_apps().contains(&n);
+        // The address is the one field the owner fills in (connectors spec):
+        // the name comes from the app. (The app's form sends what it returns
+        // and what reaches it at their most guarded; they stay named here.)
+        if name.is_empty() {
+            let own = own_name(&url).await;
+            name = name_from(&url, own.as_deref(), taken);
+        }
+        if name.is_empty() || name.contains("__") || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+            return Err(refusal(StatusCode::BAD_REQUEST, "the name must be letters, digits, '-' or '_', without '__'"));
+        }
+        if taken(&name) {
+            return Err(refusal(StatusCode::CONFLICT, "an app with this name exists"));
+        }
+        if crate::tools::Audience::parse(&audience).is_none() {
+            return Err(refusal(StatusCode::BAD_REQUEST, "audience is private, internal or public: who can see what the worker sends there"));
+        }
+        // Named, never assumed: an empty label would read as "principal", and
+        // the app's results would taint nothing.
+        if label.is_empty() || crate::tools::Label::parse(&label).is_none() {
+            return Err(refusal(StatusCode::BAD_REQUEST, "label is what the app returns: principal, private, untrusted, or private+untrusted"));
+        }
+        if !url.starts_with("https://") && !(url.starts_with("http://") && self.cfg.web.allow_private_networks) {
+            return Err(refusal(StatusCode::BAD_REQUEST, "the app's address must be https://"));
+        }
+        let oauth = match asks_sign_in(&url).await {
+            Ok(a) => a.is_some(),
+            Err(e) => return Err(refusal(StatusCode::BAD_GATEWAY, format!("{e:#}"))),
+        };
+        // A credential only where there is one: the app's sign-in, or a key the
+        // owner gives. An app that asks for neither is called without one.
+        let token = s("token");
+        if !oauth && !token.is_empty() {
+            self.vault.put(&credential_name(&name), &token).map_err(failed)?;
+        }
+        let credential = (oauth || !token.is_empty()).then(|| credential_name(&name));
+        let c = Connector {
+            name: name.clone(),
+            transport: "mcp_http".into(),
+            url,
+            credential,
+            audience,
+            label,
+            access_groups: b["access_groups"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(String::from)).collect(),
+            system_of_record: b["system_of_record"].as_bool().unwrap_or(false),
+            idempotency: "none".into(),
+            tools: Default::default(),
+            auth: oauth.then(|| OAUTH.to_string()),
+            client_id: b["client_id"].as_str().map(String::from),
+            scopes: vec![],
+            registration: None,
+            title: None,
+            summary: None,
+            catalog: false,
+        };
+        self.emit(actor, Ev::ConnectorAdded { connector: c }).await.map_err(failed)?;
+        Ok(json!({ "name": name, "sign_in": oauth }))
+    }
+
+    /// An app added from the app or the console (not the config file's, not
+    /// the catalog's).
+    pub fn added_connector(&self, name: &str) -> Result<Connector, Refusal> {
+        if self.cfg.connectors.iter().any(|c| c.name == name) {
+            return Err(refusal(StatusCode::CONFLICT, "this app is set in the appliance's config file; change it there"));
+        }
+        match self.read(|s| s.connectors.get(name).cloned()) {
+            Some(c) => Ok(c),
+            None if crate::catalog::manifest(name).is_some() => Err(refusal(StatusCode::CONFLICT, "this app is in the catalog: turn it off instead")),
+            None => Err(refusal(StatusCode::NOT_FOUND, "no such app")),
+        }
+    }
+
+    /// Revoke every sign-in to an app (each person's own, at the app, and
+    /// the old shared one) and its key. The number revoked.
+    async fn revoke_all(&self, c: &Connector) -> Result<usize, Refusal> {
+        let names: Vec<String> = self.vault.names().map_err(failed)?.into_iter().filter(|n| is_sign_in_of(n, &c.name) || c.credential.as_ref() == Some(n)).collect();
+        let mut n = 0;
+        for cred in names {
+            match self.vault.remove(&cred).map_err(failed)? {
+                Some(s) if c.auth.as_deref() == Some(OAUTH) => {
+                    let (done, detail) = revoke(s.expose()).await;
+                    tracing::info!("{}: revoked {cred} {done}: {detail}", c.name);
+                    n += 1;
+                }
+                Some(_) => n += 1,
+                None => {}
+            }
+        }
+        Ok(n)
+    }
+
+    /// Remove an added app: every sign-in to it revoked, its key deleted.
+    pub async fn remove_connector(&self, actor: &str, name: &str) -> Result<Value, Refusal> {
+        let c = self.added_connector(name)?;
+        let n = self.revoke_all(&c).await?;
+        self.emit(actor, Ev::ConnectorRemoved { name: name.to_string() }).await.map_err(failed)?;
+        Ok(json!({ "sign_ins_revoked": n }))
+    }
+
+    /// Turn an app on or off for the organisation, or set who may use it
+    /// (empty: everyone).
+    pub async fn connector_settings(&self, actor: &str, name: &str, enabled: Option<bool>, access_groups: Option<Vec<String>>) -> Result<Value, Refusal> {
+        let Some((c, on)) = self.all_connectors().into_iter().find(|(c, _)| c.name == name) else { return Err(refusal(StatusCode::NOT_FOUND, "no such app")) };
+        let access_groups = access_groups.map(|g| g.into_iter().map(|x| x.trim().to_string()).collect::<Vec<String>>());
+        if access_groups.as_ref().is_some_and(|g| g.iter().any(|g| g.is_empty() || g.len() > 100)) {
+            return Err(refusal(StatusCode::BAD_REQUEST, "each access group is a group's name"));
+        }
+        let groups = access_groups.or_else(|| self.read(|s| s.connector_settings.get(name).and_then(|(_, g)| g.clone())));
+        let enabled = enabled.unwrap_or(on);
+        self.emit(actor, Ev::ConnectorSettings { name: name.to_string(), enabled, access_groups: groups.clone() }).await.map_err(failed)?;
+        Ok(json!({ "name": name, "enabled": enabled, "access_groups": groups.unwrap_or(c.access_groups) }))
+    }
+
+    /// Set, or rotate, the organisation's credential for an app. Nothing
+    /// shows it again: the log records only that it was set.
+    pub async fn set_connector_credential(&self, actor: &str, name: &str, value: &str) -> Result<Value, Refusal> {
+        let Some((c, _)) = self.all_connectors().into_iter().find(|(c, _)| c.name == name) else { return Err(refusal(StatusCode::NOT_FOUND, "no such app")) };
+        let value = value.trim();
+        if value.is_empty() || value.len() > 16 * 1024 {
+            return Err(refusal(StatusCode::BAD_REQUEST, "give the credential"));
+        }
+        match org_credential(&c) {
+            Some(OrgCredential::Registration(p)) => self.set_registration(actor, &p, value).await,
+            Some(OrgCredential::Key(cred)) => {
+                self.vault.put(&cred, value).map_err(failed)?;
+                self.emit(actor, Ev::CredentialSet { connector: name.to_string(), set: true }).await.map_err(failed)?;
+                Ok(json!({ "set": true }))
+            }
+            None => Err(refusal(StatusCode::CONFLICT, "people sign in to this app with their own accounts: the organisation holds no credential for it")),
+        }
+    }
+
+    /// The organisation's client secret with a provider (Google's, for its
+    /// apps), until the relay holds it (connectors spec rev 46).
+    pub async fn set_registration(&self, actor: &str, provider: &str, secret: &str) -> Result<Value, Refusal> {
+        if crate::catalog::client(provider).is_none_or(|c| !c.needs_secret()) {
+            return Err(refusal(StatusCode::NOT_FOUND, "no catalog provider takes a secret by that name"));
+        }
+        let secret = secret.trim();
+        if secret.is_empty() {
+            return Err(refusal(StatusCode::BAD_REQUEST, "give the provider's client secret"));
+        }
+        self.vault.put(&crate::catalog::registration_name(provider), &json!({ "client_secret": secret }).to_string()).map_err(failed)?;
+        self.emit(actor, Ev::RegistrationSet { provider: provider.to_string(), set: true }).await.map_err(failed)?;
+        Ok(json!({ "set": true }))
+    }
+
+    /// Revoke the organisation's credential for an app, and every person's
+    /// sign-in to it, at the app. A provider's client secret serves all of
+    /// its apps: revoking it ends the sign-ins to each of them.
+    pub async fn revoke_connector_credential(&self, actor: &str, name: &str) -> Result<Value, Refusal> {
+        let Some((c, _)) = self.all_connectors().into_iter().find(|(c, _)| c.name == name) else { return Err(refusal(StatusCode::NOT_FOUND, "no such app")) };
+        match org_credential(&c) {
+            Some(OrgCredential::Registration(p)) => {
+                let mut n = 0;
+                for (other, _) in self.all_connectors().into_iter().filter(|(o, _)| o.registration.as_deref() == Some(p.as_str())) {
+                    n += self.revoke_all(&other).await?;
+                }
+                self.vault.remove(&crate::catalog::registration_name(&p)).map_err(failed)?;
+                self.emit(actor, Ev::RegistrationSet { provider: p, set: false }).await.map_err(failed)?;
+                Ok(json!({ "sign_ins_revoked": n }))
+            }
+            Some(OrgCredential::Key(_)) => {
+                let n = self.revoke_all(&c).await?;
+                self.emit(actor, Ev::CredentialSet { connector: name.to_string(), set: false }).await.map_err(failed)?;
+                Ok(json!({ "sign_ins_revoked": n }))
+            }
+            None => Ok(json!({ "sign_ins_revoked": self.revoke_all(&c).await? })),
+        }
+    }
+}
+
+/// A kernel operation's answer as a route's.
+fn answer(r: Result<Value, Refusal>, ok: StatusCode) -> Response {
+    match r {
+        Ok(_) if ok == StatusCode::NO_CONTENT => StatusCode::NO_CONTENT.into_response(),
+        Ok(v) => (ok, Json(v)).into_response(),
+        Err((st, m)) => err(st, m),
+    }
+}
+
 pub fn router() -> Router<Arc<Kernel>> {
     Router::new()
         .route("/v1/connectors", axum::routing::get(list).post(add))
@@ -633,20 +925,7 @@ async fn set_registration(AxState(k): K, h: HeaderMap, Path(provider): Path<Stri
         Ok(p) => p,
         Err(r) => return r,
     };
-    if crate::catalog::client(&provider).is_none_or(|c| !c.needs_secret()) {
-        return err(StatusCode::NOT_FOUND, "no catalog provider takes a secret by that name");
-    }
-    let secret = b["client_secret"].as_str().map(str::trim).unwrap_or_default();
-    if secret.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "give the provider's client secret");
-    }
-    if let Err(e) = k.vault.put(&crate::catalog::registration_name(&provider), &json!({ "client_secret": secret }).to_string()) {
-        return internal(e);
-    }
-    match k.emit(&format!("person:{}", p.id), Ev::RegistrationSet { provider, set: true }).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => internal(e),
-    }
+    answer(k.set_registration(&format!("person:{}", p.id), &provider, b["client_secret"].as_str().unwrap_or_default()).await, StatusCode::NO_CONTENT)
 }
 
 macro_rules! owner {
@@ -780,107 +1059,20 @@ async fn detail(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Respon
     Json(v).into_response()
 }
 
-/// Add an app by its MCP address. Whether it needs a sign-in is asked of
-/// the app itself.
+/// Add an app by its MCP address.
 async fn add(AxState(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
     let p = owner!(k, h);
-    let s = |f: &str| b[f].as_str().map(str::trim).unwrap_or_default().to_string();
-    let (mut name, url, audience, label) = (s("name"), s("url"), s("audience"), s("label"));
-    // The address is the one field the owner fills in (connectors spec):
-    // the name comes from the app. (The app's form sends what it returns
-    // and what reaches it at their most guarded; they stay named here.)
-    if name.is_empty() {
-        let own = own_name(&url).await;
-        name = name_from(&url, own.as_deref(), |n| k.connector(n).is_some() || crate::tools::builtin_apps().contains(&n));
-    }
-    if name.is_empty() || name.contains("__") || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
-        return err(StatusCode::BAD_REQUEST, "the name must be letters, digits, '-' or '_', without '__'");
-    }
-    if k.connector(&name).is_some() || crate::tools::builtin_apps().contains(&name.as_str()) {
-        return err(StatusCode::CONFLICT, "an app with this name exists");
-    }
-    if crate::tools::Audience::parse(&audience).is_none() {
-        return err(StatusCode::BAD_REQUEST, "audience is private, internal or public: who can see what the worker sends there");
-    }
-    // Named, never assumed: an empty label would read as "principal", and
-    // the app's results would taint nothing.
-    if label.is_empty() || crate::tools::Label::parse(&label).is_none() {
-        return err(StatusCode::BAD_REQUEST, "label is what the app returns: principal, private, untrusted, or private+untrusted");
-    }
-    if !url.starts_with("https://") && !(url.starts_with("http://") && k.cfg.web.allow_private_networks) {
-        return err(StatusCode::BAD_REQUEST, "the app's address must be https://");
-    }
-    let oauth = match asks_sign_in(&url).await {
-        Ok(a) => a.is_some(),
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("{e:#}")),
-    };
-    // A credential only where there is one: the app's sign-in, or a key the
-    // owner gives. An app that asks for neither is called without one.
-    let token = s("token");
-    if !oauth && !token.is_empty() {
-        if let Err(e) = k.vault.put(&credential_name(&name), &token) {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}"));
-        }
-    }
-    let credential = (oauth || !token.is_empty()).then(|| credential_name(&name));
-    let c = Connector {
-        name: name.clone(),
-        transport: "mcp_http".into(),
-        url,
-        credential,
-        audience,
-        label,
-        access_groups: b["access_groups"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(String::from)).collect(),
-        system_of_record: b["system_of_record"].as_bool().unwrap_or(false),
-        idempotency: "none".into(),
-        tools: Default::default(),
-        auth: oauth.then(|| OAUTH.to_string()),
-        client_id: b["client_id"].as_str().map(String::from),
-        scopes: vec![],
-        registration: None,
-        title: None,
-        summary: None,
-        catalog: false,
-    };
-    if let Err(e) = k.emit(&format!("person:{}", p.id), Ev::ConnectorAdded { connector: c }).await {
-        return internal(e);
-    }
-    (StatusCode::CREATED, Json(json!({ "name": name, "sign_in": oauth }))).into_response()
+    answer(k.add_connector(&format!("person:{}", p.id), &b).await, StatusCode::CREATED)
 }
 
 fn added(k: &Kernel, name: &str) -> Result<Connector, Response> {
-    if k.cfg.connectors.iter().any(|c| c.name == name) {
-        return Err(err(StatusCode::CONFLICT, "this app is set in the appliance's config file; change it there"));
-    }
-    k.read(|s| s.connectors.get(name).cloned()).ok_or_else(|| err(StatusCode::NOT_FOUND, "no such app"))
+    k.added_connector(name).map_err(|(st, m)| err(st, m))
 }
 
 /// Remove an app: its sign-in is revoked at the app and its credential deleted.
 async fn remove(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Response {
     let p = owner!(k, h);
-    let c = match added(&k, &name) {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    // The organisation's key, and every person's sign-in, each revoked.
-    let names: Vec<String> = match k.vault.names() {
-        Ok(n) => n.into_iter().filter(|n| is_sign_in_of(n, &name) || c.credential.as_ref() == Some(n)).collect(),
-        Err(e) => return internal(e),
-    };
-    for cred in names {
-        match k.vault.remove(&cred) {
-            Ok(Some(s)) if c.auth.as_deref() == Some(OAUTH) => {
-                let (done, detail) = revoke(s.expose()).await;
-                tracing::info!("removed {name}: revoked {cred} {done}: {detail}");
-            }
-            Ok(_) => {}
-            Err(e) => return internal(e),
-        }
-    }
-    if let Err(e) = k.emit(&format!("person:{}", p.id), Ev::ConnectorRemoved { name }).await {
-        return internal(e);
-    }
-    StatusCode::NO_CONTENT.into_response()
+    answer(k.remove_connector(&format!("person:{}", p.id), &name).await, StatusCode::NO_CONTENT)
 }
 
 /// Classify one tool: its risk class, or null to stop offering it.

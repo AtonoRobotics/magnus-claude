@@ -630,3 +630,23 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - The console now serves the app's fonts (Inter, IBM Plex Mono) at `/assets/fonts/`: its stylesheet asked for them and got 404, so it was not the app's look.
 - Colours that were wrong in dark: the kill switch's button and banner, and danger buttons, were the dark theme's light red with white text (2.1:1). They are now a fixed strong red with white text (6:1) in every look. Status pills are the app's chips.
 - Test: `the_consoles_screens_share_a_live_stream_a_step_up_sheet_panels_sheets_and_undo` (admin_shell.rs), in Chromium against Keycloak: the menu sets the theme; the kill switch's banner arrives over the stream with no reload; Release asks in the sheet, the provider's window takes the password, and the switch is released; a row opens its panel and Escape closes it; a cancelled sheet ends nothing; Turn off's Undo turns the person back on; each is in the audit log. The stream is refused without a session, opens with `status`, and ends at sign-out. Overview names the console's certificate. `the_end_of_a_certificates_validity_is_read_from_its_pem` (admin/cert.rs).
+
+## The admin console's Security › Connectors and credentials (2026-11-02, `admin-connectors`)
+
+- The organisation's apps in the console (admin console spec, Security › Connectors and credentials): each with its status (ready, needs its credential, tools not reviewed, off), how people sign in (each person's own account, the organisation's key, none), its scopes, its credential (only whether it is set, and when), how many people are signed in, and when anyone last used it. Spec decision 18 proposed leaving these out; the owner ruled the specs are built as written, so they are in.
+- Its actions: add an app by its address; turn one off or on for the organisation; set who may use it (groups; empty is everyone); set, rotate or revoke the organisation's credential; remove an app that was added. A catalog app is turned off, not removed; a config-file app is changed in the file.
+- The organisation's credential for an app is its key, or, for an app people sign in to through a provider whose client takes a secret (Google), that provider's client secret. Setting it on one Google app sets it for every Google app, and revoking it ends every person's sign-in to each of them, at the provider. An app people sign in to with their own accounts and no client secret holds nothing for the organisation; revoking there ends every person's sign-in.
+- Google's client secret can now be set here by an admin, as well as by the CI step from the repository's secret. Either way it is written to the vault, the log records only that it was set, and nothing shows it again.
+- An app turned off is filtered out of `Kernel::connectors()`, so it leaves the Library and the boundary's facts: no one is offered it and no task can reach it. People's sign-ins stay until revoked. Events: `ConnectorSettings` (on or off, who may use it) and `CredentialSet` (an app's key set or revoked; never the value).
+- Add, remove and the registration secret were the app's owner routes; they are now the kernel's own operations (`add_connector`, `remove_connector`, `set_registration`, ...), which the app's routes and the console's (through the control socket) both call.
+- Every change is audited before it is made, with before and after, and a credential appears in neither: only `{ kind, set }`.
+- The console passes on the kernel's refusals with their status (409, 400, 404), where before any kernel refusal showed as 502.
+- Test: `the_console_sets_rotates_and_revokes_the_organisations_credentials_and_never_shows_one` (admin_connectors.rs), against Keycloak:
+  - Google's client secret set from the console serves Gmail and Drive, and the app's Library sees Google's client as complete;
+  - an app added by its address with a key; who may use it set;
+  - turned off, Gmail leaves the Library, and comes back when turned on;
+  - the key rotated with a new time;
+  - every admin route that reads (each person's page, the audit and its CSV, the live stream included) holds none of the three credential values (the spec's invariant "No admin endpoint ever returns a credential value");
+  - the key and Google's secret revoked; the added app removed, a catalog app refused;
+  - each change in the audit log, the rotation recorded as `{ kind: key, set: true }`;
+  - the screen in every look and at phone width.

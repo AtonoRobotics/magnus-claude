@@ -11,6 +11,21 @@ pub struct Kernel {
     pub path: PathBuf,
 }
 
+/// The kernel refused a call: its status and why, for the console to pass on.
+#[derive(Debug)]
+pub struct Refused {
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
+
 impl Kernel {
     pub async fn call(&self, method: hyper::Method, path: &str, body: Option<&Value>) -> Result<Value> {
         let stream = tokio::net::UnixStream::connect(&self.path).await.with_context(|| format!("reach the kernel at {}", self.path.display()))?;
@@ -28,6 +43,9 @@ impl Kernel {
         let status = res.status();
         let bytes = res.into_body().collect().await?.to_bytes();
         let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if status.is_client_error() {
+            return Err(Refused { status: status.as_u16(), message: v["error"].as_str().unwrap_or("refused").to_string() }.into());
+        }
         if !status.is_success() {
             return Err(anyhow!("the kernel answered {status}: {}", v["error"].as_str().unwrap_or_default()));
         }
