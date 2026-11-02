@@ -29,6 +29,15 @@ remove_access = "https://myaccount.google.com/connections"
 scopes = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file"]
 
 # Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).
+# The org context's search and fetch (org context build spec): Drive's own
+# search, in its query language, and its reader.
+[source]
+search = "search_files"
+query = "query"
+template = "fullText contains '{q}'"
+fetch = "read_file_content"
+id = "fileId"
+
 [tools]
 search_files = "read"
 list_recent_files = "read"

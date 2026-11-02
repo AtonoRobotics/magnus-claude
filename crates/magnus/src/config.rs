@@ -690,6 +690,40 @@ pub struct Connector {
     /// From the catalog, not added by the owner.
     #[serde(default)]
     pub catalog: bool,
+    /// How `org_search` and `org_fetch` reach it, when it is one of the
+    /// org's sources (org context build spec, Tools).
+    #[serde(default)]
+    pub source: Option<Source>,
+}
+
+/// One of the org's sources, as `org_search` and `org_fetch` use it: its own
+/// search tool, and the tool that reads one item by its id.
+#[derive(Deserialize, serde::Serialize, Clone, Debug, Default)]
+pub struct Source {
+    /// The search tool and the argument the query goes in, written into
+    /// `template` where `{q}` stands for the query (single quotes escaped),
+    /// for a source with a query language of its own.
+    pub search: String,
+    #[serde(default = "query_arg")]
+    pub query: String,
+    #[serde(default)]
+    pub template: Option<String>,
+    /// The tool that reads one item, the argument its id goes in, and any
+    /// other arguments it is always given.
+    #[serde(default)]
+    pub fetch: Option<String>,
+    #[serde(default = "id_arg")]
+    pub id: String,
+    #[serde(default)]
+    pub fetch_args: BTreeMap<String, serde_json::Value>,
+}
+
+fn query_arg() -> String {
+    "query".into()
+}
+
+fn id_arg() -> String {
+    "id".into()
 }
 
 /// The company knowledge base. Without an embedding server it is searched

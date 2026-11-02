@@ -923,6 +923,7 @@ impl Kernel {
             title: None,
             summary: None,
             catalog: false,
+            source: None,
         };
         self.emit(actor, Ev::ConnectorAdded { connector: c }).await.map_err(failed)?;
         Ok(json!({ "name": name, "sign_in": oauth }))

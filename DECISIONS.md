@@ -999,3 +999,12 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - The developer's context accounting no longer counts the playbook, and `playbook_update` says where lessons are kept.
 - Test: `playbook_items_reach_later_tasks_and_carry_their_taint` (app.rs) now checks that the lesson is not in the next task's context, is found by searching memory with its taint, is in her memory and not Bob's, and is forgotten to her trash.
 
+## Org context, step 4a: searching and reading the org's sources (2026-11-02, `org-context-4`)
+
+- `org_search` (query, optional sources, limit) runs each source's own search at once and returns hits with the spec's fields: source, locator, title, snippet, author, last modified. `org_fetch` (locator) reads one item, with when it was read. A locator is `<source>://<id>`.
+- Each call is made as the person (K1): their own sign-in, or the organisation's key for an app that takes one; a source whose access groups they are not in, that they have not connected, or whose tool definition changed since the owner approved it, is not reached, and a search says which sources it did not search and why. A scheduled run is its owner's, so it searches as them. Only tools classified as reads are used.
+- A source says how it is searched in its connector (`source`: the search tool, the argument the query goes in, an optional template for a source with its own query language such as Drive's `fullText contains '{q}'`, the reader and the argument the id goes in). The Drive and Gmail manifests declare theirs, from their live tool definitions. Hits are read from the first list of objects in what the search answered, whatever its shape.
+- What comes back carries the label of the sources that answered (joined), and their names as where private data came from, as a direct call to each would: the Rule of Two and approvals see it the same way.
+- Permission checks against a cache (K3), `entity.resolve` and `people.ask` follow in step 4b.
+- Test: `org_search_asks_every_source_the_person_may_reach_and_org_fetch_reads_as_them` (org_sources.rs).
+

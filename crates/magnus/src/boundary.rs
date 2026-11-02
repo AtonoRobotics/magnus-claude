@@ -379,6 +379,12 @@ impl Kernel {
         };
         let (label, sources) = if let Some(taint) = memory {
             taint
+        } else if matches!(a.tool.as_str(), "org_search" | "org_fetch") {
+            // Each source's own label, joined; its private data is from the
+            // sources that answered.
+            let d = out.as_ref().ok().and_then(|(_, _, d)| d.clone()).unwrap_or_default();
+            let apps: Vec<String> = d["apps"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
+            (Label { untrusted: d["untrusted"] != false, private: d["private"] != false }, if apps.is_empty() { vec![f.app.clone()] } else { apps })
         } else if matches!(a.tool.as_str(), "knowledge_search" | "bundle_read" | "bundle_search" | "memory_list" | "memory_read") {
             // What the search returned decides; a result that says nothing is untrusted and private.
             let d = out.as_ref().ok().and_then(|(_, _, d)| d.clone()).unwrap_or_default();
@@ -424,6 +430,17 @@ impl Kernel {
                 }
             }
         }
+    }
+
+    /// Whether an app's tool may be called for `person` now: its live
+    /// definition is the pinned one, and the owner has approved it (B10).
+    pub(crate) async fn usable(&self, c: &Connector, f: &Facts, person: &str) -> std::result::Result<(), String> {
+        self.check_pin(c, f, person).await?;
+        let (pinned, changed) = self.read(|s| (s.pins.contains_key(&f.name), s.changed.contains_key(&f.name)));
+        if changed || !pinned {
+            return Err(format!("{}'s definition changed and is disabled until the owner re-approves it", f.name));
+        }
+        Ok(())
     }
 
     async fn check_pin(&self, c: &Connector, f: &Facts, person: &str) -> std::result::Result<(), String> {
@@ -899,6 +916,8 @@ impl Kernel {
                 "knowledge_search" => Ok(self.knowledge_search(&a.run, &s("query")).await?),
                 "bundle_read" | "bundle_search" | "bundle_write" => Ok(self.bundle_tool(&a.run, &a.tool, &a.input).await?),
                 "memory_list" | "memory_read" | "memory_invalidate" | "memory_forget" => Ok(self.memory_tool(&a.run, &a.tool, &a.input).await?),
+                "org_search" => Ok(self.org_search(&a.run, &a.input).await?),
+                "org_fetch" => Ok(self.org_fetch(&a.run, &a.input).await?),
                 "knowledge_add" => Ok(self.knowledge_add(&a.run, &a.input).await?),
                 "project_read" => {
                     let name = s("name");

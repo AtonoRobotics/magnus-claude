@@ -154,6 +154,10 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "bundle_read", app: "bundle", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "bundle_search", app: "bundle", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "bundle_write", app: "bundle", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    // The org's sources, searched and read under the person's own grant:
+    // each result carries the label of the sources it came from.
+    Builtin { name: "org_search", app: "org", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "org_fetch", app: "org", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "knowledge_add", app: "knowledge", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // A project's reference file, read when the work needs it (M2). Its
     // result carries the file's own taint; an upload is private and untrusted.
@@ -426,6 +430,12 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
         },
         ToolSpec { name: "memory_forget".into(), description: d("memory_forget"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
         ToolSpec { name: "bundle_read".into(), description: d("bundle_read"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
+        ToolSpec {
+            name: "org_search".into(),
+            description: d("org_search"),
+            input_schema: obj(json!({ "query": { "type": "string" }, "sources": { "type": "array", "items": { "type": "string" }, "description": "only these sources, by name" }, "limit": { "type": "integer" } }), &["query"]),
+        },
+        ToolSpec { name: "org_fetch".into(), description: d("org_fetch"), input_schema: obj(json!({ "locator": { "type": "string", "description": "as a search hit gives it: source://id" } }), &["locator"]) },
         ToolSpec {
             name: "bundle_search".into(),
             description: d("bundle_search"),

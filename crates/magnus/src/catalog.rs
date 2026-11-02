@@ -64,6 +64,9 @@ pub struct Manifest {
     /// authorization server's metadata may.
     #[serde(default)]
     pub revoke: Option<String>,
+    /// How the org context's search and fetch reach it.
+    #[serde(default)]
+    pub source: Option<crate::config::Source>,
 }
 
 pub fn manifests() -> &'static [Manifest] {
@@ -126,6 +129,7 @@ pub fn connector(m: &Manifest) -> Connector {
         title: Some(m.name.clone()),
         summary: Some(m.summary.clone()),
         catalog: true,
+        source: m.source.clone(),
     }
 }
 
