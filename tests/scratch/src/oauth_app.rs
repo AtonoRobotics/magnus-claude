@@ -37,6 +37,11 @@ pub struct AppState {
     /// It publishes no revocation endpoint: a sign-in to it can only be
     /// ended in its own settings.
     pub no_revocation: bool,
+    /// share_calendar needs this scope, which a sign-in holds only when it
+    /// asked for it: a call without it gets MCP's step-up challenge.
+    pub share_scope: Option<String>,
+    /// The scope each code and each token was granted.
+    scopes: HashMap<String, String>,
     /// Answer refreshes without `expires_in` (it is only recommended).
     pub refresh_without_expiry: bool,
     n: usize,
@@ -76,10 +81,27 @@ async fn mcp(State((base, st)): S, h: HeaderMap, Json(req): Json<Value>) -> Resp
     let id = req["id"].clone();
     let result = match req["method"].as_str().unwrap_or_default() {
         "initialize" => json!({ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} }, "serverInfo": { "name": "calendar", "version": "1" } }),
-        "tools/list" => json!({ "tools": tools(st.lock().unwrap().changed.clone()) }),
+        "tools/list" => {
+            let s = st.lock().unwrap();
+            let mut t = tools(s.changed.clone());
+            if s.share_scope.is_some() {
+                t.as_array_mut().unwrap().push(json!({ "name": "share_calendar", "description": "Share the calendar with someone.", "inputSchema": { "type": "object", "properties": { "with": { "type": "string" } } }, "annotations": { "readOnlyHint": true } }));
+            }
+            json!({ "tools": t })
+        }
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or_default().to_string();
             let mut s = st.lock().unwrap();
+            if let Some(need) = s.share_scope.clone().filter(|_| name == "share_calendar") {
+                let held = s.scopes.get(token).cloned().unwrap_or_default();
+                if !held.split_whitespace().any(|x| x == need) {
+                    return Response::builder()
+                        .status(403)
+                        .header("www-authenticate", format!("Bearer error=\"insufficient_scope\", scope=\"{need}\", resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\""))
+                        .body(Body::empty())
+                        .unwrap();
+                }
+            }
             s.calls.push((name.clone(), req["params"]["arguments"].clone()));
             let events: Vec<Value> = s.calls.iter().filter(|(n, _)| n == "create_event").map(|(_, a)| a.clone()).collect();
             json!({ "content": [{ "type": "text", "text": if name == "list_events" { json!(events).to_string() } else { "done".into() } }] })
@@ -126,6 +148,7 @@ async fn authorize(State((base, st)): S, Query(q): Query<HashMap<String, String>
     s.n += 1;
     let code = format!("code-{}", s.n);
     s.codes.insert(code.clone(), (g("client_id"), g("redirect_uri"), g("code_challenge"), g("resource")));
+    s.scopes.insert(code.clone(), g("scope"));
     let mut to = url::Url::parse(&g("redirect_uri")).unwrap();
     to.query_pairs_mut().append_pair("code", &code).append_pair("state", &g("state"));
     if s.names_itself {
@@ -134,11 +157,13 @@ async fn authorize(State((base, st)): S, Query(q): Query<HashMap<String, String>
     Response::builder().status(302).header("location", to.to_string()).body(Body::empty()).unwrap()
 }
 
-fn issue(s: &mut AppState) -> Value {
+fn issue(s: &mut AppState, scope: String) -> Value {
     s.n += 1;
     let (a, r) = (format!("at-{}", s.n), format!("rt-{}", s.n));
     s.access.insert(a.clone());
     s.refresh.insert(r.clone());
+    s.scopes.insert(a.clone(), scope.clone());
+    s.scopes.insert(r.clone(), scope);
     json!({ "access_token": a, "refresh_token": r, "token_type": "Bearer", "expires_in": s.expires_in })
 }
 
@@ -151,12 +176,13 @@ async fn token(State((base, st)): S, Form(f): Form<HashMap<String, String>>) -> 
     match g("grant_type").as_str() {
         "authorization_code" => {
             let Some((client, redirect, challenge, _)) = s.codes.remove(&g("code")) else { return oauth_error(400, "invalid_grant") };
+            let scope = s.scopes.remove(&g("code")).unwrap_or_default();
             use sha2::Digest;
             let proof = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(g("code_verifier").as_bytes()));
             if client != g("client_id") || redirect != g("redirect_uri") || proof != challenge {
                 return oauth_error(400, "invalid_grant");
             }
-            Json(issue(&mut s)).into_response()
+            Json(issue(&mut s, scope)).into_response()
         }
         // Rotation: a refresh token is good once.
         "refresh_token" => {
@@ -164,7 +190,8 @@ async fn token(State((base, st)): S, Form(f): Form<HashMap<String, String>>) -> 
                 return oauth_error(400, "invalid_grant");
             }
             s.refreshes += 1;
-            let mut t = issue(&mut s);
+            let scope = s.scopes.get(&g("refresh_token")).cloned().unwrap_or_default();
+            let mut t = issue(&mut s, scope);
             if s.refresh_without_expiry {
                 t.as_object_mut().unwrap().remove("expires_in");
             }

@@ -879,6 +879,7 @@ async function showThread(main, thread) {
     const el = $("#thread", main);
     if (!el) return;
     const grew = paint(el, body);
+    bindConnectorActs(el);
     keepHeights(el);
     motion(el, ui);
     for (const e of entries.filter(e => e.view)) fill($(`iframe[data-shown="${CSS.escape(e.id)}"]`, main), e.view, e.task_id);
@@ -1192,6 +1193,7 @@ function entry(e, ui = {}) {
       <div class="pre">${esc(e.summary || "")}</div>${ENDED.includes(e.status) ? verdictBar(e.task_id, e.verdict) : ""}</details>
       ${e.view ? shownFrame(e.id, "The deliverable") : ""}
       ${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}<a class="small see" href="#/task/${enc(e.task_id)}" data-open="task:${esc(e.task_id)}">See the outcome</a></div>`;
+    case "connector_card": return appOfferCard(e);
     case "schedule_card": {
       const b = e.budget || {};
       if (e.state !== "open") return `<div data-card="${esc(e.card)}">${scheduleLine(e)}</div>`;
@@ -1645,6 +1647,22 @@ const PANELS = {
   search: searchView,
 };
 
+// An app Magnus offered, with why: the same card as in the Library, as the
+// person stands with it now, in a conversation or a task (connectors spec,
+// Inside work).
+function appOfferCard(e) {
+  const app = { title: e.title, listing: { letters: e.letters, tint: e.tint } };
+  const act = e.state === "connected" ? `<span class="chip ok">Connected</span>`
+    : e.state === "unavailable" ? `<span class="small muted">No longer in your Library.</span>`
+    : e.ready === false ? `<span class="small muted">Not ready on this appliance yet.</span>`
+    : e.state === "needs_attention" ? `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Sign in to ${esc(e.title || "")} again</button>`
+    : e.state === "needs_more_access" ? `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Approve more access</button>`
+    : `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Connect ${esc(e.title || "")}</button>`;
+  return `<div class="confirm chatcard conncard" data-connector="${esc(e.connector)}" data-state="${esc(e.state)}"><div class="cc-head">${tile(app)}<div><strong>${esc(e.title || e.connector)}</strong>${e.publisher ? ` <span class="small muted">by ${esc(e.publisher)}</span>` : ""}</div></div>
+    <p class="cc-text">${esc(e.why || "")}</p>${e.summary ? `<p class="small muted">${esc(e.summary)}</p>` : ""}
+    <div class="row cc-act">${act}</div></div>`;
+}
+
 // A task: its request, the decisions it waits on (the same cards as in its
 // conversation), then its outcome, its contract and plan, or its trace.
 async function taskView(id, composed) {
@@ -1679,6 +1697,7 @@ async function taskView(id, composed) {
   const head = `<h2 class="ptitle" data-task="${esc(t.task_id)}">${esc(t.title || t.text)}</h2>
     <div class="row small dh-sub">${pill}${cs.length ? `<span class="checks">${icon("shield")}<span class="num">${checked} of ${cs.length} checks verified by the appliance</span></span>` : ""}${t.waiting_on ? `<span class="muted">${esc(WAITING[t.waiting_on] || "")}</span>` : ""}</div>`;
   const body = `${items.map(i => card(i, composed)).join("")}
+    ${(t.app_offers || []).filter(o => o.state !== "connected").map(appOfferCard).join("")}
     ${running ? `<div class="live" id="plive" aria-live="polite">${esc(Panel.liveText) || `<span class="faint">Working…</span>`}</div>` : ""}
     <div class="seg layers" role="tablist" aria-label="What to show">${[["outcome", "Result"], ["contract", "Plan"], ["trace", "Steps"]].map(([k, l]) => `<button role="tab" aria-selected="${Panel.layer === k}" class="${Panel.layer === k ? "on" : ""}" data-layer="${k}">${l}</button>`).join("")}</div>
     <section class="layer">${layers[Panel.layer]}</section>
@@ -1752,7 +1771,9 @@ function connectorAction(c) {
   const name = esc(c.title);
   switch (stateOf(c)) {
     case "connecting": return `<span class="lc-act busy" role="status" aria-label="Signing in to ${name}"><span class="spin"></span></span>`;
-    case "connected": return `<a class="lc-act ok" href="#/library/${enc(c.name)}" aria-label="${name} is connected. Open details">${SVG.check}</a>`;
+    case "connected": return c.more_access
+      ? `<button class="lc-act warn" data-act="connect" data-app="${esc(c.name)}" aria-label="Approve more access for ${name}">${SVG.again}</button>`
+      : `<a class="lc-act ok" href="#/library/${enc(c.name)}" aria-label="${name} is connected. Open details">${SVG.check}</a>`;
     case "needs_attention": return `<button class="lc-act warn" data-act="connect" data-app="${esc(c.name)}" aria-label="Sign in to ${name} again">${SVG.again}</button>`;
     case "local": return `<button class="primary lc-enable" data-act="connect" data-app="${esc(c.name)}">Enable</button>`;
     default: return c.ready === false

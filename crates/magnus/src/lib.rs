@@ -9,6 +9,7 @@ pub mod accounts;
 pub mod admin;
 pub mod adapters;
 pub mod api;
+pub mod app_tools;
 pub mod apps;
 pub mod backup;
 pub mod boundary;

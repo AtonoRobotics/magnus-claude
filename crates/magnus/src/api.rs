@@ -666,6 +666,13 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool, words
         "thread": task.chat.as_ref().map(|c| c.thread.clone()),
         "verdict": task.verdict,
     });
+    // The apps this task asked the person to connect, each as they stand
+    // with it now (connectors spec, Inside work).
+    if full {
+        let mut offered: Vec<(i64, Value)> = run.results.values().filter_map(|r| r.data.as_ref().filter(|d| d["connector"].is_string()).map(|d| (r.seq, k.offered_card(&task.person, d)))).collect();
+        offered.sort_by_key(|(seq, _)| *seq);
+        v["app_offers"] = json!(offered.into_iter().map(|(_, c)| c).collect::<Vec<_>>());
+    }
     if full {
         let criteria: Vec<Value> = run
             .contract

@@ -330,7 +330,14 @@ impl Kernel {
         let secret = match f.connector.as_ref().filter(|c| c.credential.is_some()) {
             Some(c) => match self.connector_secret(c, &person).await? {
                 Some(s) => Some(s),
-                None => return self.deny(a, "credentials", &format!("{} is not connected for the person this task is for (or their sign-in expired): they sign in again in the Library", f.app), false, None).await,
+                None => {
+                    let why = if self.lapsed(c, &person) {
+                        format!("{} no longer accepts the sign-in of the person this task is for: offer_app puts its card in front of them to sign in again", f.app)
+                    } else {
+                        format!("{} is not connected for the person this task is for (or their sign-in expired): they sign in again in the Library, or offer_app puts its card in front of them", f.app)
+                    };
+                    return self.deny(a, "credentials", &why, false, None).await;
+                }
             },
             None => None,
         };
@@ -727,6 +734,18 @@ impl Kernel {
                 Ok(o) => Ok((o.text, o.is_error, o.structured)),
                 Err(crate::apps::CallError::NotSent(m)) => Err(CallFailure::NotDone(m)),
                 Err(crate::apps::CallError::Unknown(m)) => Err(CallFailure::Unknown(m)),
+                // The app wants more access for this (connectors spec,
+                // Remote MCP connectors: a scope challenge becomes a card
+                // asking for it). Nothing happened at the app.
+                Err(crate::apps::CallError::NeedsScope(scopes)) => {
+                    let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
+                    if let Err(e) = self.want_scopes(&c.name, &person, &scopes) {
+                        return Err(CallFailure::NotDone(format!("{} wants more access, which could not be kept: {e:#}", f.app)));
+                    }
+                    let title = c.title.clone().unwrap_or_else(|| crate::connectors::title(&c.name));
+                    let data = json!({ "card": crate::chat::derived("card", key), "connector": c.name, "why": format!("{title} needs more access from you to do this") });
+                    Ok((format!("{} needs more access from the person for {}. Its card is in front of them to approve it; nothing happened at the app. Once they have approved it, call it again.", title, f.remote), true, Some(data)))
+                }
             };
         }
         let s = |v: &str| a.input[v].as_str().unwrap_or_default().to_string();
@@ -739,6 +758,21 @@ impl Kernel {
                 "web_search" => Ok((self.web.search(&s("query")).await?, false, None)),
                 "create_task" => self.chat_task(a, key).await,
                 "create_schedule" => Ok(self.chat_card(a, key)),
+                "find_apps" | "app_details" | "offer_app" => {
+                    let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).and_then(|p| self.person(&p));
+                    let Some(person) = person else { return Ok(("no such person".into(), true, None)) };
+                    Ok(match a.tool.as_str() {
+                        "find_apps" => {
+                            let v = self.find_apps(&person, a.input["query"].as_str().unwrap_or_default());
+                            (v.to_string(), false, Some(v))
+                        }
+                        "app_details" => match self.app_details(&person, a.input["name"].as_str().unwrap_or_default()) {
+                            Ok(v) => (v.to_string(), false, Some(v)),
+                            Err(e) => (e, true, None),
+                        },
+                        _ => self.offer_app(&person, &a.input, crate::chat::derived("card", key)),
+                    })
+                }
                 t if crate::controls::TOOLS.contains(&t) => {
                     let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
                     Ok(self.chat_control(&person, t, &a.input).await)

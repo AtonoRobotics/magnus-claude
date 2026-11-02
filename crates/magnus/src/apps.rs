@@ -28,6 +28,23 @@ pub enum CallError {
     NotSent(String),
     /// The request may have reached the app; its outcome is unknown.
     Unknown(String),
+    /// The app refused it for want of access the sign-in does not hold
+    /// (HTTP 403, `insufficient_scope`, MCP authorization's step-up): the
+    /// scopes it names. Nothing happened at the app.
+    NeedsScope(Vec<String>),
+}
+
+/// The scopes a 403 asks for, when it is MCP's step-up challenge:
+/// `WWW-Authenticate: Bearer error="insufficient_scope", scope="a b"`.
+pub fn insufficient_scope(h: &reqwest::header::HeaderMap) -> Option<Vec<String>> {
+    let v = h.get(reqwest::header::WWW_AUTHENTICATE)?.to_str().ok()?;
+    if !v.contains("insufficient_scope") {
+        return None;
+    }
+    let at = v.find("scope=\"")? + "scope=\"".len();
+    let end = at + v[at..].find('"')?;
+    let s: Vec<String> = v[at..end].split_whitespace().map(String::from).collect();
+    (!s.is_empty()).then_some(s)
 }
 
 pub struct CallOutput {
@@ -90,6 +107,11 @@ impl Mcp {
             return Ok(None);
         }
         if !status.is_success() {
+            if status == reqwest::StatusCode::FORBIDDEN {
+                if let Some(scopes) = insufficient_scope(resp.headers()) {
+                    return Err(CallError::NeedsScope(scopes));
+                }
+            }
             let text = resp.text().await.unwrap_or_default();
             // An HTTP-level rejection means the server did not run the tool.
             return Err(CallError::NotSent(format!("app returned HTTP {status}: {}", text.chars().take(300).collect::<String>())));
@@ -164,6 +186,7 @@ impl Mcp {
         match e {
             CallError::NotSent(m) => CallError::NotSent(Self::clean(&m, bearer)),
             CallError::Unknown(m) => CallError::Unknown(Self::clean(&m, bearer)),
+            CallError::NeedsScope(s) => CallError::NeedsScope(s),
         }
     }
 

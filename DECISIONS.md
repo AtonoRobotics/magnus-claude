@@ -815,3 +815,43 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - `an_app_that_cannot_revoke_is_disconnected_here_and_the_person_is_told`.
   - `a_sign_in_ended_at_the_app_asks_the_person_to_sign_in_again`: the person removes Magnus in the app's own settings; the card turns Needs attention, and signing in again brings it back.
   - `connectors.rs` expects Disconnect's new answer.
+## Magnus knows the person's apps while it works, and offers an app's card with why (2026-11-02, `agent-apps`)
+
+- The connectors spec, How the agent uses connectors:
+  - "the context always holds the user's connector index";
+  - "catalog tools to search the library by service name or by what the user wants done";
+  - "Read a connector's details";
+  - "Place a connector's card in chat, saying what it is for"; only the user completes a sign-in.
+  - Inside work: "When a task or chat needs a connection, Magnus says so in that thread with the card".
+  - Until now, a run saw only the tools of apps already connected, and knew nothing of the rest.
+- Every run and chat now holds the person's app index, placed before their words:
+  - each app the organisation lets them use (the same rule as the Library, `boundary::may_use`, and only apps turned on);
+  - its one sentence, and whether it is connected;
+  - it is rebuilt at every model call, so a connection made mid-conversation shows at once.
+- Three read tools, built in for chats and tasks (`app_tools.rs`):
+  - `find_apps`: the person's apps whose name, publisher, sentence or abilities hold the words asked for, best first. With nothing found it says so: "do not suggest one that is not there".
+  - `app_details`: what Magnus can do with the app, the access it asks for, and what it can and cannot do.
+  - `offer_app`: puts the app's card in the conversation with Magnus's reason. It is refused for an app outside the person's Library, and says so for one already connected. Nothing is connected until the person signs in.
+- The card in a conversation (`connector_card`):
+  - it is the same card as in the Library: tile, name, publisher, the reason, the app's sentence, and one Connect button through the app's existing connect path;
+  - it shows the app as the person stands with it now: Connected once they have connected it, "not ready" while the appliance is not set up for it, gone from their Library if blocked since.
+  - Magnus reads it back in the conversation as "Offered the app …".
+- In a task, the same card leads the task's page, under the decisions it waits on, until the person connects the app. The task carries the apps it offered (`app_offers`, each as the person stands with it now). In approvals the card is still to come.
+- Tests (agent_apps.rs):
+  - `magnus_finds_an_unconnected_app_by_what_is_wanted_and_offers_its_card_with_why`: the index is in the context; find_apps finds both calendars by "find a time on my calendar"; the card is in the thread with its reason, ready to connect, and nothing is connected; `desktop/tests/chat-app-card.mjs` draws it with Connect and no protocol words, in every look and at phone width.
+  - `a_task_that_needs_an_app_shows_its_card_with_why`: a task offers the calendar, and the task carries its card with the reason.
+  - `magnus_cannot_offer_an_app_outside_the_persons_library`: Gmail blocked for Bob's group is not in his index, not found and not offered; a request nothing fits ("post in our Slack") is answered plainly.
+- A sign-in the app refused (connectors spec, Lifecycle: "Re-sign-in: a refresh rejected as invalid marks the connection Needs attention and raises the card"):
+  - A refresh the app refuses (a 4xx, not a failure to reach it) is kept on the stored sign-in as lapsed, and is not tried again until the person signs in again.
+  - The index says the app needs signing in again, and its tools stop being offered to the run.
+  - The boundary's refusal tells Magnus to offer the card, and `offer_app` gives one with "Sign in to … again".
+  - Signing in again brings it back.
+  - Test: `a_sign_in_the_app_refused_is_offered_again_as_a_card_and_its_tools_wait` (agent_apps.rs).
+- More access (connectors spec, Remote MCP connectors: "a call needing an ungranted scope … becomes a Connect card asking for the added scope, and the call proceeds once approved"):
+  - An app that refuses a call with MCP authorization's step-up challenge (HTTP 403, `insufficient_scope`, the scopes it names) is answered by the kernel itself:
+    - the scopes are kept on the person's sign-in (`wants`);
+    - the card "Approve more access" is placed in the conversation or task;
+    - Magnus is told nothing happened at the app, and to call again once approved.
+  - Her index says the app needs more access, and the Library's card turns to approving it.
+  - Approving is signing in again: the sign-in asks for the added scopes too. The new sign-in holds them, and the call then goes through.
+  - Test: `a_call_that_needs_more_access_asks_for_it_with_a_card_and_goes_through_once_approved` (agent_apps.rs). The fake app holds per-token scopes and challenges a tool that needs one more.
