@@ -12,9 +12,18 @@ use serde_json::{json, Value};
 
 pub struct Directory {
     pub client_id: String,
-    /// The realm's admin API, at its public address (`Idp::inside` maps it).
+    /// The realm's admin API: at its own origin when the server keeps it
+    /// there (Keycloak's `hostname-admin`, as on strix-alpha), else at the
+    /// issuer's public address (`Idp::inside` maps it).
     base: String,
+    admin: Option<Admin>,
     token: tokio::sync::Mutex<Option<(String, std::time::Instant)>>,
+}
+
+/// The admin API's own origin, and how it is reached: trusting the CA
+/// that signed its certificate, or why that CA could not be read.
+struct Admin {
+    http: std::result::Result<reqwest::Client, String>,
 }
 
 /// What the provider said when it refused.
@@ -55,8 +64,28 @@ pub fn person(u: &Value, admins: &[String]) -> Value {
 }
 
 impl Directory {
-    pub fn new(issuer: &str, client_id: String) -> Directory {
-        Directory { client_id, base: issuer.trim_end_matches('/').replacen("/realms/", "/admin/realms/", 1), token: Default::default() }
+    /// `admin_url`: where the admin API answers when not at the issuer's
+    /// host (`https://127.0.0.1:19446`), and `admin_ca` the PEM CA its
+    /// certificate is from, when a private one.
+    pub fn new(issuer: &str, client_id: String, admin_url: Option<&str>, admin_ca: Option<&std::path::Path>) -> Directory {
+        let issuer = issuer.trim_end_matches('/');
+        let Some(origin) = admin_url else {
+            return Directory { client_id, base: issuer.replacen("/realms/", "/admin/realms/", 1), admin: None, token: Default::default() };
+        };
+        let realm = issuer.split_once("/realms/").map(|(_, r)| r).unwrap_or_default();
+        let http = (|| -> Result<reqwest::Client> {
+            let mut b = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+            if let Some(ca) = admin_ca {
+                let pem = std::fs::read(ca).with_context(|| format!("read the CA of the identity provider's admin API, {}", ca.display()))?;
+                b = b.add_root_certificate(reqwest::Certificate::from_pem(&pem).with_context(|| format!("{} is not a PEM certificate", ca.display()))?);
+            }
+            Ok(b.build()?)
+        })()
+        .map_err(|e| format!("{e:#}"));
+        if let Err(e) = &http {
+            tracing::error!("admin console: {e}: people and sign-in rules cannot be managed");
+        }
+        Directory { client_id, base: format!("{}/admin/realms/{realm}", origin.trim_end_matches('/')), admin: Some(Admin { http }), token: Default::default() }
     }
 
     async fn token(&self, idp: &Idp, key: &Key) -> Result<String> {
@@ -76,8 +105,11 @@ impl Directory {
 
     /// One admin API call: `path` is under the realm's admin address.
     pub async fn call(&self, idp: &Idp, key: &Key, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value> {
-        let url = idp.inside(&format!("{}{path}", self.base));
-        let mut rq = idp.http.request(method.clone(), &url).bearer_auth(self.token(idp, key).await?);
+        let (url, http) = match &self.admin {
+            Some(a) => (format!("{}{path}", self.base), a.http.as_ref().map_err(|e| anyhow!("{e}"))?),
+            None => (idp.inside(&format!("{}{path}", self.base)), &idp.http),
+        };
+        let mut rq = http.request(method.clone(), &url).bearer_auth(self.token(idp, key).await?);
         if let Some(b) = body {
             rq = rq.json(b);
         }
@@ -178,7 +210,13 @@ mod tests {
 
     #[test]
     fn the_admin_api_is_the_realms_own() {
-        let d = super::Directory::new("https://id.acme.test/realms/magnus/", "svc".into());
+        let d = super::Directory::new("https://id.acme.test/realms/magnus/", "svc".into(), None, None);
         assert_eq!(d.base, "https://id.acme.test/admin/realms/magnus");
+        // Where the server keeps its admin API on an origin of its own.
+        let d = super::Directory::new("https://id.acme.test/realms/magnus", "svc".into(), Some("https://127.0.0.1:19446/"), None);
+        assert_eq!(d.base, "https://127.0.0.1:19446/admin/realms/magnus");
+        // A CA that cannot be read says so at each call, not by stopping the console.
+        let d = super::Directory::new("https://id.acme.test/realms/magnus", "svc".into(), Some("https://127.0.0.1:19446"), Some(std::path::Path::new("/nonexistent/ca.pem")));
+        assert!(d.admin.as_ref().unwrap().http.as_ref().is_err_and(|e| e.contains("/nonexistent/ca.pem")));
     }
 }
