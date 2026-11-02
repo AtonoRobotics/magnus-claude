@@ -1,12 +1,13 @@
-//! An SMTP server for tests: the identity provider sends its real email to
-//! it (plain SMTP, no TLS, no sign-in), and the test reads what arrived.
-//! It listens where the test Keycloak, in its container, reaches this
-//! machine: the gateway of the container's network (`docker inspect`), or
-//! this machine's address on its network when Keycloak runs elsewhere.
+//! The identity provider's real email, as tests read it. The build box lets
+//! no container reach the host, so the SMTP server (`mail-sink`, this
+//! crate's own) runs in a container of its own that shares the test
+//! Keycloak's network (`docker run --network container:magnus-claude-kc`,
+//! on the Keycloak image already on the box): Keycloak sends to it at
+//! 127.0.0.1, and it writes each message to a directory the test reads.
 
+use magnus_invariants::appliance::bin;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub struct Mail {
@@ -15,99 +16,78 @@ pub struct Mail {
 }
 
 pub struct Inbox {
+    /// Where Keycloak sends: in its own network.
     pub addr: SocketAddr,
-    mail: Arc<Mutex<Vec<Mail>>>,
-    connections: Arc<std::sync::atomic::AtomicUsize>,
+    dir: tempfile::TempDir,
+    container: String,
 }
 
-/// This machine as the test Keycloak's container reaches it: its network's
-/// gateway.
-fn seen_from_keycloak() -> Option<std::net::IpAddr> {
-    let out = std::process::Command::new("docker").args(["inspect", "magnus-claude-kc", "--format", "{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}"]).output().ok()?;
-    String::from_utf8_lossy(&out.stdout).split_whitespace().find_map(|g| g.parse().ok())
+impl Drop for Inbox {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("docker").args(["rm", "-f", &self.container]).output();
+    }
+}
+
+fn docker(args: &[&str]) -> String {
+    let out = std::process::Command::new("docker").args(args).output().expect("run docker");
+    assert!(out.status.success(), "docker {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 impl Inbox {
     pub async fn start() -> Inbox {
-        let ip = seen_from_keycloak().unwrap_or_else(crate::admin::lan_ip);
-        let l = tokio::net::TcpListener::bind((ip, 0)).await.unwrap();
-        let addr = l.local_addr().unwrap();
-        let mail: Arc<Mutex<Vec<Mail>>> = Default::default();
-        let connections: Arc<std::sync::atomic::AtomicUsize> = Default::default();
-        let (m, n) = (mail.clone(), connections.clone());
-        tokio::spawn(async move {
-            while let Ok((s, _)) = l.accept().await {
-                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let m = m.clone();
-                tokio::spawn(async move {
-                    let _ = session(s, m).await;
-                });
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // The Keycloak image runs as its own user.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let port = 20000 + (uuid::Uuid::new_v4().as_u128() % 20000) as u16;
+        let image = docker(&["inspect", "magnus-claude-kc", "--format", "{{.Image}}"]);
+        let sink = bin("mail-sink");
+        let (sink_mount, out_mount) = (format!("{}:/mail-sink:ro", sink.display()), format!("{}:/out", dir.path().display()));
+        let container = docker(&["run", "-d", "--rm", "--network", "container:magnus-claude-kc", "-v", &sink_mount, "-v", &out_mount, "--entrypoint", "/mail-sink", &image, &port.to_string(), "/out"]);
+        let inbox = Inbox { addr: SocketAddr::from(([127, 0, 0, 1], port)), dir, container };
+        for _ in 0..300 {
+            if inbox.dir.path().join("ready").exists() {
+                return inbox;
             }
-        });
-        Inbox { addr, mail, connections }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let logs = std::process::Command::new("docker").args(["logs", &inbox.container]).output().map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
+        panic!("the mail server beside Keycloak did not start: {logs}");
     }
 
-    /// How many connections the server has taken: none means the sender
-    /// never reached it.
-    pub fn connections(&self) -> usize {
-        self.connections.load(std::sync::atomic::Ordering::SeqCst)
+    fn all(&self) -> Vec<Mail> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(self.dir.path()).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "eml")).collect();
+        files.sort();
+        files
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .map(|data| {
+                let to = data.lines().next().and_then(|l| l.strip_prefix("X-Envelope-To: ")).unwrap_or_default().split(',').map(String::from).collect();
+                Mail { to, data }
+            })
+            .collect()
     }
 
     /// The first mail to `to`, waiting up to a minute for it.
     pub async fn wait_for(&self, to: &str) -> Mail {
         for _ in 0..600 {
-            if let Some(m) = self.mail.lock().unwrap().iter().find(|m| m.to.iter().any(|t| t.eq_ignore_ascii_case(to))) {
-                return m.clone();
+            if let Some(m) = self.all().into_iter().find(|m| m.to.iter().any(|t| t.eq_ignore_ascii_case(to))) {
+                return m;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        panic!("no mail came for {to}; mail that came: {:?}", self.mail.lock().unwrap().iter().map(|m| &m.to).collect::<Vec<_>>());
+        panic!("no mail came for {to}; mail that came: {:?}", self.all().iter().map(|m| m.to.clone()).collect::<Vec<_>>());
     }
 
     pub fn count_for(&self, to: &str) -> usize {
-        self.mail.lock().unwrap().iter().filter(|m| m.to.iter().any(|t| t.eq_ignore_ascii_case(to))).count()
+        self.all().iter().filter(|m| m.to.iter().any(|t| t.eq_ignore_ascii_case(to))).count()
     }
-}
 
-async fn session(s: tokio::net::TcpStream, mail: Arc<Mutex<Vec<Mail>>>) -> std::io::Result<()> {
-    let (r, mut w) = s.into_split();
-    let mut r = BufReader::new(r);
-    w.write_all(b"220 inbox.test ESMTP\r\n").await?;
-    let mut to = vec![];
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if r.read_line(&mut line).await? == 0 {
-            return Ok(());
-        }
-        let cmd = line.trim_end().to_ascii_uppercase();
-        if cmd.starts_with("EHLO") {
-            w.write_all(b"250-inbox.test\r\n250 8BITMIME\r\n").await?;
-        } else if cmd.starts_with("RCPT TO:") {
-            to.push(line.trim_end()[8..].trim().trim_matches(['<', '>']).to_string());
-            w.write_all(b"250 OK\r\n").await?;
-        } else if cmd == "DATA" {
-            w.write_all(b"354 go on\r\n").await?;
-            let mut data = String::new();
-            loop {
-                line.clear();
-                if r.read_line(&mut line).await? == 0 {
-                    return Ok(());
-                }
-                if line == ".\r\n" || line == ".\n" {
-                    break;
-                }
-                data.push_str(line.strip_prefix('.').filter(|_| line.starts_with("..")).unwrap_or(&line));
-            }
-            mail.lock().unwrap().push(Mail { to: std::mem::take(&mut to), data });
-            w.write_all(b"250 OK\r\n").await?;
-        } else if cmd == "QUIT" {
-            w.write_all(b"221 bye\r\n").await?;
-            return Ok(());
-        } else {
-            // HELO, MAIL FROM, RSET, NOOP
-            w.write_all(b"250 OK\r\n").await?;
-        }
+    /// How many connections the server has taken: none means the sender
+    /// never reached it.
+    pub fn connections(&self) -> usize {
+        std::fs::metadata(self.dir.path().join("connections")).map(|m| m.len() as usize).unwrap_or(0)
     }
 }
 
