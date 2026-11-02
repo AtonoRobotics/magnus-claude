@@ -79,12 +79,21 @@ async fn written_with(app: &Appliance, n: &Value) -> (String, bool) {
 }
 
 /// The loop, replayed: a scheduled run proposes a schedule (refused) and
-/// then waits on an approval. The next firing starts nothing while it
-/// waits; once it ends, the schedule runs again.
+/// then waits on its person. The next firing starts nothing while it
+/// waits; once it ends, the schedule runs again. (It waits on a question:
+/// a confirmed schedule's sends no longer ask its owner each time, owner
+/// 2026-11-02.)
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scheduled_run_cannot_set_up_a_schedule_and_its_schedule_waits_for_it() {
     let mail = mcp::mail().start().await;
     let m = FakeModel::start(script(|c| async move {
+        // A schedule's runs have the verifier: it finds the work done.
+        if c.offered_tools().is_empty() && c.text().contains("The agent's criteria") {
+            return Reply::Text("The criteria cover the request.".into());
+        }
+        if c.offered_tools().contains(&"verdict".to_string()) {
+            return tool("verdict", json!({ "criteria": [{ "id": "c1", "holds": true, "evidence": "the sweep ran" }] }));
+        }
         if !c.body.to_string().contains("Sweep the mailbox.") {
             return tool("task_fail", json!({ "reason": "not scripted" }));
         }
@@ -92,7 +101,7 @@ async fn a_scheduled_run_cannot_set_up_a_schedule_and_its_schedule_waits_for_it(
             0 => simple_contract(),
             // What the test schedule's run did on 2026-10-30.
             1 => tool("propose_schedule", json!({ "text": "Tidy the folders.", "every_minutes": 1 })),
-            2 => tool("mail__send", json!({ "to": "bob@corp.example", "subject": "Swept", "body": "The mailbox is swept." })),
+            2 => tool("ask_principal", json!({ "question": "Archive the old threads too?" })),
             _ => done("Swept the mailbox."),
         }
     }))
@@ -106,7 +115,7 @@ async fn a_scheduled_run_cannot_set_up_a_schedule_and_its_schedule_waits_for_it(
     let id = add(&alice, json!({ "text": "Sweep the mailbox.", "every_minutes": 1 })).await;
 
     let first = eventually("the schedule's first run", MINUTE, || async { tasks_with(&alice, "Sweep the mailbox.").await.first().map(|t| t["task_id"].as_str().unwrap().to_string()) }).await;
-    let item = alice.wait_item(&first, "approval").await;
+    let item = alice.wait_item(&first, "question").await;
     let refused = m.requests().into_iter().find(|c| c.body.to_string().contains("Sweep the mailbox.") && c.turn() == 2).expect("the run went on after proposing").last_results();
     assert!(refused[0].is_error && refused[0].text.contains("cannot set up another schedule"), "a scheduled run proposed a schedule: {}", refused[0].text);
     assert!(!alice.inbox().await.iter().any(|i| i["kind"] == "schedule_proposal"), "a proposal reached the inbox");
@@ -114,7 +123,7 @@ async fn a_scheduled_run_cannot_set_up_a_schedule_and_its_schedule_waits_for_it(
     // Its run waits on alice, so the schedule pauses until she answers
     // (owner, 2026-10-30), says why, and cannot be resumed past it.
     let s = eventually("the schedule pauses on its waiting run", PATIENCE, || async { schedule(&alice, &id).await.filter(|s| s["paused_on"] == first.as_str()) }).await;
-    assert!(s["paused"].as_str().unwrap().contains("waiting on you (approval)"), "{s}");
+    assert!(s["paused"].as_str().unwrap().contains("waiting on you (question)"), "{s}");
     assert!(s["next"].is_null(), "a paused schedule has a next run: {s}");
     assert!(s["budget"]["max_usd"].is_number(), "no budget shown: {s}");
     let n = notice(&alice, "A schedule paused until you answer its run", &id).await;
@@ -128,7 +137,7 @@ async fn a_scheduled_run_cannot_set_up_a_schedule_and_its_schedule_waits_for_it(
     assert!(s["skipped"].is_null() && s["paused_on"] == first.as_str(), "{s}");
 
     // Once she answers, it goes on by itself.
-    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
+    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "answer", "text": "No, just sweep." })).await.is_success());
     assert_eq!(alice.wait_settled(&first).await["status"], "completed");
     eventually("the schedule goes on", PATIENCE, || async { schedule(&alice, &id).await.filter(|s| s["paused"].is_null()) }).await;
     eventually("a second run after the first ended", MINUTE, || async { (tasks_with(&alice, "Sweep the mailbox.").await.len() == 2).then_some(()) }).await;

@@ -575,6 +575,11 @@ impl Kernel {
                             // so recurring output does not bury the
                             // conversation it was set up in (behavior spec).
                             chat: Some(crate::events::ChatOrigin { thread: crate::chat::schedule_thread(&sc.id), turn: false, from_run: None, conversation: vec![] }),
+                            // A confirmed schedule runs on its own: the
+                            // verifier judges the criteria no code checks,
+                            // and only what it cannot judge goes to its
+                            // person (owner, 2026-11-02; invariant 7 holds).
+                            modules: [("verifier".to_string(), true)].into(),
                             ..Default::default()
                         };
                         self.create_run(&format!("schedule:{}", sc.id), &sc.person, w.text(sc.seq).to_string(), vec![], o).await
