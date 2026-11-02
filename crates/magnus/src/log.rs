@@ -150,7 +150,7 @@ pub fn content_walls_sql(role: &str) -> String {
 /// before the column existed, or restored from a backup.
 pub const CONTENT_OWNERS: &str = "UPDATE public.content c SET person = o.person FROM (
     SELECT e.seq, CASE
-        WHEN e.kind IN ('knowledge_added', 'playbook') THEN NULL
+        WHEN e.kind = 'knowledge_added' THEN NULL
         WHEN e.kind = 'bundle_written' THEN e.body->>'owner_user'
         WHEN e.kind = 'item_resolved' THEN (SELECT i.body->>'person' FROM public.events i
             WHERE i.kind = 'item' AND i.body->>'id' = e.body->>'id' ORDER BY i.seq LIMIT 1)

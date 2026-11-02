@@ -991,3 +991,11 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Next in step 3: the playbook moved into user memory and out of the context.
 - Test: `each_person_sees_edits_and_forgets_what_magnus_keeps_about_them` (your_memory.rs, with `desktop/tests/your-memory.mjs` in a real browser).
 
+## Org context, step 3c: the playbook is the person's memory (2026-11-02, `org-context-3c`)
+
+- The spec makes memory "per user and per task only" and takes the playbook out of the context: its lessons are no longer put at the start of later tasks. Each is in its person's memory at `/users/<person>/playbook/<id>.md`, found with `memory_search`, listed, read, and shown in "Your memory" as lessons from earlier tasks. A task that reads one takes the taint it was learned under (M1), as from any memory.
+- Lessons' content is now their person's in the content store (it was the organisation's), so it is recalled through their wall (K4); existing rows are given to their person when the store is migrated. Their text stays in the kernel's state for the developer's playbook view until recall only reaches it.
+- No longer true is retiring the lesson (a new playbook version); an edit by the person is a playbook edit in their words; Forget is the trash, with the calls that wrote it.
+- The developer's context accounting no longer counts the playbook, and `playbook_update` says where lessons are kept.
+- Test: `playbook_items_reach_later_tasks_and_carry_their_taint` (app.rs) now checks that the lesson is not in the next task's context, is found by searching memory with its taint, is in her memory and not Bob's, and is forgotten to her trash.
+

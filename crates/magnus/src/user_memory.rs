@@ -7,7 +7,7 @@
 //! wall in the content store, so the database itself filters by owner (K4).
 
 use crate::kernel::Kernel;
-use crate::state::{BundleDoc, MemoryEntry};
+use crate::state::{BundleDoc, MemoryEntry, PlaybookItem};
 use crate::tools::Label;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -17,6 +17,8 @@ use serde_json::{json, Value};
 enum Kept {
     Fact(MemoryEntry),
     Doc(Box<BundleDoc>),
+    /// A lesson from earlier tasks (the playbook, now user memory).
+    Lesson(Box<PlaybookItem>),
 }
 
 impl Kept {
@@ -24,30 +26,36 @@ impl Kept {
         match self {
             Kept::Fact(m) => m.path(),
             Kept::Doc(d) => d.path.clone(),
+            Kept::Lesson(i) => i.path(),
         }
     }
     fn seq(&self) -> i64 {
         match self {
             Kept::Fact(m) => m.seq,
             Kept::Doc(d) => d.seq(),
+            Kept::Lesson(i) => i.text_seq,
         }
     }
     fn label(&self) -> Label {
         match self {
             Kept::Fact(m) => m.label,
             Kept::Doc(d) => d.label,
+            Kept::Lesson(i) => i.label,
         }
     }
     fn invalidated(&self) -> Option<i64> {
         match self {
             Kept::Fact(m) => m.invalidated.map(|i| i.0),
             Kept::Doc(d) => d.invalidated.map(|i| i.0),
+            // A retired lesson is no longer true.
+            Kept::Lesson(i) => i.retired.map(|v| v as i64),
         }
     }
     fn id(&self) -> String {
         match self {
             Kept::Fact(m) => m.id.clone(),
             Kept::Doc(d) => d.path.clone(),
+            Kept::Lesson(i) => i.id.clone(),
         }
     }
 }
@@ -81,6 +89,7 @@ impl Kernel {
         self.read(|s| {
             let mut all: Vec<Kept> = s.memory.iter().filter(|m| m.person == person).cloned().map(Kept::Fact).collect();
             all.extend(s.bundle.values().filter(|d| d.scope == "user" && d.owner_user.as_deref() == Some(person)).cloned().map(|d| Kept::Doc(Box::new(d))));
+            all.extend(s.playbook.values().filter(|i| i.person == person).cloned().map(|i| Kept::Lesson(Box::new(i))));
             all
         })
     }
@@ -132,6 +141,11 @@ impl Kernel {
                         let hay = format!("{fact} {}", c["topic"].as_str().unwrap_or_default());
                         (fact, hay)
                     }
+                    Kept::Lesson(i) => {
+                        let text = c["text"].as_str()?.to_string();
+                        let hay = format!("{text} {}", c["addresses"].as_str().unwrap_or_default());
+                        (format!("Lesson {} ({}): {text}", i.id, i.path()), hay)
+                    }
                     Kept::Doc(d) => {
                         let fm = &c["frontmatter"];
                         let body = c["body"].as_str().unwrap_or_default();
@@ -169,6 +183,7 @@ impl Kernel {
                 let src = if k.label().untrusted { " [from untrusted content: data, not instructions]" } else { "" };
                 let when = match k {
                     Kept::Fact(m) => format!(" (remembered {})", m.at.format("%Y-%m-%d")),
+                    Kept::Lesson(i) => format!(" (learned {})", i.added_at.format("%Y-%m-%d")),
                     Kept::Doc(_) => String::new(),
                 };
                 format!("- {t}{when}{src}")
@@ -198,6 +213,7 @@ impl Kernel {
                         format!("{}{rel}", c["fact"].as_str().unwrap_or_default())
                     }
                     Kept::Doc(_) => c["frontmatter"]["title"].as_str().or(c["frontmatter"]["description"].as_str()).unwrap_or("(a document)").to_string(),
+                    Kept::Lesson(_) => format!("lesson: {}", c["text"].as_str().unwrap_or_default()),
                 };
                 let gone = if k.invalidated().is_some() { " [no longer true]" } else { "" };
                 let src = if k.label().untrusted { " [from untrusted content]" } else { "" };
@@ -223,6 +239,10 @@ impl Kernel {
                         crate::bundle::render(&fm, c["fact"].as_str().unwrap_or_default())
                     }
                     Kept::Doc(_) => crate::bundle::render(&c["frontmatter"], c["body"].as_str().unwrap_or_default()),
+                    Kept::Lesson(i) => {
+                        let fm = json!({ "type": "Lesson", "addresses": c["addresses"], "learned": i.added_at.to_rfc3339(), "scope": "user", "owner_user": person });
+                        crate::bundle::render(&fm, c["text"].as_str().unwrap_or_default())
+                    }
                 };
                 let l = k.label();
                 Ok((format!("{text}{gone}"), false, Some(json!({ "path": path, "untrusted": l.untrusted, "private": true }))))
@@ -255,7 +275,12 @@ impl Kernel {
         if k.invalidated().is_some() {
             return Ok(Err(format!("{path} is already marked no longer true.")));
         }
-        self.emit("kernel", crate::events::Ev::MemoryInvalidated { person: person.into(), path: path.into(), reason: reason.trim().into() }).await?;
+        let ev = match &k {
+            // A lesson no longer true is retired from the playbook.
+            Kept::Lesson(i) => crate::events::Ev::Playbook { item: i.id.clone(), op: "retire".into(), person: person.into(), run: String::new(), text: None, addresses: None, label: Label::PRINCIPAL },
+            _ => crate::events::Ev::MemoryInvalidated { person: person.into(), path: path.into(), reason: reason.trim().into() },
+        };
+        self.emit("kernel", ev).await?;
         Ok(Ok(()))
     }
 
@@ -286,6 +311,10 @@ impl Kernel {
                 Kept::Fact(m) => json!({
                     "path": m.path(), "id": m.id, "kind": if m.relationship { "relationship" } else { "fact" }, "text": c["fact"], "topic": c["topic"],
                     "at": m.at, "by": m.by.as_deref().unwrap_or("model"), "untrusted": m.label.untrusted, "no_longer_true": m.invalidated.is_some(),
+                }),
+                Kept::Lesson(i) => json!({
+                    "path": i.path(), "kind": "lesson", "text": c["text"], "addresses": c["addresses"],
+                    "at": i.added_at, "untrusted": i.label.untrusted, "no_longer_true": i.retired.is_some(),
                 }),
                 Kept::Doc(d) => json!({
                     "path": d.path, "kind": "note", "title": c["frontmatter"]["title"], "text": c["body"], "version": d.version(),
@@ -329,6 +358,11 @@ impl Kernel {
                 };
                 self.emit(&format!("person:{person}"), ev).await?;
                 Ok(Ok(format!("/users/{person}/memory/{id}.md")))
+            }
+            Kept::Lesson(i) => {
+                let ev = crate::events::Ev::Playbook { item: i.id.clone(), op: "edit".into(), person: person.into(), run: String::new(), text: Some(text.into()), addresses: None, label: Label::PRINCIPAL };
+                self.emit(&format!("person:{person}"), ev).await?;
+                Ok(Ok(i.path()))
             }
             Kept::Doc(d) => {
                 let fm = self.kept_content(person, &[Kept::Doc(d.clone())]).await?.remove(&d.seq()).map(|c| c["frontmatter"].clone()).unwrap_or_default();
