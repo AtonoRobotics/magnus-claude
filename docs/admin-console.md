@@ -113,7 +113,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] Postgres as `magnus_root`, insert and select only on the log (#70)
 - [x] The provider's admin API through `magnus-admin-svc` with `private_key_jwt`, realm-management in the realm only (#72)
 - [x] The kill switch the kernel's own, persisted, refusing new runs while on (#71, before)
-- [ ] Every endpoint in the spec's table (tracked per section above)
+- [ ] Every endpoint in the spec's table: all built (`admin-shell` to `admin-knowledge`) but `POST /network/certificate/renew`, which comes with the trusted certificate; `POST /modules` and `DELETE /modules/{id}` answer 409 (modules come with the release)
 - [x] Every change audited before it answers; a step-up endpoint without a fresh check returns 401 `step_up_required` (#70, #69)
 
 ## Invariant tests
@@ -127,7 +127,7 @@ Reach
 Sign-in and authority
 - [x] A member's session or token is refused on every admin endpoint (`admin_sign_in.rs`)
 - [x] An admin cannot sign in without their password (ruling 1) (`admin_sign_in.rs`)
-- [ ] Every step-up endpoint returns `step_up_required` without a fresh check and succeeds with one (grows with each section)
+- [x] Every step-up endpoint returns `step_up_required` without a fresh check and succeeds with one: kill switch release (`admin_sign_in.rs`), role change and admin invite (`admin_users.rs`), delete (`admin_people.rs`), sign-in rules, policy apply and rollback (`admin_security.rs`), memory bulk and activity batch (`admin_knowledge.rs`), update install and rollback, allowlist (`admin_operations.rs`)
 - [x] An admin turned off loses the console within 5 minutes (`admin_sign_in.rs`)
 - [x] The last admin cannot be removed, turned off or demoted (`admin_users.rs`)
 
@@ -148,7 +148,7 @@ Kill switch
 - [x] Release without step-up fails (#71)
 
 UI
-- [ ] Every screen in light, dark and glass, and at phone width with no horizontal scroll
+- [x] Every screen in light, dark and glass, and at phone width with no horizontal scroll, the sections in reach (each section's test visits its screens through `admin-sign-in.mjs`)
 
 ## Removals
 
