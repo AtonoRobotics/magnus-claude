@@ -106,6 +106,21 @@ async fn only_an_admin_signs_in_on_the_providers_page_and_the_session_holds_to_i
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "an admin turned off at the provider kept the console");
     kc.enable("Alice").await;
     assert_eq!(with_cookie(b.get(api("/session")), &sid).send().await.unwrap().status(), StatusCode::UNAUTHORIZED, "the ended session came back");
+
+    // Every one of those is in the audit log, with who and from where; the
+    // log's CSV says the same.
+    let sid = sign_in(&url, c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
+    let audit: Value = with_cookie(b.get(api("/audit")), &sid).send().await.unwrap().json().await.unwrap();
+    let actions: Vec<&str> = audit["entries"].as_array().unwrap().iter().filter_map(|e| e["action"].as_str()).collect();
+    for a in ["sign_in_refused", "sign_in", "step_up", "sign_out", "session_ended_by_provider"] {
+        assert!(actions.contains(&a), "{a} is not in the audit: {audit}");
+    }
+    let ip = lan_ip().to_string();
+    assert!(audit["entries"].as_array().unwrap().iter().all(|e| e["source"] == ip.as_str() && e["at"].is_string()), "{audit}");
+    let filtered: Value = with_cookie(b.get(api("/audit?action=sign_out")), &sid).send().await.unwrap().json().await.unwrap();
+    assert!(filtered["entries"].as_array().unwrap().iter().all(|e| e["action"] == "sign_out") && !filtered["entries"].as_array().unwrap().is_empty(), "{filtered}");
+    let csv = with_cookie(b.get(api("/audit.csv")), &sid).send().await.unwrap().text().await.unwrap();
+    assert!(csv.starts_with("seq,at,admin,name,action,target,source,before,after") && csv.contains("\"sign_in_refused\""), "{csv}");
 }
 
 /// A sign-in that comes back to another browser than the one that started

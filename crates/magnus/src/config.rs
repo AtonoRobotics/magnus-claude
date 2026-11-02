@@ -131,6 +131,11 @@ pub struct Admin {
     /// still turned on, at least this often.
     #[serde(default = "admin_refresh_seconds")]
     pub refresh_seconds: u32,
+    /// The console's own database role (`postgres://magnus_root:…@…`):
+    /// past the walls between people, and only adding to the log, never
+    /// changing it. `magnus migrate` creates it.
+    #[serde(default)]
+    pub database_url: Option<String>,
 }
 
 fn admin_step_up_seconds() -> u32 {

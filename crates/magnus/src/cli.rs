@@ -69,7 +69,7 @@ async fn check(args: &[String]) -> Result<()> {
 async fn migrate(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let admin = arg(args, "--admin-url").context("--admin-url is required")?;
-    crate::log::migrate(&admin, &cfg.database.url).await
+    crate::log::migrate(&admin, &cfg.database.url, cfg.admin.as_ref().and_then(|a| a.database_url.as_deref())).await
 }
 
 async fn serve(args: &[String]) -> Result<()> {
@@ -117,6 +117,15 @@ async fn run(cfg: Config) -> Result<()> {
     k.watch_sessions();
     crate::update::schedule(k.clone());
     tokio::spawn(k.clone().sweep());
+    // The admin console's way to the kernel: a local socket, never the network.
+    {
+        let (k, dir) = (k.clone(), k.cfg.appliance.state_dir.clone());
+        tokio::spawn(async move {
+            if let Err(e) = crate::control::serve(k, &dir).await {
+                tracing::error!("control socket: {e:#}");
+            }
+        });
+    }
     tracing::info!("magnus {} listening on http://{bound}", crate::update::version());
     let plain = axum::serve(plain, router(k.clone(), Transport::Plain).into_make_service_with_connect_info::<SocketAddr>());
     match tls {

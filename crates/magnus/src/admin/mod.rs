@@ -11,6 +11,7 @@
 //! their own pull requests.
 
 pub mod auth;
+pub mod kernel;
 pub mod net;
 pub mod session;
 
@@ -40,6 +41,19 @@ pub struct Console {
     pub session_hours: i64,
     pub step_up_seconds: i64,
     pub refresh_seconds: i64,
+    pub kernel: kernel::Kernel,
+}
+
+impl Console {
+    /// Write one console action to the log (admin console spec: every
+    /// action, with who, what, when, the source address, and for a change
+    /// its before and after), before the action answers.
+    pub async fn audit(&self, who: (&str, &str), action: &str, target: Option<&str>, source: std::net::SocketAddr, before: Option<serde_json::Value>, after: Option<serde_json::Value>) -> Result<i64> {
+        self.kernel
+            .audit(&json!({ "admin": who.0, "name": who.1, "action": action, "target": target, "source": source.ip().to_string(), "before": before, "after": after }))
+            .await
+            .context("record it in the audit log")
+    }
 }
 
 /// `magnus-admin --config <file>`, or `magnus-admin jwk --config <file>`
@@ -91,9 +105,14 @@ pub async fn serve(cfg: Config) -> Result<()> {
         session_hours: a.session_hours.into(),
         step_up_seconds: a.step_up_seconds.into(),
         refresh_seconds: a.refresh_seconds.into(),
+        kernel: kernel::Kernel { path: crate::control::socket_path(&cfg.appliance.state_dir) },
     });
     let l = net::Listener::bind(&addrs, allow, tls).await?;
-    axum::serve(l, router(console)).await?;
+    // tap_io gives the listener axum's connect-info: each request's source,
+    // for the audit log.
+    use axum::serve::ListenerExt;
+    let l = l.tap_io(|_| {});
+    axum::serve(l, router(console).into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }
 
@@ -112,6 +131,8 @@ pub fn router(console: Arc<Console>) -> Router {
     let api = Router::new()
         .route("/api/v1/session", get(session::me).delete(session::logout))
         .route("/api/v1/session/step-up", axum::routing::post(session::confirm))
+        .route("/api/v1/audit", get(audit_list))
+        .route("/api/v1/audit.csv", get(audit_csv))
         .route("/api/v1/{*rest}", axum::routing::any(api_not_found))
         .layer(axum::middleware::from_fn_with_state(console.clone(), session::guard));
     Router::new()
@@ -161,6 +182,45 @@ async fn harden(req: Request, next: Next) -> Response {
 
 async fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+/// The audit log, filtered by actor, action, target and time (`since`,
+/// `until`), newest first.
+async fn audit_list(State(c): State<Arc<Console>>, axum::extract::RawQuery(q): axum::extract::RawQuery) -> Response {
+    match audit_rows(&c, q).await {
+        Ok(v) => Json(json!({ "entries": v })).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": "kernel", "message": format!("{e:#}") }))).into_response(),
+    }
+}
+
+async fn audit_rows(c: &Console, q: Option<String>) -> Result<Vec<serde_json::Value>> {
+    let path = format!("/v1/audit{}", q.map(|q| format!("?{q}")).unwrap_or_default());
+    Ok(c.kernel.call(axum::http::Method::GET, &path, None).await?["entries"].as_array().cloned().unwrap_or_default())
+}
+
+/// The same, as CSV.
+async fn audit_csv(State(c): State<Arc<Console>>, axum::extract::RawQuery(q): axum::extract::RawQuery) -> Response {
+    let rows = match audit_rows(&c, q).await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    };
+    let cell = |v: &serde_json::Value| {
+        let s = match v {
+            serde_json::Value::Null => String::new(),
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        // A cell a spreadsheet would run as a formula is kept as text.
+        let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s };
+        format!("\"{}\"", s.replace('"', "\"\""))
+    };
+    let mut out = String::from("seq,at,admin,name,action,target,source,before,after\r\n");
+    for r in &rows {
+        let cols = ["seq", "at", "admin", "name", "action", "target", "source", "before", "after"].map(|f| cell(&r[f]));
+        out.push_str(&cols.join(","));
+        out.push_str("\r\n");
+    }
+    ([(header::CONTENT_TYPE, "text/csv; charset=utf-8"), (header::CONTENT_DISPOSITION, "attachment; filename=\"magnus-audit.csv\"")], out).into_response()
 }
 
 async fn api_not_found() -> Response {

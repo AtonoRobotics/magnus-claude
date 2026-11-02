@@ -46,6 +46,45 @@ function signedOut() {
   $("#sign-in").hidden = false;
 }
 
+// Security › Audit (admin console spec): the full log as a table, filtered
+// by actor, action, target and time, with CSV export.
+async function auditView(view) {
+  view.innerHTML = `<h1>Security</h1><h2>Audit</h2>
+    <form class="row" id="audit-filter" role="search">
+      <label>Who <input name="actor" autocomplete="off"></label>
+      <label>Action <input name="action" autocomplete="off"></label>
+      <label>On <input name="target" autocomplete="off"></label>
+      <label>From <input name="since" type="datetime-local"></label>
+      <label>To <input name="until" type="datetime-local"></label>
+      <button class="primary">Filter</button>
+      <a class="button" id="audit-csv" href="/api/v1/audit.csv" download>Export CSV</a>
+    </form>
+    <div id="audit-rows"><p class="muted">Loading the audit log…</p></div>`;
+  const form = $("#audit-filter", view);
+  const query = () => {
+    const q = new URLSearchParams();
+    for (const [k, v] of new FormData(form)) if (v) q.set(k, k === "since" || k === "until" ? new Date(v).toISOString() : v);
+    return q.toString();
+  };
+  const draw = async () => {
+    const q = query();
+    $("#audit-csv", view).href = `/api/v1/audit.csv${q ? `?${q}` : ""}`;
+    try {
+      const v = await api("GET", `/audit${q ? `?${q}` : ""}`);
+      if (!v) return;
+      $("#audit-rows", view).innerHTML = v.entries.length
+        ? `<table class="t small"><thead><tr><th>When</th><th>Who</th><th>What</th><th>On</th><th>From</th><th>Change</th></tr></thead><tbody>${v.entries.map(e => `<tr>
+            <td>${esc(new Date(e.at).toLocaleString())}</td><td>${esc(e.name || e.admin)}</td><td>${esc(e.action)}</td><td>${esc(e.target || "")}</td>
+            <td class="mono">${esc(e.source || "")}</td><td class="mono">${e.before || e.after ? `${esc(JSON.stringify(e.before ?? null))} → ${esc(JSON.stringify(e.after ?? null))}` : ""}</td></tr>`).join("")}</tbody></table>`
+        : `<p class="empty">Nothing in the audit log matches.</p>`;
+    } catch (err) {
+      $("#audit-rows", view).innerHTML = `<p class="error">The audit log could not be read: ${esc(err.message)}</p>`;
+    }
+  };
+  form.onsubmit = e => { e.preventDefault(); draw(); };
+  draw();
+}
+
 function section() {
   const name = (location.hash.match(/^#\/(\w+)/) || [, "overview"])[1];
   for (const a of document.querySelectorAll("#nav a")) {
@@ -54,6 +93,7 @@ function section() {
   const title = $(`#nav a[data-section="${name}"]`)?.textContent || "Overview";
   let view = $("#view");
   if (!view) { view = document.createElement("section"); view.id = "view"; $("#main").append(view); }
+  if (name === "security") return auditView(view);
   view.innerHTML = `<h1>${esc(title)}</h1><p class="muted">This section arrives with its part of the console.</p>`;
 }
 

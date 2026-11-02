@@ -110,6 +110,24 @@ pub enum Ev {
     KillSwitch {
         engaged: bool,
     },
+    /// Something done in the admin console (admin console spec, Authority
+    /// and audit): who (the admin's `sub` and name), what, to what, from
+    /// where, and for a change, what it was before and after. Written by the
+    /// kernel at the console's request, before the console answers.
+    AdminAction {
+        admin: String,
+        #[serde(default)]
+        name: String,
+        action: String,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        before: Option<Value>,
+        #[serde(default)]
+        after: Option<Value>,
+    },
     /// The lost-reset module found a no-progress signal and sent the run back
     /// to the reply where the loop began, with a note; the replies from
     /// `from` to `to` leave the model's context (they stay in the log).
