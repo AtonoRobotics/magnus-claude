@@ -252,6 +252,40 @@ impl Keycloak {
         self.admin(reqwest::Method::POST, "/clients", Some(body)).await;
     }
 
+    /// The admin console's service account (`magnus-admin-svc`): proving
+    /// itself with the console's key, holding user management in this
+    /// realm and no more, as `config/keycloak-client.py --admin-console`
+    /// registers it.
+    pub async fn add_admin_service(&self, client_id: &str, jwks: &Value) {
+        let body = json!({
+            "clientId": client_id, "publicClient": false, "clientAuthenticatorType": "client-jwt",
+            "standardFlowEnabled": false, "directAccessGrantsEnabled": false, "serviceAccountsEnabled": true,
+            "attributes": { "use.jwks.string": "true", "jwks.string": jwks.to_string(), "token.endpoint.auth.signing.alg": "ES256" },
+        });
+        self.admin(reqwest::Method::POST, "/clients", Some(body)).await;
+        let client = self.admin(reqwest::Method::GET, &format!("/clients?clientId={client_id}"), None).await[0]["id"].as_str().unwrap().to_string();
+        let account = self.admin(reqwest::Method::GET, &format!("/clients/{client}/service-account-user"), None).await["id"].as_str().unwrap().to_string();
+        let rm = self.admin(reqwest::Method::GET, "/clients?clientId=realm-management", None).await[0]["id"].as_str().unwrap().to_string();
+        let mut roles = vec![];
+        for r in ["manage-users", "view-users", "query-users", "view-realm"] {
+            roles.push(self.admin(reqwest::Method::GET, &format!("/clients/{rm}/roles/{r}"), None).await);
+        }
+        self.admin(reqwest::Method::POST, &format!("/users/{account}/role-mappings/clients/{rm}"), Some(Value::Array(roles))).await;
+    }
+
+    /// The realm sends its email through this SMTP server.
+    pub async fn set_smtp(&self, at: std::net::SocketAddr) {
+        let smtp = json!({ "host": at.ip().to_string(), "port": at.port().to_string(), "from": "id@acme.test", "fromDisplayName": "Acme sign-in", "auth": "false", "ssl": "false", "starttls": "false" });
+        self.admin(reqwest::Method::PUT, "", Some(json!({ "smtpServer": smtp }))).await;
+    }
+
+    /// Whether the realm takes this password for this person now (Direct
+    /// access grants on the appliance's client).
+    pub async fn password_works(&self, username: &str, password: &str) -> bool {
+        let r = self.http.post(format!("{}/protocol/openid-connect/token", self.issuer)).form(&[("grant_type", "password"), ("client_id", IDP_CLIENT), ("username", username), ("password", password), ("scope", "openid")]).send().await.unwrap();
+        r.status().is_success()
+    }
+
     /// Turn the person's account back on.
     pub async fn enable(&self, username: &str) {
         let id = self.user_id(username).await;

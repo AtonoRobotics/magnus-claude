@@ -126,3 +126,37 @@ pub fn browser(c: &Console, max_tls12: bool) -> reqwest::Client {
     }
     b.build().unwrap()
 }
+
+/// The browser signs in as `who` (and steps up after, if asked): the
+/// console's session cookie, or the script's log when it fails.
+pub async fn sign_in(p_url: &str, at: std::net::SocketAddr, who: &str, expect: &str, step_up: bool) -> Result<String, String> {
+    sign_in_and_visit(p_url, at, who, expect, step_up, None).await
+}
+
+/// The same, then the screen `visit` (e.g. `#/users`) checked in every look
+/// and at phone width.
+pub async fn sign_in_and_visit(p_url: &str, at: std::net::SocketAddr, who: &str, expect: &str, step_up: bool, visit: Option<&str>) -> Result<String, String> {
+    let out = tokio::process::Command::new("node")
+        .arg(magnus_invariants::appliance::workspace_root().join("desktop/tests/admin-sign-in.mjs"))
+        .env("MAGNUS_ADMIN_URL", p_url)
+        .env("MAGNUS_ADMIN_AT", at.to_string())
+        .env("MAGNUS_PERSON", who.to_lowercase())
+        .env("MAGNUS_PASSWORD", crate::keycloak::password_of(who))
+        .env("MAGNUS_EXPECT", expect)
+        .env("MAGNUS_STEP_UP", if step_up { "1" } else { "0" })
+        .envs(visit.map(|v| ("MAGNUS_VISIT", v)))
+        .env("MAGNUS_CHROMIUM", crate::chromium())
+        .envs(crate::shots())
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(150), out).await.map_err(|_| "the browser did not finish in 150 seconds".to_string())?.unwrap();
+    let log = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    if !out.status.success() {
+        return Err(log);
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).lines().last().unwrap_or_default().trim().to_string())
+}
+
+pub fn with_cookie(b: reqwest::RequestBuilder, sid: &str) -> reqwest::RequestBuilder {
+    b.header("cookie", format!("__Host-magnus_admin={sid}"))
+}

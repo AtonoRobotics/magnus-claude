@@ -43,6 +43,10 @@ async fn the_console_answers_only_its_own_network_by_its_own_name_over_tls_1_3()
     for p in ["/api/v1/users", "/api/v1/health", "/api/v1/overview", "/api/v1/kill-switch"] {
         assert_eq!(browser(&c, false).get(url(p)).send().await.unwrap().status(), 401, "{p} answered without a sign-in");
     }
+    for (m, p) in [("POST", "/api/v1/users"), ("GET", "/api/v1/users/x"), ("PATCH", "/api/v1/users/x"), ("POST", "/api/v1/users/x/disable"), ("POST", "/api/v1/users/x/enable"), ("DELETE", "/api/v1/users/x/sessions"), ("DELETE", "/api/v1/users/x/sessions/y"), ("POST", "/api/v1/users/x/invite"), ("DELETE", "/api/v1/users/x/invite")] {
+        let r = browser(&c, false).request(m.parse().unwrap(), url(p)).json(&serde_json::json!({ "role": "admin" })).send().await.unwrap();
+        assert_eq!(r.status(), 401, "{m} {p} answered without a sign-in");
+    }
 
     // Any other name is not found, the console not even confirmed.
     let r = browser(&c, false).get(url("/")).header("host", "magnus.pyrallon.ai").send().await.unwrap();

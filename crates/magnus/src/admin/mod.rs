@@ -11,10 +11,12 @@
 //! their own pull requests.
 
 pub mod auth;
+pub mod directory;
 pub mod kernel;
 pub mod net;
 pub mod ops;
 pub mod session;
+pub mod users;
 
 use crate::config::Config;
 use anyhow::{Context, Result};
@@ -45,6 +47,8 @@ pub struct Console {
     pub kernel: kernel::Kernel,
     /// The appliance's state, whose disk Health watches.
     pub state_dir: std::path::PathBuf,
+    /// The organisation's people at the provider, as the console's service account reaches them.
+    pub directory: directory::Directory,
 }
 
 impl Console {
@@ -98,6 +102,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
     let oidc = cfg.sign_in.oidc.as_ref();
     let issuer = a.issuer.clone().or_else(|| oidc.map(|o| o.issuer.clone())).context("the admin console signs in through the organisation's identity provider: set sign_in.oidc or admin.issuer")?;
     let roles_claim = oidc.and_then(|o| o.roles_claim.clone()).unwrap_or_else(|| "/realm_access/roles".into());
+    let directory = directory::Directory::new(&issuer, a.service_client_id.clone());
     let console = Arc::new(Console {
         hostname: a.hostname.to_ascii_lowercase(),
         org: a.org.clone().unwrap_or_else(|| "Magnus".into()),
@@ -110,6 +115,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
         refresh_seconds: a.refresh_seconds.into(),
         kernel: kernel::Kernel { path: crate::control::socket_path(&cfg.appliance.state_dir) },
         state_dir: cfg.appliance.state_dir.clone(),
+        directory,
     });
     let l = net::Listener::bind(&addrs, allow, tls).await?;
     // tap_io gives the listener axum's connect-info: each request's source,
@@ -140,6 +146,13 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/api/v1/kill-switch", get(ops::switch_state))
         .route("/api/v1/kill-switch/engage", axum::routing::post(ops::engage))
         .route("/api/v1/kill-switch/release", axum::routing::post(ops::release))
+        .route("/api/v1/users", get(users::list).post(users::invite))
+        .route("/api/v1/users/{id}", get(users::detail).patch(users::update))
+        .route("/api/v1/users/{id}/disable", axum::routing::post(users::disable))
+        .route("/api/v1/users/{id}/enable", axum::routing::post(users::enable))
+        .route("/api/v1/users/{id}/sessions", axum::routing::delete(users::end_sessions))
+        .route("/api/v1/users/{id}/sessions/{sid}", axum::routing::delete(users::end_session))
+        .route("/api/v1/users/{id}/invite", axum::routing::post(users::resend).delete(users::cancel))
         .route("/api/v1/audit", get(audit_list))
         .route("/api/v1/audit.csv", get(audit_csv))
         .route("/api/v1/{*rest}", axum::routing::any(api_not_found))

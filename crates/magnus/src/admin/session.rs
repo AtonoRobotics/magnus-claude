@@ -104,11 +104,17 @@ impl Idp {
 
     /// A call to the token endpoint, the console proving itself with its key.
     async fn token(&self, key: &auth::Key, form: &[(&str, &str)]) -> Result<Value> {
+        self.token_as(key, &self.client_id, form).await
+    }
+
+    /// A call to the token endpoint as `client_id`, proven with the
+    /// console's key (`private_key_jwt`).
+    pub async fn token_as(&self, key: &auth::Key, client_id: &str, form: &[(&str, &str)]) -> Result<Value> {
         let d = self.discovery().await?;
         let endpoint = Self::endpoint(d, "token_endpoint")?;
-        let assertion = key.assertion(&self.client_id, endpoint)?;
+        let assertion = key.assertion(client_id, endpoint)?;
         let mut f: Vec<(&str, &str)> = form.to_vec();
-        f.extend([("client_id", self.client_id.as_str()), ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"), ("client_assertion", assertion.as_str())]);
+        f.extend([("client_id", client_id), ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"), ("client_assertion", assertion.as_str())]);
         let r = self.http.post(self.inside(endpoint)).form(&f).send().await?;
         let status = r.status();
         let b: Value = r.json().await.unwrap_or_default();
