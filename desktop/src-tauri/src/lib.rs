@@ -352,12 +352,14 @@ async fn loopback_open(app: State<'_, App>) -> Res<String> {
 /// How long a sign-in page may take before the app stops waiting.
 const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
-/// Wait for the sign-in page's redirect: its code and state, or its error.
+/// Wait for the sign-in page's redirect: its code, its state and the
+/// server's name when it gives one (RFC 9207, as Google does: without it the
+/// appliance refuses the answer as a possible mix-up), or its error.
 #[tauri::command]
 async fn loopback_wait(app: State<'_, App>) -> Res<Value> {
     let l = app.loopback.lock().unwrap().take().ok_or("no sign-in is waiting")?;
     let q = redirected(l, SIGN_IN_WAIT).await?;
-    Ok(json!({ "code": q["code"], "state": q["state"] }))
+    Ok(json!({ "code": q["code"], "state": q["state"], "iss": q.get("iss") }))
 }
 
 /// The query of the first redirect to `/callback` on this listener: it has
