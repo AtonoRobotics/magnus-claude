@@ -23,6 +23,13 @@ fn derived(prefix: &str, key: &str) -> String {
     format!("{prefix}_{}", &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..32])
 }
 
+/// The thread a schedule's runs post to: one of its own, so recurring output
+/// never buries the conversation it was set up in (behavior spec, Tasks and
+/// schedules in conversation). The person can reply in it like any other.
+pub fn schedule_thread(schedule: &str) -> String {
+    format!("schedule-{schedule}")
+}
+
 /// Why a card decision was not taken.
 pub enum CardRefusal {
     NotFound,

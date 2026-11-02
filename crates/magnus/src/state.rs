@@ -1241,6 +1241,14 @@ impl State {
                     s.paused_on = task.clone();
                 }
             }
+            Ev::ScheduleChanged { id, every_minutes, daily_at, until, max_runs } => {
+                if let Some(s) = self.schedules.get_mut(id) {
+                    s.every_minutes = *every_minutes;
+                    s.daily_at = daily_at.clone();
+                    s.until = *until;
+                    s.max_runs = *max_runs;
+                }
+            }
             Ev::ScheduleResumed { id } => {
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.paused = None;

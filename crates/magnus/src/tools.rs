@@ -155,6 +155,15 @@ pub const BUILTINS: &[Builtin] = &[
     // confirm. Neither leaves the appliance; the task carries the turn's taint.
     Builtin { name: "create_task", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "create_schedule", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // Control of the person's own tasks and schedules, as the app's buttons
+    // (behavior spec, Tasks and schedules in conversation).
+    Builtin { name: "list_tasks", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "list_schedules", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "cancel_task", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "pause_schedule", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "resume_schedule", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "edit_schedule", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "cancel_schedule", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
 ];
 
 pub fn builtin(name: &str) -> Option<&'static Builtin> {
@@ -221,8 +230,9 @@ fn component(kinds: &[&str]) -> Value {
     }, "required": ["type"] })
 }
 
-/// The tools a chat turn may call besides reads: start a task, or propose a
-/// schedule the person confirms in the thread.
+/// The tools a chat turn may call besides reads: start a task, propose a
+/// schedule the person confirms in the thread, and control their tasks and
+/// schedules.
 pub fn chat_specs() -> Vec<ToolSpec> {
     let desc: Value = serde_json::from_str(include_str!("../instructions/tools.json")).expect("tools.json");
     let d = |n: &str| desc[n].as_str().unwrap_or_default().to_string();
@@ -244,6 +254,17 @@ pub fn chat_specs() -> Vec<ToolSpec> {
                 &["title", "text", "scope"],
             ),
         },
+        ToolSpec { name: "list_tasks".into(), description: d("list_tasks"), input_schema: obj(json!({}), &[]) },
+        ToolSpec { name: "list_schedules".into(), description: d("list_schedules"), input_schema: obj(json!({}), &[]) },
+        ToolSpec { name: "cancel_task".into(), description: d("cancel_task"), input_schema: obj(json!({ "id": { "type": "string" } }), &["id"]) },
+        ToolSpec { name: "pause_schedule".into(), description: d("pause_schedule"), input_schema: obj(json!({ "id": { "type": "string" } }), &["id"]) },
+        ToolSpec { name: "resume_schedule".into(), description: d("resume_schedule"), input_schema: obj(json!({ "id": { "type": "string" } }), &["id"]) },
+        ToolSpec {
+            name: "edit_schedule".into(),
+            description: d("edit_schedule"),
+            input_schema: obj(json!({ "id": { "type": "string" }, "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" }, "until": { "type": "string" }, "max_runs": { "type": "integer" } }), &["id"]),
+        },
+        ToolSpec { name: "cancel_schedule".into(), description: d("cancel_schedule"), input_schema: obj(json!({ "id": { "type": "string" } }), &["id"]) },
     ]
 }
 

@@ -570,3 +570,9 @@ ul.allows { margin: 4px 0 8px; padding-left: 18px; }
   .ctile { width: 44px; height: 44px; font-size: 15px; }
   .lseg button { padding: 0 14px; }
 }
+
+/* The live task and schedule cards' own buttons (behavior spec, Tasks and
+   schedules in conversation), and a result quoting what was asked. */
+.card-acts { display: flex; gap: 12px; align-items: center; padding: 4px 12px 8px 44px; }
+.tcard .card-acts { padding-top: 0; }
+blockquote.asked { margin: 0 0 6px; padding: 4px 10px; border-left: 3px solid var(--line-strong); color: var(--fg2); }

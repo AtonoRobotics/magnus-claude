@@ -865,6 +865,16 @@ async function showThread(main, thread) {
     if (waits.some(id => !App.inbox.some(i => i.id === id))) await pollInbox();
     convHead(thread);
     ui.composed = [];
+    // A result that comes after the person has moved on (a message of theirs
+    // since the task started) quotes what they asked.
+    ui.movedOn = new Set();
+    const startedAt = {};
+    let lastMessage = -1;
+    entries.forEach((e, i) => {
+      if (e.kind === "message") lastMessage = i;
+      if (e.kind === "tasks") for (const t of e.tasks) startedAt[t.task_id] = i;
+      if (e.kind === "result" && startedAt[e.task_id] !== undefined && lastMessage > startedAt[e.task_id]) ui.movedOn.add(e.task_id);
+    });
     const body = entries.map(e => `<div class="entry ${e.kind === "message" ? "me" : "them"}" data-entry="${esc(e.id || "")}" data-kind="${esc(e.kind)}">${entry(e, ui)}${msgActions(e, ui)}</div>`).join("");
     const el = $("#thread", main);
     if (!el) return;
@@ -919,6 +929,27 @@ async function showThread(main, thread) {
       box.value = "Change the schedule: ";
       box.focus();
       box.setSelectionRange(box.value.length, box.value.length);
+      return;
+    }
+    // The live cards' buttons act directly, not through Magnus.
+    const ta = e.target.closest("[data-task-act]"), sa = e.target.closest("[data-sched-act]");
+    if (ta || sa) {
+      e.preventDefault();
+      const el = ta || sa;
+      el.disabled = true;
+      try {
+        if (ta) {
+          if (!confirm("Cancel this task? What it already did stays done.")) { el.disabled = false; return; }
+          await api("POST", `/v1/tasks/${enc(ta.dataset.task)}/cancel`, {}); toast("Cancelled.");
+        } else {
+          const id = enc(sa.dataset.scheduleId), k = sa.dataset.schedAct;
+          if (k === "cancel") {
+            if (!confirm("Cancel this schedule? No more of its runs start, and a run still going stops.")) { el.disabled = false; return; }
+            await api("DELETE", `/v1/schedules/${id}`); toast("The schedule is cancelled.");
+          } else { await api("POST", `/v1/schedules/${id}/${k}`, {}); toast(k === "pause" ? "Paused." : "Resumed."); }
+        }
+        await refresh();
+      } catch (err) { toast(err.message); el.disabled = false; }
       return;
     }
     const b = e.target.closest("[data-decide]");
@@ -1016,7 +1047,8 @@ function taskCard(t) {
   const why = t.status === "suspended" ? WAITING[t.waiting_on] || "" : t.status === "running" ? "working on it" : "";
   const [ic, pill] = standing(t);
   return `<li class="tcard" data-chat-task="${esc(t.task_id)}" data-status="${esc(t.status)}"><a class="rg-row${Panel.what === `task:${t.task_id}` ? " open" : ""}" href="#/task/${enc(t.task_id)}" data-open="task:${esc(t.task_id)}" title="${esc(t.text)}">
-    <span class="st ${ic}">${icon(ic)}</span><span class="rg-main"><span class="ttl">${esc(t.title)}</span>${why ? `<span class="sub why">${esc(why)}</span>` : `<span class="sub">${esc(firstLine(t.text))}</span>`}</span>${pill}${icon("chev", "chev")}</a></li>`;
+    <span class="st ${ic}">${icon(ic)}</span><span class="rg-main"><span class="ttl">${esc(t.title)}</span>${why ? `<span class="sub why">${esc(why)}</span>` : `<span class="sub">${esc(firstLine(t.text))}</span>`}</span>${pill}${icon("chev", "chev")}</a>
+    ${ENDED.includes(t.status) ? "" : `<div class="card-acts"><button class="link small" data-task-act="cancel" data-task="${esc(t.task_id)}">Cancel</button></div>`}</li>`;
 }
 // A schedule where it was confirmed: a row that opens it, with when it runs
 // next and how its last run went.
@@ -1028,9 +1060,11 @@ function scheduleLine(e) {
   if (e.state === "declined") return `<p class="small"><span class="chip">Declined</span></p>`;
   if (e.state !== "confirmed") return "";
   const sc = App.schedules.find(x => x.id === e.schedule);
-  if (!sc) return "";
+  if (!sc) return `<p class="small" data-schedule-gone="${esc(e.schedule || "")}"><span class="chip">Cancelled</span> ${esc(e.title || "This schedule")} no longer runs.</p>`;
+  const act = (k, label) => `<button class="link small" data-sched-act="${k}" data-schedule-id="${esc(sc.id)}">${label}</button>`;
   return `<div class="reqgroup sched-state" data-schedule="${esc(sc.id)}"><a class="rg-row" href="#/schedules" data-open="schedule:${esc(sc.id)}" title="Open the schedule">
-    <span class="st sch">${icon("calendar")}</span><span class="rg-main"><span class="ttl">${esc(sc.title)}</span><span class="sub" data-last>${esc(scheduleText(sc))}</span></span><span class="chip sch">Scheduled</span>${icon("chev", "chev")}</a></div>`;
+    <span class="st sch">${icon("calendar")}</span><span class="rg-main"><span class="ttl">${esc(sc.title)}</span><span class="sub" data-last>${esc(scheduleText(sc))}</span></span><span class="chip sch">${sc.paused ? "Paused" : "Scheduled"}</span>${icon("chev", "chev")}</a>
+    <div class="card-acts">${sc.paused ? act("resume", "Resume") : act("pause", "Pause")}${act("cancel", "Cancel")}<a class="small" href="#/schedules" data-open="schedule:${esc(sc.id)}">Open</a>${sc.started ? `<a class="small" href="#/chat/${enc(`schedule-${sc.id}`)}" data-schedule-runs>Its runs</a>` : ""}</div></div>`;
 }
 
 // Motion (U7): what is new in the thread rises into place, a task whose
@@ -1154,7 +1188,7 @@ function entry(e, ui = {}) {
         <ul class="rg-rows">${e.tasks.map(taskCard).join("")}</ul></div>
         ${e.tasks.map(t => t.waiting_item && waitingCard(t.waiting_item, ui) ? `<div class="decide" data-for-task="${esc(t.task_id)}">${waitingCard(t.waiting_item, ui)}</div>` : "").join("")}`;
     }
-    case "result": return `<div class="result" data-result="${esc(e.task_id)}"><details data-key="result:${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
+    case "result": return `<div class="result" data-result="${esc(e.task_id)}">${ui.movedOn?.has(e.task_id) ? `<blockquote class="asked small"><span class="faint">You asked:</span> ${esc(firstLine(e.text))}</blockquote>` : ""}<details data-key="result:${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
       <div class="pre">${esc(e.summary || "")}</div>${ENDED.includes(e.status) ? verdictBar(e.task_id, e.verdict) : ""}</details>
       ${e.view ? shownFrame(e.id, "The deliverable") : ""}
       ${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}<a class="small see" href="#/task/${enc(e.task_id)}" data-open="task:${esc(e.task_id)}">See the outcome</a></div>`;
