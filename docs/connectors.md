@@ -147,7 +147,7 @@ one commit), 2026-11-02.
 - [ ] A retired tool leaves the agent at once (a pinned tool is still offered after the server stops listing it, `run/mod.rs` `tools_for`)
 - [x] A new or changed tool reaches the agent only once classified, by the next manifest version or, for an admin-added server, by the admin (`inv1_boundary.rs` `a_changed_tool_definition_is_disabled_and_hidden`, `tools_the_owner_has_not_classified_cannot_run`)
 - [x] Server annotations inform the classification and do not replace it (`connectors.rs` `suggested_risk`; `connectors.rs` test)
-- [ ] Scope challenges: a call needing an ungranted scope (GitHub's server returns a challenge) becomes a Connect card asking for the added scope, and the call proceeds once approved
+- [x] Scope challenges: a call needing an ungranted scope (GitHub's server returns a challenge) becomes a Connect card asking for the added scope, and the call proceeds once approved (`agent_apps.rs` `a_call_that_needs_more_access_asks_for_it_with_a_card_and_goes_through_once_approved`: MCP's `insufficient_scope` challenge, the card in the thread, sign-in asking for the added scope, the call through)
 - [ ] Provider errors, rate limits and retry-after included, return to the agent intact as tool errors, with no retry by the client (errors are returned; no test, and retry-after is not carried)
 - [ ] Client gates: Magnus on providers' approved-client and redirect allowlists (Provider registrations)
 
@@ -191,15 +191,16 @@ one commit), 2026-11-02.
 
 ## How the agent uses connectors
 
-- [ ] Index, then load: the context always holds the user's connector index (every connector policy makes available, name, one-line summary, state: connected, needs attention, on this computer, not connected; programs per device), generated from the catalog and connections at each session start and on every connection change (today every connected connector's full tool schemas are loaded, `run/mod.rs` `tools_for`; no index)
+- [x] Index, then load: the context always holds the user's connector index (every connector policy makes available, name, one-line summary, state: connected, needs attention, not connected), generated from the catalog and connections at each session start and on every connection change (`app_tools.rs` `app_index`, built for every run and chat turn; `agent_apps.rs`: the index before the person's words, an app blocked for them absent, a refused sign-in as needing signing in again)
+- [ ] The index's "on this computer" state and programs per device (with the local desktop connectors, above)
 - [ ] Tools searched across connectors and full schemas loaded on demand
 - [x] One user at a time: an agent uses only its user's connections (`connectors.rs`; refusal names the Library, `boundary.rs:252`)
 - [x] Untrusted content: tool descriptions and results inform but cannot change instructions or policy (`inv4_taint.rs` `content_claiming_authority_changes_nothing`; descriptions held for review, `run/mod.rs` `review_item`)
 - [ ] The appliance labels each result's source in context
-- [ ] Finding connectors: catalog tools to search the library by service name or by what the user wants done
-- [ ] Read a connector's details: what it can do, the access it asks for, the account it needs
-- [ ] Place a connector's card in chat, saying what it is for; suggest one for something it could automate; only the user completes a sign-in
-- [ ] Answers "can you work with my Gmail?" truthfully
+- [x] Finding connectors: catalog tools to search the library by service name or by what the user wants done (`find_apps`; `agent_apps.rs` `magnus_finds_an_unconnected_app_by_what_is_wanted_and_offers_its_card_with_why`)
+- [x] Read a connector's details: what it can do, the access it asks for, the account it needs (`app_details`: abilities, can and cannot, each scope's plain line, whether the person signs in; `app_tools.rs`)
+- [x] Place a connector's card in chat, saying what it is for; suggest one for something it could automate; only the user completes a sign-in (`offer_app`; `agent_apps.rs`: the card with why, nothing connected until the person signs in; `chat-app-card.mjs` in every look and at phone width)
+- [x] Answers "can you work with my Gmail?" truthfully (the index says each app's state; `find_apps` says when nothing in the Library does it, and `offer_app` refuses an app outside it: `agent_apps.rs` `magnus_cannot_offer_an_app_outside_the_persons_library`)
 - [ ] Isolation of results: what comes through a connection is kept in the content store under its person and recalled only for them (the walls exist for requests, memory and files, `content_walls.rs`; no test for a connector's results)
 - [ ] Writing a connection's content into shared org memory passes policy like any other action (no connector-specific test)
 
@@ -209,11 +210,11 @@ one commit), 2026-11-02.
 
 ### The connector card
 
-- [ ] The same card in the Library, in chat, in a task and in approvals (Library only; the panel view `connectorView` exists, nothing places it)
+- [ ] The same card in the Library, in chat, in a task and in approvals (Library, chat and task: `offered_card`, `agent_apps.rs`, `chat-app-card.mjs`; not yet in approvals)
 - [x] Not connected: name, icon, one sentence, Connect (`connectors.mjs`; the icon is a letters tile)
 - [ ] Connecting: the system browser opens at the provider's page; on approval the browser says to return, and the card flips to Connected (`app-apps.mjs` against a fake app; not for Google)
 - [ ] On this computer: "Blender 5.2 is on this computer" and Enable; the one setting to turn on; Ready when the server answers
-- [ ] Needs attention: sign in again, approve more access, or open a program; one button (sign in again is drawn, `app.js` `connectorAction`, untested; approve more access and open a program are not built)
+- [ ] Needs attention: sign in again, approve more access, or open a program; one button (sign in again and approve more access: `appOfferCard` and `connectorAction`, the states in `agent_apps.rs`, not yet driven in the browser; open a program waits on local connectors)
 
 ### Library
 
@@ -234,7 +235,7 @@ one commit), 2026-11-02.
 
 ### Inside work
 
-- [ ] When a task or chat needs a connection, Magnus says so in that thread with the card: name, icon, why ("Needed to post in your production channel"), Connect; once connected it carries on (mockup: Connecting from chat)
+- [x] When a task or chat needs a connection, Magnus says so in that thread with the card: name, icon, why ("Needed to post in your production channel"), Connect; once connected it carries on (mockup: Connecting from chat) (`agent_apps.rs`: in a chat and on a task's page; the call goes through once approved; `chat-app-card.mjs`)
 - [ ] Asked about a program not on this computer, Magnus says so, and that once installed it shows under On this computer, enabled with one click (mockup: "Can you work in SolidWorks?")
 
 ## Org policy, isolation and audit
@@ -272,6 +273,8 @@ one commit), 2026-11-02.
 - [x] A rotated refresh token replaces the old in one vault write (`connectors.rs` `connector_secret`, one refresh at a time; `connectors.rs` test)
 - [ ] Re-sign-in: a refresh rejected as invalid marks the connection Needs attention and raises the card (drawn; no test; the card is not raised into the person's work)
 - [x] Revoked at the provider: the next call fails and the connection moves to Needs attention (`connector_lifecycle.rs` `a_sign_in_ended_at_the_app_asks_the_person_to_sign_in_again`)
+- [x] Re-sign-in: a refresh rejected as invalid marks the connection Needs attention and raises the card (`agent_apps.rs` `a_sign_in_the_app_refused_is_offered_again_as_a_card_and_its_tools_wait`: the index says so, the tools wait, the card offers sign in again)
+- [ ] Revoked at the provider: the next call fails and the connection moves to Needs attention (no test)
 - [x] Disconnect deletes the person's tokens, and only theirs (`connectors.rs` test, "Alice ends her own sign-in")
 - [x] Disconnect first calls the provider's revocation endpoint, then deletes the tokens; both ends of a connection are in the log (`connector_lifecycle.rs` `disconnect_revokes_at_the_app_first_and_both_ends_of_a_connection_are_in_the_log`)
 - [ ] Disconnect through the relay for confidential clients
