@@ -152,7 +152,12 @@ if (visit && expect === "admin") {
     await page.goto(`${base}/${visit}`);
     await page.locator("#view h1").waitFor({ timeout: T });
     // Drawn: nothing on the screen is still loading.
-    await page.waitForFunction(() => document.querySelector("#main") && !document.querySelector('#main [aria-busy="true"]') && document.querySelector("#view h1, #panel h2"), null, { timeout: T });
+    // (Polled with evaluate: waitForFunction compiles its predicate with
+    // eval, which the console's Content-Security-Policy rightly refuses.)
+    const drawn = () => page.evaluate(() => !!(document.querySelector("#main") && !document.querySelector('#main [aria-busy="true"]') && document.querySelector("#view h1, #panel h2")));
+    for (const end = Date.now() + T; !(await drawn()); await page.waitForTimeout(200)) {
+      if (Date.now() > end) throw new Error(`${visit} did not finish loading in ${T / 1000} seconds`);
+    }
     for (const [mode, material] of [["light", "solid"], ["dark", "solid"], ["light", "glass"], ["dark", "glass"]]) {
       for (const width of [1280, 390]) {
         await page.setViewportSize({ width, height: 800 });
