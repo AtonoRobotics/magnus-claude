@@ -196,7 +196,7 @@ one commit), 2026-11-02.
 - [x] Tools searched across connectors and full schemas loaded on demand (past `LOAD_ALL`, 40 tools across the person's connected apps, a run is offered `find_tools` and what it found; `tool_search.rs` both ways)
 - [x] One user at a time: an agent uses only its user's connections (`connectors.rs`; refusal names the Library, `boundary.rs:252`)
 - [x] Untrusted content: tool descriptions and results inform but cannot change instructions or policy (`inv4_taint.rs` `content_claiming_authority_changes_nothing`; descriptions held for review, `run/mod.rs` `review_item`)
-- [ ] The appliance labels each result's source in context
+- [x] The appliance labels each result's source in context (`run/mod.rs` `source_of`: beside each app's result, the appliance's own line naming the app and saying whether the content is private and written by others; `result_sources.rs`)
 - [x] Finding connectors: catalog tools to search the library by service name or by what the user wants done (`find_apps`; `agent_apps.rs` `magnus_finds_an_unconnected_app_by_what_is_wanted_and_offers_its_card_with_why`)
 - [x] Read a connector's details: what it can do, the access it asks for, the account it needs (`app_details`: abilities, can and cannot, each scope's plain line, whether the person signs in; `app_tools.rs`)
 - [x] Place a connector's card in chat, saying what it is for; suggest one for something it could automate; only the user completes a sign-in (`offer_app`; `agent_apps.rs`: the card with why, nothing connected until the person signs in; `chat-app-card.mjs` in every look and at phone width)
