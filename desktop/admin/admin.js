@@ -649,6 +649,7 @@ async function policyView(box, id) {
         <label>Action <select name="action"><option value="execute">execute (act without asking)</option><option value="request_approval">request_approval (ask first)</option></select></label>
         <label>Resource (tool) <input name="resource" list="pol-tools" required autocomplete="off" placeholder="app__tool"></label>
         <label>Its risk <select name="risk"><option value="">As the tool is classified</option>${["read", "sandbox", "reversible_write", "irreversible", "financial", "prohibited"].map(r => `<option>${r}</option>`).join("")}</select></label>
+        <label class="span2">What the call carries <textarea name="input" rows="2" spellcheck="false" autocapitalize="off" placeholder='{"amount": 750}'></textarea></label>
         <label class="row"><input type="checkbox" name="untrusted"> The run has read untrusted content</label>
         <label class="row"><input type="checkbox" name="private"> The run holds private data</label>
         <label>Against <select name="with"><option value="draft">This draft, with the rest live</option><option value="live">What is live</option></select></label>
@@ -701,6 +702,11 @@ async function policyView(box, id) {
     const body = { principal: f.get("principal"), resource: f.get("resource"), risk: f.get("risk") || undefined, untrusted: f.get("untrusted") === "on", private: f.get("private") === "on" };
     if (f.get("with") === "draft") body.cedar = { [cur.layer]: ta.value };
     const res = $("#pol-result", box);
+    const carries = String(f.get("input") || "").trim();
+    if (carries) {
+      try { body.input = JSON.parse(carries); } catch { res.innerHTML = `<p class="error">What the call carries is not JSON: write it as {"name": value}.</p>`; return; }
+      if (!body.input || typeof body.input !== "object" || Array.isArray(body.input)) { res.innerHTML = `<p class="error">What the call carries is an object: {"name": value}.</p>`; return; }
+    }
     try {
       const r = await api("POST", "/policy/test", body);
       const exec = r.decision === "allow", ask = r.decision !== "deny";

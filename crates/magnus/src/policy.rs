@@ -82,8 +82,25 @@ fn eval(cedar: &str, layer: &str, req: &Request, ents: &Entities) -> Result<(boo
     if !errors.is_empty() {
         return Err(anyhow!("policy layer {layer} failed to evaluate: {}", errors.join("; ")));
     }
-    let rules = resp.diagnostics().reason().map(|id| format!("{layer}:{id}")).collect();
+    // A rule is named by its @id annotation where it has one, so a refusal
+    // says which business rule refused (K6).
+    let rules = resp.diagnostics().reason().map(|id| format!("{layer}:{}", set.policy(id).and_then(|p| p.annotation("id")).map(String::from).unwrap_or_else(|| id.to_string()))).collect();
     Ok((resp.decision() == Decision::Allow, rules))
+}
+
+/// A call's input as Cedar takes it: whole numbers as numbers, others as
+/// decimals (four places), nothing for nulls.
+fn cedar_value(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Number(n) => match n.as_i64() {
+            Some(i) => Value::from(i),
+            None => n.as_f64().filter(|f| f.fract() == 0.0 && f.abs() < 9e15).map(|f| Value::from(f as i64)).unwrap_or_else(|| serde_json::json!({ "__extn": { "fn": "decimal", "arg": format!("{:.4}", n.as_f64().unwrap_or(0.0)) } })),
+        },
+        Value::Array(a) => Value::Array(a.iter().filter(|x| !x.is_null()).map(cedar_value).collect()),
+        Value::Object(o) => Value::Object(o.iter().filter(|(_, x)| !x.is_null()).map(|(k, x)| (k.clone(), cedar_value(x))).collect()),
+        other => other.clone(),
+    }
 }
 
 /// The layers that apply to `person`, top first: org, groups, user.
@@ -108,14 +125,13 @@ pub fn decide(
     tool: &ToolFacts,
     untrusted: bool,
     private: bool,
+    input: &serde_json::Value,
 ) -> Result<Outcome> {
     let ents = entities(person, tool)?;
     let layers = layers_for(policies, person);
-    let ctx = Context::from_pairs([
-        ("untrusted".to_string(), RestrictedExpression::new_bool(untrusted)),
-        ("private".to_string(), RestrictedExpression::new_bool(private)),
-    ])
-    .map_err(|e| anyhow!("{e}"))?;
+    // The call's input is in the context, so business limits are Cedar
+    // rules (K6): `context.input has amount && context.input.amount > 500`.
+    let ctx = Context::from_json_value(serde_json::json!({ "untrusted": untrusted, "private": private, "input": cedar_value(input) }), None).map_err(|e| anyhow!("{e}"))?;
 
     let mut forbidden: Option<String> = None;
     let mut results = vec![];

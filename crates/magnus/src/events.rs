@@ -608,6 +608,23 @@ pub enum Ev {
         #[serde(default)]
         rule: Option<String>,
     },
+    /// The audit record of one tool call (org context spec, K12): the run,
+    /// the person it was for, the grant it used, the source items and
+    /// bundle documents it touched, and whom it sent to.
+    Audit {
+        run: String,
+        call_id: String,
+        tool: String,
+        requester: String,
+        grant: String,
+        #[serde(default)]
+        items: Vec<String>,
+        #[serde(default)]
+        documents: Vec<String>,
+        #[serde(default)]
+        recipients: Vec<String>,
+        status: String,
+    },
     /// The result of a tool call as the model will see it, already redacted.
     ToolResult {
         run: String,
@@ -989,6 +1006,7 @@ impl Ev {
             | ModelReply { run, .. }
             | ModelError { run, .. }
             | Notice { run, .. }
+            | Audit { run, .. }
             | Intent { run, .. }
             | Decision { run, .. }
             | ToolResult { run, .. }

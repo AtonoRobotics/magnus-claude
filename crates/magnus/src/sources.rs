@@ -361,6 +361,11 @@ impl Kernel {
             summary: format!("Magnus asks, for {asker}: {question}"),
             details: json!({ "call_id": a.call_id, "question": question, "asked_for": run.person, "area": through, "taint": { "untrusted": run.untrusted, "private": run.private } }),
         };
+        let mut audit = self.audit_event(a, "asked", None);
+        if let crate::events::Ev::Audit { recipients, .. } = &mut audit {
+            *recipients = vec![to.clone()];
+        }
+        self.emit("kernel", audit).await?;
         self.suspend_on(&run.id, "question", id, Some(ev)).await?;
         Ok(Ok(()))
     }

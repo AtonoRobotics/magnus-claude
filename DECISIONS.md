@@ -1028,3 +1028,9 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - The rule sits beside the Rule of Two and the audience rule and is skipped when the Rule of Two already asks; approvals keep their roles.
 - Test: `sending_to_someone_who_cannot_read_what_the_task_read_asks_first` (shared_output.rs, T6).
 
+## Org context, step 5b: business limits and the audit record (2026-11-02, `org-context-5b`)
+
+- K6: Cedar's context now has the call's input (`context.input`), so a business limit is a Cedar rule: `@id("refunds_over_500") forbid(...) when { context.input has amount && context.input.amount > 500 };`. A refusal names the rule by its `@id` (else Cedar's own id), in the layer it is in. Whole numbers reach Cedar as numbers and others as decimals (four places), and nulls are left out. A rule that reaches for a field without `has` fails to evaluate on a call without it, and that call is refused, as any evaluation error is (fail closed).
+- K12: every tool call that ends (done, failed or refused) writes an `audit` event with the run, the person it was for, the grant it used, the source items and bundle documents it touched, whom it sent to, and its status. A question to a colleague writes one when it is asked. The grant is named: the person's own sign-in to an app, the organisation's key for one, or for the org tools each source's. The audit trail is read from the log, not kept in the kernel's memory; the console's view of it comes with step 10.
+- Test: `a_business_limit_refuses_by_name_and_every_call_is_audited` (audit_and_limits.rs, T7 and T13).
+
