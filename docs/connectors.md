@@ -255,8 +255,8 @@ one commit), 2026-11-02.
 - [x] A connection belongs to one user; no admin or other user can act through it (`connectors.rs`)
 - [x] What it returns is the organisation's data by default: the admin can read it, each read recorded and shown to the user (`admin_people.rs` `root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_deletes_them_for_good`, `data_access.rs`)
 - [x] Where the policy makes data private, admins see metadata only: which connectors each user connected and when last used (`data_access.rs`; the console's connectors list shows counts and last use, `admin_connectors.rs`)
-- [ ] When an admin removes a user, every connection is revoked at the provider and its tokens deleted (code in `person_admin.rs`; `admin_people.rs` does not check it)
-- [ ] When the identity provider turns a user off, their connections refuse every call and schedules pause until they are back; tokens stay in the vault unused (schedules only)
+- [x] When an admin removes a user, every connection is revoked at the provider and its tokens deleted (`person_admin.rs` `erase_person`; `admin_people.rs`: Bob's calendar sign-in revoked at the app, both tokens)
+- [x] When the identity provider turns a user off, their connections refuse every call and schedules pause until they are back; tokens stay in the vault unused (`PersonTurnedOff`, cleared by their next sign-in; `turned_off_apps.rs`; schedules, `people.rs`)
 
 ### Audit
 

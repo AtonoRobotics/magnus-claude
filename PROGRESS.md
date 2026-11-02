@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **A person's apps when they leave or are turned off (connectors spec, Isolation; branch `person-connections`).** Turned off at the identity provider or by an admin, a person's apps answer no calls for them, their sign-ins kept unused, until they sign in again. Deleted, their sign-ins are revoked at each app (now tested).
 - **A retired tool leaves the agent at once (connectors spec, Remote MCP connectors; branch `retired-tools`).** A tool an app stops listing is no longer offered to the next step; listed again unchanged, it is offered again with no new review.
 - **An app's content in the knowledge base passes policy (connectors spec; branch `app-content-policy`).** Proven by a test: the organisation's rule against filing private content refuses filing what a person's calendar said, and lets public content through.
 - **Tools loaded on demand (connectors spec, How the agent uses connectors; branch `tool-search`).** With many apps connected, a run is no longer handed every tool at once: past 40 tools it searches them with `find_tools`, and what it finds is offered, with its full definition, from its next step.
