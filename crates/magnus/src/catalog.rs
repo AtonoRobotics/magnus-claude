@@ -55,6 +55,10 @@ pub struct Manifest {
     /// Every tool's class.
     #[serde(default)]
     pub tools: BTreeMap<String, String>,
+    /// The provider's page where a person removes Magnus's access, named
+    /// when Disconnect could not revoke it there.
+    #[serde(default)]
+    pub remove_access: Option<String>,
 }
 
 pub fn manifests() -> &'static [Manifest] {

@@ -105,7 +105,8 @@ async fn the_owner_adds_an_app_each_person_signs_in_with_their_own_account_and_t
     assert!(cal.state.lock().unwrap().refreshes >= 2, "expired tokens were not refreshed (or a rotated refresh token was reused)");
 
     // Alice ends her own sign-in; carol's is untouched and still hers.
-    assert_eq!(alice.send(reqwest::Method::DELETE, "/v1/connectors/calendar/connection", None).await.0, 204);
+    let (st, ended) = alice.send(reqwest::Method::DELETE, "/v1/connectors/calendar/connection", None).await;
+    assert_eq!((st.as_u16(), ended["at_provider"].as_bool()), (200, Some(true)), "{ended}");
     assert_eq!(alice.get("/v1/connectors").await.1["connectors"][0]["signed_in"], false);
     assert_eq!(carol.get("/v1/connectors").await.1["connectors"][0]["signed_in"], true);
 

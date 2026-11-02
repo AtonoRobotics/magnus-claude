@@ -34,6 +34,9 @@ pub struct AppState {
     /// It names itself in its answer, as Google does (RFC 9207): it says
     /// so in its metadata and puts `iss` on the redirect.
     pub names_itself: bool,
+    /// It publishes no revocation endpoint: a sign-in to it can only be
+    /// ended in its own settings.
+    pub no_revocation: bool,
     /// Answer refreshes without `expires_in` (it is only recommended).
     pub refresh_without_expiry: bool,
     n: usize,
@@ -91,13 +94,17 @@ async fn resource(State((base, _)): S) -> Json<Value> {
 }
 
 async fn metadata(State((base, st)): S) -> Json<Value> {
-    let names_itself = st.lock().unwrap().names_itself;
-    Json(json!({
+    let (names_itself, no_revocation) = { let s = st.lock().unwrap(); (s.names_itself, s.no_revocation) };
+    let mut m = json!({
         "issuer": base, "authorization_endpoint": format!("{base}/authorize"), "token_endpoint": format!("{base}/token"),
         "registration_endpoint": format!("{base}/register"), "revocation_endpoint": format!("{base}/revoke"),
         "code_challenge_methods_supported": ["S256"], "grant_types_supported": ["authorization_code", "refresh_token"],
         "authorization_response_iss_parameter_supported": names_itself
-    }))
+    });
+    if no_revocation {
+        m.as_object_mut().unwrap().remove("revocation_endpoint");
+    }
+    Json(m)
 }
 
 async fn register(State((_, st)): S, Json(b): Json<Value>) -> Response {
@@ -212,6 +219,14 @@ impl FakeOAuthApp {
         let to = url::Url::parse(r.headers()["location"].to_str().unwrap()).unwrap();
         let q: HashMap<String, String> = to.query_pairs().into_owned().collect();
         (q["code"].clone(), q["state"].clone())
+    }
+
+    /// The person removes the app's access in its own settings: every token
+    /// it issued stops working.
+    pub fn revoke_everything(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.access.clear();
+        s.refresh.clear();
     }
 
     pub fn calls(&self, tool: &str) -> usize {
