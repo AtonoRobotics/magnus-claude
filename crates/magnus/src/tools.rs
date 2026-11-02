@@ -159,6 +159,10 @@ pub const BUILTINS: &[Builtin] = &[
     // each result carries the label of the sources it came from.
     Builtin { name: "org_search", app: "org", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "org_fetch", app: "org", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // A question to a colleague, sent in the app under Magnus's name: it
+    // reaches someone inside the organisation, so private data bound for
+    // them is asked about first (the audience rule).
+    Builtin { name: "people_ask", app: "people", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Internal },
     Builtin { name: "knowledge_add", app: "knowledge", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // A project's reference file, read when the work needs it (M2). Its
     // result carries the file's own taint; an upload is private and untrusted.
@@ -440,6 +444,11 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             name: "org_search".into(),
             description: d("org_search"),
             input_schema: obj(json!({ "query": { "type": "string" }, "sources": { "type": "array", "items": { "type": "string" }, "description": "only these sources, by name" }, "limit": { "type": "integer" } }), &["query"]),
+        },
+        ToolSpec {
+            name: "people_ask".into(),
+            description: d("people_ask"),
+            input_schema: obj(json!({ "area": { "type": "string", "description": "an area, as its people page names it (/people/<area>.md)" }, "user": { "type": "string", "description": "or a person, by id" }, "question": { "type": "string" } }), &["question"]),
         },
         ToolSpec { name: "org_fetch".into(), description: d("org_fetch"), input_schema: obj(json!({ "locator": { "type": "string", "description": "as a search hit gives it: source://id" } }), &["locator"]) },
         ToolSpec {

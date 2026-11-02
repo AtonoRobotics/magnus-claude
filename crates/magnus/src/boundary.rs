@@ -368,6 +368,13 @@ impl Kernel {
             )
             .await?;
         }
+        // A question to a colleague waits for their answer (people.ask).
+        if a.tool == "people_ask" {
+            return match self.people_ask(a, &run).await? {
+                Ok(()) => Ok(Verdict::Suspended),
+                Err(why) => self.record(a, Some(key), "failed", why, true, f.label, None).await,
+            };
+        }
         // memory_search returns content with the taint it was written under
         // (M1), taken from the same entries it returns: a second lookup could
         // miss a fact forgotten in between and label its text clean.

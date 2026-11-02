@@ -1013,3 +1013,10 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - An item whose source the kernel cannot ask (its locator names no source with a reader, such as an address written by hand) is seen only by the person whose run read it, as before. Change events from the sources (step 6) will drop answers early.
 - Test: `who_sees_an_org_document_follows_what_each_person_can_read_at_its_sources` (org_permissions.rs).
 
+## Org context, step 4d: asking a colleague (2026-11-02, `org-context-4d`)
+
+- `people_ask` (an area or a person, and the question) asks the owner of an area (its people page, `/people/<area>.md`, which the asker must be able to see) or a named person. The question reaches them in the app under Magnus's name, saying whom it is for, and only they may answer it. The task waits, and their answer comes back as the call's result, naming who gave it ("the answer arrives as an event on the task").
+- It passes the boundary like any action: a reversible write to someone inside the organisation, so a run holding private data is asked before sending it to them (the audience rule). It is not offered in chat, which only reads.
+- Only areas whose `ask_channel` is `magnus` (in the app) are asked so far. Any other channel is refused with the reason, until sending through a connector's channel comes with shared output (K5, step 5). Asking the person Magnus works for is refused in favour of `ask_principal`.
+- Test: `magnus_asks_an_areas_owner_and_the_answer_comes_back_to_the_task` (people_ask.rs).
+

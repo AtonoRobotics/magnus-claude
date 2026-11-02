@@ -261,6 +261,56 @@ impl Kernel {
     }
 }
 
+impl Kernel {
+    /// `people.ask`: the question to the area's owner (from its people page,
+    /// which the asker must be able to see) or to the person named, in the
+    /// app under Magnus's name, saying whom it is for. The run waits; the
+    /// answer is this call's result. Why not, when it cannot be asked.
+    pub async fn people_ask(&self, a: &crate::boundary::Action, run: &crate::state::Run) -> Result<std::result::Result<(), String>> {
+        use sha2::Digest;
+        let question = a.input["question"].as_str().unwrap_or_default().trim().to_string();
+        if question.is_empty() {
+            return Ok(Err("A question is needed. A retry without one will not help.".into()));
+        }
+        let (area, user) = (a.input["area"].as_str().unwrap_or_default().trim(), a.input["user"].as_str().unwrap_or_default().trim());
+        let (to, through) = if !area.is_empty() {
+            let path = if area.starts_with('/') { area.to_string() } else { format!("/people/{area}.md") };
+            let Some((fm, _, _, _)) = self.bundle_read(&run.person, &path).await? else {
+                return Ok(Err(format!("{path}: no such people page, or not one the person can see. bundle_search finds areas.")));
+            };
+            let channel = fm["ask_channel"].as_str().unwrap_or_default().to_string();
+            if !matches!(channel.as_str(), "magnus" | "app") {
+                return Ok(Err(format!("{path} asks through {channel:?}, which Magnus cannot send to yet: only questions in the app (ask_channel: magnus). Ask the person instead, or tell the person you work for whom to ask.")));
+            }
+            (fm["owner"].as_str().unwrap_or_default().to_string(), Some(path))
+        } else {
+            (user.to_string(), None)
+        };
+        if to.is_empty() || self.person(&to).is_none() {
+            return Ok(Err(format!("{to:?} is not someone at the organisation who can be asked.")));
+        }
+        if to == run.person {
+            return Ok(Err("That is the person you work for: ask them with ask_principal.".into()));
+        }
+        let asker = self.person(&run.person).map(|p| p.name.clone()).unwrap_or_else(|| run.person.clone());
+        let id = format!("item_{}", &hex::encode(sha2::Sha256::digest(format!("{}\n{}\npeople_ask", run.id, a.call_id).as_bytes()))[..32]);
+        if self.read(|s| s.items.contains_key(&id)) {
+            return Ok(Ok(()));
+        }
+        let ev = crate::events::Ev::Item {
+            id: id.clone(),
+            item_kind: "question".into(),
+            task: Some(run.task.clone()),
+            run: Some(run.id.clone()),
+            person: to.clone(),
+            summary: format!("Magnus asks, for {asker}: {question}"),
+            details: json!({ "call_id": a.call_id, "question": question, "asked_for": run.person, "area": through, "taint": { "untrusted": run.untrusted, "private": run.private } }),
+        };
+        self.suspend_on(&run.id, "question", id, Some(ev)).await?;
+        Ok(Ok(()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
