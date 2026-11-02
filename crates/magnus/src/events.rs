@@ -608,6 +608,12 @@ pub enum Ev {
         #[serde(default)]
         rule: Option<String>,
     },
+    /// One of the org's sources was connected for the first time, by `by`:
+    /// its survey runs under their grant (org context spec, survey run).
+    SourceConnected {
+        source: String,
+        by: String,
+    },
     /// Something changed at one of the org's sources (org context spec,
     /// Change events): an item changed, was deleted, or who may read it
     /// changed. `change` is `changed`, `deleted` or `permissions_changed`.

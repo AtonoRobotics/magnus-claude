@@ -701,6 +701,9 @@ pub struct ConnectorSetting {
 
 #[derive(Default)]
 pub struct State {
+    /// Who first connected each of the org's sources (`connected_by`): the
+    /// survey, the curator and the change watch use their grant (K1).
+    pub source_connected_by: HashMap<String, String>,
     /// Source items deleted at their source (K11): links to them are gone.
     pub deleted_items: HashSet<String>,
     /// Trashed items by id.
@@ -1627,6 +1630,9 @@ impl State {
             }
             // The audit trail is read from the log, not kept in memory.
             Ev::Audit { .. } => {}
+            Ev::SourceConnected { source, by } => {
+                self.source_connected_by.entry(source.clone()).or_insert_with(|| by.clone());
+            }
             // K10: every document listing the item is stale from now. A
             // deleted item leaves the documents that list it (K11): those
             // left with no source are erased by the kernel after this.
