@@ -756,3 +756,4 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
     - every change audited;
     - the four screens in every look and at phone width.
   - `an_id_is_one_segment_and_never_leaves_the_bundle` and `okf_text_splits_into_frontmatter_and_body` (admin/knowledge.rs).
+- At phone width the two-column screens (Ontology, Agent policy) are one column of `minmax(0, 1fr)`, as on wide screens, not `1fr`: a plain `1fr` grew to its widest child, so a type's history, with a run id or an author's id as one unbroken word, made the screen scroll sideways by 116px (#85's first CI run). Its tables now scroll inside their own box, as the console's other wide tables do, and long ids in tables wrap.

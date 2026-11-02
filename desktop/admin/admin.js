@@ -1111,8 +1111,8 @@ function knowledgeView(view, rest) {
 
 // A document's versions, each shown against now and rolled back to.
 function versionsHtml(d) {
-  return `<table class="t small"><thead><tr><th>Version</th><th>When</th><th>By</th><th></th></tr></thead><tbody>${d.versions.map((v, i) => `<tr><td>${esc(v.version)}${i === 0 ? ` <span class="chip ok">now</span>` : ""}</td><td>${esc(when(v.at))}</td><td>${esc(byWho(v.by))}${v.run ? ` <span class="muted mono">${esc(v.run)}</span>` : ""}</td>
-    <td><button class="link small" data-vshow="${v.version}">Show</button>${i === 0 ? "" : ` <button class="link small" data-vback="${v.version}">Roll back to this</button>`}</td></tr>`).join("")}</tbody></table><div class="ad-vout"></div>`;
+  return `<div class="ad-scroll"><table class="t small"><thead><tr><th>Version</th><th>When</th><th>By</th><th></th></tr></thead><tbody>${d.versions.map((v, i) => `<tr><td>${esc(v.version)}${i === 0 ? ` <span class="chip ok">now</span>` : ""}</td><td>${esc(when(v.at))}</td><td>${esc(byWho(v.by))}${v.run ? ` <span class="muted mono">${esc(v.run)}</span>` : ""}</td>
+    <td><button class="link small" data-vshow="${v.version}">Show</button>${i === 0 ? "" : ` <button class="link small" data-vback="${v.version}">Roll back to this</button>`}</td></tr>`).join("")}</tbody></table></div><div class="ad-vout"></div>`;
 }
 
 function bindVersions(el, d, rollback, after) {
@@ -1191,7 +1191,7 @@ async function typeDetail(box) {
       <dt>Entries</dt><dd>${d.entities.length} ${d.entities.length ? `<a href="#/knowledge/memory">in Memory</a>` : ""}</dd><dt>Referred to by</dt><dd>${d.referenced_by.length ? d.referenced_by.map(r => `<span class="mono">${esc(r.path)}</span>`).join(", ") : "nothing"}</dd></dl>
     ${typeGraph({ ...d, title: fm.title, path: d.path, relations: rels }, box.types)}
     <h3>Relations</h3>
-    <table class="t small"><thead><tr><th>Name</th><th>To</th><th>Cardinality</th><th></th></tr></thead><tbody>${rels.map((r, i) => `<tr><td class="mono">${esc(r.type)}</td><td>${esc(r.to ? (box.types.find(t => t.path === r.to)?.title || r.to) : "–")}</td><td>${esc(r.cardinality || "–")}</td><td><button class="link small" data-rel-rm="${i}">Remove</button></td></tr>`).join("") || `<tr><td colspan="4" class="muted">None.</td></tr>`}</tbody></table>
+    <div class="ad-scroll"><table class="t small"><thead><tr><th>Name</th><th>To</th><th>Cardinality</th><th></th></tr></thead><tbody>${rels.map((r, i) => `<tr><td class="mono">${esc(r.type)}</td><td>${esc(r.to ? (box.types.find(t => t.path === r.to)?.title || r.to) : "–")}</td><td>${esc(r.cardinality || "–")}</td><td><button class="link small" data-rel-rm="${i}">Remove</button></td></tr>`).join("") || `<tr><td colspan="4" class="muted">None.</td></tr>`}</tbody></table></div>
     <form id="rel-add" class="row ad-bar"><input name="type" placeholder="relation, e.g. owned_by" required autocomplete="off" aria-label="Relation name"><select name="to" aria-label="To">${others.map(t => `<option value="${esc(t.path)}">${esc(t.title || t.path)}</option>`).join("")}</select><select name="card" aria-label="Cardinality"><option value="one">one</option><option value="many">many</option></select><button>Add relation</button></form>
     <div class="row ad-bar">${fm.status !== "stable" ? `<button id="ty-stable" class="primary">Approve as stable</button>` : ""}${fm.status !== "deprecated" ? `<button id="ty-dep">Deprecate</button>` : `<button id="ty-draft">Bring back as draft</button>`}
       <button id="ty-merge">Merge into…</button><button id="ty-del" class="danger">Delete</button></div>
