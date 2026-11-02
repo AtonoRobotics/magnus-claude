@@ -758,6 +758,11 @@ impl Kernel {
                 "web_search" => Ok((self.web.search(&s("query")).await?, false, None)),
                 "create_task" => self.chat_task(a, key).await,
                 "create_schedule" => Ok(self.chat_card(a, key)),
+                "find_tools" => {
+                    let Some(run) = self.read(|s| s.runs.get(&a.run).cloned()) else { return Ok(("no such run".into(), true, None)) };
+                    let v = self.find_tools(&run, a.input["query"].as_str().unwrap_or_default()).await;
+                    Ok((v.to_string(), false, Some(v)))
+                }
                 "find_apps" | "app_details" | "offer_app" => {
                     let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).and_then(|p| self.person(&p));
                     let Some(person) = person else { return Ok(("no such person".into(), true, None)) };

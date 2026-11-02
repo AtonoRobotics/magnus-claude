@@ -67,7 +67,7 @@ impl Kernel {
     /// covers, judged by the verifier from what it reads.
     pub(super) async fn verify_work(self: &Arc<Self>, run: &Run, call_id: &str, step_id: &str, goal: &str, criteria: &[Value], summary: &str) -> Result<Vec<(Value, Judged)>> {
         let task = self.asked(run).await?;
-        let mut tools: Vec<ToolSpec> = self.tools_for(run).await.into_iter().filter(|t| crate::boundary::facts(self, &t.name).is_some_and(|f| crate::tools::checkable(&f.name, f.risk))).collect();
+        let mut tools: Vec<ToolSpec> = self.every_tool_for(run).await.into_iter().filter(|t| crate::boundary::facts(self, &t.name).is_some_and(|f| crate::tools::checkable(&f.name, f.risk))).collect();
         tools.push(ToolSpec {
             name: "verdict".into(),
             description: "Your verdict on every criterion.".into(),

@@ -193,7 +193,7 @@ one commit), 2026-11-02.
 
 - [x] Index, then load: the context always holds the user's connector index (every connector policy makes available, name, one-line summary, state: connected, needs attention, not connected), generated from the catalog and connections at each session start and on every connection change (`app_tools.rs` `app_index`, built for every run and chat turn; `agent_apps.rs`: the index before the person's words, an app blocked for them absent, a refused sign-in as needing signing in again)
 - [ ] The index's "on this computer" state and programs per device (with the local desktop connectors, above)
-- [ ] Tools searched across connectors and full schemas loaded on demand
+- [x] Tools searched across connectors and full schemas loaded on demand (past `LOAD_ALL`, 40 tools across the person's connected apps, a run is offered `find_tools` and what it found; `tool_search.rs` both ways)
 - [x] One user at a time: an agent uses only its user's connections (`connectors.rs`; refusal names the Library, `boundary.rs:252`)
 - [x] Untrusted content: tool descriptions and results inform but cannot change instructions or policy (`inv4_taint.rs` `content_claiming_authority_changes_nothing`; descriptions held for review, `run/mod.rs` `review_item`)
 - [ ] The appliance labels each result's source in context
