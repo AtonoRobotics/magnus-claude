@@ -10,6 +10,8 @@
 // MAGNUS_PERSON, MAGNUS_PASSWORD  who signs in
 // MAGNUS_EXPECT      "admin" (signed in) or "refused" (not an admin)
 // MAGNUS_STEP_UP     optional: "1" to step up after signing in
+// MAGNUS_AGAIN       optional: "1" to sign in again in the same browser, which
+//                    the provider lets through without asking for the password
 // MAGNUS_VISIT       optional: a screen (e.g. "#/users") to open signed in, which
 //                    must render in light, dark and glass, and at phone width
 //                    with no sideways scroll (admin console spec, invariant tests, UI)
@@ -83,6 +85,17 @@ if (expect === "refused") {
       await page.locator("#password").waitFor({ timeout: T });
       await login();
       await page.waitForURL(u => new URL(u).host === new URL(base).host && u.toString().endsWith("/#/security"), { timeout: T });
+    });
+  }
+  if (process.env.MAGNUS_AGAIN === "1") {
+    await step("signed in again, the provider asking for nothing", async () => {
+      // The provider still holds this browser's sign-in, so the console's
+      // Sign in comes straight back: no password is typed.
+      await page.waitForTimeout(2500);
+      await ctx.clearCookies({ name: "__Host-magnus_admin" });
+      await page.goto(`${base}/auth/login`);
+      await page.waitForURL(u => new URL(u).host === new URL(base).host, { timeout: T });
+      await page.locator("#nav").waitFor({ state: "visible", timeout: T });
     });
   }
 }
