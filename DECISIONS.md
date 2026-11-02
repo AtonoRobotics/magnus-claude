@@ -952,3 +952,9 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - `the_installed_app_updates_itself_from_the_appliance_while_a_task_waits` failed once on #84 ("the restarted copy showed what's new before it was stopped") and passed when re-run on the same commit.
 - The cause is the test's timing, not the app. `update_install` writes the new release and restarts at once. The test began stopping the restarted copy, which runs outside its session, only after it had seen the new file and read `whats-new.json`. On a loaded runner, that copy reached its window in the gap, and the window marks what's new as shown (`whats-new-shown.json`).
 - Nobody sees that copy, so the test now puts the note back once the copy is stopped, and checks that none is still running. The new session must then show what's new exactly once, as before. Reading the note also moves to after the copy is stopped, since the same race could reach it first.
+
+## A manifest names its app's revocation endpoint (2026-11-02, `manifest-revoke`)
+
+- The connectors spec, Catalog and connector manifests: "`auth.revoke`: the provider's revocation endpoint". Where a sign-in is revoked came only from the authorization server's metadata, read when the person signed in. So the place Disconnect and the kill switch end a sign-in was whatever the server said that day, not what Alpha Vector reviewed. A server whose metadata leaves it out could not be revoked at all.
+- A manifest now names it (`revoke`). The four Google manifests name `https://oauth2.googleapis.com/revoke`. A catalog app's sign-in is revoked there, and only an app without one in its manifest falls back to the metadata. It is kept with the sign-in, as before.
+- Tests: `a_catalog_app_is_revoked_where_its_manifest_says` (connectors.rs); `every_manifest_is_well_formed` requires an https endpoint, and Google's for Google's apps.

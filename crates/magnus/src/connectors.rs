@@ -166,6 +166,13 @@ pub fn allows(c: &Connector) -> (String, Vec<String>) {
     (sentence, lines)
 }
 
+/// Where a sign-in to `c` is revoked: its catalog manifest's own endpoint
+/// (connectors spec, `auth.revoke`), else what the authorization server's
+/// metadata names, else nowhere.
+fn revocation_endpoint(c: &Connector, from_metadata: Option<String>) -> Option<String> {
+    crate::catalog::manifest(&c.name).filter(|_| c.catalog).and_then(|m| m.revoke.clone()).or(from_metadata)
+}
+
 /// A sign-in left unfinished this long is dropped.
 const PENDING_FOR: Duration = Duration::from_secs(15 * 60);
 
@@ -540,7 +547,7 @@ impl Kernel {
                 q.append_pair("access_type", "offline").append_pair("prompt", "consent");
             }
         }
-        let client = Client { token_endpoint: token, revocation_endpoint: s("revocation_endpoint"), client_id, client_secret, resource: c.url.clone() };
+        let client = Client { token_endpoint: token, revocation_endpoint: revocation_endpoint(c, s("revocation_endpoint")), client_id, client_secret, resource: c.url.clone() };
         let iss_required = asm["authorization_response_iss_parameter_supported"] == true;
         // What finishing it needs, in the vault under its nonce: the
         // verifier and the client never travel in the state.
@@ -1338,5 +1345,23 @@ mod sign_in_state {
         let forged = format!("{}.{tag}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw));
         assert!(open_state(key, &forged, 999).is_err(), "a changed state opened");
         assert!(open_state(key, "random-state", 999).is_err());
+    }
+}
+
+#[cfg(test)]
+mod revocation {
+    /// A catalog app's sign-in is revoked where its manifest says, whatever
+    /// the authorization server's metadata names; another app's, where the
+    /// metadata says.
+    #[test]
+    fn a_catalog_app_is_revoked_where_its_manifest_says() {
+        let app = |name: &str, catalog: bool| -> crate::config::Connector { serde_json::from_value(serde_json::json!({ "name": name, "url": "https://x.test/mcp", "audience": "private", "label": "private", "catalog": catalog })).unwrap() };
+        let mut gmail = app("google-gmail", true);
+        assert_eq!(super::revocation_endpoint(&gmail, None).as_deref(), Some("https://oauth2.googleapis.com/revoke"));
+        assert_eq!(super::revocation_endpoint(&gmail, Some("https://elsewhere.example/revoke".into())).as_deref(), Some("https://oauth2.googleapis.com/revoke"));
+        gmail.catalog = false;
+        assert_eq!(super::revocation_endpoint(&gmail, Some("https://elsewhere.example/revoke".into())).as_deref(), Some("https://elsewhere.example/revoke"));
+        let added = app("calendar", false);
+        assert_eq!(super::revocation_endpoint(&added, None), None);
     }
 }

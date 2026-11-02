@@ -59,6 +59,11 @@ pub struct Manifest {
     /// when Disconnect could not revoke it there.
     #[serde(default)]
     pub remove_access: Option<String>,
+    /// The provider's revocation endpoint (RFC 7009): Disconnect and the
+    /// kill switch end a sign-in there. Where the manifest names none, the
+    /// authorization server's metadata may.
+    #[serde(default)]
+    pub revoke: Option<String>,
 }
 
 pub fn manifests() -> &'static [Manifest] {
@@ -142,6 +147,10 @@ mod tests {
             assert_eq!(m.registration == "preregistered", m.provider.is_some(), "{}", m.id);
             // Where the person removes Magnus when the app cannot end a sign-in itself.
             assert!(m.remove_access.as_deref().is_some_and(|u| u.starts_with("https://")), "{}: no page where the person removes Magnus", m.id);
+            assert!(m.revoke.as_deref().is_none_or(|u| u.starts_with("https://")), "{}: its revocation endpoint is not https", m.id);
+            if m.provider.as_deref() == Some("google") {
+                assert_eq!(m.revoke.as_deref(), Some("https://oauth2.googleapis.com/revoke"), "{}: Google's revocation endpoint", m.id);
+            }
             assert!(crate::tools::Audience::parse(&m.audience).is_some(), "{}", m.id);
             assert!(crate::tools::Label::parse(&m.label).is_some(), "{}", m.id);
             for (t, risk) in &m.tools {

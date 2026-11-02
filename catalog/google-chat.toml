@@ -22,6 +22,8 @@ audience = "public"
 label = "private+untrusted"
 registration = "preregistered"
 provider = "google"
+# Google's revocation endpoint (RFC 7009), where Disconnect ends a sign-in.
+revoke = "https://oauth2.googleapis.com/revoke"
 # Where a person removes Magnus at Google when Disconnect could not revoke it.
 remove_access = "https://myaccount.google.com/connections"
 scopes = ["https://www.googleapis.com/auth/chat.spaces.readonly", "https://www.googleapis.com/auth/chat.memberships.readonly", "https://www.googleapis.com/auth/chat.messages.readonly", "https://www.googleapis.com/auth/chat.messages.create"]

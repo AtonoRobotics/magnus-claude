@@ -84,7 +84,7 @@ one commit), 2026-11-02.
 - [ ] `auth.registration`: `preregistered`, `cimd`, `dcr`, or `none` for local (only `preregistered` and `dcr`)
 - [ ] `auth.client`: public with PKCE, or confidential through the relay; the client ID from the relay for its environment (today `catalog/registrations.toml` `kind`, the secret on the appliance)
 - [x] `auth.scopes`: exactly the scopes requested, each with its plain line (`scopes` and `asks`, `every_manifest_is_well_formed`; the request, `google.rs`)
-- [ ] `auth.revoke`: the provider's revocation endpoint in the manifest (found from the authorization server's metadata instead)
+- [x] `auth.revoke`: the provider's revocation endpoint in the manifest (`revoke`, used before the authorization server's metadata; Google's in its four manifests; `every_manifest_is_well_formed`, `a_catalog_app_is_revoked_where_its_manifest_says`)
 - [x] `tools`: every tool's class, read, reversible, irreversible or financial (`every_manifest_is_well_formed`; named `reversible_write`)
 - [ ] `platforms`: local only, `windows`, `linux` and supported program versions
 - [ ] `signature`: Alpha Vector's catalog signature over everything above
