@@ -1297,7 +1297,7 @@ function card(i, composed) {
         if (isOwner()) list.push(["approve:standing", "Always allow"]);
       }
       list.push(["reject", "Deny"]);
-      body = `${i.consequence ? `<div class="consequence" role="note">${esc(i.consequence)}</div>` : ""}
+      body = `${i.app ? appOfferCard(i.app, i.person === App.me?.id) : ""}${i.consequence ? `<div class="consequence" role="note">${esc(i.consequence)}</div>` : ""}
         ${whatHappens(d)}
         ${d.why ? `<p class="small"><span class="muted">Why you are asked:</span> ${esc(d.why)}${d.rule && !String(d.rule).startsWith("kernel:") ? ` <span class="faint mono">(${esc(d.rule)})</span>` : ""}</p>` : ""}
         ${taintNote(d.taint)}${buttons(i, list)}`;
@@ -1648,18 +1648,21 @@ const PANELS = {
 };
 
 // An app Magnus offered, with why: the same card as in the Library, as the
-// person stands with it now, in a conversation or a task (connectors spec,
-// Inside work).
-function appOfferCard(e) {
+// person stands with it now, in a conversation, a task or an approval
+// (connectors spec, Inside work). Only the person whose app it is gets its
+// button; anyone else deciding sees where they stand.
+function appOfferCard(e, theirs = true) {
   const app = { title: e.title, listing: { letters: e.letters, tint: e.tint } };
+  const STATE = { needs_attention: "Needs signing in again", needs_more_access: "Needs more access", available: "Not connected" };
   const act = e.state === "connected" ? `<span class="chip ok">Connected</span>`
+    : !theirs ? `<span class="chip warn">${esc(STATE[e.state] || "Not in their Library")}</span>`
     : e.state === "unavailable" ? `<span class="small muted">No longer in your Library.</span>`
     : e.ready === false ? `<span class="small muted">Not ready on this appliance yet.</span>`
     : e.state === "needs_attention" ? `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Sign in to ${esc(e.title || "")} again</button>`
     : e.state === "needs_more_access" ? `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Approve more access</button>`
     : `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Connect ${esc(e.title || "")}</button>`;
   return `<div class="confirm chatcard conncard" data-connector="${esc(e.connector)}" data-state="${esc(e.state)}"><div class="cc-head">${tile(app)}<div><strong>${esc(e.title || e.connector)}</strong>${e.publisher ? ` <span class="small muted">by ${esc(e.publisher)}</span>` : ""}</div></div>
-    <p class="cc-text">${esc(e.why || "")}</p>${e.summary ? `<p class="small muted">${esc(e.summary)}</p>` : ""}
+    ${e.why ? `<p class="cc-text">${esc(e.why)}</p>` : ""}${e.summary ? `<p class="small muted">${esc(e.summary)}</p>` : ""}
     <div class="row cc-act">${act}</div></div>`;
 }
 

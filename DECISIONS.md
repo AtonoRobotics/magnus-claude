@@ -855,3 +855,11 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - Her index says the app needs more access, and the Library's card turns to approving it.
   - Approving is signing in again: the sign-in asks for the added scopes too. The new sign-in holds them, and the call then goes through.
   - Test: `a_call_that_needs_more_access_asks_for_it_with_a_card_and_goes_through_once_approved` (agent_apps.rs). The fake app holds per-token scopes and challenges a tool that needs one more.
+
+## The app's card in approvals (2026-11-02, `approval-app-card`)
+
+- The connectors spec, The connector card: "The same card appears in the Library, in chat, in a task, and in approvals, so connecting never sends the user to a separate settings system." The card was in the Library, in chat and in a task; an approval for an app's action named only the tool.
+- Each approval in Needs you whose tool is an app's now carries the app's card (`app`, the same `offered_card` as in chat and tasks), as the person whose task it is stands with the app now. It is worked out when the list is read, not stored with the item, so a sign-in the app refuses while the decision waits shows at once.
+- Only that person signs in to their app. Someone else who decides it (an approver with the role) sees the card with where the person stands, and no button: a sign-in is always the person's own.
+- The kernel's own tools have no card.
+- Test: `an_approval_for_an_apps_action_carries_the_apps_card_as_the_person_stands_with_it` (approval_app_card.rs): the card while Carol is connected; after the app refuses her sign-in, it asks her to sign in again; in the app (`approval-app-card.mjs`), Carol gets the button and Alice, who decides, gets the state and the decision, in every look and at phone width.
