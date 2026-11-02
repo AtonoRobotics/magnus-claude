@@ -13,7 +13,9 @@ body { background: transparent; display: grid; grid-template-columns: 220px 1fr;
 .ad-nav { grid-area: nav; display: flex; flex-direction: column; gap: 2px; padding: 12px 8px; background: var(--side); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); border-right: 1px solid var(--line); }
 .ad-nav a { padding: 8px 12px; border-radius: 8px; color: var(--fg); }
 .ad-nav a[aria-current="page"] { background: var(--row-sel); font-weight: 600; }
-.ad-main { grid-area: main; padding: 24px; min-width: 0; outline: none; background: var(--main); }
+/* The page scrolls as one, under the sticky top bar: the app's main is a
+   full-height scroll box, which under the bar overflowed the window. */
+.ad-main { grid-area: main; padding: 24px; min-width: 0; outline: none; background: var(--main); height: auto; min-height: calc(100vh - 52px - 2 * var(--main-gap, 0px)); overflow: visible; box-sizing: border-box; }
 .ad-main.with-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 440px); gap: 24px; align-items: start; padding-right: 0; }
 body:not(.signed-in) { grid-template-areas: "top top" "main main"; }
 .ad-sign-in { max-width: 420px; margin: 10vh auto 0; padding: 24px; }

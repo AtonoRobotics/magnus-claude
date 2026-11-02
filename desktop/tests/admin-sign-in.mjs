@@ -155,6 +155,10 @@ if (visit && expect === "admin") {
         await page.evaluate(([mode, material]) => Theme.set({ mode, material }), [mode, material]);
         const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         if (over > 0) throw new Error(`${visit} in ${mode} ${material} at ${width}px scrolls sideways by ${over}px`);
+        // The sections stay in reach: the first is on screen at the top.
+        await page.evaluate(() => scrollTo(0, 0));
+        const top = await page.evaluate(() => document.querySelector("#nav a").getBoundingClientRect().top);
+        if (top < 0) throw new Error(`${visit} in ${mode} ${material} at ${width}px starts scrolled: the first section is ${-top}px above the window`);
         await shot(`${visit.replace(/\W/g, "")}-${mode}-${material}-${width}`);
       }
     }
