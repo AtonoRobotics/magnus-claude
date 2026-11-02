@@ -148,7 +148,7 @@ one commit), 2026-11-02.
 - [x] A new or changed tool reaches the agent only once classified, by the next manifest version or, for an admin-added server, by the admin (`inv1_boundary.rs` `a_changed_tool_definition_is_disabled_and_hidden`, `tools_the_owner_has_not_classified_cannot_run`)
 - [x] Server annotations inform the classification and do not replace it (`connectors.rs` `suggested_risk`; `connectors.rs` test)
 - [x] Scope challenges: a call needing an ungranted scope (GitHub's server returns a challenge) becomes a Connect card asking for the added scope, and the call proceeds once approved (`agent_apps.rs` `a_call_that_needs_more_access_asks_for_it_with_a_card_and_goes_through_once_approved`: MCP's `insufficient_scope` challenge, the card in the thread, sign-in asking for the added scope, the call through)
-- [ ] Provider errors, rate limits and retry-after included, return to the agent intact as tool errors, with no retry by the client (errors are returned; no test, and retry-after is not carried)
+- [x] Provider errors, rate limits and retry-after included, return to the agent intact as tool errors, with no retry by the client (`apps.rs` `refused`: the status, the wait and what the app said; an app's own error with its code, message and data; `app_errors.rs`, the app reached once)
 - [ ] Client gates: Magnus on providers' approved-client and redirect allowlists (Provider registrations)
 
 ## Brokered API connectors

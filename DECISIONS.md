@@ -906,3 +906,14 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - The page shows Connected, the account, when it was connected and last used, "List events" linking to the task, and Disconnect.
   - After the app refuses her sign-in, the card asks to sign in again, Discover lists it under Needs attention, and the page says so with one button.
   - Every view is checked in light, dark and glass and at phone width, with no protocol words.
+
+## An app's errors reach the agent intact (2026-11-02, `app-errors`)
+
+- The connectors spec, Remote MCP connectors: "Provider errors, rate limits and retry-after included, return to the agent intact as tool errors, with no retry by the client."
+- An app's HTTP refusal reached the agent as its status and the first 300 characters of its body, without `Retry-After`. A refusal while opening the session gave only the status. An app's JSON-RPC error kept its message but lost its code and data. So an agent told to slow down could not know for how long.
+- Now each HTTP refusal reads "HTTP 429 Too Many Requests; it asks to wait 42 seconds before trying again: <what the app said>", or "until <date>" for a date (`apps.rs` `refused`). This applies whether it came while starting the session or on the call. An app's own error keeps its code, message and data.
+- Nothing retries: the call reaches the app once, and the agent decides whether and when to try again. A call whose outcome is unknown (sent, then the connection lost) is still reconciled as before, which is not a retry of a refusal.
+- Tests (app_errors.rs):
+  - `a_rate_limit_reaches_the_agent_with_its_wait_and_is_not_retried`;
+  - `an_apps_own_error_reaches_the_agent_with_its_code_message_and_data`.
+  - In both, the app sees the call once.

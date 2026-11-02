@@ -26,6 +26,8 @@ pub struct AppState {
     refresh: HashSet<String>,
     pub revoked: Vec<String>,
     pub refreshes: usize,
+    /// Every tools/call that reached it, answered or refused.
+    pub attempts: usize,
     pub calls: Vec<(String, Value)>,
     /// Seconds each access token lasts.
     pub expires_in: i64,
@@ -44,6 +46,10 @@ pub struct AppState {
     scopes: HashMap<String, String>,
     /// The account a sign-in is to, named in an ID token beside the tokens.
     pub account: Option<String>,
+    /// Calls are refused for exceeding its rate, asking to wait this many seconds.
+    pub rate_limited: Option<u64>,
+    /// Calls fail with this JSON-RPC error: code, message, data.
+    pub rpc_error: Option<(i64, String, Value)>,
     /// Tools it no longer lists: retired from the app.
     pub retired: Vec<String>,
     /// Answer refreshes without `expires_in` (it is only recommended).
@@ -97,6 +103,13 @@ async fn mcp(State((base, st)): S, h: HeaderMap, Json(req): Json<Value>) -> Resp
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or_default().to_string();
             let mut s = st.lock().unwrap();
+            s.attempts += 1;
+            if let Some(wait) = s.rate_limited {
+                return Response::builder().status(429).header("retry-after", wait.to_string()).body(Body::from("Rate limit exceeded: 100 requests per minute.")).unwrap();
+            }
+            if let Some((code, message, data)) = s.rpc_error.clone() {
+                return Json(json!({ "jsonrpc": "2.0", "id": req["id"], "error": { "code": code, "message": message, "data": data } })).into_response();
+            }
             if let Some(need) = s.share_scope.clone().filter(|_| name == "share_calendar") {
                 let held = s.scopes.get(token).cloned().unwrap_or_default();
                 if !held.split_whitespace().any(|x| x == need) {

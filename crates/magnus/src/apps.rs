@@ -112,9 +112,10 @@ impl Mcp {
                     return Err(CallError::NeedsScope(scopes));
                 }
             }
+            let headers = resp.headers().clone();
             let text = resp.text().await.unwrap_or_default();
             // An HTTP-level rejection means the server did not run the tool.
-            return Err(CallError::NotSent(format!("app returned HTTP {status}: {}", text.chars().take(300).collect::<String>())));
+            return Err(CallError::NotSent(refused("app returned", status, &headers, &text)));
         }
         let sse = resp
             .headers()
@@ -135,7 +136,9 @@ impl Mcp {
             serde_json::from_str(&text).map_err(|_| CallError::Unknown("response is not JSON".into()))?
         };
         if let Some(err) = msg.get("error") {
-            return Err(CallError::NotSent(format!("app error: {}", err["message"].as_str().unwrap_or("unknown"))));
+            // The app's own error, as it gave it: its code, message and data.
+            let data = err.get("data").filter(|d| !d.is_null()).map(|d| format!(" ({})", d.to_string().chars().take(300).collect::<String>())).unwrap_or_default();
+            return Err(CallError::NotSent(format!("app error {}: {}{data}", err["code"], err["message"].as_str().unwrap_or("unknown"))));
         }
         Ok(Some(msg["result"].clone()))
     }
@@ -158,7 +161,9 @@ impl Mcp {
             return Err(CallError::NotSent(UNAUTHORIZED.into()));
         }
         if !resp.status().is_success() {
-            return Err(CallError::NotSent(format!("app refused initialize: HTTP {}", resp.status())));
+            let (status, headers) = (resp.status(), resp.headers().clone());
+            let text = resp.text().await.unwrap_or_default();
+            return Err(CallError::NotSent(refused("app refused to start a session:", status, &headers, &text)));
         }
         s.id = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()).map(String::from);
         let _ = resp.text().await;
@@ -253,6 +258,23 @@ impl Mcp {
             is_error: r["isError"].as_bool().unwrap_or(false),
         })
     }
+}
+
+/// An app's HTTP refusal as the agent reads it, intact: the status, how long
+/// the app asks to wait before trying again (`Retry-After`, in seconds or as
+/// a date), and what it said. Nothing here retries: the agent decides.
+fn refused(what: &str, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap, body: &str) -> String {
+    let wait = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .map(|v| match v.parse::<u64>() {
+            Ok(s) => format!("; it asks to wait {s} seconds before trying again"),
+            Err(_) => format!("; it asks to wait until {v} before trying again"),
+        })
+        .unwrap_or_default();
+    let said = body.trim().chars().take(300).collect::<String>();
+    format!("{what} HTTP {status}{wait}{}", if said.is_empty() { String::new() } else { format!(": {said}") })
 }
 
 /// Hash of a tool definition, for pinning (B10).
