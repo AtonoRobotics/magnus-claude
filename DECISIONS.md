@@ -966,3 +966,11 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - The failure pages ("The sign-in did not finish. Return to Magnus.") are unchanged.
 - With the relay, its own page says the same (Relay, not built).
 - Test: the installed-app connect test (`the_owner_connects_an_app_from_settings_and_reapproves_a_changed_tool`). The test's browser (`sign-in-browser.mjs`) now writes what the page it ended on said beside the sign-in-as file, and the test checks it reads "Connected, return to Magnus."
+## Org context, step 2: the index in every run (2026-11-02, `org-context-2`)
+
+- Every run carries the organisation's top index (`/index.md`) as its person may see it, then their own notes' index (`/users/<person>/index.md`), ahead of the task (org context build spec, Context assembly: system prompt, rendered index, task). A line whose links all point at what the person cannot see is dropped, and such a link loses its target (K2).
+- The index a run carries is the version there when the run began, so a run's context only grows at its end and provider caches stay valid (C1); a run begun before an index existed carries none. Rendered indexes are cached per person, keyed by the versions they came from and the bundle's latest write, so any write renders afresh.
+- Both system prompts describe the bundle as part of Magnus's environment (what it holds, the three tools, that it says where to look and what was learned, not what is true), the same for every run; they say nothing about the organisation. The knowledge base and the playbook stay in context until steps 3 and 9 move them.
+- Relationship memory, in context by code (owner's ruling), comes with per-user memory (step 3).
+- Test: `each_run_carries_the_index_its_person_may_see_as_it_was_when_the_run_began` (org_context_index.rs): Bob's run shows the type he may see and not Acme, nor Alice's notes, ahead of his task; Alice's shows Acme and her notes after the org's index; a run waiting since before the index existed keeps the first message it began with.
+

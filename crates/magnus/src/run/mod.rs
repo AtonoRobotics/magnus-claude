@@ -100,6 +100,12 @@ impl Kernel {
             }
             _ => {}
         }
+        // The organisation's context index (before the task: the spec's order), as the person may see it, and
+        // their own notes' index (org context build spec, Context assembly).
+        let index = self.rendered_index(&run.person, run.created_at).await?;
+        if !index.is_empty() {
+            first.push(Block::Text { text: format!("The organisation's context index, as this person may see it (bundle /index.md):\n\n{index}") });
+        }
         // The person's apps, as they stand at this call, before what they said (connectors spec,
         // How the agent uses connectors: "the context always holds the
         // user's connector index").

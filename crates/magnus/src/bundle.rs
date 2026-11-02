@@ -368,7 +368,50 @@ impl Kernel {
     }
 }
 
+/// Rendered indexes, per person and per the documents they were rendered
+/// from: any write to the bundle makes a new key, so nothing stale is reused.
+fn index_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(String, i64, i64, i64), String>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(String, i64, i64, i64), String>>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
 impl Kernel {
+    /// The top index as `person` may see it, with their own memory index
+    /// after it (org context build spec, Context assembly): each as it stood
+    /// at `at`, the run's start, so a run's context only grows at its end
+    /// (C1). Lines whose links are all to what they cannot see are dropped,
+    /// and such links removed (K2). Empty when there is no index yet.
+    pub async fn rendered_index(&self, person: &str, at: chrono::DateTime<chrono::Utc>) -> anyhow::Result<String> {
+        let as_of = |path: &str| self.read(|s| s.bundle.get(path).and_then(|d| d.versions.iter().rev().find(|v| v.2 <= at).map(|v| v.1)));
+        let root = as_of("/index.md").unwrap_or(0);
+        let mine = as_of(&format!("/users/{person}/index.md")).unwrap_or(0);
+        if root == 0 && mine == 0 {
+            return Ok(String::new());
+        }
+        let generation = self.read(|s| s.bundle.values().map(|d| d.seq()).max().unwrap_or(0));
+        let key = (person.to_string(), root, mine, generation);
+        if let Some(hit) = index_cache().lock().unwrap().get(&key) {
+            return Ok(hit.clone());
+        }
+        let seqs: Vec<i64> = [root, mine].into_iter().filter(|s| *s > 0).collect();
+        let c = self.log.contents(&seqs).await?;
+        let body = |seq: i64| c.get(&seq).and_then(|v| v["body"].as_str().map(String::from)).unwrap_or_default();
+        let mut out = vec![];
+        if root > 0 {
+            out.push(self.without_hidden_links(person, &body(root)));
+        }
+        if mine > 0 {
+            out.push(format!("Your notes for this person (/users/{person}/index.md):\n{}", self.without_hidden_links(person, &body(mine))));
+        }
+        let text = out.join("\n\n").trim().to_string();
+        let mut cache = index_cache().lock().unwrap();
+        if cache.len() > 1000 {
+            cache.clear();
+        }
+        cache.insert(key, text.clone());
+        Ok(text)
+    }
+
     /// One of the bundle tools, for the run's person: what it says back,
     /// whether it is an error, and the taint of what it returned (read by
     /// the boundary, as for a knowledge search).
