@@ -76,7 +76,9 @@ async fn an_admin_renews_the_consoles_certificate_and_sees_why_it_could_not_be_i
     let url = p.url();
     let c = launch(p).await;
     eventually("the trusted certificate served", PATIENCE, || async { presented(&c, ts.public_ca()).await.ok() }).await;
-    let b = browser(&c, false);
+    // An admin's browser trusts the public CA, as any does, and the
+    // organisation's own: the hostname gets the tailnet's certificate now.
+    let b = reqwest::Client::builder().add_root_certificate(c.ca.clone()).add_root_certificate(ts.public_ca()).resolve(HOST, c.addr).no_proxy().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let sid = sign_in(&url, c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
     let me: Value = with_cookie(b.get(format!("{url}/api/v1/session")), &sid).send().await.unwrap().json().await.unwrap();
     let csrf = me["csrf"].as_str().unwrap().to_string();
