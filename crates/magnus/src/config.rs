@@ -124,6 +124,15 @@ pub struct Admin {
     /// still name the public issuer.
     #[serde(default)]
     pub idp_internal: Option<String>,
+    /// Where the provider's admin API answers, when the server keeps it on
+    /// an origin of its own (Keycloak's `hostname-admin`, such as
+    /// `https://127.0.0.1:19446`), and the PEM CA its certificate is from.
+    /// Unset: the appliance's own `sign_in.oidc.status_admin_url` and
+    /// `status_admin_ca`, the same server's; else the issuer's host.
+    #[serde(default)]
+    pub idp_admin_url: Option<String>,
+    #[serde(default)]
+    pub idp_admin_ca: Option<PathBuf>,
     /// A session ends after this long unused, and after `session_hours`.
     #[serde(default = "admin_idle_minutes")]
     pub idle_minutes: u32,

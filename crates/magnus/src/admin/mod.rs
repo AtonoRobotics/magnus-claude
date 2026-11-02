@@ -130,7 +130,11 @@ pub async fn serve(cfg: Config) -> Result<()> {
     let oidc = cfg.sign_in.oidc.as_ref();
     let issuer = a.issuer.clone().or_else(|| oidc.map(|o| o.issuer.clone())).context("the admin console signs in through the organisation's identity provider: set sign_in.oidc or admin.issuer")?;
     let roles_claim = oidc.and_then(|o| o.roles_claim.clone()).unwrap_or_else(|| "/realm_access/roles".into());
-    let directory = directory::Directory::new(&issuer, a.service_client_id.clone());
+    // The admin API's own origin: the console's setting, else the
+    // appliance's, which reaches the same server for the same reason.
+    let admin_url = a.idp_admin_url.clone().or_else(|| oidc.and_then(|o| o.status_admin_url.clone()));
+    let admin_ca = a.idp_admin_ca.clone().or_else(|| oidc.and_then(|o| o.status_admin_ca.clone()));
+    let directory = directory::Directory::new(&issuer, a.service_client_id.clone(), admin_url.as_deref(), admin_ca.as_deref());
     let console = Arc::new(Console {
         hostname: a.hostname.to_ascii_lowercase(),
         aliases: a.aliases.iter().map(|x| x.to_ascii_lowercase()).collect(),
