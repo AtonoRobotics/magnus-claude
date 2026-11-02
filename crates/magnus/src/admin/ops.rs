@@ -119,6 +119,9 @@ pub async fn overview(State(c): State<Arc<Console>>) -> Response {
         alerts.push(json!({ "what": format!("The disk is {:.0}% full.", h["disk_used"].as_f64().unwrap_or(0.0) * 100.0), "fix": "#/operations/health" }));
     }
     alerts.extend(alerts_extra);
+    if let Some(e) = c.tls.error.read().unwrap().clone() {
+        alerts.push(json!({ "what": format!("The console's trusted certificate could not be issued: {e}"), "fix": "#/operations/network" }));
+    }
     let certs = certificates(&c);
     for x in &certs {
         if let Some(days) = x["days_left"].as_i64().filter(|d| *d < 14) {
@@ -296,8 +299,28 @@ pub async fn network(State(c): State<Arc<Console>>, Extension(a): Extension<Admi
         "allow": *c.allow_text.read().unwrap(),
         "you": a.peer.ip().to_string(),
         "certificates": certificates(&c),
+        "trusted": trusted(&c),
     }))
     .into_response()
+}
+
+/// How the console's trusted certificate is had, whether browsers naming
+/// its hostname get it yet, and why not.
+fn trusted(c: &Console) -> Value {
+    json!({ "via": c.tls.via(), "serving": c.tls.certs.has_trusted(), "error": *c.tls.error.read().unwrap() })
+}
+
+/// Operations › Network › Renew: the organisation's certificate read again,
+/// and the trusted one issued or renewed; served from the next connection.
+/// Recorded first; a failure is recorded with what was said.
+pub async fn renew_certificate(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>) -> Response {
+    let ends = |c: &Console| json!(certificates(c).iter().map(|x| json!({ "what": x["what"], "not_after": x["not_after"] })).collect::<Vec<_>>());
+    let before = json!({ "certificates": ends(&c) });
+    let renew = async { c.tls.renew().await.map(|_| Value::Null) };
+    match recorded(&c, &a, "certificate_renewed", "certificates", Some(before), None, renew).await {
+        Ok(_) => Json(json!({ "certificates": certificates(&c), "trusted": trusted(&c) })).into_response(),
+        Err(r) => r,
+    }
 }
 
 /// Change the subnets the console takes connections from: a fresh password

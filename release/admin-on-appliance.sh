@@ -22,7 +22,10 @@
 #     100.64.0.0/10);
 #   - the certificate: from the organisation's own CA, made here (its key
 #     owner-only, beside CONFIG in admin-tls/), naming every name it answers
-#     to; the owner trusts the CA once on their computers;
+#     to; and on a tailnet, for its name there, one browsers already trust,
+#     which the console has issued through tailscaled and renews (this
+#     user may ask tailscaled for it: `tailscale set --operator`; the
+#     tailnet needs HTTPS turned on, in its admin console under DNS);
 #   - the console's own database role, with a password made here once.
 # Then, each time: the role in the database (`magnus migrate`), the
 # console's client and service account in the realm and the realm role
@@ -99,6 +102,11 @@ chmod 600 "$tls"/*.key
 
 [ "$only" = --config-only ] && exit 0
 
+# The console, as this user, may have tailscaled issue its certificate.
+if [ -n "$tsname" ] && [ "$managed" != no ]; then
+  sudo -n tailscale set --operator="$(id -un)" || echo "tailscale set --operator failed: the console keeps the organisation's own certificate"
+fi
+
 # The console's database role (and the log's tables, as each release does).
 if [ -r "$here/admin-url" ]; then
   "$programs/magnus" migrate --config "$config" --admin-url "$(cat "$here/admin-url")"
@@ -161,8 +169,11 @@ fi
 # What a person needs to reach it.
 echo "The admin console, at any of these on the organisation's network or the tailnet:"
 for n in "${names[@]}"; do echo "  https://$n:$port/"; done
+if [ -n "$tsname" ] && [ "$managed" != no ]; then
+  echo "At https://$tsname:$port/ browsers already trust its certificate once the tailnet issues it (Operations › Network says whether it has, and why not)."
+fi
 if [ -f "$tls/ca.pem" ]; then
-  echo "Trust this CA once on each computer that opens the console (it is public):"
+  echo "At its other names, trust this CA once on each computer that opens the console (it is public):"
   cat "$tls/ca.pem"
   echo "SHA-256 fingerprint: $(openssl x509 -in "$tls/ca.pem" -noout -fingerprint -sha256 | cut -d= -f2)"
 fi

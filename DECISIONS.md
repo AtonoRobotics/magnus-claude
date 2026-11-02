@@ -757,3 +757,22 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
     - the four screens in every look and at phone width.
   - `an_id_is_one_segment_and_never_leaves_the_bundle` and `okf_text_splits_into_frontmatter_and_body` (admin/knowledge.rs).
 - At phone width the two-column screens (Ontology, Agent policy) are one column of `minmax(0, 1fr)`, as on wide screens, not `1fr`: a plain `1fr` grew to its widest child, so a type's history, with a run id or an author's id as one unbroken word, made the screen scroll sideways by 116px (#85's first CI run). Its tables now scroll inside their own box, as the console's other wide tables do, and long ids in tables wrap.
+
+## The admin console's trusted certificate: issued through the tailnet (2026-11-02, `admin-certificate`)
+
+- The spec (Access): "a certificate browsers already trust: ACME DNS-01 under a domain the organisation controls, or the organisation's own CA". Until now the console had only a CA made on the appliance, which the owner had to trust by hand on each computer.
+- Chosen: `admin.trusted_via = "tailscale"`. The owner reaches strix-alpha over Tailscale ("not found over tailscale"), and its name there (strix-alpha.tailfc1d45.ts.net) is the console's hostname. `tailscale cert` has Let's Encrypt issue a certificate for that name by ACME DNS-01, under the tailnet's domain, with tailscaled answering the challenge.
+  - No secret is needed. ACME DNS-01 under pyrallon.ai would need a Cloudflare API token in the repository; that stays possible later as another `trusted_via`.
+  - The organisation's own CA stays as it was: `tls_cert` without `trusted_via`. Renew reads it again once the organisation has renewed it.
+- How it is served (`admin/net.rs` `Certs`, `admin/trusted.rs`):
+  - by name: browsers naming the hostname get the trusted certificate once it is issued; the LAN and tailnet addresses, and every name until then, get the CA's;
+  - swapped while the console runs, from the next handshake, with no restart;
+  - asked for on start when it is not yet issued, every twelve hours when fewer than 30 days are left, and on Operations › Network › Renew (`POST /api/v1/network/certificate/renew`, audited as `certificate_renewed`, or `certificate_renewed_failed` with what tailscale said).
+- A failure never stops the console. It keeps what it serves; Overview's alerts and Operations › Network give tailscale's reason. The likely one on a new tailnet: HTTPS is off. The owner turns it on in Tailscale's admin console under DNS.
+- The setup script writes `trusted_via` when the machine is on a tailnet. It lets its own user ask tailscaled for the certificate (`sudo tailscale set --operator`), because the console runs as that user.
+- No step-up for Renew: it changes no setting and serves only a certificate for the console's own name.
+- Tests:
+  - `the_console_serves_the_tailnets_certificate_for_its_hostname_and_its_own_until_then` (admin_certificate.rs, against a stand-in for `tailscale cert` whose CA stands for Let's Encrypt): a browser trusting only that CA opens the console by its hostname, and is shown the issued certificate; a restart serves it at once without asking again; with HTTPS off, the console still starts, on the CA's;
+  - `an_admin_renews_the_consoles_certificate_and_sees_why_it_could_not_be_issued` (Keycloak): a failed Renew keeps what is served, gives tailscale's reason in the answer, on Network and as an alert; a successful one is served from the next connection; both are audited; the screen in every look;
+  - `the_setup_writes_an_admin_console_that_answers_its_hostname_on_the_network_only`, extended: the setup's config gets the tailnet's certificate for the Tailscale name, and the address keeps the CA's;
+  - `the_trusted_certificate_answers_for_the_hostname_alone_once_issued` and `a_key_that_is_not_the_certificates_is_refused` (admin/net.rs).

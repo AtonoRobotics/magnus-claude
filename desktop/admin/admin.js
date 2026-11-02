@@ -459,7 +459,16 @@ async function opsNetwork(box) {
       <p class="small muted">One subnet a line, such as 192.168.0.0/24, and the VPN's, such as 100.64.0.0/10. Never loopback. Saving asks for your password again.</p>
       <p class="error" id="net-error" hidden></p><div class="row"><button class="primary">Save</button></div></form>
     <h3>Certificates</h3>
-    <table class="t small"><thead><tr><th>For</th><th>Ends</th><th></th></tr></thead><tbody>${n.certificates.map(c => `<tr><td>${esc(c.what)}</td><td>${c.not_after ? esc(when(c.not_after)) : "unreadable"}</td><td>${c.days_left == null ? "" : c.days_left < 14 ? `<span class="chip bad">${esc(c.days_left)} days left</span>` : `<span class="chip ok">${esc(c.days_left)} days left</span>`}</td></tr>`).join("")}</tbody></table>`;
+    <p class="small" id="net-trusted">${!n.trusted.via ? "The console's certificate is the organisation's own, from its CA: computers that open the console trust that CA. Renew reads it again once the organisation has renewed it."
+      : n.trusted.serving ? `<span class="chip ok">Trusted</span> Browsers opening <span class="mono">${esc(n.admin.hostname)}</span> get a certificate they already trust, issued through the tailnet (Let's Encrypt) and renewed before it ends. Its other names get the organisation's own.`
+      : `<span class="chip bad">Not issued</span> Browsers get the organisation's own certificate until the tailnet issues the trusted one${n.trusted.error ? `: ${esc(n.trusted.error)}` : "."}`}</p>
+    <table class="t small"><thead><tr><th>For</th><th>Ends</th><th></th></tr></thead><tbody>${n.certificates.map(c => `<tr><td>${esc(c.what)}</td><td>${c.not_after ? esc(when(c.not_after)) : c.what.includes("trusted") ? "not issued yet" : "unreadable"}</td><td>${c.days_left == null ? "" : c.days_left < 14 ? `<span class="chip bad">${esc(c.days_left)} days left</span>` : `<span class="chip ok">${esc(c.days_left)} days left</span>`}</td></tr>`).join("")}</tbody></table>
+    <div class="row"><button id="net-renew">Renew</button></div>`;
+  $("#net-renew", box).onclick = async e => {
+    e.target.disabled = true;
+    try { await api("POST", "/network/certificate/renew"); UI.toast("The certificates are renewed: the next connection gets them."); opsNetwork(box); }
+    catch (err) { e.target.disabled = false; UI.toast(`The certificates could not be renewed: ${err.message}`); }
+  };
   $("#net-allow", box).onsubmit = async e => {
     e.preventDefault();
     const allow = new FormData(e.target).get("allow").split(/[\n,]/).map(x => x.trim()).filter(Boolean);

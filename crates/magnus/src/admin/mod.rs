@@ -22,6 +22,7 @@ pub mod ops;
 pub mod policy;
 pub mod session;
 pub mod signin;
+pub mod trusted;
 pub mod users;
 
 use crate::config::Config;
@@ -71,6 +72,8 @@ pub struct Console {
     pub listen: Vec<String>,
     pub tunnel_ready: Option<String>,
     pub public_hostnames: Vec<String>,
+    /// The certificates it serves, renewed while it runs.
+    pub tls: Arc<trusted::Tls>,
 }
 
 impl Console {
@@ -123,7 +126,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
     for alias in &a.aliases {
         anyhow::ensure!(valid_host(alias), "admin.aliases: {alias:?} is not a hostname or an address");
     }
-    let tls = net::tls(&a.tls_cert, &a.tls_key)?;
+    let tls = Arc::new(trusted::Tls::new(&a)?);
     let oidc = cfg.sign_in.oidc.as_ref();
     let issuer = a.issuer.clone().or_else(|| oidc.map(|o| o.issuer.clone())).context("the admin console signs in through the organisation's identity provider: set sign_in.oidc or admin.issuer")?;
     let roles_claim = oidc.and_then(|o| o.roles_claim.clone()).unwrap_or_else(|| "/realm_access/roles".into());
@@ -142,7 +145,11 @@ pub async fn serve(cfg: Config) -> Result<()> {
         kernel: kernel::Kernel { path: crate::control::socket_path(&cfg.appliance.state_dir) },
         state_dir: cfg.appliance.state_dir.clone(),
         directory,
-        certs: [("The admin console's certificate".to_string(), Some(a.tls_cert.clone())), ("The appliance's certificate".to_string(), cfg.appliance.tls_cert.clone())]
+        certs: [
+            ("The admin console's trusted certificate".to_string(), tls.trusted_path()),
+            ("The admin console's certificate".to_string(), Some(a.tls_cert.clone())),
+            ("The appliance's certificate".to_string(), cfg.appliance.tls_cert.clone()),
+        ]
             .into_iter()
             .filter_map(|(what, p)| p.map(|p| (what, p)))
             .collect(),
@@ -151,13 +158,15 @@ pub async fn serve(cfg: Config) -> Result<()> {
         listen: a.listen.clone(),
         tunnel_ready: a.tunnel_ready.clone(),
         public_hostnames: a.public_hostnames.clone(),
+        tls: tls.clone(),
     });
     // Lifetimes an admin set before this start.
     if let Ok(v) = console.kernel.call(axum::http::Method::GET, "/v1/admin/console-settings", None).await {
         signin::adopt(&console, &v);
         ops::adopt_allow(&console, &v);
     }
-    let l = net::Listener::bind(&addrs, allow, tls).await?;
+    let l = net::Listener::bind(&addrs, allow, net::tls(tls.certs.clone())?).await?;
+    tls.keep();
     // tap_io gives the listener axum's connect-info: each request's source,
     // for the audit log.
     use axum::serve::ListenerExt;
@@ -220,6 +229,7 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/api/v1/updates/desktop-channel", axum::routing::patch(ops::desktop_channel))
         .route("/api/v1/network", get(ops::network))
         .route("/api/v1/network/allowlist", axum::routing::patch(ops::set_allowlist))
+        .route("/api/v1/network/certificate/renew", axum::routing::post(ops::renew_certificate))
         .route("/api/v1/ontology/types", get(knowledge::types).post(knowledge::create_type))
         .route("/api/v1/ontology/types/merge", axum::routing::post(knowledge::merge_types))
         .route("/api/v1/ontology/types/{id}", get(knowledge::get_type).patch(knowledge::edit_type).delete(knowledge::delete_type))

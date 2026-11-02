@@ -116,15 +116,68 @@ pub fn allowed(allow: &[Subnet], peer: IpAddr) -> bool {
     !peer.is_loopback() && !peer.is_unspecified() && allow.iter().any(|s| s.contains(peer))
 }
 
-/// TLS 1.3 only, with the organisation's certificate.
-pub fn tls(cert: &std::path::Path, key: &std::path::Path) -> Result<rustls::ServerConfig> {
+/// A certificate and its key, read from PEM files, checked to belong
+/// together.
+pub fn certified(cert: &std::path::Path, key: &std::path::Path) -> Result<Arc<rustls::sign::CertifiedKey>> {
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert).with_context(|| format!("read {}", cert.display()))?.collect::<std::result::Result<_, _>>()?;
+    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert).with_context(|| format!("read {}", cert.display()))?.collect::<std::result::Result<_, _>>().with_context(|| format!("read {}", cert.display()))?;
     anyhow::ensure!(!chain.is_empty(), "{} holds no certificate", cert.display());
-    let key = PrivateKeyDer::from_pem_file(key).with_context(|| format!("read {}", key.display()))?;
+    let key_der = PrivateKeyDer::from_pem_file(key).with_context(|| format!("read {}", key.display()))?;
+    let k = rustls::sign::CertifiedKey::from_der(chain, key_der, &rustls::crypto::ring::default_provider()).with_context(|| format!("{} and {} do not make a certificate and its key", cert.display(), key.display()))?;
+    Ok(Arc::new(k))
+}
+
+/// The certificates the console serves, by the name a browser asks for:
+/// the trusted one (`admin.trusted_via`) for the console's hostname once it
+/// is issued, the organisation's own for every other name. Either is
+/// replaced while the console runs, for the next handshake.
+#[derive(Debug)]
+pub struct Certs {
+    hostname: String,
+    own: std::sync::RwLock<Arc<rustls::sign::CertifiedKey>>,
+    trusted: std::sync::RwLock<Option<Arc<rustls::sign::CertifiedKey>>>,
+}
+
+impl Certs {
+    pub fn new(hostname: &str, own: Arc<rustls::sign::CertifiedKey>) -> Arc<Certs> {
+        Arc::new(Certs { hostname: hostname.to_ascii_lowercase(), own: std::sync::RwLock::new(own), trusted: std::sync::RwLock::new(None) })
+    }
+
+    pub fn set_own(&self, k: Arc<rustls::sign::CertifiedKey>) {
+        *self.own.write().unwrap() = k;
+    }
+
+    pub fn set_trusted(&self, k: Arc<rustls::sign::CertifiedKey>) {
+        *self.trusted.write().unwrap() = Some(k);
+    }
+
+    /// Whether the trusted certificate is being served.
+    pub fn has_trusted(&self) -> bool {
+        self.trusted.read().unwrap().is_some()
+    }
+
+    fn pick(&self, name: Option<&str>) -> Arc<rustls::sign::CertifiedKey> {
+        if let Some(t) = self.trusted.read().unwrap().clone() {
+            if name.is_some_and(|n| n.eq_ignore_ascii_case(&self.hostname)) {
+                return t;
+            }
+        }
+        self.own.read().unwrap().clone()
+    }
+}
+
+impl rustls::server::ResolvesServerCert for Certs {
+    fn resolve(&self, hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(self.pick(hello.server_name()))
+    }
+}
+
+/// TLS 1.3 only, with the certificates `certs` holds as each handshake
+/// begins.
+pub fn tls(certs: Arc<Certs>) -> Result<rustls::ServerConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut cfg = rustls::ServerConfig::builder_with_provider(provider).with_protocol_versions(&[&rustls::version::TLS13])?.with_no_client_auth().with_single_cert(chain, key)?;
+    let mut cfg = rustls::ServerConfig::builder_with_provider(provider).with_protocol_versions(&[&rustls::version::TLS13])?.with_no_client_auth().with_cert_resolver(certs);
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(cfg)
 }
@@ -232,5 +285,41 @@ mod tests {
         let allow = allowlist(&["192.168.1.0/24".to_string(), "10.8.0.0/24".to_string()]).unwrap();
         assert!(allowed(&allow, ip("10.8.0.5")) && !allowed(&allow, ip("10.9.0.5")));
         assert!(!allowed(&allow, ip("127.0.0.1")) && !allowed(&allow, ip("::1")));
+    }
+
+    fn key_for(name: &str) -> Arc<rustls::sign::CertifiedKey> {
+        let c = rcgen::generate_simple_self_signed(vec![name.to_string()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (cp, kp) = (dir.path().join("c.pem"), dir.path().join("k.pem"));
+        std::fs::write(&cp, c.cert.pem()).unwrap();
+        std::fs::write(&kp, c.key_pair.serialize_pem()).unwrap();
+        certified(&cp, &kp).unwrap()
+    }
+
+    #[test]
+    fn the_trusted_certificate_answers_for_the_hostname_alone_once_issued() {
+        let (own, trusted) = (key_for("admin.acme.internal"), key_for("admin.tail1234.ts.net"));
+        let certs = Certs::new("Admin.tail1234.ts.net", own.clone());
+        assert!(Arc::ptr_eq(&certs.pick(Some("admin.tail1234.ts.net")), &own), "nothing issued yet: the organisation's own");
+        certs.set_trusted(trusted.clone());
+        assert!(certs.has_trusted());
+        assert!(Arc::ptr_eq(&certs.pick(Some("ADMIN.tail1234.ts.net")), &trusted));
+        for other in [Some("192.168.1.10"), Some("admin.local"), None] {
+            assert!(Arc::ptr_eq(&certs.pick(other), &own), "{other:?}");
+        }
+        let renewed = key_for("admin.acme.internal");
+        certs.set_own(renewed.clone());
+        assert!(Arc::ptr_eq(&certs.pick(None), &renewed), "a renewed certificate is served at the next handshake");
+    }
+
+    #[test]
+    fn a_key_that_is_not_the_certificates_is_refused() {
+        let (a, b) = (rcgen::generate_simple_self_signed(vec!["a".into()]).unwrap(), rcgen::generate_simple_self_signed(vec!["b".into()]).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (cp, kp) = (dir.path().join("c.pem"), dir.path().join("k.pem"));
+        std::fs::write(&cp, a.cert.pem()).unwrap();
+        std::fs::write(&kp, b.key_pair.serialize_pem()).unwrap();
+        assert!(certified(&cp, &kp).is_err());
+        assert!(certified(&dir.path().join("missing.pem"), &kp).is_err());
     }
 }
