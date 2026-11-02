@@ -863,3 +863,15 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Only that person signs in to their app. Someone else who decides it (an approver with the role) sees the card with where the person stands, and no button: a sign-in is always the person's own.
 - The kernel's own tools have no card.
 - Test: `an_approval_for_an_apps_action_carries_the_apps_card_as_the_person_stands_with_it` (approval_app_card.rs): the card while Carol is connected; after the app refuses her sign-in, it asks her to sign in again; in the app (`approval-app-card.mjs`), Carol gets the button and Alice, who decides, gets the state and the decision, in every look and at phone width.
+
+## Tools searched across connectors, loaded on demand (2026-11-02, `tool-search`)
+
+- The connectors spec, How the agent uses connectors: "Index, then load", and "tools searched across connectors and full schemas loaded on demand". Every run was offered the full definition of every tool of every app the person had connected. A dozen apps can bring hundreds of tools: every model call pays for all of them, and the model chooses worse among so many.
+- Up to `LOAD_ALL` (40) tools across the person's connected apps, a run is offered all of them, as before: most people connect a few apps, and searching would only cost them a step.
+- Past it, a run is offered none at first, and the builtin `find_tools` instead. It searches the run's app tools by words in their names and descriptions, best first, up to eight, and answers with each one's name and what it does. From the run's next step those tools are offered with their full definitions, for the rest of the run.
+- What a run found is read back from its own `find_tools` results in the log, so no new event is needed, and a run picked up after a restart keeps what it found.
+- The verifier still sees every tool the run may use (`every_tool_for`), since a criterion's check may name one the agent never searched for.
+- Every call still passes the boundary as before: a tool not yet found is only not offered, never permitted or refused differently.
+- Tests (tool_search.rs):
+  - `past_the_limit_a_run_is_offered_the_tools_it_finds_and_they_go_through`: 45 tools; the first step has `find_tools` and no app tool; "calendar events" finds `list_events`; from the next step it alone of the app's tools is offered, with its definition, and its call goes through.
+  - `within_the_limit_every_tool_is_offered_and_there_is_nothing_to_find`.

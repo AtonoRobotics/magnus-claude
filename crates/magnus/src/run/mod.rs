@@ -223,6 +223,16 @@ impl Kernel {
     /// and the person's classified app tools with pinned definitions.
     /// A chat turn is offered only the tools that read, and the chat tools.
     pub async fn tools_for(&self, run: &Run) -> Vec<ToolSpec> {
+        self.offered(run, false).await
+    }
+
+    /// Every tool the run may use, found or not: what the verifier may
+    /// call to check a criterion.
+    pub async fn every_tool_for(&self, run: &Run) -> Vec<ToolSpec> {
+        self.offered(run, true).await
+    }
+
+    async fn offered(&self, run: &Run, every: bool) -> Vec<ToolSpec> {
         let chat = self.is_chat_turn(run);
         let mut specs = tools::builtin_specs(self.sandboxes.available(), self.web.can_search(), self.browser.available());
         if chat {
@@ -233,6 +243,62 @@ impl Kernel {
         if !self.read(|s| s.tasks.get(&run.task).and_then(|t| t.project.as_ref()).is_some_and(|p| !p.files.is_empty())) {
             specs.retain(|t| t.name != "project_read");
         }
+        let apps = self.app_tool_specs(run, chat).await;
+        if apps.len() > tools::LOAD_ALL && !every {
+            let found = self.found_tools(run);
+            specs.extend(apps.into_iter().filter(|t| found.contains(&t.name)));
+            specs.push(tools::find_tools_spec());
+        } else {
+            specs.extend(apps);
+        }
+        specs
+    }
+
+    /// The tools found by this run's `find_tools` calls.
+    pub fn found_tools(&self, run: &Run) -> std::collections::BTreeSet<String> {
+        self.read(|s| {
+            let Some(r) = s.runs.get(&run.id) else { return Default::default() };
+            r.intents
+                .values()
+                .filter(|i| i.tool == "find_tools")
+                .filter_map(|i| i.result.as_ref().filter(|res| !res.is_error).and_then(|res| res.data.as_ref()).and_then(|d| d["found"].as_array().cloned()))
+                .flatten()
+                .filter_map(|n| n.as_str().map(String::from))
+                .collect()
+        })
+    }
+
+    /// `find_tools`: the tools of the run's connected apps whose name or
+    /// description holds the words asked for, best first, at most eight;
+    /// from the next model call they are offered with their definitions.
+    pub async fn find_tools(&self, run: &Run, query: &str) -> Value {
+        let words: Vec<String> = query.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() > 2).map(String::from).collect();
+        let mut hits: Vec<(usize, ToolSpec)> = self
+            .app_tool_specs(run, self.is_chat_turn(run))
+            .await
+            .into_iter()
+            .map(|t| {
+                let hay = format!("{} {}", t.name.replace('_', " "), t.description).to_lowercase();
+                (words.iter().filter(|w| hay.contains(w.as_str())).count(), t)
+            })
+            .filter(|(n, _)| *n > 0)
+            .collect();
+        hits.sort_by(|a, b| b.0.cmp(&a.0));
+        hits.truncate(8);
+        if hits.is_empty() {
+            return json!({ "tools": [], "found": [], "note": "No tool of the person's connected apps matches. Try other words, or find_apps for an app they have not connected." });
+        }
+        let short = |d: &str| d.chars().take(300).collect::<String>();
+        json!({
+            "tools": hits.iter().map(|(_, t)| json!({ "name": t.name, "does": short(&t.description) })).collect::<Vec<_>>(),
+            "found": hits.iter().map(|(_, t)| t.name.clone()).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Every tool of the person's connected apps this run may use, with its
+    /// definition as reviewed.
+    async fn app_tool_specs(&self, run: &Run, chat: bool) -> Vec<ToolSpec> {
+        let mut specs = vec![];
         let Some(person) = self.person(&run.person) else { return specs };
         for c in self.connectors() {
             // An app people sign in to is offered only to a run whose
