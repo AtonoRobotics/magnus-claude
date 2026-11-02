@@ -202,7 +202,7 @@ one commit), 2026-11-02.
 - [x] Place a connector's card in chat, saying what it is for; suggest one for something it could automate; only the user completes a sign-in (`offer_app`; `agent_apps.rs`: the card with why, nothing connected until the person signs in; `chat-app-card.mjs` in every look and at phone width)
 - [x] Answers "can you work with my Gmail?" truthfully (the index says each app's state; `find_apps` says when nothing in the Library does it, and `offer_app` refuses an app outside it: `agent_apps.rs` `magnus_cannot_offer_an_app_outside_the_persons_library`)
 - [ ] Isolation of results: what comes through a connection is kept in the content store under its person and recalled only for them (the walls exist for requests, memory and files, `content_walls.rs`; no test for a connector's results)
-- [ ] Writing a connection's content into shared org memory passes policy like any other action (no connector-specific test)
+- [x] Writing a connection's content into shared org memory passes policy like any other action (`app_content_policy.rs`: a rule forbidding the knowledge base after private content refuses filing what Alice's calendar said, and lets web content through; who reads what is filed, `knowledge.rs` `nobody_retrieves_an_entry_they_may_not_read`)
 
 ## User experience
 
