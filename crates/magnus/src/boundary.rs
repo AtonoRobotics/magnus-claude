@@ -170,8 +170,36 @@ impl Kernel {
         self.record_from(a, key, status, text, is_error, label, sources, data).await
     }
 
+    /// The audit record of a call (K12), written with its result.
+    pub(crate) fn audit_event(&self, a: &Action, status: &str, data: Option<&Value>) -> Ev {
+        let requester = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
+        let f = facts(self, &a.tool);
+        let grant_of = |c: &Connector| match (c.auth.as_deref(), &c.credential) {
+            (Some(crate::connectors::OAUTH), _) => format!("{requester}'s own sign-in to {}", c.name),
+            (_, Some(_)) => format!("the organisation's key for {}", c.name),
+            _ => format!("{} (no credential)", c.name),
+        };
+        // The org tools reach sources themselves: the grant of each one used.
+        let grant = match f.as_ref().and_then(|f| f.connector.as_ref()) {
+            Some(c) => grant_of(c),
+            None => {
+                let used: Vec<String> = data.and_then(|d| d["apps"].as_array()).into_iter().flatten().filter_map(|x| x.as_str()).filter_map(|n| self.connector(n)).map(|c| grant_of(&c)).collect();
+                if used.is_empty() { "none".into() } else { used.join("; ") }
+            }
+        };
+        let items: Vec<String> = data.and_then(|d| d["items"].as_array()).into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
+        let documents: Vec<String> = match a.tool.as_str() {
+            t if t.starts_with("bundle_") || t.starts_with("memory_") => a.input["path"].as_str().map(|p| vec![p.to_string()]).unwrap_or_default(),
+            "entity_resolve" => data.and_then(|d| d["entities"].as_array()).into_iter().flatten().filter_map(|e| e["path"].as_str().map(String::from)).collect(),
+            _ => vec![],
+        };
+        let recipients = if f.as_ref().is_some_and(|f| f.risk.changes_state()) { crate::sources::recipients(&a.input) } else { vec![] };
+        Ev::Audit { run: a.run.clone(), call_id: a.call_id.clone(), tool: a.tool.clone(), requester, grant, items, documents, recipients, status: status.into() }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn record_from(&self, a: &Action, key: Option<String>, status: &str, text: String, is_error: bool, label: Label, sources: Vec<String>, data: Option<Value>) -> Result<Verdict> {
+        self.emit("kernel", self.audit_event(a, status, data.as_ref())).await?;
         // What the verifier reads taints the run like the model's own reads:
         // its words go back to the model.
         self.emit(
@@ -539,7 +567,7 @@ impl Kernel {
         let (untrusted, private) = if a.issuer == Issuer::Check { run.contract_taint } else { (run.untrusted, run.private) };
         let policies = self.read(|s| s.policies.clone());
         let facts = ToolFacts { name: &f.name, app: &f.app, risk: f.risk, audience: f.audience };
-        let outcome = policy::decide(&policies, person, &facts, untrusted, private)?;
+        let outcome = policy::decide(&policies, person, &facts, untrusted, private, &a.input)?;
         let mut ask = match outcome {
             Outcome::Deny { reason, rule } => return Ok(Err(self.deny(a, "policy", &reason, false, rule).await?)),
             Outcome::Ask { rule } => Some((format!("policy asks before {}", a.tool), Some(rule))),

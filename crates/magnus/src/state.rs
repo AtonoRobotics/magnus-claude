@@ -1617,6 +1617,8 @@ impl State {
                     );
                 }
             }
+            // The audit trail is read from the log, not kept in memory.
+            Ev::Audit { .. } => {}
             Ev::Decision { run, call_id, tool, outcome, stage, rule, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.decisions.push(DecisionRec { seq: e.seq, call_id: call_id.clone(), tool: tool.clone(), stage: stage.clone(), outcome: outcome.clone(), rule: rule.clone() });

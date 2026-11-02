@@ -141,3 +141,4 @@ button.danger { background: #B42318; border-color: #B42318; color: #fff; }
 .ad-feed li { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 10px 14px; }
 .ad-feed-body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 #ctx-seen { max-height: 60vh; overflow: auto; }
+.ad-form .span2 { grid-column: 1 / -1; }
