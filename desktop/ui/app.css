@@ -280,6 +280,10 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px
 table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 table.t th { text-align: left; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line-strong); }
 table.t td { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+ul.list { list-style: none; margin: 0; padding: 4px 16px; }
+li.mem { padding: 10px 0; border-bottom: 1px solid var(--line); }
+li.mem:last-child { border-bottom: 0; }
+li.mem.gone [data-text] { text-decoration: line-through; color: var(--muted); }
 table.t td.n, table.t th.n { text-align: right; font-variant-numeric: tabular-nums; }
 table.t tr.click { cursor: pointer; }
 table.t tr.click:hover td { background: var(--raised); }

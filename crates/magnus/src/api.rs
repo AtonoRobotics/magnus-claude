@@ -150,7 +150,9 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/adapters/{id}/conformance", post(conformance))
         .route("/v1/adapters/{id}/sign-in", post(sign_in_begin))
         .route("/v1/adapters/{id}/sign-in/complete", post(sign_in_complete))
-        .route("/v1/memory", get(memory))
+        .route("/v1/memory", get(memory).put(edit_memory))
+        .route("/v1/memory/forget", post(forget_path))
+        .route("/v1/memory/no-longer-true", post(mark_memory))
         .route("/v1/memory/{id}", axum::routing::delete(forget))
         .route("/v1/schedules", get(schedules).post(add_schedule))
         .route("/v1/schedules/{id}", axum::routing::delete(remove_schedule).patch(edit_schedule))
@@ -1494,7 +1496,51 @@ async fn memory(State(k): K, h: HeaderMap) -> Response {
             .collect(),
         Err(e) => return internal(e),
     };
-    Json(json!({ "memory": items })).into_response()
+    // Everything kept, facts and notes, as "Your memory" shows it.
+    let kept = match k.memory_view(&p.id).await {
+        Ok(v) => v,
+        Err(e) => return internal(e),
+    };
+    Json(json!({ "memory": items, "kept": kept })).into_response()
+}
+
+/// The person's own edit of something kept about them, by its path.
+async fn edit_memory(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match k.memory_edit(&p.id, b["path"].as_str().unwrap_or_default(), b["text"].as_str().unwrap_or_default()).await {
+        Ok(Ok(path)) => Json(json!({ "path": path })).into_response(),
+        Ok(Err(why)) => err(StatusCode::CONFLICT, why),
+        Err(e) => internal(e),
+    }
+}
+
+/// Forget something kept about the person, by its path: to their trash.
+async fn forget_path(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match k.memory_forget(&p.id, b["path"].as_str().unwrap_or_default()).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(why)) => err(StatusCode::CONFLICT, why),
+        Err(e) => internal(e),
+    }
+}
+
+/// Mark something kept about the person no longer true, by its path.
+async fn mark_memory(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match k.memory_mark(&p.id, b["path"].as_str().unwrap_or_default(), b["reason"].as_str().unwrap_or_default()).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(why)) => err(StatusCode::CONFLICT, why),
+        Err(e) => internal(e),
+    }
 }
 
 /// Forget one of the person's own memories.

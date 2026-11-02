@@ -227,20 +227,127 @@ impl Kernel {
                 let l = k.label();
                 Ok((format!("{text}{gone}"), false, Some(json!({ "path": path, "untrusted": l.untrusted, "private": true }))))
             }
-            "memory_invalidate" => {
-                if k.invalidated().is_some() {
-                    return Ok((format!("{path} is already marked no longer true."), true, clean));
+            "memory_invalidate" => Ok(match self.memory_mark(&person, &path, input["reason"].as_str().unwrap_or_default()).await? {
+                Ok(()) => (format!("{path} is marked no longer true: kept, but out of searches and later context. memory_forget erases it."), false, clean),
+                Err(why) => (why, true, clean),
+            }),
+            _ => Ok(match self.memory_forget(&person, &path).await? {
+                Ok(()) => (format!("Forgotten: {path} is in the person's trash, out of every view, and erased for good when the trash is emptied."), false, clean),
+                Err(why) => (why, true, clean),
+            }),
+        }
+    }
+
+    /// The person's thing at `path` (their own only), or why not.
+    fn mine(&self, person: &str, path: &str) -> Result<Kept, String> {
+        if let Some(why) = not_yours(person, path) {
+            return Err(why);
+        }
+        self.kept(person).into_iter().find(|k| k.path() == path).ok_or_else(|| format!("{path}: nothing kept there."))
+    }
+
+    /// Mark `path` in `person`'s memory no longer true, with the reason.
+    pub async fn memory_mark(&self, person: &str, path: &str, reason: &str) -> Result<Result<(), String>> {
+        let k = match self.mine(person, path) {
+            Ok(k) => k,
+            Err(why) => return Ok(Err(why)),
+        };
+        if k.invalidated().is_some() {
+            return Ok(Err(format!("{path} is already marked no longer true.")));
+        }
+        self.emit("kernel", crate::events::Ev::MemoryInvalidated { person: person.into(), path: path.into(), reason: reason.trim().into() }).await?;
+        Ok(Ok(()))
+    }
+
+    /// Put `path` in `person`'s memory in their trash, as the app's Forget.
+    pub async fn memory_forget(&self, person: &str, path: &str) -> Result<Result<(), String>> {
+        let k = match self.mine(person, path) {
+            Ok(k) => k,
+            Err(why) => return Ok(Err(why)),
+        };
+        Ok(match self.trash(person, false, &k.id()).await? {
+            Ok(()) => Ok(()),
+            // What wrote it is still running: its text is in that run.
+            Err(crate::state::NotTrashable::Running) => Err(format!("{path} cannot be forgotten while the task that wrote it is running. Mark it no longer true now, and forget it after.")),
+            Err(crate::state::NotTrashable::NotFound) => Err(format!("{path}: nothing kept there.")),
+        })
+    }
+
+    /// Everything in `person`'s memory as "Your memory" shows it: how they
+    /// want Magnus to work with them, the facts, and the notes, each with
+    /// what it says, recalled for them.
+    pub async fn memory_view(&self, person: &str) -> Result<Vec<Value>> {
+        let kept = self.kept(person);
+        let content = self.kept_content(person, &kept).await?;
+        let mut out = vec![];
+        for k in &kept {
+            let Some(c) = content.get(&k.seq()) else { continue };
+            out.push(match k {
+                Kept::Fact(m) => json!({
+                    "path": m.path(), "id": m.id, "kind": if m.relationship { "relationship" } else { "fact" }, "text": c["fact"], "topic": c["topic"],
+                    "at": m.at, "by": m.by.as_deref().unwrap_or("model"), "untrusted": m.label.untrusted, "no_longer_true": m.invalidated.is_some(),
+                }),
+                Kept::Doc(d) => json!({
+                    "path": d.path, "kind": "note", "title": c["frontmatter"]["title"], "text": c["body"], "version": d.version(),
+                    "at": d.versions.last().map(|v| v.2), "untrusted": d.label.untrusted, "no_longer_true": d.invalidated.is_some(),
+                }),
+            });
+        }
+        Ok(out)
+    }
+
+    /// The person's own edit of what Magnus keeps about them: a fact is
+    /// replaced by one in their words (the old one to the trash), a note
+    /// gets a new version by them. Their words are trusted, as a task is.
+    pub async fn memory_edit(&self, person: &str, path: &str, text: &str) -> Result<Result<String, String>> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(Err("An edit needs the new text; Forget removes it.".into()));
+        }
+        let k = match self.mine(person, path) {
+            Ok(k) => k,
+            Err(why) => return Ok(Err(why)),
+        };
+        match k {
+            Kept::Fact(m) => {
+                // The old one leaves first, so a refusal changes nothing.
+                if let Err(why) = self.memory_forget(person, path).await? {
+                    return Ok(Err(why));
                 }
-                let reason = input["reason"].as_str().unwrap_or_default().trim().to_string();
-                self.emit("kernel", crate::events::Ev::MemoryInvalidated { person: person.clone(), path: path.clone(), reason }).await?;
-                Ok((format!("{path} is marked no longer true: kept, but out of searches and later context. memory_forget erases it."), false, clean))
+                let topic = self.kept_content(person, &[Kept::Fact(m.clone())]).await?.remove(&m.seq).and_then(|c| c["topic"].as_str().map(String::from));
+                let id = crate::kernel::new_id("mem");
+                let ev = crate::events::Ev::Memory {
+                    id: id.clone(),
+                    person: person.into(),
+                    run: String::new(),
+                    fact: text.into(),
+                    topic,
+                    label: Label::PRINCIPAL,
+                    sources: vec![],
+                    by: Some("person".into()),
+                    relationship: m.relationship,
+                };
+                self.emit(&format!("person:{person}"), ev).await?;
+                Ok(Ok(format!("/users/{person}/memory/{id}.md")))
             }
-            _ => match self.trash(&person, false, &k.id()).await? {
-                Ok(()) => Ok((format!("Forgotten: {path} is in the person's trash, out of every view, and erased for good when the trash is emptied."), false, clean)),
-                // What wrote it is still running: its text is in that run.
-                Err(crate::state::NotTrashable::Running) => Ok((format!("{path} cannot be forgotten while the task that wrote it is running. Mark it no longer true with memory_invalidate now, and forget it after."), true, clean)),
-                Err(crate::state::NotTrashable::NotFound) => Ok((format!("{path}: nothing kept there."), true, clean)),
-            },
+            Kept::Doc(d) => {
+                let fm = self.kept_content(person, &[Kept::Doc(d.clone())]).await?.remove(&d.seq()).map(|c| c["frontmatter"].clone()).unwrap_or_default();
+                let ev = crate::events::Ev::BundleWritten {
+                    path: d.path.clone(),
+                    version: d.version() + 1,
+                    doc_kind: d.kind.clone(),
+                    scope: "user".into(),
+                    owner_user: Some(person.into()),
+                    actor: format!("human:{person}"),
+                    run: None,
+                    label: Label::PRINCIPAL,
+                    sources: d.sources.clone(),
+                    frontmatter: fm,
+                    body: text.into(),
+                };
+                self.emit(&format!("person:{person}"), ev).await?;
+                Ok(Ok(d.path.clone()))
+            }
         }
     }
 }

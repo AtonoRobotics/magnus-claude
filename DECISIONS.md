@@ -975,3 +975,11 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Next in step 3: "Your memory" in the app (view, edit, forget), and the playbook moved into user memory and out of the context.
 - Test: `a_persons_memory_is_theirs_and_how_they_want_to_work_is_in_each_of_their_runs` (user_memory.rs).
 
+## Org context, step 3b: Your memory in the app (2026-11-02, `org-context-3b`)
+
+- Settings has "Your memory" (org context spec, In the app: "each user can view, edit and forget what Magnus keeps about them"): how the person wants Magnus to work with them, what it remembers, and its notes under their folder, each with Edit, No longer true and Forget. Only their own: the API addresses the requester's memory by path and refuses another person's as the tools do (409, "another person's memory").
+- An edit is the person's own words, trusted as a task is: a fact is replaced by a new one (`by: person`, keeping whether it is how they want Magnus to work), the old one going to their trash first so a refused edit changes nothing; a note gets a new version by `human:<person>`. Forget is the trash, as everywhere; No longer true is `memory_invalidated`, as the tool.
+- Endpoints: `GET /v1/memory` adds `kept` (everything, facts and notes), `PUT /v1/memory {path, text}`, `POST /v1/memory/forget {path}`, `POST /v1/memory/no-longer-true {path, reason}`.
+- Next in step 3: the playbook moved into user memory and out of the context.
+- Test: `each_person_sees_edits_and_forgets_what_magnus_keeps_about_them` (your_memory.rs, with `desktop/tests/your-memory.mjs` in a real browser).
+
