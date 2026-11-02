@@ -106,6 +106,7 @@ pub fn connector(m: &Manifest) -> Connector {
         audience: m.audience.clone(),
         label: m.label.clone(),
         access_groups: vec![],
+        blocked_groups: vec![],
         idempotency: "none".into(),
         tools: m.tools.iter().map(|(t, risk)| (t.clone(), ToolClass { risk: risk.clone(), label: None })).collect(),
         auth: Some(crate::connectors::OAUTH.into()),

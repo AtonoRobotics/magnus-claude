@@ -66,17 +66,25 @@ pub async fn update(State(c): State<Arc<Console>>, Extension(a): Extension<Admin
         Err(r) => return r,
     };
     let enabled = b["enabled"].as_bool();
-    let groups = match b.get("access_groups") {
-        None | Some(Value::Null) => None,
-        Some(Value::Array(g)) if g.iter().all(Value::is_string) => Some(g.clone()),
-        Some(_) => return refuse(StatusCode::BAD_REQUEST, "invalid", "Who may use it is a list of groups."),
+    let list = |f: &str| match b.get(f) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(g)) if g.iter().all(Value::is_string) => Ok(Some(g.clone())),
+        Some(_) => Err(refuse(StatusCode::BAD_REQUEST, "invalid", "Who may use it, and who it is blocked for, are lists of groups.")),
     };
-    if enabled.is_none() && groups.is_none() {
+    let (groups, blocked) = match (list("access_groups"), list("blocked_groups")) {
+        (Ok(g), Ok(x)) => (g, x),
+        (Err(r), _) | (_, Err(r)) => return r,
+    };
+    if enabled.is_none() && groups.is_none() && blocked.is_none() {
         return refuse(StatusCode::BAD_REQUEST, "invalid", "Nothing to change.");
     }
-    let before = json!({ "enabled": now["enabled"], "access_groups": now["access_groups"] });
-    let after = json!({ "enabled": enabled.map(Value::Bool).unwrap_or(now["enabled"].clone()), "access_groups": groups.clone().map(Value::Array).unwrap_or(now["access_groups"].clone()) });
-    let body = json!({ "actor": actor(&a), "enabled": enabled, "access_groups": groups });
+    let before = json!({ "enabled": now["enabled"], "access_groups": now["access_groups"], "blocked_groups": now["blocked_groups"] });
+    let after = json!({
+        "enabled": enabled.map(Value::Bool).unwrap_or(now["enabled"].clone()),
+        "access_groups": groups.clone().map(Value::Array).unwrap_or(now["access_groups"].clone()),
+        "blocked_groups": blocked.clone().map(Value::Array).unwrap_or(now["blocked_groups"].clone()),
+    });
+    let body = json!({ "actor": actor(&a), "enabled": enabled, "access_groups": groups, "blocked_groups": blocked });
     match recorded(&c, &a, "connector_settings_changed", &name, Some(before), Some(after), c.kernel.call(Method::PATCH, &format!("/v1/admin/connectors/{name}"), Some(&body))).await {
         Ok(v) => Json(v).into_response(),
         Err(r) => r,

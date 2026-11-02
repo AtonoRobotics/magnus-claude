@@ -326,11 +326,14 @@ impl Kernel {
         }
         all.into_iter()
             .map(|mut c| match settings.get(&c.name) {
-                Some((on, groups)) => {
-                    if let Some(g) = groups {
+                Some(set) => {
+                    if let Some(g) = &set.access_groups {
                         c.access_groups = g.clone();
                     }
-                    (c, *on)
+                    if let Some(g) = &set.blocked_groups {
+                        c.blocked_groups = g.clone();
+                    }
+                    (c, set.enabled)
                 }
                 None => (c, true),
             })
@@ -710,7 +713,7 @@ impl Kernel {
                 json!({
                     "name": c.name, "title": c.title.clone().unwrap_or_else(|| title(&c.name)), "source": source, "enabled": on, "status": status,
                     "sign_in": if c.auth.as_deref() == Some(OAUTH) { "own_account" } else if c.credential.is_some() { "org_key" } else { "none" },
-                    "scopes": c.scopes, "url": c.url, "audience": c.audience, "label": c.label, "access_groups": c.access_groups,
+                    "scopes": c.scopes, "url": c.url, "audience": c.audience, "label": c.label, "access_groups": c.access_groups, "blocked_groups": c.blocked_groups,
                     "registration": c.registration,
                     "credential": { "kind": kind, "set": set, "changed_at": at },
                     "signed_in": signed_in, "last_used": last_used, "tools": c.tools.len(),
@@ -768,6 +771,7 @@ impl Kernel {
             audience,
             label,
             access_groups: b["access_groups"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(String::from)).collect(),
+            blocked_groups: b["blocked_groups"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(String::from)).collect(),
             system_of_record: b["system_of_record"].as_bool().unwrap_or(false),
             idempotency: "none".into(),
             tools: Default::default(),
@@ -823,18 +827,22 @@ impl Kernel {
         Ok(json!({ "sign_ins_revoked": n }))
     }
 
-    /// Turn an app on or off for the organisation, or set who may use it
-    /// (empty: everyone).
-    pub async fn connector_settings(&self, actor: &str, name: &str, enabled: Option<bool>, access_groups: Option<Vec<String>>) -> Result<Value, Refusal> {
+    /// Turn an app on or off for the organisation, or set who may use it:
+    /// the groups it is for (empty: everyone) and the groups it is blocked
+    /// for (connectors spec, Org policy).
+    pub async fn connector_settings(&self, actor: &str, name: &str, enabled: Option<bool>, access_groups: Option<Vec<String>>, blocked_groups: Option<Vec<String>>) -> Result<Value, Refusal> {
         let Some((c, on)) = self.all_connectors().into_iter().find(|(c, _)| c.name == name) else { return Err(refusal(StatusCode::NOT_FOUND, "no such app")) };
-        let access_groups = access_groups.map(|g| g.into_iter().map(|x| x.trim().to_string()).collect::<Vec<String>>());
-        if access_groups.as_ref().is_some_and(|g| g.iter().any(|g| g.is_empty() || g.len() > 100)) {
-            return Err(refusal(StatusCode::BAD_REQUEST, "each access group is a group's name"));
+        let clean = |g: Option<Vec<String>>| g.map(|g| g.into_iter().map(|x| x.trim().to_string()).collect::<Vec<String>>());
+        let (access_groups, blocked_groups) = (clean(access_groups), clean(blocked_groups));
+        if [&access_groups, &blocked_groups].iter().any(|l| l.as_ref().is_some_and(|g| g.iter().any(|g| g.is_empty() || g.len() > 100))) {
+            return Err(refusal(StatusCode::BAD_REQUEST, "each group is a group's name"));
         }
-        let groups = access_groups.or_else(|| self.read(|s| s.connector_settings.get(name).and_then(|(_, g)| g.clone())));
+        let had = self.read(|s| s.connector_settings.get(name).cloned()).unwrap_or_default();
+        let groups = access_groups.or(had.access_groups);
+        let blocked = blocked_groups.or(had.blocked_groups);
         let enabled = enabled.unwrap_or(on);
-        self.emit(actor, Ev::ConnectorSettings { name: name.to_string(), enabled, access_groups: groups.clone() }).await.map_err(failed)?;
-        Ok(json!({ "name": name, "enabled": enabled, "access_groups": groups.unwrap_or(c.access_groups) }))
+        self.emit(actor, Ev::ConnectorSettings { name: name.to_string(), enabled, access_groups: groups.clone(), blocked_groups: blocked.clone() }).await.map_err(failed)?;
+        Ok(json!({ "name": name, "enabled": enabled, "access_groups": groups.unwrap_or(c.access_groups), "blocked_groups": blocked.unwrap_or(c.blocked_groups) }))
     }
 
     /// Set, or rotate, the organisation's credential for an app. Nothing
@@ -950,8 +958,16 @@ async fn list(AxState(k): K, h: HeaderMap) -> Response {
     let added: Vec<String> = k.read(|s| s.connectors.keys().cloned().collect());
     let mut out = vec![];
     for c in k.connectors() {
+        // An app blocked for the person's groups, or for groups they are
+        // not in, is not in their Library (connectors spec, Org policy).
+        // The owner still manages it in Settings, marked as not theirs.
+        let theirs = crate::boundary::may_use(&p, &c);
+        if !theirs && !p.is_owner() {
+            continue;
+        }
         let from_app = added.contains(&c.name) && k.cfg.connectors.iter().all(|f| f.name != c.name);
         let mut card = card(&k, &c, &p.id).await;
+        card["for_you"] = json!(theirs);
         let secret = k.connector_secret(&c, &p.id).await.ok().flatten();
         let signed_in = c.credential.is_none() || secret.is_some();
         if !p.is_owner() {
@@ -977,7 +993,7 @@ async fn list(AxState(k): K, h: HeaderMap) -> Response {
             }
         };
         let admin = json!({
-            "url": c.url, "audience": c.audience, "label": c.label, "access_groups": c.access_groups,
+            "url": c.url, "audience": c.audience, "label": c.label, "access_groups": c.access_groups, "blocked_groups": c.blocked_groups,
             "source": if c.catalog { "catalog" } else if from_app { "app" } else { "config" }, "problem": problem, "tools": tools,
         });
         for (k, v) in admin.as_object().into_iter().flatten() {
@@ -1053,8 +1069,9 @@ async fn detail(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Respon
         Ok(p) => p,
         Err(r) => return r,
     };
-    let Some(c) = k.connector(&name) else { return err(StatusCode::NOT_FOUND, "no such app") };
+    let Some(c) = k.connector(&name).filter(|c| p.is_owner() || crate::boundary::may_use(&p, c)) else { return err(StatusCode::NOT_FOUND, "no such app") };
     let mut v = card(&k, &c, &p.id).await;
+    v["for_you"] = json!(crate::boundary::may_use(&p, &c));
     v["recent"] = json!(k.recent_uses(&c.name, &p.id, 10));
     Json(v).into_response()
 }
@@ -1099,6 +1116,9 @@ async fn sign_in(AxState(k): K, h: HeaderMap, Path(name): Path<String>, Json(b):
         Err(r) => return r,
     };
     let Some(c) = k.connector(&name).filter(|c| c.auth.as_deref() == Some(OAUTH)) else { return err(StatusCode::NOT_FOUND, "no app by that name signs in") };
+    if !crate::boundary::may_use(&p, &c) {
+        return err(StatusCode::FORBIDDEN, "your organisation has not made this app available to you");
+    }
     if k.read(|s| s.kill_switch) {
         return err(StatusCode::CONFLICT, "the kill switch is engaged");
     }

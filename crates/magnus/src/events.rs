@@ -232,12 +232,15 @@ pub enum Ev {
     },
     /// An admin turned one of the organisation's apps on or off, or set who
     /// may use it (admin console spec, Security › Connectors and
-    /// credentials). `access_groups` None keeps the app's own.
+    /// credentials). `access_groups` and `blocked_groups` None keep the
+    /// app's own.
     ConnectorSettings {
         name: String,
         enabled: bool,
         #[serde(default)]
         access_groups: Option<Vec<String>>,
+        #[serde(default)]
+        blocked_groups: Option<Vec<String>>,
     },
     /// The organisation's credential for an app (its key) was set, or
     /// revoked. The value is in the vault, never here.

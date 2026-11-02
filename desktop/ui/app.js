@@ -1804,7 +1804,9 @@ async function showLibrary(main, name) {
   Lib.main = main;
   if (name) return showConnectorPage(main, name);
   const { connectors } = await api("GET", "/v1/connectors");
-  Lib.all = connectors;
+  // An app blocked for your groups is not in your Library; the owner still
+  // manages it in Settings.
+  Lib.all = connectors.filter(c => c.for_you !== false);
   const seg = (k, label) => `<button data-lib-tab="${k}" aria-pressed="${Lib.tab === k}">${label}</button>`;
   main.innerHTML = `<div class="libpage"><header class="lhead"><div><h1>Library</h1><p>Connect the apps and programs you want Magnus to work in. You only ever sign in.</p></div>
     <a class="icon-btn lclose" href="#/home" aria-label="Close Library">${icon("close")}</a></header>

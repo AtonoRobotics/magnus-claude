@@ -804,7 +804,8 @@ async function connectorPanel(box, name) {
     <div class="row ad-bar">${c.enabled ? `<button id="cn-off" class="danger">Turn off</button>` : `<button id="cn-on" class="primary">Turn on</button>`}</div>
     <p class="small muted">${c.enabled ? "Turned off, no one is offered it and no task reaches it. People's sign-ins stay until revoked." : "It is off: no one is offered it and no task reaches it."}</p>
     <form id="cn-groups" class="ad-form"><label>Who may use it <input name="groups" value="${esc(c.access_groups.join(", "))}" placeholder="Everyone" autocomplete="off" aria-describedby="cn-groups-how"></label>
-      <p class="small muted" id="cn-groups-how">Groups, separated by commas. Empty: everyone in the organisation.</p>
+      <label>Blocked for <input name="blocked" value="${esc((c.blocked_groups || []).join(", "))}" placeholder="No one" autocomplete="off" aria-describedby="cn-groups-how"></label>
+      <p class="small muted" id="cn-groups-how">Groups, separated by commas. Who may use it, empty: everyone in the organisation. A group it is blocked for neither sees it in the Library nor reaches it, whatever the first list says.</p>
       <div class="row"><button>Save</button></div></form>
     <h3>Credential</h3>
     ${c.credential.kind === "none"
@@ -823,10 +824,12 @@ async function connectorPanel(box, name) {
   $("#cn-on", body)?.addEventListener("click", () => setOn(true));
   $("#cn-groups", body).onsubmit = e => {
     e.preventDefault();
-    const groups = new FormData(e.target).get("groups").split(",").map(x => x.trim()).filter(Boolean);
-    const was = c.access_groups;
-    act("PATCH", `/connectors/${name}`, { access_groups: groups }, async () => {
-      UI.toast(groups.length ? `Only ${groups.join(", ")} may use ${c.title}.` : `Everyone may use ${c.title}.`, () => act("PATCH", `/connectors/${name}`, { access_groups: was }, reload));
+    const f = new FormData(e.target), list = k => f.get(k).split(",").map(x => x.trim()).filter(Boolean);
+    const groups = list("groups"), blocked = list("blocked");
+    const was = { access_groups: c.access_groups, blocked_groups: c.blocked_groups || [] };
+    act("PATCH", `/connectors/${name}`, { access_groups: groups, blocked_groups: blocked }, async () => {
+      const who = groups.length ? `Only ${groups.join(", ")} may use ${c.title}` : `Everyone may use ${c.title}`;
+      UI.toast(blocked.length ? `${who}, except ${blocked.join(", ")}.` : `${who}.`, () => act("PATCH", `/connectors/${name}`, was, reload));
       await reload();
     });
   };
