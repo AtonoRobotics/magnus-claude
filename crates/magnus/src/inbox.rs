@@ -236,7 +236,9 @@ impl Kernel {
             }
             ("question", "answer") => {
                 self.emit(&actor, resolve(None)).await?;
-                self.reply(&run, &call_id, format!("The person answered: {}", text.clone().unwrap_or_default()), false, Label::PRINCIPAL).await?;
+                // A colleague's answer (people.ask) says who gave it.
+                let who = if item.details["asked_for"].is_string() { format!("{} ({}) answered", p.name, p.id) } else { "The person answered".to_string() };
+                self.reply(&run, &call_id, format!("{who}: {}", text.clone().unwrap_or_default()), false, Label::PRINCIPAL).await?;
                 self.resume_after(&run).await?;
             }
             ("policy_proposal", "accept") => {
