@@ -74,8 +74,8 @@ await step("ask for work in the project and see its output in full", async () =>
   await frame.locator("td", { hasText: "widget" }).waitFor({ timeout: T });
 });
 
-await step("find the output in the library under the project", async () => {
-  await page.getByRole("link", { name: "Library", exact: true }).click();
+await step("find the output in Files under the project", async () => {
+  await page.getByRole("link", { name: "Files", exact: true }).click();
   await page.getByLabel("Filter by project").selectOption({ label: "Kitchen remodel" });
   const row = page.locator("[data-lib-file]", { hasText: "report.md" });
   await row.waitFor({ timeout: T });
@@ -108,7 +108,7 @@ await step("open files from the library", async () => {
   const [download] = await Promise.all([page.waitForEvent("download", { timeout: T }), page.locator("#detail").getByRole("button", { name: "Download", exact: true }).click()]);
   if (download.suggestedFilename() !== "report.md") throw new Error(`downloaded ${download.suggestedFilename()}`);
   // An uploaded CSV opens as a table.
-  await page.getByRole("link", { name: "Library", exact: true }).first().click();
+  await page.getByRole("link", { name: "Files", exact: true }).first().click();
   await page.locator("[data-lib-file]", { hasText: "prices.csv" }).getByRole("link", { name: "prices.csv" }).click();
   await page.getByRole("heading", { name: "prices.csv" }).waitFor({ timeout: T });
   await page.frameLocator("#detail iframe.composed").getByRole("cell", { name: "bolt", exact: true }).waitFor({ timeout: T });

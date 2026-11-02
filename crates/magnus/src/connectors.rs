@@ -732,6 +732,22 @@ fn name_from(url: &str, own: Option<&str>, taken: impl Fn(&str) -> bool) -> Stri
     name
 }
 
+/// What the Library shows of an app beyond its card's sentence (connectors
+/// spec, Library): from its catalog manifest; an app the organisation added
+/// by its address has no publisher, and no review mark.
+fn listing(c: &Connector) -> Value {
+    match crate::catalog::manifest(&c.name).filter(|_| c.catalog) {
+        Some(m) => json!({
+            "publisher": m.publisher, "reviewed": true, "category": m.category, "abilities": m.abilities,
+            "asks": m.asks, "can": m.can, "cannot": m.cannot, "letters": m.letters, "tint": m.tint,
+        }),
+        None => {
+            let t = c.title.clone().unwrap_or_else(|| title(&c.name));
+            json!({ "publisher": null, "reviewed": false, "category": "work", "abilities": [], "asks": [], "can": null, "cannot": null, "letters": t.chars().take(2).collect::<String>(), "tint": "#3A3F48" })
+        }
+    }
+}
+
 /// One app as a person's card shows it (connectors spec, The connector
 /// card and Library): its name, one sentence on what Magnus can do with
 /// it, where they stand, and, signed in, as whom, since when and when last
@@ -747,6 +763,7 @@ async fn card(k: &Kernel, c: &Connector, person: &str) -> Value {
         "connected_at": at.and_then(|s| chrono::DateTime::from_timestamp(s, 0)), "account": account, "last_used": last,
         // False only on an appliance Alpha Vector has not finished setting up.
         "ready": k.provider_ready(c),
+        "listing": listing(c),
     })
 }
 
