@@ -1034,7 +1034,7 @@ fn name_from(url: &str, own: Option<&str>, taken: impl Fn(&str) -> bool) -> Stri
 /// What the Library shows of an app beyond its card's sentence (connectors
 /// spec, Library): from its catalog manifest; an app the organisation added
 /// by its address has no publisher, and no review mark.
-fn listing(c: &Connector) -> Value {
+pub(crate) fn listing(c: &Connector) -> Value {
     match crate::catalog::manifest(&c.name).filter(|_| c.catalog) {
         Some(m) => json!({
             "publisher": m.publisher, "reviewed": true, "category": m.category, "abilities": m.abilities,

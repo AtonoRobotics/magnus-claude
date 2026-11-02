@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 /// An id fixed by the action's idempotency key, so a call resent after a
 /// restart finds what the first one made.
-fn derived(prefix: &str, key: &str) -> String {
+pub(crate) fn derived(prefix: &str, key: &str) -> String {
     use sha2::Digest;
     format!("{prefix}_{}", &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..32])
 }
@@ -177,6 +177,14 @@ impl Kernel {
                 cards.sort_by_key(|(seq, _)| *seq);
                 for (seq, d) in cards {
                     let card = d["card"].as_str().unwrap_or_default().to_string();
+                    // An app's card: the app as the person stands with it now.
+                    if d["connector"].is_string() {
+                        let mut e = self.offered_card(person, &d);
+                        e["id"] = json!(format!("c:{card}"));
+                        e["task_id"] = json!(t.task_id);
+                        out.push((t.created_at, seq, e));
+                        continue;
+                    }
                     let (state, schedule) = match self.read(|s| s.cards.get(&card).cloned()) {
                         Some(CardState::Confirmed(id)) => ("confirmed", Some(id)),
                         Some(CardState::Declined) => ("declined", None),
@@ -282,6 +290,7 @@ impl Kernel {
                     "tasks" => ("you", format!("Started tasks: {}", e["tasks"].as_array().into_iter().flatten().map(|t| format!("{} ({})", t["title"].as_str().unwrap_or_default(), t["text"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("; "))),
                     "result" => ("task result", format!("{} ({}): {}", text("title"), text("status"), text("summary"))),
                     "schedule_card" => ("you", format!("Proposed a schedule ({}): {}", text("state"), text("text"))),
+                    "connector_card" => ("you", format!("Offered the app {} ({}): {}", text("title"), text("state"), text("why"))),
                     _ => return None,
                 };
                 Some(json!({ "role": role, "text": said }))

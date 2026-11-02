@@ -100,6 +100,12 @@ impl Kernel {
             }
             _ => {}
         }
+        // The person's apps, as they stand at this call, before what they said (connectors spec,
+        // How the agent uses connectors: "the context always holds the
+        // user's connector index").
+        if let Some(index) = self.person(&run.person).and_then(|p| self.app_index(&p)) {
+            first.push(Block::Text { text: index });
+        }
         first.push(Block::Text { text: said });
         // A schedule's run keeps to the scope the person confirmed for it.
         if let Some(scope) = scope {

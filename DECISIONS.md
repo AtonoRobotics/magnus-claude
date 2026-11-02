@@ -815,3 +815,29 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - `an_app_that_cannot_revoke_is_disconnected_here_and_the_person_is_told`.
   - `a_sign_in_ended_at_the_app_asks_the_person_to_sign_in_again`: the person removes Magnus in the app's own settings; the card turns Needs attention, and signing in again brings it back.
   - `connectors.rs` expects Disconnect's new answer.
+## Magnus knows the person's apps while it works, and offers an app's card with why (2026-11-02, `agent-apps`)
+
+- The connectors spec, How the agent uses connectors:
+  - "the context always holds the user's connector index";
+  - "catalog tools to search the library by service name or by what the user wants done";
+  - "Read a connector's details";
+  - "Place a connector's card in chat, saying what it is for"; only the user completes a sign-in.
+  - Inside work: "When a task or chat needs a connection, Magnus says so in that thread with the card".
+  - Until now, a run saw only the tools of apps already connected, and knew nothing of the rest.
+- Every run and chat now holds the person's app index, placed before their words:
+  - each app the organisation lets them use (the same rule as the Library, `boundary::may_use`, and only apps turned on);
+  - its one sentence, and whether it is connected;
+  - it is rebuilt at every model call, so a connection made mid-conversation shows at once.
+- Three read tools, built in for chats and tasks (`app_tools.rs`):
+  - `find_apps`: the person's apps whose name, publisher, sentence or abilities hold the words asked for, best first. With nothing found it says so: "do not suggest one that is not there".
+  - `app_details`: what Magnus can do with the app, the access it asks for, and what it can and cannot do.
+  - `offer_app`: puts the app's card in the conversation with Magnus's reason. It is refused for an app outside the person's Library, and says so for one already connected. Nothing is connected until the person signs in.
+- The card in a conversation (`connector_card`):
+  - it is the same card as in the Library: tile, name, publisher, the reason, the app's sentence, and one Connect button through the app's existing connect path;
+  - it shows the app as the person stands with it now: Connected once they have connected it, "not ready" while the appliance is not set up for it, gone from their Library if blocked since.
+  - Magnus reads it back in the conversation as "Offered the app …".
+- In a task, the same card leads the task's page, under the decisions it waits on, until the person connects the app. The task carries the apps it offered (`app_offers`, each as the person stands with it now). In approvals the card is still to come.
+- Tests (agent_apps.rs):
+  - `magnus_finds_an_unconnected_app_by_what_is_wanted_and_offers_its_card_with_why`: the index is in the context; find_apps finds both calendars by "find a time on my calendar"; the card is in the thread with its reason, ready to connect, and nothing is connected; `desktop/tests/chat-app-card.mjs` draws it with Connect and no protocol words, in every look and at phone width.
+  - `a_task_that_needs_an_app_shows_its_card_with_why`: a task offers the calendar, and the task carries its card with the reason.
+  - `magnus_cannot_offer_an_app_outside_the_persons_library`: Gmail blocked for Bob's group is not in his index, not found and not offered; a request nothing fits ("post in our Slack") is answered plainly.

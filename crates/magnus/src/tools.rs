@@ -151,6 +151,12 @@ pub const BUILTINS: &[Builtin] = &[
     // result carries the file's own taint; an upload is private and untrusted.
     Builtin { name: "project_read", app: "library", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "playbook_update", app: "playbook", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    // The person's apps (connectors spec, How the agent uses connectors):
+    // reading their Library, and putting an app's card in front of them.
+    // Only the person signs in; nothing leaves the appliance.
+    Builtin { name: "find_apps", app: "apps", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "app_details", app: "apps", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "offer_app", app: "apps", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     // Chat only: start a task for the person, or show them a schedule to
     // confirm. Neither leaves the appliance; the task carries the turn's taint.
     Builtin { name: "create_task", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -293,6 +299,9 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
         "required": ["id", "description"]
     });
     let mut v = vec![
+        ToolSpec { name: "find_apps".into(), description: d("find_apps"), input_schema: obj(json!({ "query": { "type": "string" } }), &[]) },
+        ToolSpec { name: "app_details".into(), description: d("app_details"), input_schema: obj(json!({ "name": { "type": "string" } }), &["name"]) },
+        ToolSpec { name: "offer_app".into(), description: d("offer_app"), input_schema: obj(json!({ "name": { "type": "string" }, "why": { "type": "string" } }), &["name", "why"]) },
         ToolSpec {
             name: "task_contract".into(),
             description: d("task_contract"),

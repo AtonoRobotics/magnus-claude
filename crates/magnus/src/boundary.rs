@@ -739,6 +739,21 @@ impl Kernel {
                 "web_search" => Ok((self.web.search(&s("query")).await?, false, None)),
                 "create_task" => self.chat_task(a, key).await,
                 "create_schedule" => Ok(self.chat_card(a, key)),
+                "find_apps" | "app_details" | "offer_app" => {
+                    let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).and_then(|p| self.person(&p));
+                    let Some(person) = person else { return Ok(("no such person".into(), true, None)) };
+                    Ok(match a.tool.as_str() {
+                        "find_apps" => {
+                            let v = self.find_apps(&person, a.input["query"].as_str().unwrap_or_default());
+                            (v.to_string(), false, Some(v))
+                        }
+                        "app_details" => match self.app_details(&person, a.input["name"].as_str().unwrap_or_default()) {
+                            Ok(v) => (v.to_string(), false, Some(v)),
+                            Err(e) => (e, true, None),
+                        },
+                        _ => self.offer_app(&person, &a.input, crate::chat::derived("card", key)),
+                    })
+                }
                 t if crate::controls::TOOLS.contains(&t) => {
                     let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
                     Ok(self.chat_control(&person, t, &a.input).await)
