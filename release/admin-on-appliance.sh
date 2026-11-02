@@ -10,19 +10,20 @@
 # ("address/prefix") and MAGNUS_ADMIN_TAILSCALE ("address", or "none") name
 # the networks when `ip` should not be asked.
 #
-# Once, when CONFIG has no [admin] section, it chooses what the admin
-# console spec leaves to the organisation and writes it there:
-#   - the hostname: this machine's name on the local network, NAME.local
-#     (mDNS), on port $PORT;
-#   - listen: the machine's address on the network its default route uses,
-#     and its Tailscale address when it has one; never every address or
-#     loopback;
+# It keeps CONFIG's [admin] section (written the first time, then kept to the
+# machine as it is; release/admin-section.py) to what the admin console spec
+# leaves to the organisation:
+#   - the names it answers to: the machine's Tailscale name when it is on a
+#     tailnet (its hostname, which resolves wherever the owner's computers
+#     are), its address on the network its default route uses, and its
+#     Tailscale address; on port $PORT;
+#   - listen: those addresses; never every address or loopback;
 #   - allow: those networks only (the LAN's subnet, and Tailscale's
 #     100.64.0.0/10);
 #   - the certificate: from the organisation's own CA, made here (its key
-#     owner-only, beside CONFIG in admin-tls/), naming the hostname and those
-#     addresses; the owner trusts the CA once on their computers;
-#   - the console's own database role, with a password made here.
+#     owner-only, beside CONFIG in admin-tls/), naming every name it answers
+#     to; the owner trusts the CA once on their computers;
+#   - the console's own database role, with a password made here once.
 # Then, each time: the role in the database (`magnus migrate`), the
 # console's client and service account in the realm and the realm role
 # `admin` for the appliance's owners (config/keycloak-client.py, as root,
@@ -47,64 +48,54 @@ c = tomllib.load(open(sys.argv[1], "rb"))
 print(c["appliance"]["listen"], c["appliance"]["state_dir"], os.path.dirname(c.get("sandbox", {}).get("kernel_image", "")) or "-")
 EOF
 )
-has_admin=$(python3 -I -c 'import sys, tomllib; print("admin" in tomllib.load(open(sys.argv[1], "rb")))' "$config")
+# The names and networks the console answers on, worked out each time:
+# the machine's address on the network its default route uses, and its
+# Tailscale address and name when it is on a tailnet. The console's
+# hostname is its Tailscale name when it has one (it resolves wherever the
+# owner's computers are), else the LAN address; the rest are aliases.
+lan=${MAGNUS_ADMIN_LAN:-}
+if [ -z "$lan" ]; then
+  dev=$(ip -o route get 1.1.1.1 | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+  lan=$(ip -o -4 addr show dev "$dev" | awk '{print $4}' | head -1)
+fi
+ts=${MAGNUS_ADMIN_TAILSCALE:-$(ip -o -4 addr show dev tailscale0 2>/dev/null | awk '{print $4}' | head -1 || true)}
+[ "$ts" = none ] && ts=""
+tsname=${MAGNUS_ADMIN_TSNAME:-}
+if [ -z "$tsname" ] && [ -n "$ts" ] && command -v tailscale >/dev/null; then
+  tsname=$(tailscale status --json 2>/dev/null | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
+fi
+[ "$tsname" = none ] && tsname=""
 
-if [ "$has_admin" != True ]; then
-  host="$(hostname -s).local"
-  # The default route's interface and address, and that network.
-  lan=${MAGNUS_ADMIN_LAN:-}
-  if [ -z "$lan" ]; then
-    dev=$(ip -o route get 1.1.1.1 | sed -n 's/.* dev \([^ ]*\).*/\1/p')
-    lan=$(ip -o -4 addr show dev "$dev" | awk '{print $4}' | head -1)
-  fi
-  addr=${lan%/*}
-  net=$(python3 -I -c 'import ipaddress, sys; print(ipaddress.ip_interface(sys.argv[1]).network)' "$lan")
-  listen_list="\"$addr:$port\""
-  allow_list="\"$net\""
-  sans="DNS:$host,IP:$addr"
-  ts=${MAGNUS_ADMIN_TAILSCALE:-$(ip -o -4 addr show dev tailscale0 2>/dev/null | awk '{print $4}' | head -1 || true)}
-  [ "$ts" = none ] && ts=""
-  if [ -n "$ts" ]; then
-    listen_list="$listen_list, \"${ts%/*}:$port\""
-    allow_list="$allow_list, \"100.64.0.0/10\""
-    sans="$sans,IP:${ts%/*}"
-  fi
+# The organisation's CA, made once.
+mkdir -p "$tls" && chmod 700 "$tls"
+if [ ! -f "$tls/ca.pem" ]; then
+  openssl req -x509 -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 3650 \
+    -subj "/O=Magnus appliance $(hostname -s)/CN=Magnus organisation CA" \
+    -addext "basicConstraints=critical,CA:true,pathlen:0" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -keyout "$tls/ca.key" -out "$tls/ca.pem" 2>/dev/null
+fi
 
-  # The organisation's CA and the console's certificate from it.
-  mkdir -p "$tls" && chmod 700 "$tls"
-  if [ ! -f "$tls/ca.pem" ]; then
-    openssl req -x509 -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 3650 \
-      -subj "/O=Magnus appliance $(hostname -s)/CN=Magnus organisation CA" \
-      -addext "basicConstraints=critical,CA:true,pathlen:0" -addext "keyUsage=critical,keyCertSign,cRLSign" \
-      -keyout "$tls/ca.key" -out "$tls/ca.pem" 2>/dev/null
-  fi
+# The [admin] section this script keeps: written the first time, then kept
+# to the names and networks above, with its database password as it was.
+# A section someone else wrote is left as it is.
+read -r managed sans host < <(python3 -I release/admin-section.py "$config" "$lan" "$ts" "$tsname" "$port" "$tls")
+case $managed in
+  changed) echo "wrote [admin] to $config: $host, with $sans" ;;
+  no) echo "[admin] in $config was not written by this script: left as it is" ;;
+esac
+
+# The console's certificate, from the CA, for every name it answers to:
+# made again when the names change.
+if [ "$managed" != no ] && { [ ! -f "$tls/console.pem" ] || [ "$(cat "$tls/console.sans" 2>/dev/null)" != "$sans" ]; }; then
   openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -subj "/CN=$host" \
     -keyout "$tls/console.key" -out "$tls/console.csr" 2>/dev/null
   printf 'subjectAltName=%s\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' "$sans" > "$tls/console.ext"
   openssl x509 -req -in "$tls/console.csr" -CA "$tls/ca.pem" -CAkey "$tls/ca.key" -CAcreateserial \
     -days 825 -extfile "$tls/console.ext" -out "$tls/console.pem" 2>/dev/null
-  chmod 600 "$tls"/*.key
+  echo "$sans" > "$tls/console.sans"
   rm -f "$tls/console.csr"
-
-  # The console's own database role: its password made here, in the config
-  # only (owner-only, as the config is).
-  db=$(python3 -I -c 'import sys, tomllib, urllib.parse as u; d = u.urlsplit(tomllib.load(open(sys.argv[1], "rb"))["database"]["url"]); print(f"{d.hostname}:{d.port}{d.path}")' "$config")
-  root_password=$(openssl rand -hex 24)
-
-  cp -p "$config" "$config.bak-$(date +%Y%m%d%H%M%S)"
-  cat >> "$config" <<EOF
-
-# The admin console (written by release/admin-on-appliance.sh; admin console spec).
-[admin]
-hostname = "$host"
-listen = [$listen_list]
-allow = [$allow_list]
-tls_cert = "$tls/console.pem"
-tls_key = "$tls/console.key"
-database_url = "postgres://magnus_root:$root_password@$db"
-EOF
-  echo "wrote [admin] to $config: $host, listening on $listen_list, allowing $allow_list"
 fi
+chmod 600 "$tls"/*.key
 
 [ "$only" = --config-only ] && exit 0
 
@@ -115,14 +106,16 @@ fi
 
 # The console's client and service account in the realm, and the realm role
 # admin for the appliance's owners, with the console's own key.
-host=$(python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["admin"]["hostname"])' "$config")
+mapfile -t names < <(python3 -I -c 'import sys, tomllib; a = tomllib.load(open(sys.argv[1], "rb"))["admin"]; print("\n".join([a["hostname"]] + a.get("aliases", [])))' "$config")
 owners=$(python3 -I -c 'import sys, tomllib; print(" ".join(p["id"] for p in tomllib.load(open(sys.argv[1], "rb")).get("people", []) if "owner" in p.get("roles", [])))' "$config")
 jwks=$(mktemp)
 trap 'rm -f "$jwks"' EXIT
 "$programs/magnus-admin" jwk --config "$config" > "$jwks"
 assign=()
 for o in $owners; do assign+=(--assign-admin "$o"); done
-sudo -n python3 -I config/keycloak-client.py --admin-console "$jwks" --admin-hostname "$host:$port" "${assign[@]}"
+hosts=()
+for n in "${names[@]}"; do hosts+=(--admin-hostname "$n:$port"); done
+sudo -n python3 -I config/keycloak-client.py --admin-console "$jwks" "${hosts[@]}" "${assign[@]}"
 
 # The console as a user service beside the appliance, on the installed
 # programs; restarted so it runs this release.
@@ -166,9 +159,8 @@ else
 fi
 
 # What a person needs to reach it.
-first=$(python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["admin"]["listen"][0].rsplit(":", 1)[0])' "$config")
-echo "The admin console: https://$host:$port/ (on the network; $host is $first)"
-echo "If $host does not resolve on a computer, add this line to its hosts file: $first $host"
+echo "The admin console, at any of these on the organisation's network or the tailnet:"
+for n in "${names[@]}"; do echo "  https://$n:$port/"; done
 if [ -f "$tls/ca.pem" ]; then
   echo "Trust this CA once on each computer that opens the console (it is public):"
   cat "$tls/ca.pem"

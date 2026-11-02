@@ -36,6 +36,8 @@ pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; 
 /// The console's settings, checked, and what it keeps while it runs.
 pub struct Console {
     pub hostname: String,
+    /// The other names it answers to (`admin.aliases`).
+    pub aliases: Vec<String>,
     pub org: String,
     pub idp: session::Idp,
     pub key: auth::Key,
@@ -98,6 +100,9 @@ pub async fn serve(cfg: Config) -> Result<()> {
     let addrs = net::listen_addrs(&a.listen)?;
     let allow = net::allowlist(&a.allow)?;
     anyhow::ensure!(valid_host(&a.hostname), "admin.hostname {:?} is not a hostname", a.hostname);
+    for alias in &a.aliases {
+        anyhow::ensure!(valid_host(alias), "admin.aliases: {alias:?} is not a hostname or an address");
+    }
     let tls = net::tls(&a.tls_cert, &a.tls_key)?;
     let oidc = cfg.sign_in.oidc.as_ref();
     let issuer = a.issuer.clone().or_else(|| oidc.map(|o| o.issuer.clone())).context("the admin console signs in through the organisation's identity provider: set sign_in.oidc or admin.issuer")?;
@@ -105,6 +110,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
     let directory = directory::Directory::new(&issuer, a.service_client_id.clone());
     let console = Arc::new(Console {
         hostname: a.hostname.to_ascii_lowercase(),
+        aliases: a.aliases.iter().map(|x| x.to_ascii_lowercase()).collect(),
         org: a.org.clone().unwrap_or_else(|| "Magnus".into()),
         idp: session::Idp::new(issuer, a.client_id.clone(), roles_claim, a.idp_internal.clone()),
         key: auth::Key::load_or_make(&key_dir(&cfg))?,
@@ -176,7 +182,7 @@ pub fn router(console: Arc<Console>) -> Router {
 async fn host_check(State(c): State<Arc<Console>>, req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
     let name = host.rsplit_once(':').filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit())).map_or(host.as_str(), |(n, _)| n);
-    if name != c.hostname {
+    if name != c.hostname && !c.aliases.iter().any(|a| a == name) {
         return not_found().await;
     }
     next.run(req).await

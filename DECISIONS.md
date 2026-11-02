@@ -601,3 +601,16 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Test: `a_confirmed_schedule_runs_without_asking_again_within_its_persons_authority` (schedule_approved_once.rs): Bob's schedule sends an irreversible email and completes with nothing asked of him; Carol's, which she could not approve, asks; a one-off task of Bob's still asks. Invariants 4, 6 and 7 pass unchanged.
 - `a_scheduled_run_cannot_set_up_a_schedule_and_its_schedule_waits_for_it` (schedules.rs) made the owner's scheduled run wait on an approval to send; a confirmed schedule's send no longer asks her, so the run now waits on a question to her, which keeps what the test checks: a schedule pauses while its run waits on its person, and goes on once answered.
 
+## The admin console answers every name it is reached by (2026-11-02, `admin-names`)
+
+- The owner (2026-11-02): "There is never a time that strix-alpha.local will be reachable"; Zero reaches strix-alpha over the LAN, Tailscale and pyrallon.ai ("all three"). `.local` needs mDNS, which strix-alpha does not run, and the console answered only that one name, so opening it by its address gave "not found".
+- The console now answers its hostname and `admin.aliases`. On strix-alpha:
+  - the hostname is the machine's Tailscale name when the `tailscale` command reports one (it resolves wherever the owner's computers are), else its LAN address;
+  - the aliases are the LAN address (192.168.0.50) and the Tailscale address (100.92.130.94).
+- The certificate names every one of them, and the realm accepts a sign-in coming back to any of them (`keycloak-client.py --admin-hostname`, now repeatable).
+- The setup script now keeps its own `[admin]` section each run (`release/admin-section.py`): names, listen addresses, networks and certificate follow the machine, and the database password is kept. A section someone else wrote is left alone.
+- Not through pyrallon.ai: the console spec keeps it to the organisation's network and never behind the tunnel, which is why it refuses loopback. Tailscale reaches it from anywhere the owner is.
+- Test: `the_setup_writes_an_admin_console_that_answers_its_hostname_on_the_network_only` (admin_on_appliance.rs), extended:
+  - a section with one name, as the first run on strix-alpha wrote it, is brought up to every name and keeps its password;
+  - the console answers its Tailscale name and its address, both over TLS the CA verifies.
+

@@ -38,7 +38,7 @@ p.add_argument("--realm", default="magnus")
 p.add_argument("--client-id", default="magnus-claude")
 p.add_argument("--name", default="Magnus appliance")
 p.add_argument("--admin-console", metavar="JWKS_FILE", help="register the admin console's client, with the key `magnus-admin jwk` printed")
-p.add_argument("--admin-hostname", help="the admin console's hostname, with :port if not 443")
+p.add_argument("--admin-hostname", action="append", default=[], help="the admin console's hostname, with :port if not 443; repeat for each name it answers to")
 p.add_argument("--assign-admin", action="append", default=[], metavar="USERNAME",
                help="with --admin-console: give this person of the realm the realm role admin, which opens the console (repeatable)")
 a = p.parse_args()
@@ -103,7 +103,7 @@ if a.admin_console:
         "implicitFlowEnabled": False,
         "directAccessGrantsEnabled": False,
         "serviceAccountsEnabled": False,
-        "redirectUris": [f"https://{a.admin_hostname}/auth/callback"],
+        "redirectUris": [f"https://{h}/auth/callback" for h in a.admin_hostname],
         "attributes": {
             "pkce.code.challenge.method": "S256",
             "use.jwks.string": "true",
