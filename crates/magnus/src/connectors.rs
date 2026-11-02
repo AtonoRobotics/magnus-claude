@@ -522,8 +522,10 @@ impl Kernel {
             connected_at: Some(chrono::Utc::now().timestamp()),
             account: account_of(&v),
         };
+        let account = t.account.clone();
         self.vault.put(&connection_name(app, person), &serde_json::to_string(&t)?)?;
         self.live_tools.lock().await.remove(&connection_name(app, person));
+        self.emit(&format!("person:{person}"), Ev::AppConnected { app: app.to_string(), person: person.to_string(), account }).await?;
         Ok(())
     }
 
@@ -569,17 +571,19 @@ impl Kernel {
         }
     }
 
-    /// End one person's sign-in to an app: revoked at the app, then deleted.
-    pub async fn disconnect(&self, app: &str, person: &str) -> Result<bool> {
-        match self.vault.remove(&connection_name(app, person))? {
-            Some(s) => {
-                let (done, detail) = revoke(s.expose()).await;
-                tracing::info!("{person} disconnected {app}: revoked {done}: {detail}");
-                self.live_tools.lock().await.remove(&connection_name(app, person));
-                Ok(true)
-            }
-            None => Ok(false),
-        }
+    /// End one person's sign-in to an app (connectors spec, Lifecycle):
+    /// first revoked at the app, then deleted here, whatever the app said,
+    /// and recorded. None: they were not signed in. Some: whether the app
+    /// itself ended the sign-in, and why not.
+    pub async fn disconnect(&self, app: &str, person: &str) -> Result<Option<(bool, String)>> {
+        let name = connection_name(app, person);
+        let Some(s) = self.vault.get(&name)? else { return Ok(None) };
+        let (done, detail) = revoke(s.expose()).await;
+        self.vault.remove(&name)?;
+        self.live_tools.lock().await.remove(&name);
+        tracing::info!("{person} disconnected {app}: revoked {done}: {detail}");
+        self.emit(&format!("person:{person}"), Ev::AppDisconnected { app: app.to_string(), person: person.to_string(), at_provider: done, detail: detail.clone() }).await?;
+        Ok(Some((done, detail)))
     }
 }
 
@@ -1150,8 +1154,13 @@ async fn disconnect(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Re
         return err(StatusCode::NOT_FOUND, "no such app");
     }
     match k.disconnect(&name, &p.id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, "you are not signed in to this app"),
+        // Where the app could not end the sign-in itself, the person is
+        // told where they remove Magnus there (connectors spec, Lifecycle).
+        Ok(Some((at_provider, detail))) => {
+            let remove_at = (!at_provider).then(|| crate::catalog::manifests().iter().find(|m| m.id == name).and_then(|m| m.remove_access.clone())).flatten();
+            Json(json!({ "at_provider": at_provider, "detail": detail, "remove_at": remove_at })).into_response()
+        }
+        Ok(None) => err(StatusCode::NOT_FOUND, "you are not signed in to this app"),
         Err(e) => internal(e),
     }
 }

@@ -1133,6 +1133,8 @@ impl State {
             Ev::ConnectorSettings { name, enabled, access_groups, blocked_groups } => {
                 self.connector_settings.insert(name.clone(), ConnectorSetting { enabled: *enabled, access_groups: access_groups.clone(), blocked_groups: blocked_groups.clone() });
             }
+            // The connection itself is in the vault; these are its record.
+            Ev::AppConnected { .. } | Ev::AppDisconnected { .. } => {}
             Ev::CredentialSet { connector, set } => {
                 self.credential_changed.insert(connector.clone(), (*set, e.at));
             }

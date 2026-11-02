@@ -271,11 +271,11 @@ one commit), 2026-11-02.
 - [ ] Refresh through the relay for confidential clients
 - [x] A rotated refresh token replaces the old in one vault write (`connectors.rs` `connector_secret`, one refresh at a time; `connectors.rs` test)
 - [ ] Re-sign-in: a refresh rejected as invalid marks the connection Needs attention and raises the card (drawn; no test; the card is not raised into the person's work)
-- [ ] Revoked at the provider: the next call fails and the connection moves to Needs attention (no test)
+- [x] Revoked at the provider: the next call fails and the connection moves to Needs attention (`connector_lifecycle.rs` `a_sign_in_ended_at_the_app_asks_the_person_to_sign_in_again`)
 - [x] Disconnect deletes the person's tokens, and only theirs (`connectors.rs` test, "Alice ends her own sign-in")
-- [ ] Disconnect first calls the provider's revocation endpoint (code in `Kernel::disconnect`; the test checks revocation only for the kill switch, not for Disconnect)
+- [x] Disconnect first calls the provider's revocation endpoint, then deletes the tokens; both ends of a connection are in the log (`connector_lifecycle.rs` `disconnect_revokes_at_the_app_first_and_both_ends_of_a_connection_are_in_the_log`)
 - [ ] Disconnect through the relay for confidential clients
-- [ ] For a provider with no revocation endpoint, the tokens are deleted and the card names the provider page where the user removes Magnus
+- [x] For a provider with no revocation endpoint, the tokens are deleted and the card names the provider page where the user removes Magnus (`connector_lifecycle.rs` `an_app_that_cannot_revoke_is_disconnected_here_and_the_person_is_told`; every catalog manifest names its page, `remove_access`, catalog.rs `every_manifest_is_well_formed`)
 - [ ] Manifest updates: new versions pulled and applied when no call is in flight; brokered images by digest; local add-ons through the app's updater when the program is closed
 - [ ] A new version needing more access asks through the scope-approval card the first time a tool needs it
 - [ ] Withdrawal: appliances disable the connector, revoke its connections and tell affected users in their Library

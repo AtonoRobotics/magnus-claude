@@ -22,6 +22,8 @@ audience = "public"
 label = "private+untrusted"
 registration = "preregistered"
 provider = "google"
+# Where a person removes Magnus at Google when Disconnect could not revoke it.
+remove_access = "https://myaccount.google.com/connections"
 scopes = ["https://www.googleapis.com/auth/calendar.calendarlist.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar.events.freebusy"]
 
 # Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).

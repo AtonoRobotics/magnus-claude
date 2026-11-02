@@ -1854,6 +1854,14 @@ async function connectorView(name) {
   return plain(`<section class="cp">${connectorBody(await api("GET", `/v1/connectors/${enc(name)}`))}</section>`);
 }
 
+// What Disconnect did: ended at the app, or, where the app could not end it
+// itself, ended here, with the app's own page where the person removes
+// Magnus (connectors spec, Lifecycle).
+function disconnected(r) {
+  if (!r || r.at_provider !== false) { toast("Disconnected. Your sign-in is ended at the app too."); return; }
+  toast(r.remove_at ? `Disconnected here. The app could not end your sign-in itself: remove Magnus at ${r.remove_at}` : "Disconnected here. The app could not end your sign-in itself: remove Magnus in its own settings.", 10000);
+}
+
 // Connect, again or for the first time, and Disconnect, wherever a card is.
 function bindConnectorActs(root) {
   if (root.dataset.connActs) return;
@@ -1871,7 +1879,7 @@ function bindConnectorActs(root) {
     if (a.dataset.act === "disconnect") {
       e.preventDefault();
       if (!confirm("Disconnect? Your sign-in is ended at the app, and Magnus can no longer use it for you until you connect again.")) return;
-      try { await api("DELETE", `/v1/connectors/${enc(a.dataset.app)}/connection`); toast("Disconnected."); connectorsChanged(); } catch (err) { toast(err.message); }
+      try { disconnected(await api("DELETE", `/v1/connectors/${enc(a.dataset.app)}/connection`)); connectorsChanged(); } catch (err) { toast(err.message); }
     }
   });
 }
@@ -1974,7 +1982,7 @@ function wirePanel() {
         case "connect-page": await Magnus.openExternal(a.dataset.url); return;
         case "disconnect":
           if (!confirm("Disconnect? Your sign-in is ended at the app, and Magnus can no longer use it for you until you connect again.")) return;
-          await api("DELETE", `/v1/connectors/${enc(a.dataset.app)}/connection`); toast("Disconnected."); break;
+          disconnected(await api("DELETE", `/v1/connectors/${enc(a.dataset.app)}/connection`)); break;
         case "save-ins":
           await api("PUT", `/v1/projects/${enc(id)}`, { instructions: $("#pin", el).value }); delete drafts[`pin-${id}`];
           toast("Instructions saved. New tasks here use them."); break;

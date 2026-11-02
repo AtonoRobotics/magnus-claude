@@ -342,6 +342,24 @@ pub enum Ev {
         #[serde(default)]
         title: String,
     },
+    /// A person connected one of the organisation's apps with their own
+    /// account (connectors spec, Lifecycle and audit). The tokens are in
+    /// the vault, never here; `account` is whom the app says they are.
+    AppConnected {
+        app: String,
+        person: String,
+        #[serde(default)]
+        account: Option<String>,
+    },
+    /// A person's connection to an app ended: Disconnect, or the person
+    /// removed. `at_provider`: the app revoked the sign-in itself; else
+    /// `detail` says why not, and the tokens are deleted here all the same.
+    AppDisconnected {
+        app: String,
+        person: String,
+        at_provider: bool,
+        detail: String,
+    },
     /// A person signed in from an app. The token itself is never logged.
     SignedIn {
         person: String,

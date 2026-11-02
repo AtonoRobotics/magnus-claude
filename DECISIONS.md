@@ -796,3 +796,22 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - A person's Library, the app's page and starting a sign-in all apply it: the app is not listed, its page is not found, and a sign-in is refused with "your organisation has not made this app available to you". The owner still manages every app in Settings, each marked as theirs or not (`for_you`), and their own Library hides the ones not theirs.
 - Group-scoped knowledge from an app's documents still follows only `access_groups`: a block list cannot be written as the knowledge ACL's groups.
 - Tests: `an_app_blocked_for_a_group_leaves_that_groups_library_and_cannot_be_signed_in_to` (library_groups.rs: Gmail allowed for staff and blocked for finance; Carol has it, Bob and Dana neither see it, open it, nor start signing in; the owner still manages it; clearing the block keeps who may use it); `an_app_is_for_its_groups_and_never_for_the_groups_it_is_blocked_for` (boundary.rs).
+
+## A connection's life: Disconnect revokes at the app first, and both ends are in the log (2026-11-02, `connector-lifecycle`)
+
+- The connectors spec, Lifecycle: "Disconnect first calls the provider's revocation endpoint"; for a provider with none, "the tokens are deleted and the card names the provider page where the user removes Magnus"; "Revoked at the provider: the next call fails and the connection moves to Needs attention".
+- Before this change, Disconnect deleted the tokens and then revoked them. The outcome was only a trace line: not in the log, not told to the person, and no test checked it.
+- Disconnect now:
+  - reads the sign-in, revokes its refresh and access tokens at the app (RFC 7009), then deletes it here whatever the app answered;
+  - answers whether the app ended it (`at_provider`), and why not;
+  - for a catalog app, names the app's own page where the person removes Magnus (`remove_access` in the manifest; Google's is myaccount.google.com/connections).
+  - The app's toast says which happened.
+- Both ends of a connection are now in the log:
+  - `AppConnected`: app, person, and the account the app named;
+  - `AppDisconnected`: app, person, `at_provider` and why.
+  - No token is recorded. The connection itself stays in the vault.
+- Tests (connector_lifecycle.rs):
+  - `disconnect_revokes_at_the_app_first_and_both_ends_of_a_connection_are_in_the_log`: both tokens revoked at the app; the card is available again; a second Disconnect is not found; both events are logged with whose they are and no token.
+  - `an_app_that_cannot_revoke_is_disconnected_here_and_the_person_is_told`.
+  - `a_sign_in_ended_at_the_app_asks_the_person_to_sign_in_again`: the person removes Magnus in the app's own settings; the card turns Needs attention, and signing in again brings it back.
+  - `connectors.rs` expects Disconnect's new answer.
