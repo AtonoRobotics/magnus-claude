@@ -740,6 +740,23 @@ pub struct Source {
     pub id: String,
     #[serde(default)]
     pub fetch_args: BTreeMap<String, serde_json::Value>,
+    /// The tool that lists what changed since a time (its argument `since`,
+    /// an ISO 8601 time), polled every `poll_seconds`: each item's id, and
+    /// `deleted` or `permissions_changed` when that is what changed.
+    #[serde(default)]
+    pub changes: Option<String>,
+    #[serde(default = "since_arg")]
+    pub since: String,
+    #[serde(default = "poll_seconds")]
+    pub poll_seconds: u64,
+}
+
+fn since_arg() -> String {
+    "since".into()
+}
+
+fn poll_seconds() -> u64 {
+    300
 }
 
 fn query_arg() -> String {

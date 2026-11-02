@@ -35,6 +35,16 @@ pub fn set_permit(person: &str, item: &str, ok: bool) {
     }
 }
 
+/// Forget what any source said about `item`, for everyone (K10).
+pub fn forget_permits(item: &str) {
+    let mut p = permits().lock().unwrap();
+    let before = p.0.len();
+    p.0.retain(|(_, i), _| i != item);
+    if p.0.len() != before {
+        p.1 += 1;
+    }
+}
+
 /// Changes to what is known, so a cache of what someone may see can tell
 /// when to look again.
 pub fn permits_generation() -> u64 {
@@ -135,6 +145,61 @@ pub fn recipients(input: &Value) -> Vec<String> {
 }
 
 impl Kernel {
+    /// A change at a source, recorded (K10: documents listing the item are
+    /// stale from now, and what the sources said of it is forgotten).
+    pub async fn source_changed(&self, source: &str, id: &str, change: &str) -> Result<()> {
+        let item = locator(source, id);
+        let change = if matches!(change, "deleted" | "permissions_changed") { change } else { "changed" };
+        self.emit("kernel", crate::events::Ev::SourceChanged { source: source.into(), item: item.clone(), change: change.into() }).await?;
+        forget_permits(&item);
+        Ok(())
+    }
+
+    /// Whose grant reads a source's changes: the organisation's key for an
+    /// app that takes one, else someone connected to it (the owner first).
+    fn change_reader(&self, c: &Connector) -> Option<String> {
+        let mut people: Vec<String> = self.owners().into_iter().map(|p| p.id).collect();
+        people.extend(self.cfg.people.iter().map(|p| p.id.clone()));
+        people.into_iter().find(|p| self.connected(c, p))
+    }
+
+    /// Ask every source that lists its changes what changed since it was
+    /// last asked, and record each change. Every `poll_seconds` per source.
+    pub fn watch_sources(self: &std::sync::Arc<Self>) {
+        let k = self.clone();
+        tokio::spawn(async move {
+            let mut last: std::collections::HashMap<String, (std::time::Instant, chrono::DateTime<chrono::Utc>)> = Default::default();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                for c in k.connectors() {
+                    let Some(s) = c.source.clone() else { continue };
+                    let Some(tool) = s.changes.clone() else { continue };
+                    let due = last.get(&c.name).is_none_or(|(at, _)| at.elapsed().as_secs() >= s.poll_seconds);
+                    if !due {
+                        continue;
+                    }
+                    let since = last.get(&c.name).map(|x| x.1).unwrap_or_else(chrono::Utc::now);
+                    let now = chrono::Utc::now();
+                    last.insert(c.name.clone(), (std::time::Instant::now(), since));
+                    let Some(reader) = k.change_reader(&c) else { continue };
+                    match k.source_call(&reader, &c, &tool, &json!({ s.since.clone(): since.to_rfc3339() })).await {
+                        Ok((v, _)) => {
+                            for o in items(&v) {
+                                let Some(id) = first(&o, &[&s.id, "id"]) else { continue };
+                                let change = if o["deleted"] == true { "deleted" } else if o["permissions_changed"] == true { "permissions_changed" } else { "changed" };
+                                if let Err(e) = k.source_changed(&c.name, &id, change).await {
+                                    tracing::warn!("recording a change at {}: {e:#}", c.name);
+                                }
+                            }
+                            last.insert(c.name.clone(), (std::time::Instant::now(), now));
+                        }
+                        Err(why) => tracing::debug!("asking {} what changed: {why}", c.name),
+                    }
+                }
+            }
+        });
+    }
+
     /// The person a recipient is: by their address, or their id.
     pub fn person_for(&self, recipient: &str) -> Option<String> {
         let r = recipient.to_lowercase();

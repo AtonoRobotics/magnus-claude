@@ -608,6 +608,14 @@ pub enum Ev {
         #[serde(default)]
         rule: Option<String>,
     },
+    /// Something changed at one of the org's sources (org context spec,
+    /// Change events): an item changed, was deleted, or who may read it
+    /// changed. `change` is `changed`, `deleted` or `permissions_changed`.
+    SourceChanged {
+        source: String,
+        item: String,
+        change: String,
+    },
     /// The audit record of one tool call (org context spec, K12): the run,
     /// the person it was for, the grant it used, the source items and
     /// bundle documents it touched, and whom it sent to.

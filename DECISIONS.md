@@ -1034,3 +1034,10 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - K12: every tool call that ends (done, failed or refused) writes an `audit` event with the run, the person it was for, the grant it used, the source items and bundle documents it touched, whom it sent to, and its status. A question to a colleague writes one when it is asked. The grant is named: the person's own sign-in to an app, the organisation's key for one, or for the org tools each source's. The audit trail is read from the log, not kept in the kernel's memory; the console's view of it comes with step 10.
 - Test: `a_business_limit_refuses_by_name_and_every_call_is_audited` (audit_and_limits.rs, T7 and T13).
 
+## Org context, step 6a: change events and staleness (2026-11-02, `org-context-6`)
+
+- A source can list its changes (`[source] changes`, the tool, called with `since` as an ISO 8601 time, every `poll_seconds`, five minutes by default): each item it returns is a change, `deleted` or `permissions_changed` when it says so, else `changed`. The kernel asks under the organisation's key for an app that takes one, else as someone connected to it, the owner first (the survey and curator's `connected_by` comes with step 7). The owner can also report changes (`POST /v1/sources/<name>/changes`), which is how a connector's push will arrive through the relay.
+- Each change is an event, `source_changed` (one kind with the change in a field, rather than the spec's three, which it names). K10: every document listing the item is stale from then (`stale_after`, shown to whoever reads it and cleared by its next version), and what the sources said about who can read the item is forgotten, so a permission revoked at the source takes effect at once rather than when the hour's answer expires (T4 by event).
+- A deleted item's erasure (K11) is step 6b; until then a deletion marks its documents stale like any change.
+- Test: `a_change_at_a_source_marks_its_documents_stale_and_its_permissions_asked_again` (source_changes.rs, T11).
+
