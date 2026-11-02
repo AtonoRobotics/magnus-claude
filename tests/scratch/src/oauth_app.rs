@@ -31,6 +31,9 @@ pub struct AppState {
     pub expires_in: i64,
     /// list_events' description as the app now advertises it, if changed.
     pub changed: Option<String>,
+    /// It names itself in its answer, as Google does (RFC 9207): it says
+    /// so in its metadata and puts `iss` on the redirect.
+    pub names_itself: bool,
     /// Answer refreshes without `expires_in` (it is only recommended).
     pub refresh_without_expiry: bool,
     n: usize,
@@ -87,11 +90,13 @@ async fn resource(State((base, _)): S) -> Json<Value> {
     Json(json!({ "resource": format!("{base}/mcp"), "resource_name": "Calendar", "authorization_servers": [base] }))
 }
 
-async fn metadata(State((base, _)): S) -> Json<Value> {
+async fn metadata(State((base, st)): S) -> Json<Value> {
+    let names_itself = st.lock().unwrap().names_itself;
     Json(json!({
         "issuer": base, "authorization_endpoint": format!("{base}/authorize"), "token_endpoint": format!("{base}/token"),
         "registration_endpoint": format!("{base}/register"), "revocation_endpoint": format!("{base}/revoke"),
-        "code_challenge_methods_supported": ["S256"], "grant_types_supported": ["authorization_code", "refresh_token"]
+        "code_challenge_methods_supported": ["S256"], "grant_types_supported": ["authorization_code", "refresh_token"],
+        "authorization_response_iss_parameter_supported": names_itself
     }))
 }
 
@@ -105,7 +110,7 @@ async fn register(State((_, st)): S, Json(b): Json<Value>) -> Response {
 }
 
 /// The person approves at once: straight back to the redirect with a code.
-async fn authorize(State((_, st)): S, Query(q): Query<HashMap<String, String>>) -> Response {
+async fn authorize(State((base, st)): S, Query(q): Query<HashMap<String, String>>) -> Response {
     let g = |k: &str| q.get(k).cloned().unwrap_or_default();
     let mut s = st.lock().unwrap();
     if !s.clients.get(&g("client_id")).is_some_and(|r| r.contains(&g("redirect_uri"))) || g("code_challenge_method") != "S256" || g("response_type") != "code" {
@@ -116,6 +121,9 @@ async fn authorize(State((_, st)): S, Query(q): Query<HashMap<String, String>>) 
     s.codes.insert(code.clone(), (g("client_id"), g("redirect_uri"), g("code_challenge"), g("resource")));
     let mut to = url::Url::parse(&g("redirect_uri")).unwrap();
     to.query_pairs_mut().append_pair("code", &code).append_pair("state", &g("state"));
+    if s.names_itself {
+        to.query_pairs_mut().append_pair("iss", &base);
+    }
     Response::builder().status(302).header("location", to.to_string()).body(Body::empty()).unwrap()
 }
 
@@ -170,9 +178,18 @@ async fn revoke(State((_, st)): S, Form(f): Form<HashMap<String, String>>) -> Re
 
 impl FakeOAuthApp {
     pub async fn start(expires_in: i64) -> FakeOAuthApp {
+        Self::start_with(expires_in, false).await
+    }
+
+    /// One that names itself in its answer, as Google does (RFC 9207).
+    pub async fn naming_itself(expires_in: i64) -> FakeOAuthApp {
+        Self::start_with(expires_in, true).await
+    }
+
+    async fn start_with(expires_in: i64, names_itself: bool) -> FakeOAuthApp {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
-        let state = Arc::new(Mutex::new(AppState { expires_in, ..Default::default() }));
+        let state = Arc::new(Mutex::new(AppState { expires_in, names_itself, ..Default::default() }));
         let app = Router::new()
             .route("/mcp", post(mcp))
             .route("/.well-known/oauth-protected-resource/mcp", get(resource))

@@ -528,12 +528,16 @@ async fn two_people_sign_in_on_one_installed_app_each_with_their_own_rights() {
 /// sign-in's code comes back to a loopback address the shell opens on this
 /// computer (only the installed app can catch it). A tool whose definition
 /// changes is blocked until the owner accepts the change on its connector.
-/// Fails if the Connectors page or its connection flow disappears.
+/// Fails if the Connectors page or its connection flow disappears, or if
+/// the app drops the server's name from the sign-in's answer (RFC 9207).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
 async fn the_owner_connects_an_app_from_settings_and_reapproves_a_changed_tool() {
     let (f, _idp, url, fingerprint) = appliance().await;
-    let cal = FakeOAuthApp::start(3600).await;
+    // It names itself in its answer, as Google does: the app must carry
+    // that back (2026-11-02: every Google sign-in from the app was refused
+    // because the app dropped it).
+    let cal = FakeOAuthApp::naming_itself(3600).await;
     let alice = f.app.api(PERSON);
     // The admin adds a server by its address in the admin console, never in
     // the app (connectors spec rev 46): here, through the same API.
