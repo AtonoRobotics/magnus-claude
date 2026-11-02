@@ -589,6 +589,20 @@ impl Kernel {
                 || ap.by.strip_prefix("person:").and_then(|id| self.person(id)).is_some_and(|p| p.is_owner() || p.has_role(&format!("approver:{}", f.risk.as_str())))
         };
         let found = found.into_iter().find(|ap| still_may(ap));
+        // A confirmed schedule was approved once for all its runs (owner,
+        // 2026-11-02: "The schedule should be approved once and run until
+        // completion or it's stopped"): its confirmation covers the policy's
+        // asks in its runs, for actions its person could approve themselves,
+        // except moving money. The kernel's own asks (the Rule of Two, the
+        // audience rule) still ask each time (owner, the same day).
+        if found.is_none() && !kernel_ask && f.risk != Risk::Financial {
+            let schedule = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.schedule.clone()).filter(|id| s.schedules.get(id).is_some_and(|sc| sc.person == run.person)));
+            let may = self.person(&run.person).is_some_and(|p| p.is_owner() || p.has_role(&format!("approver:{}", f.risk.as_str())) || f.risk == Risk::ReversibleWrite);
+            if let (Some(id), true) = (schedule, may) {
+                self.decision(a, "allow", "approval", &format!("covered by the confirmed schedule {id}"), rule).await?;
+                return Ok(Gate::Pass);
+            }
+        }
         if let Some(ap) = found {
             self.decision(a, "allow", "approval", &format!("approved by {} ({})", ap.by, ap.scope), rule).await?;
             if ap.scope == "once" {
