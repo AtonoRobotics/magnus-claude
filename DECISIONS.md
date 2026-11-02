@@ -728,3 +728,32 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - an allowlist that shuts out the admin's own address is refused, one with loopback is invalid, and a wider one is saved with the console still answering;
   - each change is audited;
   - the screens in every look and at phone width.
+
+## The admin console's Knowledge (2026-11-02, `admin-knowledge`)
+
+- The organisation's shared ontology, context and memory are the org context bundle that agents curate (the owner's org context build spec replaced the memory spec; #76). The console's Knowledge section is that bundle as an admin oversees, corrects and rolls it back:
+  - **Ontology** is the entity types (`/types/`). Each shows its definition, its attributes (identity keys), its relations with their cardinality, a drawing of it and its directly related types (both ways), its entries, what refers to it, and its history.
+  - **Context** is what every agent receives: the map (`/index.md` and each area's index), who does what (`/people/`), the terminology and standing facts (`/conventions/`), and the sources. Each item shows who last changed it and when, and is edited in place. "As agents see it" shows the map as a chosen person's agent receives it, with links to what they cannot see turned into text (K2).
+  - **Memory** is the entries (`/entities/`): summary, linked entities, sources, created, last used (the last run that read it), filtered by source, writer, linked entity and date. An entry's provenance is its writer (an agent and its version, or an admin), run, sources and the taint it was read under, with every version.
+  - **Activity** is every change agents make, newest first, from the log: who, what, created, updated or removed, its run and sources, filtered by agent, area, change and time, and live from the stream. A change opens with its before and after.
+- What an admin does:
+  - Ontology: create a type; edit it as OKF text; add or remove a relation; approve it as stable (only an admin may, as #76 decided), deprecate it, or bring it back as a draft; merge it into another type (each entry moved and re-typed, every reference repointed, the type removed, each step a version); delete it, refused while it has entries or is referred to.
+  - Memory: edit an entry, delete it, or roll it back; delete or roll back many at once, with a fresh password.
+  - Activity: undo one change, or a selection as a batch, with a fresh password. Each document goes back to how it was before the earliest selected change, as a new version, or is removed if it did not exist then.
+  - Every version can be shown against now and rolled back to.
+- An admin's write goes through the same checks as an agent's (`bundle::validate`), as `human:<admin's sub>`. It keeps the document's sources and taint, so editing launders nothing. A removal (`BundleRemoved`) keeps every version in the log to bring back.
+- Overview's "agent knowledge changes in the last 24 hours" now counts agents' writes to the bundle, and opens Activity.
+- Tests (admin_knowledge.rs):
+  - `the_kernel_keeps_every_knowledge_change_and_root_rolls_any_back`, through the control socket, run here:
+    - the agent's provenance;
+    - an admin approves a type as stable; a malformed edit is refused; the type is rolled back;
+    - the agent's change is in Activity with its before and after, and undone;
+    - a type in use is not deleted but merged, and its versions stay readable;
+    - the map as Bob's agent sees it.
+  - `root_oversees_corrects_and_rolls_back_the_organisations_knowledge_from_the_console`, against Keycloak:
+    - the same through the console (the spec's two Knowledge invariants), with relations added and rolled back, an entry edited and rolled back, and an agent's change undone;
+    - bulk and batch actions refused without a fresh password, and a bulk delete answering per entry;
+    - every change audited;
+    - the four screens in every look and at phone width.
+  - `an_id_is_one_segment_and_never_leaves_the_bundle` and `okf_text_splits_into_frontmatter_and_body` (admin/knowledge.rs).
+- At phone width the two-column screens (Ontology, Agent policy) are one column of `minmax(0, 1fr)`, as on wide screens, not `1fr`: a plain `1fr` grew to its widest child, so a type's history, with a run id or an author's id as one unbroken word, made the screen scroll sideways by 116px (#85's first CI run). Its tables now scroll inside their own box, as the console's other wide tables do, and long ids in tables wrap.

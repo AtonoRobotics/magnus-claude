@@ -1791,6 +1791,9 @@ impl State {
                 d.sources = sources.clone();
                 d.versions.push((*version, e.seq, e.at, actor.clone()));
             }
+            Ev::BundleRemoved { path } => {
+                self.bundle.remove(path);
+            }
             Ev::Memory { id, person, run, label, sources, by, .. } => self.memory.push(MemoryEntry {
                 id: id.clone(),
                 person: person.clone(),

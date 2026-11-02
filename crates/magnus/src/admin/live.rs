@@ -39,6 +39,7 @@ pub async fn status(c: &Console) -> Value {
         "signed_in": k["signed_in"],
         "microvms_running": k["microvms_running"],
         "knowledge_changes_24h": k["knowledge_changes_24h"],
+        "knowledge_last_change": k["knowledge_last_change"],
         "kill_switch": switch.unwrap_or(Value::Null),
     })
 }

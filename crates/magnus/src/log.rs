@@ -534,6 +534,14 @@ impl Log {
         Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
+    /// The latest events of these kinds, newest first, without their
+    /// content: each one's seq, time, actor and what the log keeps of it.
+    pub async fn of_kinds(&self, kinds: &[&str], limit: i64) -> Result<Vec<(i64, chrono::DateTime<chrono::Utc>, String, Value)>> {
+        let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
+        let rows = self.client().await?.query("SELECT seq, at, actor, body FROM public.events WHERE kind = ANY($1) ORDER BY seq DESC LIMIT $2", &[&kinds, &limit]).await.context("read events by kind")?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))).collect())
+    }
+
     /// Delete the content of these events.
     pub async fn delete_content(&self, seqs: &[i64]) -> Result<u64> {
         if !self.store {

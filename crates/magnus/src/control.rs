@@ -55,6 +55,15 @@ pub async fn serve(k: Arc<Kernel>, state_dir: &Path) -> Result<()> {
         .route("/v1/admin/updates/install", post(install_update))
         .route("/v1/admin/updates/rollback", post(roll_back_update))
         .route("/v1/admin/updates/desktop-channel", axum::routing::put(desktop_channel))
+        .route("/v1/admin/knowledge", axum::routing::get(knowledge_list))
+        .route("/v1/admin/knowledge/doc", axum::routing::get(knowledge_doc).post(knowledge_write).delete(knowledge_remove))
+        .route("/v1/admin/knowledge/version", axum::routing::get(knowledge_version))
+        .route("/v1/admin/knowledge/rollback", post(knowledge_rollback))
+        .route("/v1/admin/knowledge/merge", post(knowledge_merge))
+        .route("/v1/admin/knowledge/activity", axum::routing::get(knowledge_activity))
+        .route("/v1/admin/knowledge/activity/{seq}", axum::routing::get(knowledge_change))
+        .route("/v1/admin/knowledge/revert", post(knowledge_revert))
+        .route("/v1/admin/knowledge/assembled", axum::routing::get(knowledge_assembled))
         .route("/v1/admin/connectors", axum::routing::get(connectors).post(add_connector))
         .route("/v1/admin/connectors/{name}", axum::routing::patch(connector_settings).delete(remove_connector))
         .route("/v1/admin/connectors/{name}/credential", axum::routing::put(set_credential).delete(revoke_credential))
@@ -155,12 +164,16 @@ async fn overview(State(k): State<Arc<Kernel>>) -> Response {
         failed.sort_by(|a, b| b.ended_at.cmp(&a.ended_at));
         let knowledge = s.knowledge.values().filter(|e| e.at > day && !e.author.starts_with("person:")).count();
         let memory = s.memory.iter().filter(|m| m.at > day).count();
+        // Agents' changes to the org context bundle (admin console spec,
+        // Overview: "agent knowledge changes in the last 24 hours").
+        let bundle = s.bundle.values().filter(|d| d.scope == "org").flat_map(|d| d.versions.iter()).filter(|v| v.2 > day && !v.3.starts_with("human:")).count();
+        let last_change = s.bundle.values().filter(|d| d.scope == "org").flat_map(|d| d.versions.iter()).map(|v| v.1).max();
         json!({
             "version": crate::update::version(), "log_up": log_up, "kill_switch": s.kill_switch,
             "running_tasks": s.runs.values().filter(|r| r.status == Status::Running).count(),
             "waiting_tasks": s.runs.values().filter(|r| r.status == Status::Suspended).count(),
             "signed_in": signed_in, "microvms_running": vms,
-            "knowledge_changes_24h": knowledge + memory,
+            "knowledge_changes_24h": knowledge + memory + bundle, "knowledge_last_change": last_change,
             "recent_errors": failed.iter().take(10).map(|r| json!({ "run": r.id, "task": r.task, "person": r.person, "reason": r.reason, "at": r.ended_at })).collect::<Vec<_>>(),
         })
     });
@@ -470,5 +483,78 @@ async fn roll_back_update(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) ->
 async fn desktop_channel(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
     let Some(actor) = actor(&b) else { return ops_refused((StatusCode::BAD_REQUEST, "name who sets it".into())) };
     ops(k.set_desktop_channel(&actor, b["channel"].as_str().unwrap_or_default()).await)
+}
+
+// The organisation's knowledge (admin console spec, Knowledge), as the
+// kernel keeps it: the org context bundle. A change names the admin by
+// their provider `sub`, and is written as `human:<sub>`.
+
+fn know(r: Result<Value, crate::knowledge_admin::Refusal>) -> Response {
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err((st, m)) => (st, Json(json!({ "error": m }))).into_response(),
+    }
+}
+
+fn sub_of(b: &Value) -> Option<String> {
+    text(b, "sub").filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+}
+
+fn no_sub() -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": "name the admin" }))).into_response()
+}
+
+async fn knowledge_list(State(k): State<Arc<Kernel>>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let kinds: Vec<&str> = q.get("kinds").map(|k| k.split(',').collect()).unwrap_or_default();
+    know(k.admin_bundle(&kinds).await.map(|d| json!({ "documents": d })))
+}
+
+async fn knowledge_doc(State(k): State<Arc<Kernel>>, Query(q): Query<HashMap<String, String>>) -> Response {
+    know(k.admin_bundle_doc(q.get("path").map(String::as_str).unwrap_or_default()).await)
+}
+
+async fn knowledge_version(State(k): State<Arc<Kernel>>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let v = q.get("version").and_then(|v| v.parse().ok()).unwrap_or(0);
+    know(k.admin_bundle_version(q.get("path").map(String::as_str).unwrap_or_default(), v).await)
+}
+
+async fn knowledge_write(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(sub) = sub_of(&b) else { return no_sub() };
+    know(k.admin_bundle_write(&sub, b["path"].as_str().unwrap_or_default(), &b["frontmatter"], b["body"].as_str().unwrap_or_default()).await.map(|v| json!({ "version": v })))
+}
+
+async fn knowledge_remove(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(sub) = sub_of(&b) else { return no_sub() };
+    know(k.admin_bundle_remove(&sub, b["path"].as_str().unwrap_or_default()).await)
+}
+
+async fn knowledge_rollback(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(sub) = sub_of(&b) else { return no_sub() };
+    know(k.admin_bundle_rollback(&sub, b["path"].as_str().unwrap_or_default(), b["version"].as_u64().unwrap_or(0) as u32).await.map(|v| json!({ "version": v })))
+}
+
+async fn knowledge_merge(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(sub) = sub_of(&b) else { return no_sub() };
+    know(k.admin_merge_types(&sub, b["from"].as_str().unwrap_or_default(), b["into"].as_str().unwrap_or_default()).await)
+}
+
+async fn knowledge_activity(State(k): State<Arc<Kernel>>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let limit = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(500);
+    know(k.admin_activity(q.get("agents").is_some_and(|a| a == "1"), limit).await.map(|c| json!({ "changes": c })))
+}
+
+async fn knowledge_change(State(k): State<Arc<Kernel>>, axum::extract::Path(seq): axum::extract::Path<i64>) -> Response {
+    know(k.admin_change(seq).await)
+}
+
+async fn knowledge_revert(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(sub) = sub_of(&b) else { return no_sub() };
+    let seqs: Vec<i64> = b["seqs"].as_array().into_iter().flatten().filter_map(Value::as_i64).collect();
+    know(k.admin_revert(&sub, &seqs).await)
+}
+
+async fn knowledge_assembled(State(k): State<Arc<Kernel>>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let person = q.get("person").cloned().or_else(|| k.cfg.people.first().map(|p| p.id.clone())).unwrap_or_default();
+    know(k.admin_assembled(&person).await)
 }
 

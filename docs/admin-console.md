@@ -56,7 +56,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] Reversible changes show a toast with Undo (`admin-shell`; `admin_shell.rs`)
 - [x] Destructive changes open a confirm sheet; the riskiest ask for the target's name typed (`admin-shell`; `admin_shell.rs`; typed, under Users › Delete)
 - [x] Step-up opens the provider's sign-in in a sheet and returns to the action (`admin-shell`; `admin_shell.rs`)
-- [x] Live data over server-sent events, `/api/v1/events`: status and the kill switch (`admin-shell`; `admin_shell.rs`); tasks and activity join with their sections
+- [x] Live data over server-sent events, `/api/v1/events`: status, the kill switch, tasks, microVMs and knowledge changes (`admin-shell`, `admin-operations`, `admin-knowledge`)
 - [x] Designed empty, loading and error states on every screen built so far (`admin-shell`), and on each section as it is built
 
 ### Overview
@@ -71,11 +71,11 @@ Each line names the pull request that built it, or the one building it.
 
 ### Knowledge
 
-- [ ] Ontology: searchable types; definition, attributes, relations with cardinality, a graph of related types, entries referencing it, history
-- [ ] Ontology: create, edit, add or remove a relation, merge, deprecate, delete (refused while in use); every change versioned, diff per version, rollback
-- [ ] Context: org profile, structure, terminology, standing facts; who last changed each and when; edit in place; "As agents see it"
-- [ ] Memory: searchable table (summary, entities, source, created, last used) with filters; detail with provenance, entities, versions; edit, delete, rollback; bulk delete and rollback with step-up
-- [ ] Activity: every agent change, newest first, with before/after and source; revert one; revert a range with step-up; filters
+- [x] Ontology: searchable types; definition, attributes, relations with cardinality, a graph of related types, entries referencing it, history (`admin-knowledge`; `admin_knowledge.rs`)
+- [x] Ontology: create, edit, add or remove a relation, merge, deprecate, delete (refused while in use); every change versioned, diff per version, rollback (`admin-knowledge`; `admin_knowledge.rs`)
+- [x] Context: the map, who does what, terminology and standing facts, sources; who last changed each and when; edit in place; "As agents see it" (`admin-knowledge`; `admin_knowledge.rs`)
+- [x] Memory: searchable table (summary, entities, source, created, last used) with filters; detail with provenance, entities, versions; edit, delete, rollback; bulk delete and rollback with step-up (`admin-knowledge`; `admin_knowledge.rs`)
+- [x] Activity: every agent change, newest first, with before/after and source; revert one; revert a selection with step-up; filters; live (`admin-knowledge`; `admin_knowledge.rs`)
 
 ### Users
 
@@ -113,7 +113,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] Postgres as `magnus_root`, insert and select only on the log (#70)
 - [x] The provider's admin API through `magnus-admin-svc` with `private_key_jwt`, realm-management in the realm only (#72)
 - [x] The kill switch the kernel's own, persisted, refusing new runs while on (#71, before)
-- [ ] Every endpoint in the spec's table (tracked per section above)
+- [ ] Every endpoint in the spec's table: all built (`admin-shell` to `admin-knowledge`) but `POST /network/certificate/renew`, which comes with the trusted certificate; `POST /modules` and `DELETE /modules/{id}` answer 409 (modules come with the release)
 - [x] Every change audited before it answers; a step-up endpoint without a fresh check returns 401 `step_up_required` (#70, #69)
 
 ## Invariant tests
@@ -127,7 +127,7 @@ Reach
 Sign-in and authority
 - [x] A member's session or token is refused on every admin endpoint (`admin_sign_in.rs`)
 - [x] An admin cannot sign in without their password (ruling 1) (`admin_sign_in.rs`)
-- [ ] Every step-up endpoint returns `step_up_required` without a fresh check and succeeds with one (grows with each section)
+- [x] Every step-up endpoint returns `step_up_required` without a fresh check and succeeds with one: kill switch release (`admin_sign_in.rs`), role change and admin invite (`admin_users.rs`), delete (`admin_people.rs`), sign-in rules, policy apply and rollback (`admin_security.rs`), memory bulk and activity batch (`admin_knowledge.rs`), update install and rollback, allowlist (`admin_operations.rs`)
 - [x] An admin turned off loses the console within 5 minutes (`admin_sign_in.rs`)
 - [x] The last admin cannot be removed, turned off or demoted (`admin_users.rs`)
 
@@ -138,8 +138,8 @@ Data and audit
 - [x] `magnus_root` cannot change an audit entry (`admin_audit.rs`)
 
 Knowledge
-- [ ] An admin edits an ontology type and a memory entry, sees provenance on both, and rolls each back
-- [ ] An agent's change to org memory appears in Activity, and reverting it restores the prior state
+- [x] An admin edits an ontology type and a memory entry, sees provenance on both, and rolls each back (`admin_knowledge.rs`)
+- [x] An agent's change to org memory appears in Activity, and reverting it restores the prior state (`admin_knowledge.rs`)
 
 Kill switch
 - [x] Hold-to-stop at phone width halts a running task and a pending schedule within 5 seconds (#71)
@@ -148,7 +148,7 @@ Kill switch
 - [x] Release without step-up fails (#71)
 
 UI
-- [ ] Every screen in light, dark and glass, and at phone width with no horizontal scroll
+- [x] Every screen in light, dark and glass, and at phone width with no horizontal scroll, the sections in reach (each section's test visits its screens through `admin-sign-in.mjs`)
 
 ## Removals
 
