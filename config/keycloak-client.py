@@ -39,6 +39,8 @@ p.add_argument("--client-id", default="magnus-claude")
 p.add_argument("--name", default="Magnus appliance")
 p.add_argument("--admin-console", metavar="JWKS_FILE", help="register the admin console's client, with the key `magnus-admin jwk` printed")
 p.add_argument("--admin-hostname", help="the admin console's hostname, with :port if not 443")
+p.add_argument("--assign-admin", action="append", default=[], metavar="USERNAME",
+               help="with --admin-console: give this person of the realm the realm role admin, which opens the console (repeatable)")
 a = p.parse_args()
 if a.admin_console:
     if not a.admin_hostname:
@@ -146,6 +148,20 @@ if a.admin_console:
     roles = [send("GET", f"{base}/clients/{rm}/roles/{r}", token=token) for r in ("manage-users", "view-users", "query-users", "view-realm")]
     send("POST", f"{base}/users/{account}/role-mappings/clients/{rm}", body=roles, token=token)
     print(f"The console's service account magnus-admin-svc may manage the people of realm {a.realm}, and no more.")
+    # The realm role that opens the console, and the people who hold it.
+    if a.assign_admin:
+        try:
+            role = send("GET", f"{base}/roles/admin", token=token)
+        except SystemExit:
+            send("POST", f"{base}/roles", body={"name": "admin", "description": "Opens the Magnus admin console"}, token=token)
+            role = send("GET", f"{base}/roles/admin", token=token)
+        for name in a.assign_admin:
+            users = [u for u in send("GET", f"{base}/users?{urlencode({'username': name, 'exact': 'true'})}", token=token) if u.get("username") == name]
+            if not users:
+                print(f"No person {name} in realm {a.realm}: not given the role admin.")
+                continue
+            send("POST", f"{base}/users/{users[0]['id']}/role-mappings/realm", body=[role], token=token)
+            print(f"{name} holds the realm role admin.")
     print(f"""
 The admin console signs in through {issuer} as {a.client_id}. Give the
 realm role "admin" to the people who run the appliance; only they enter.
