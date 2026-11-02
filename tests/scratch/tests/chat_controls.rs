@@ -138,3 +138,33 @@ async fn magnus_pauses_resumes_edits_and_cancels_a_schedule_in_conversation() {
     }
     panic!("the cancelled schedule is still there: {}", schedule(&bob, &id).await);
 }
+
+/// Cancelling a schedule stops a run of it still going; pausing would not
+/// (behavior spec, Cancellation semantics).
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_schedule_stops_its_run_in_flight() {
+    let calls = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start(model(calls.clone())).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    magnus_scratch::reconfigure(&mut app, |c| {
+        let mut t = toml::Table::new();
+        t.insert("min_every_minutes".into(), 1.into());
+        c.insert("schedules".into(), toml::Value::Table(t));
+    })
+    .await;
+    let bob = app.api("bob");
+    let (st, v) = bob.post("/v1/schedules", json!({ "text": "Check the parking lot.", "every_minutes": 1 })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    // Its first run starts, and waits on Bob's answer.
+    let task = eventually("the schedule's run", Duration::from_secs(120), || async {
+        bob.tasks().await["tasks"].as_array().unwrap().iter().find(|t| t["text"] == "Check the parking lot.").and_then(|t| t["task_id"].as_str().map(String::from))
+    })
+    .await;
+    bob.wait_item(&task, "question").await;
+    let said = ask(&bob, &calls, "Stop checking the lot.", "cancel_schedule", json!({ "id": id })).await;
+    assert!(said.contains("\"runs_stopped\":1"), "{said}");
+    let (_, t) = bob.get(&format!("/v1/tasks/{task}")).await;
+    assert_eq!(t["status"], "cancelled", "the schedule's run in flight went on: {t}");
+    assert!(schedule(&bob, &id).await.is_null());
+}

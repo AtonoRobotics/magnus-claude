@@ -187,7 +187,9 @@ async fn a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run() {
     let s = eventually("a firing skipped for a run that waits for a time", MINUTE * 2, || async { schedule(&alice, &kettle).await.filter(|s| s["skipped"].is_object()) }).await;
     assert!(s["skipped"]["why"].as_str().unwrap().contains("waiting for a time"), "{s}");
     assert!(s["paused"].is_null(), "a run waiting for a time paused its schedule: {s}");
-    assert!(alice.send(reqwest::Method::DELETE, &format!("/v1/schedules/{kettle}"), None).await.0.is_success());
+    // Paused, it starts no more runs; the run already waiting goes on
+    // (cancelling would stop that run too: behavior spec, Cancellation).
+    assert_eq!(alice.post(&format!("/v1/schedules/{kettle}/pause"), json!({})).await.0.as_u16(), 204);
 
     let n = notice(&alice, "A schedule ended", &dated).await;
     assert!(n["details"]["evidence"]["why"].as_str().unwrap().contains("reached its end"), "{n}");
