@@ -153,3 +153,52 @@ async fn a_sign_in_finishes_only_in_the_browser_that_started_it_and_once() {
     let r = b.get(format!("{url}/auth/callback?state={}&code=forged", q["state"])).header("cookie", format!("__Host-magnus_admin_login={}", q["state"])).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
 }
+
+/// From the console: "Stop all agents" needs no step-up, Release does
+/// (admin console spec, Kill switch; invariant "Release without step-up
+/// fails"), and both are in the audit log; Overview and Health answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_stops_all_agents_at_once_and_releases_only_with_a_fresh_password() {
+    let kc = Keycloak::start().await;
+    kc.add_person("Alice").await;
+    kc.set_roles("Alice", &["admin"]).await;
+    let m = FakeModel::start(steps(vec![])).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    kc.configure(&mut app).await;
+    let mine = format!("{}/32", lan_ip());
+    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", 4.into())]);
+    kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &p.jwks().await).await;
+    let url = p.url();
+    let c = launch(p).await;
+    let api = |path: &str| format!("{url}/api/v1{path}");
+    let b = browser(&c, false);
+    let sid = sign_in(&url, c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
+    let me: Value = with_cookie(b.get(api("/session")), &sid).send().await.unwrap().json().await.unwrap();
+    let csrf = me["csrf"].as_str().unwrap().to_string();
+    for path in ["/overview", "/health"] {
+        let r = with_cookie(b.get(api(path)), &sid).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "{path}");
+    }
+    let o: Value = with_cookie(b.get(api("/overview")), &sid).send().await.unwrap().json().await.unwrap();
+    assert!(o["cards"]["running_tasks"].is_number() && o["status"]["version"].is_string(), "{o}");
+
+    // Long after the sign-in's own step-up has lapsed: engaging still works.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let r = with_cookie(b.post(api("/kill-switch/engage")), &sid).header("x-csrf-token", &csrf).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(app.api("alice").get("/v1/kill-switch").await.1["engaged"], true, "the app's switch is not on");
+    // Release without a fresh password fails, and leaves it on.
+    let r = with_cookie(b.post(api("/kill-switch/release")), &sid).header("x-csrf-token", &csrf).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(r.json::<Value>().await.unwrap()["error"], "step_up_required");
+    assert_eq!(app.api("alice").get("/v1/kill-switch").await.1["engaged"], true);
+    // With one, it is released.
+    let sid2 = sign_in(&url, c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
+    let me: Value = with_cookie(b.get(api("/session")), &sid2).send().await.unwrap().json().await.unwrap();
+    let r = with_cookie(b.post(api("/kill-switch/release")), &sid2).header("x-csrf-token", me["csrf"].as_str().unwrap()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(app.api("alice").get("/v1/kill-switch").await.1["engaged"], false);
+    let audit: Value = with_cookie(b.get(api("/audit?action=kill_switch")), &sid2).send().await.unwrap().json().await.unwrap();
+    let actions: Vec<&str> = audit["entries"].as_array().unwrap().iter().filter_map(|e| e["action"].as_str()).collect();
+    assert!(actions.contains(&"kill_switch_engaged") && actions.contains(&"kill_switch_released"), "{audit}");
+}

@@ -27,3 +27,16 @@ body:not(.signed-in) { grid-template-areas: "top top" "main main"; }
 #audit-filter { flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-bottom: 12px; }
 #audit-filter label { display: flex; flex-direction: column; font-size: 12px; gap: 2px; }
 #audit-rows { overflow-x: auto; }
+.ad-kill-btn { height: 36px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--bad); background: var(--bad); color: #fff; font-weight: 600; cursor: pointer; position: relative; overflow: hidden; touch-action: none; user-select: none; }
+.ad-kill-btn.holding::after { content: ""; position: absolute; inset: 0; background: rgba(255,255,255,.28); transform-origin: left; animation: ad-hold 1s linear forwards; }
+@keyframes ad-hold { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.ad-kill-on { color: var(--bad); font-weight: 600; }
+#kill-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 10; min-height: 52px; box-sizing: border-box; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 16px; background: var(--bad); color: #fff; }
+#kill-banner button { margin-left: auto; height: 36px; padding: 0 14px; border-radius: 10px; border: 1px solid #fff; background: transparent; color: #fff; font-weight: 600; cursor: pointer; }
+body:has(#kill-banner) { padding-top: 52px; }
+.ad-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.ad-big { font-size: 28px; font-weight: 600; }
+.ad-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); }
+.ad-dot.ok { background: var(--ok-icon); } .ad-dot.down { background: var(--bad); }
+.ad-alerts, .ad-services { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

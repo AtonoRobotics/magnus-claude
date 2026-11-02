@@ -37,15 +37,17 @@ async fn the_console_answers_only_its_own_network_by_its_own_name_over_tls_1_3()
     for asset in ["/assets/app.css", "/assets/theme.js", "/assets/admin.css", "/assets/admin.js"] {
         assert_eq!(browser(&c, false).get(url(asset)).send().await.unwrap().status(), 200, "{asset}");
     }
-    let health: serde_json::Value = browser(&c, false).get(url("/api/v1/health")).send().await.unwrap().json().await.unwrap();
-    assert_eq!(health["ok"], true, "{health}");
+    let status: serde_json::Value = browser(&c, false).get(url("/status")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(status, serde_json::json!({ "ok": true }), "the status before sign-in says more than that it answers");
     // Nothing else answers without signing in.
-    assert_eq!(browser(&c, false).get(url("/api/v1/users")).send().await.unwrap().status(), 401);
+    for p in ["/api/v1/users", "/api/v1/health", "/api/v1/overview", "/api/v1/kill-switch"] {
+        assert_eq!(browser(&c, false).get(url(p)).send().await.unwrap().status(), 401, "{p} answered without a sign-in");
+    }
 
     // Any other name is not found, the console not even confirmed.
     let r = browser(&c, false).get(url("/")).header("host", "magnus.pyrallon.ai").send().await.unwrap();
     assert_eq!(r.status(), 404);
-    let r = browser(&c, false).get(url("/api/v1/health")).header("host", format!("{ip}:{}", c.addr.port())).send().await.unwrap();
+    let r = browser(&c, false).get(url("/status")).header("host", format!("{ip}:{}", c.addr.port())).send().await.unwrap();
     assert_eq!(r.status(), 404);
 
     // TLS 1.3 only.
@@ -54,7 +56,7 @@ async fn the_console_answers_only_its_own_network_by_its_own_name_over_tls_1_3()
     // Loopback, where the tunnel reaches services, is never the console's.
     assert!(tokio::net::TcpStream::connect(("127.0.0.1", c.addr.port())).await.is_err(), "the console listens on loopback");
     // Nor is the user API, which the tunnel serves.
-    for p in ["/assets/admin.js", "/api/v1/health"] {
+    for p in ["/assets/admin.js", "/status"] {
         let st = reqwest::get(format!("{}{p}", app.base)).await.unwrap().status();
         assert_eq!(st, 404, "the user API serves the console's {p}");
     }

@@ -639,6 +639,8 @@ pub struct State {
     pub approvals: Vec<Approval>,
     pub policies: BTreeMap<String, String>,
     pub kill_switch: bool,
+    /// Who last engaged or released it, and when (as the log names them).
+    pub kill_switch_by: Option<(String, DateTime<Utc>)>,
     /// Everyone who has ever signed in here. Someone not in it signs in the
     /// first time on the identity provider's own page, which can walk them
     /// through what their account still needs (a new password, two-factor).
@@ -1007,7 +1009,10 @@ impl State {
                 let n = self.policy_history.iter().filter(|p| &p.layer == layer).count();
                 self.version_changes.push((e.seq, e.at, format!("policy:{layer}"), format!("v{n}")));
             }
-            Ev::KillSwitch { engaged } => self.kill_switch = *engaged,
+            Ev::KillSwitch { engaged } => {
+                self.kill_switch = *engaged;
+                self.kill_switch_by = Some((e.actor.clone(), e.at));
+            }
             Ev::AdminAction { .. } => {
                 if let Ok(v) = serde_json::to_value(&e.ev) {
                     self.audit.push((e.seq, e.at, v));

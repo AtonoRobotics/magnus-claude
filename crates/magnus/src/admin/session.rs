@@ -37,7 +37,7 @@ impl Idp {
     }
 
     /// A public address of the provider, as the console reaches it.
-    fn inside(&self, url: &str) -> String {
+    pub fn inside(&self, url: &str) -> String {
         match &self.internal {
             Some(i) => {
                 let public = url::Url::parse(&self.issuer).map(|u| u.origin().ascii_serialization()).unwrap_or_default();

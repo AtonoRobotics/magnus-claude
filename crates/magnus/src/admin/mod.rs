@@ -13,6 +13,7 @@
 pub mod auth;
 pub mod kernel;
 pub mod net;
+pub mod ops;
 pub mod session;
 
 use crate::config::Config;
@@ -42,6 +43,8 @@ pub struct Console {
     pub step_up_seconds: i64,
     pub refresh_seconds: i64,
     pub kernel: kernel::Kernel,
+    /// The appliance's state, whose disk Health watches.
+    pub state_dir: std::path::PathBuf,
 }
 
 impl Console {
@@ -106,6 +109,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
         step_up_seconds: a.step_up_seconds.into(),
         refresh_seconds: a.refresh_seconds.into(),
         kernel: kernel::Kernel { path: crate::control::socket_path(&cfg.appliance.state_dir) },
+        state_dir: cfg.appliance.state_dir.clone(),
     });
     let l = net::Listener::bind(&addrs, allow, tls).await?;
     // tap_io gives the listener axum's connect-info: each request's source,
@@ -131,6 +135,11 @@ pub fn router(console: Arc<Console>) -> Router {
     let api = Router::new()
         .route("/api/v1/session", get(session::me).delete(session::logout))
         .route("/api/v1/session/step-up", axum::routing::post(session::confirm))
+        .route("/api/v1/overview", get(ops::overview))
+        .route("/api/v1/health", get(ops::health))
+        .route("/api/v1/kill-switch", get(ops::switch_state))
+        .route("/api/v1/kill-switch/engage", axum::routing::post(ops::engage))
+        .route("/api/v1/kill-switch/release", axum::routing::post(ops::release))
         .route("/api/v1/audit", get(audit_list))
         .route("/api/v1/audit.csv", get(audit_csv))
         .route("/api/v1/{*rest}", axum::routing::any(api_not_found))
@@ -141,7 +150,7 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/auth/login", get(session::login))
         .route("/auth/step-up", get(session::step_up))
         .route("/auth/callback", get(session::callback))
-        .route("/api/v1/health", get(health))
+        .route("/status", get(status))
         .merge(api)
         .fallback(not_found)
         .layer(axum::middleware::from_fn_with_state(console.clone(), host_check))
@@ -227,8 +236,10 @@ async fn api_not_found() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response()
 }
 
-async fn health() -> Response {
-    Json(json!({ "ok": true, "version": crate::update::version() })).into_response()
+/// Whether the console answers, for the status dot before anyone signs
+/// in: nothing more, not even its version.
+async fn status() -> Response {
+    Json(json!({ "ok": true })).into_response()
 }
 
 const SHELL: &str = include_str!("../../../../desktop/admin/index.html");
