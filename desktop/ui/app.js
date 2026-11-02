@@ -2209,7 +2209,7 @@ async function connectorsSection(main) {
 // Everything a person can set, in one place; developer views stay in their
 // own group. Sections that need the owner role are shown only to owners.
 const SETTINGS = [
-  ["models", "Models", modelsSection, true], ["connectors", "Connectors", connectorsSection, true], ["account", "Account", accountSection],
+  ["models", "Models", modelsSection, true], ["connectors", "Connectors", connectorsSection, true], ["account", "Account", accountSection], ["memory", "Your memory", memorySection],
   ["appearance", "Appearance", appearanceSection], ["notifications", "Notifications", notificationsSection], ["updates", "Updates", updatesSection], ["data", "Data and privacy", dataSection],
   ["safety", "Kill switch", killSwitchSection, true],
 ];
@@ -2267,6 +2267,43 @@ async function killSwitchSection(el) {
   };
   App.redraw = draw;
   onLeave(() => { App.redraw = null; });
+  await draw();
+}
+
+// What Magnus keeps about the person (org context spec, Your memory): how
+// they want it to work with them, the facts, and its notes, each to edit,
+// mark no longer true, or forget. Theirs alone.
+async function memorySection(el) {
+  let editing = null;
+  const GROUPS = [["relationship", "How you want Magnus to work with you", "In every conversation and task of yours."],
+    ["fact", "What Magnus remembers", "Found when it is needed."], ["note", "Magnus's notes about your work", "Kept under your own folder."]];
+  const row = k => `<li class="mem${k.no_longer_true ? " gone" : ""}" data-path="${esc(k.path)}">
+    ${editing === k.path ? `<textarea data-edit rows="3" style="width:100%" aria-label="Edit">${esc(k.text || "")}</textarea>
+      <div class="row" style="margin-top:6px"><button data-act="save">Save</button><button class="ghost" data-act="cancel">Cancel</button></div>`
+    : `<div class="spread"><div>${k.title ? `<strong>${esc(k.title)}</strong> ` : ""}<span data-text>${esc(k.kind === "note" ? String(k.text || "").slice(0, 400) : k.text || "")}</span>
+        <div class="small faint">${k.at ? esc(when(k.at)) : ""}${k.by === "person" ? " · in your words" : ""}${k.untrusted ? " · from content outside" : ""}${k.no_longer_true ? ` · <span class="chip">No longer true</span>` : ""}</div></div>
+      <div class="row"><button class="ghost" data-act="edit">Edit</button>${k.no_longer_true ? "" : `<button class="ghost" data-act="mark">No longer true</button>`}<button class="ghost" data-act="forget">Forget</button></div></div>`}</li>`;
+  const draw = async () => {
+    const { kept } = await api("GET", "/v1/memory");
+    paint(el, `<h2>Your memory</h2><p class="muted">What Magnus keeps about you. Only you see it; Forget puts it in your Trash.</p>
+      ${kept.length ? GROUPS.map(([kind, title, note]) => {
+        const these = kept.filter(k => k.kind === kind);
+        return these.length ? `<h3>${esc(title)}</h3><p class="small muted">${esc(note)}</p><ul class="card list" data-kind="${kind}">${these.map(row).join("")}</ul>` : "";
+      }).join("") : `<div class="card"><p class="muted">Nothing yet. Tell Magnus something to remember, or how you want it to work with you.</p></div>`}`);
+  };
+  el.onclick = async e => {
+    const b = e.target.closest("button[data-act]"); if (!b) return;
+    const path = b.closest("[data-path]")?.dataset.path;
+    try {
+      if (b.dataset.act === "edit") { editing = path; return draw(); }
+      if (b.dataset.act === "cancel") { editing = null; return draw(); }
+      b.disabled = true;
+      if (b.dataset.act === "save") { await api("PUT", "/v1/memory", { path, text: $("textarea[data-edit]", el).value }); editing = null; toast("Saved."); }
+      if (b.dataset.act === "mark") { await api("POST", "/v1/memory/no-longer-true", { path }); toast("Marked no longer true."); }
+      if (b.dataset.act === "forget") { await api("POST", "/v1/memory/forget", { path }); toast("Forgotten. It is in your Trash."); }
+      await draw();
+    } catch (err) { toast(err.message); b.disabled = false; }
+  };
   await draw();
 }
 
