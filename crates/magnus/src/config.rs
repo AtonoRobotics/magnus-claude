@@ -24,6 +24,8 @@ pub struct Config {
     #[serde(default)]
     pub trash: Trash,
     #[serde(default)]
+    pub bundle: Bundle,
+    #[serde(default)]
     pub schedules: Schedules,
     #[serde(default)]
     pub updates: Updates,
@@ -391,6 +393,24 @@ fn keep_days() -> u32 {
 impl Default for Backup {
     fn default() -> Self {
         Backup { dir: None, key_file: None, every_hours: every_hours(), keep_days: keep_days() }
+    }
+}
+
+/// The org context bundle. Whether a person can read a source item is kept
+/// for `permission_seconds` (K3: an hour), then asked of the source again.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Bundle {
+    #[serde(default = "permission_seconds")]
+    pub permission_seconds: u64,
+}
+
+fn permission_seconds() -> u64 {
+    3600
+}
+
+impl Default for Bundle {
+    fn default() -> Self {
+        Bundle { permission_seconds: permission_seconds() }
     }
 }
 

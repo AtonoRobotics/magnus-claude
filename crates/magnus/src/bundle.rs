@@ -245,24 +245,38 @@ pub fn render(fm: &Value, body: &str) -> String {
 
 impl Kernel {
     /// Whether `person` may see a document (K2): their own, or an org
-    /// document whose every source they can read. Until the kernel asks
-    /// each source (K3, step 4), an org document drawn from items in the
-    /// org's systems is seen only by the person whose run wrote it, under
-    /// whose grant the items were read; one drawn only from the bundle, or
-    /// from people's answers, by everyone.
+    /// document whose every source they can read. Drawn from the bundle or
+    /// from people's answers, everyone can. An item in one of the org's
+    /// sources is decided by what the source said (K3, `check_sources`
+    /// asks first); one whose source the kernel cannot ask (or has not yet
+    /// asked) is seen only by the person whose run read it.
     pub fn bundle_visible(&self, person: &str, d: &crate::state::BundleDoc) -> bool {
         if d.scope == "user" {
             return d.owner_user.as_deref() == Some(person);
         }
-        if d.sources.iter().all(|s| s.starts_with('/') || s.starts_with("human:")) {
-            return true;
-        }
-        d.writer.as_deref() == Some(person)
+        let ttl = std::time::Duration::from_secs(self.cfg.bundle.permission_seconds);
+        let writer = d.writer.as_deref() == Some(person);
+        d.sources.iter().all(|s| {
+            if s.starts_with('/') || s.starts_with("human:") {
+                return true;
+            }
+            match self.askable(s).then(|| crate::sources::permit(person, s, ttl)).flatten() {
+                Some(ok) => ok,
+                None => writer,
+            }
+        })
+    }
+
+    /// Every org document, its sources asked about for `person` (K3).
+    async fn checked(&self, person: &str) {
+        let docs: Vec<crate::state::BundleDoc> = self.read(|s| s.bundle.values().filter(|d| d.scope == "org").cloned().collect());
+        self.check_sources(person, &docs).await;
     }
 
     /// A document for `person`: its frontmatter and body, links to what
     /// they cannot see removed, and the taint it was written under.
     pub async fn bundle_read(&self, person: &str, path: &str) -> anyhow::Result<Option<(Value, String, Label, u32)>> {
+        self.checked(person).await;
         let Some(d) = self.read(|s| s.bundle.get(path).cloned()) else { return Ok(None) };
         if !self.bundle_visible(person, &d) {
             return Ok(None);
@@ -346,6 +360,7 @@ impl Kernel {
     /// Documents `person` can see whose path, title, description or body
     /// has every word of `query`, optionally only some kinds.
     pub async fn bundle_search(&self, person: &str, query: &str, kinds: &[String], limit: usize) -> anyhow::Result<(Vec<Value>, Label)> {
+        self.checked(person).await;
         let docs: Vec<crate::state::BundleDoc> = self.read(|s| s.bundle.values().cloned().collect());
         let seen: Vec<crate::state::BundleDoc> = docs.into_iter().filter(|d| (kinds.is_empty() || kinds.contains(&d.kind)) && self.bundle_visible(person, d)).collect();
         let contents = self.log.contents(&seen.iter().map(|d| d.seq()).collect::<Vec<_>>()).await?;
@@ -374,6 +389,7 @@ impl Kernel {
     /// optionally of one type, each with its identity (K2 decides).
     pub async fn entity_resolve(&self, person: &str, key: &str, name: &str, kind: &str) -> anyhow::Result<(Vec<Value>, Label)> {
         let (key, name, kind) = (key.trim().to_lowercase(), name.trim().to_lowercase(), kind.trim().to_lowercase());
+        self.checked(person).await;
         let docs: Vec<crate::state::BundleDoc> = self.read(|s| s.bundle.values().filter(|d| d.kind == "entity").cloned().collect());
         let seen: Vec<crate::state::BundleDoc> = docs.into_iter().filter(|d| self.bundle_visible(person, d)).collect();
         let contents = self.log.contents(&seen.iter().map(|d| d.seq()).collect::<Vec<_>>()).await?;
@@ -417,7 +433,10 @@ impl Kernel {
         if root == 0 && mine == 0 {
             return Ok(String::new());
         }
-        let generation = self.read(|s| s.bundle.values().map(|d| d.seq()).max().unwrap_or(0));
+        self.checked(person).await;
+        // Any write, or any change in what a source says someone can read,
+        // renders afresh.
+        let generation = self.read(|s| s.bundle.values().map(|d| d.seq()).max().unwrap_or(0)) + crate::sources::permits_generation() as i64 * 1_000_000_000;
         let key = (person.to_string(), root, mine, generation);
         if let Some(hit) = index_cache().lock().unwrap().get(&key) {
             return Ok(hit.clone());
