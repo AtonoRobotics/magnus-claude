@@ -178,3 +178,42 @@ async fn a_task_that_needs_an_app_shows_its_card_with_why() {
     assert_eq!(offers.len(), 1, "the task does not carry the app it asked for: {done}");
     assert_eq!((offers[0]["connector"].as_str(), offers[0]["state"].as_str(), offers[0]["why"].as_str()), (Some(n.as_str()), Some("available"), Some("To read your team's calendars")), "{}", offers[0]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sign_in_the_app_refused_is_offered_again_as_a_card_and_its_tools_wait() {
+    let plan = Arc::new(Mutex::new(vec![]));
+    let seen: Arc<Mutex<Vec<(Value, Vec<String>)>>> = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start(model(plan.clone(), seen.clone())).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    // 30-second tokens: every use refreshes, so a refused refresh shows at once.
+    let cal = magnus_scratch::FakeOAuthApp::start(30).await;
+    let (st, v) = app.api("alice").post("/v1/connectors", json!({ "url": cal.url, "audience": "public", "label": "private+untrusted" })).await;
+    assert!(st.is_success(), "{v}");
+    let name = v["name"].as_str().unwrap().to_string();
+    let carol = app.api("carol");
+    let (st, v) = carol.post(&format!("/v1/connectors/{name}/sign-in"), json!({ "redirect_uri": "http://127.0.0.1:9/callback" })).await;
+    assert!(st.is_success(), "{v}");
+    let (code, state) = magnus_scratch::FakeOAuthApp::browse(v["authorize_url"].as_str().unwrap()).await;
+    assert_eq!(carol.post(&format!("/v1/connectors/{name}/sign-in/complete"), json!({ "state": state, "code": code })).await.0, 204);
+
+    // Carol ends Magnus's access in the app's own settings; the next use finds it refused.
+    cal.revoke_everything();
+    let (_, c) = carol.get(&format!("/v1/connectors/{name}")).await;
+    assert_eq!(c["state"], "needs_attention", "{c}");
+
+    let (_, thread) = say(&carol, &plan, "What's on my calendar tomorrow?", vec![("offer_app", json!({ "name": name, "why": "To read your calendar again" }))]).await;
+    let opening = opening(&seen);
+    assert!(opening.contains(&format!("({name})")) && opening.contains("Needs signing in again"), "the index does not say the calendar needs signing in again: {opening}");
+    let first = seen.lock().unwrap().first().cloned().unwrap().0;
+    let offered: Vec<String> = first["tools"].as_array().into_iter().flatten().filter_map(|t| t["name"].as_str().map(String::from)).collect();
+    assert!(offered.iter().all(|t| !t.starts_with(&format!("{name}__"))), "a refused sign-in's tools are still offered: {offered:?}");
+    let card = thread.iter().find(|e| e["kind"] == "connector_card").unwrap_or_else(|| panic!("no card: {thread:?}"));
+    assert_eq!((card["connector"].as_str(), card["state"].as_str()), (Some(name.as_str()), Some("needs_attention")), "{card}");
+
+    // Signed in again, the calendar is connected again.
+    let (_, v) = carol.post(&format!("/v1/connectors/{name}/sign-in"), json!({ "redirect_uri": "http://127.0.0.1:9/callback" })).await;
+    let (code, state) = magnus_scratch::FakeOAuthApp::browse(v["authorize_url"].as_str().unwrap()).await;
+    assert_eq!(carol.post(&format!("/v1/connectors/{name}/sign-in/complete"), json!({ "state": state, "code": code })).await.0, 204);
+    let (_, c) = carol.get(&format!("/v1/connectors/{name}")).await;
+    assert_eq!(c["state"], "connected", "{c}");
+}

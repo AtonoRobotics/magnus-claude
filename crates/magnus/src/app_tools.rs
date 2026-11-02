@@ -16,12 +16,23 @@ const MAX_WHY: usize = 200;
 
 impl Kernel {
     /// The apps the person may use, on for the organisation, each with
-    /// whether they can use it now (connected, or it takes no sign-in).
-    pub fn apps_of(&self, person: &Person) -> Vec<(Connector, bool)> {
-        self.connectors().into_iter().filter(|c| may_use(person, c)).map(|c| {
-            let on = self.connected(&c, &person.id);
-            (c, on)
-        }).collect()
+    /// where they stand: connected (or it takes no sign-in), their sign-in
+    /// refused by the app, or not connected.
+    pub fn apps_of(&self, person: &Person) -> Vec<(Connector, State)> {
+        self.connectors()
+            .into_iter()
+            .filter(|c| may_use(person, c))
+            .map(|c| {
+                let state = if self.lapsed(&c, &person.id) {
+                    State::Lapsed
+                } else if self.connected(&c, &person.id) {
+                    State::Connected
+                } else {
+                    State::Not
+                };
+                (c, state)
+            })
+            .collect()
     }
 
     /// The person's app index, as the run's context holds it.
@@ -31,9 +42,14 @@ impl Kernel {
             return None;
         }
         let mut t = "The person's apps (their Library), as of now. A connected app's tools are offered to you. For one they have not connected, offer_app puts its card in front of them, saying what it is for; only they sign in. find_apps and app_details tell you more.\n".to_string();
-        for (c, on) in &apps {
-            let l = line(c, *on);
-            t.push_str(&format!("- {} ({}): {} {}\n", l["title"].as_str().unwrap_or_default(), c.name, l["summary"].as_str().unwrap_or_default(), if *on { "Connected." } else { "Not connected." }));
+        for (c, state) in &apps {
+            let l = line(c, *state);
+            let says = match state {
+                State::Connected => "Connected.",
+                State::Lapsed => "Needs signing in again: the app no longer accepts their sign-in; offer_app lets them sign in again.",
+                State::Not => "Not connected.",
+            };
+            t.push_str(&format!("- {} ({}): {} {says}\n", l["title"].as_str().unwrap_or_default(), c.name, l["summary"].as_str().unwrap_or_default()));
         }
         Some(t)
     }
@@ -45,8 +61,8 @@ impl Kernel {
         let mut found: Vec<(usize, Value)> = self
             .apps_of(person)
             .into_iter()
-            .filter_map(|(c, on)| {
-                let l = line(&c, on);
+            .filter_map(|(c, state)| {
+                let l = line(&c, state);
                 let hay = format!("{} {} {} {} {}", c.name, l["title"], l["summary"], l["publisher"], l["abilities"]).to_lowercase();
                 let score = words.iter().filter(|w| hay.contains(w.as_str())).count();
                 (words.is_empty() || score > 0).then_some((score, l))
@@ -63,8 +79,8 @@ impl Kernel {
     /// `app_details`: what an app lets Magnus do, the access it asks for,
     /// where the person signs in, and whether they have.
     pub fn app_details(&self, person: &Person, name: &str) -> Result<Value, String> {
-        let (c, on) = self.apps_of(person).into_iter().find(|(c, _)| c.name == name).ok_or_else(|| format!("{name} is not in the person's Library. find_apps lists what is."))?;
-        let mut l = line(&c, on);
+        let (c, state) = self.apps_of(person).into_iter().find(|(c, _)| c.name == name).ok_or_else(|| format!("{name} is not in the person's Library. find_apps lists what is."))?;
+        let mut l = line(&c, state);
         let listing = crate::connectors::listing(&c);
         for k in ["asks", "can", "cannot", "category"] {
             l[k] = listing[k].clone();
@@ -81,14 +97,18 @@ impl Kernel {
         e["kind"] = json!("connector_card");
         let app = offered["connector"].as_str().unwrap_or_default();
         match self.person(person).and_then(|p| self.apps_of(&p).into_iter().find(|(c, _)| c.name == app)) {
-            Some((c, on)) => {
+            Some((c, state)) => {
                 let l = crate::connectors::listing(&c);
                 e["title"] = json!(c.title.clone().unwrap_or_else(|| crate::connectors::title(&c.name)));
                 e["summary"] = json!(c.summary.clone().unwrap_or_else(|| crate::connectors::allows(&c).0));
                 e["letters"] = l["letters"].clone();
                 e["tint"] = l["tint"].clone();
                 e["publisher"] = l["publisher"].clone();
-                e["state"] = json!(if on { "connected" } else { "available" });
+                e["state"] = json!(match state {
+                    State::Connected => "connected",
+                    State::Lapsed => "needs_attention",
+                    State::Not => "available",
+                });
                 e["ready"] = json!(self.provider_ready(&c));
             }
             None => e["state"] = json!("unavailable"),
@@ -104,11 +124,11 @@ impl Kernel {
         if why.is_empty() || why.chars().count() > MAX_WHY {
             return (format!("offer_app needs why: what the app is for here, in a short sentence (at most {MAX_WHY} characters)."), true, None);
         }
-        let Some((c, on)) = self.apps_of(person).into_iter().find(|(c, _)| c.name == name) else {
+        let Some((c, state)) = self.apps_of(person).into_iter().find(|(c, _)| c.name == name) else {
             return (format!("{name} is not in the person's Library, so it cannot be offered. find_apps lists what is; if nothing fits, say so."), true, None);
         };
-        let t = line(&c, on);
-        if on {
+        let t = line(&c, state);
+        if state == State::Connected {
             return (format!("{} is already connected: its tools are yours to use.", t["title"].as_str().unwrap_or(name)), false, None);
         }
         let data = json!({ "card": card, "connector": c.name, "why": why });
@@ -116,8 +136,17 @@ impl Kernel {
     }
 }
 
+/// Where the person stands with one of their apps.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum State {
+    Connected,
+    /// The app refused their sign-in: they sign in again.
+    Lapsed,
+    Not,
+}
+
 /// One app as the agent reads it: no protocol words.
-fn line(c: &Connector, on: bool) -> Value {
+fn line(c: &Connector, state: State) -> Value {
     let (sentence, _) = crate::connectors::allows(c);
     let l = crate::connectors::listing(c);
     json!({
@@ -125,6 +154,10 @@ fn line(c: &Connector, on: bool) -> Value {
         "title": c.title.clone().unwrap_or_else(|| crate::connectors::title(&c.name)),
         "summary": c.summary.clone().unwrap_or(sentence),
         "publisher": l["publisher"], "abilities": l["abilities"],
-        "state": if on { "connected" } else { "not connected" },
+        "state": match state {
+            State::Connected => "connected",
+            State::Lapsed => "needs signing in again",
+            State::Not => "not connected",
+        },
     })
 }

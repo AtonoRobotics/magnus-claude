@@ -237,7 +237,7 @@ impl Kernel {
         for c in self.connectors() {
             // An app people sign in to is offered only to a run whose
             // person has signed in to it themselves.
-            if !self.connected(&c, &run.person) {
+            if !self.connected(&c, &run.person) || self.lapsed(&c, &run.person) {
                 continue;
             }
             let live = self.live_app_tools(&c, &run.person).await;

@@ -1655,6 +1655,7 @@ function appOfferCard(e) {
   const act = e.state === "connected" ? `<span class="chip ok">Connected</span>`
     : e.state === "unavailable" ? `<span class="small muted">No longer in your Library.</span>`
     : e.ready === false ? `<span class="small muted">Not ready on this appliance yet.</span>`
+    : e.state === "needs_attention" ? `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Sign in to ${esc(e.title || "")} again</button>`
     : `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Connect ${esc(e.title || "")}</button>`;
   return `<div class="confirm chatcard conncard" data-connector="${esc(e.connector)}" data-state="${esc(e.state)}"><div class="cc-head">${tile(app)}<div><strong>${esc(e.title || e.connector)}</strong>${e.publisher ? ` <span class="small muted">by ${esc(e.publisher)}</span>` : ""}</div></div>
     <p class="cc-text">${esc(e.why || "")}</p>${e.summary ? `<p class="small muted">${esc(e.summary)}</p>` : ""}

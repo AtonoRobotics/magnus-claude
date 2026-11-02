@@ -841,3 +841,9 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - `magnus_finds_an_unconnected_app_by_what_is_wanted_and_offers_its_card_with_why`: the index is in the context; find_apps finds both calendars by "find a time on my calendar"; the card is in the thread with its reason, ready to connect, and nothing is connected; `desktop/tests/chat-app-card.mjs` draws it with Connect and no protocol words, in every look and at phone width.
   - `a_task_that_needs_an_app_shows_its_card_with_why`: a task offers the calendar, and the task carries its card with the reason.
   - `magnus_cannot_offer_an_app_outside_the_persons_library`: Gmail blocked for Bob's group is not in his index, not found and not offered; a request nothing fits ("post in our Slack") is answered plainly.
+- A sign-in the app refused (connectors spec, Lifecycle: "Re-sign-in: a refresh rejected as invalid marks the connection Needs attention and raises the card"):
+  - A refresh the app refuses (a 4xx, not a failure to reach it) is kept on the stored sign-in as lapsed, and is not tried again until the person signs in again.
+  - The index says the app needs signing in again, and its tools stop being offered to the run.
+  - The boundary's refusal tells Magnus to offer the card, and `offer_app` gives one with "Sign in to … again".
+  - Signing in again brings it back.
+  - Test: `a_sign_in_the_app_refused_is_offered_again_as_a_card_and_its_tools_wait` (agent_apps.rs).

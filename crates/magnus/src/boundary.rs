@@ -330,7 +330,14 @@ impl Kernel {
         let secret = match f.connector.as_ref().filter(|c| c.credential.is_some()) {
             Some(c) => match self.connector_secret(c, &person).await? {
                 Some(s) => Some(s),
-                None => return self.deny(a, "credentials", &format!("{} is not connected for the person this task is for (or their sign-in expired): they sign in again in the Library", f.app), false, None).await,
+                None => {
+                    let why = if self.lapsed(c, &person) {
+                        format!("{} no longer accepts the sign-in of the person this task is for: offer_app puts its card in front of them to sign in again", f.app)
+                    } else {
+                        format!("{} is not connected for the person this task is for (or their sign-in expired): they sign in again in the Library, or offer_app puts its card in front of them", f.app)
+                    };
+                    return self.deny(a, "credentials", &why, false, None).await;
+                }
             },
             None => None,
         };
