@@ -358,14 +358,16 @@ const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60
 #[tauri::command]
 async fn loopback_wait(app: State<'_, App>) -> Res<Value> {
     let l = app.loopback.lock().unwrap().take().ok_or("no sign-in is waiting")?;
-    let q = redirected(l, SIGN_IN_WAIT).await?;
+    // Connecting an app (connectors spec, Connect flow): the browser says
+    // so, and to return to Magnus.
+    let q = redirected(l, SIGN_IN_WAIT, "Connected, return to Magnus.").await?;
     Ok(json!({ "code": q["code"], "state": q["state"], "iss": q.get("iss") }))
 }
 
 /// The query of the first redirect to `/callback` on this listener: it has
 /// a code and state, or the sign-in page's error. The browser is told to
-/// return to Magnus either way.
-async fn redirected(l: tokio::net::TcpListener, wait: std::time::Duration) -> Res<HashMap<String, String>> {
+/// return to Magnus either way: with `done` when it worked.
+async fn redirected(l: tokio::net::TcpListener, wait: std::time::Duration, done: &'static str) -> Res<HashMap<String, String>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let wait_for = async {
         loop {
@@ -391,7 +393,7 @@ async fn redirected(l: tokio::net::TcpListener, wait: std::time::Duration) -> Re
             }
             let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
             let (title, result) = match (q.get("code"), q.get("state"), q.get("error")) {
-                (Some(_), Some(_), _) => ("Signed in. You can close this page and return to Magnus.", Ok(q.clone())),
+                (Some(_), Some(_), _) => (done, Ok(q.clone())),
                 (_, _, Some(e)) => ("The sign-in did not finish. Return to Magnus.", Err(format!("the sign-in page said: {}", q.get("error_description").unwrap_or(e)))),
                 _ => ("The sign-in did not finish. Return to Magnus.", Err("the sign-in page sent no code".to_string())),
             };
@@ -427,7 +429,7 @@ async fn provider_sign_in(handle: AppHandle, app: State<'_, App>, login_hint: Op
     handle.opener().open_url(page.as_str(), None::<&str>).map_err(|e| format!("cannot open the browser: {e}"))?;
     // As long as the appliance keeps the sign-in open.
     let wait = std::time::Duration::from_secs(begun["expires_in"].as_u64().unwrap_or(SIGN_IN_WAIT.as_secs()));
-    let q = redirected(l, wait).await?;
+    let q = redirected(l, wait, "Signed in. You can close this page and return to Magnus.").await?;
     if q.get("state").map(String::as_str) != Some(state) {
         return Err("the browser came back from a different sign-in; start again".into());
     }

@@ -958,3 +958,11 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - The connectors spec, Catalog and connector manifests: "`auth.revoke`: the provider's revocation endpoint". Where a sign-in is revoked came only from the authorization server's metadata, read when the person signed in. So the place Disconnect and the kill switch end a sign-in was whatever the server said that day, not what Alpha Vector reviewed. A server whose metadata leaves it out could not be revoked at all.
 - A manifest now names it (`revoke`). The four Google manifests name `https://oauth2.googleapis.com/revoke`. A catalog app's sign-in is revoked there, and only an app without one in its manifest falls back to the metadata. It is kept with the sign-in, as before.
 - Tests: `a_catalog_app_is_revoked_where_its_manifest_says` (connectors.rs); `every_manifest_is_well_formed` requires an https endpoint, and Google's for Google's apps.
+
+## The browser says an app is connected (2026-11-02, `connected-page`)
+
+- The connectors spec, Connect flow: "The browser shows 'Connected, return to Magnus.'" The desktop app's loopback page said "Signed in. You can close this page and return to Magnus." for everything that came back to it, including connecting an app.
+- `redirected` takes the words for success. Connecting an app (`loopback_wait`) says "Connected, return to Magnus." Signing in to Magnus through the browser keeps its own words.
+- The failure pages ("The sign-in did not finish. Return to Magnus.") are unchanged.
+- With the relay, its own page says the same (Relay, not built).
+- Test: the installed-app connect test (`the_owner_connects_an_app_from_settings_and_reapproves_a_changed_tool`). The test's browser (`sign-in-browser.mjs`) now writes what the page it ended on said beside the sign-in-as file, and the test checks it reads "Connected, return to Magnus."

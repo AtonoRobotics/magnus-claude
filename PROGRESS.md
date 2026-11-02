@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **The browser says an app is connected (connectors spec, Connect flow; branch `connected-page`).** After connecting an app from the desktop app, the browser shows "Connected, return to Magnus." instead of the words for signing in to Magnus.
 - **A manifest names its app's revocation endpoint (connectors spec, `auth.revoke`; branch `manifest-revoke`).** Disconnect and the kill switch revoke a catalog app's sign-in where its manifest says (Google's for the four Google apps), and only otherwise where the app's sign-in server advertises.
 - **The installed-app update test no longer races the restarted copy (2026-11-02; branch `desktop-update-race`).** It failed once on #84 when the copy the app restarted, outside the test's session, showed what's new before it was stopped; the test now puts that note back for the new session to show.
 - **The appliance labels each result's source (connectors spec, How the agent uses connectors; branch `result-labels`).** Beside each result from an app or the web, the model reads the appliance's own line saying where it came from and whether it is private or written by others.

@@ -528,8 +528,9 @@ async fn two_people_sign_in_on_one_installed_app_each_with_their_own_rights() {
 /// sign-in's code comes back to a loopback address the shell opens on this
 /// computer (only the installed app can catch it). A tool whose definition
 /// changes is blocked until the owner accepts the change on its connector.
-/// Fails if the Connectors page or its connection flow disappears, or if
-/// the app drops the server's name from the sign-in's answer (RFC 9207).
+/// Fails if the Connectors page or its connection flow disappears, if the
+/// app drops the server's name from the sign-in's answer (RFC 9207), or if
+/// the browser is not told the app is connected.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
 async fn the_owner_connects_an_app_from_settings_and_reapproves_a_changed_tool() {
@@ -573,6 +574,10 @@ async fn the_owner_connects_an_app_from_settings_and_reapproves_a_changed_tool()
     };
     let ((ok, log), item) = tokio::join!(script, change);
     assert!(ok, "connecting an app failed:\n{log}");
+    // The browser, back on this computer, says the app is connected and to
+    // return to Magnus (connectors spec, Connect flow).
+    let landed = std::fs::read_to_string(d.home.path().join("sign-in-as.landed")).unwrap_or_default();
+    assert_eq!(landed.trim(), "Connected, return to Magnus.", "the browser's page after connecting:\n{log}");
     let item = item.unwrap_or_else(|| panic!("the owner never let the worker read events:\n{log}"));
     let item = alice.inbox().await.into_iter().find(|i| i["id"] == item["id"]).unwrap();
     assert_eq!(item["resolution"]["decision"], "approve", "the change was not accepted on the connector: {item}");

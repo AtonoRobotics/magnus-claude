@@ -14,7 +14,7 @@
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(path.join(here, "../../browser/package.json"));
@@ -65,6 +65,9 @@ try {
     console.error(`the provider said: ${(await error.first().innerText()).trim()}`);
     process.exit(1);
   }
+  // What the page it ended on said, beside the sign-in-as file, for the
+  // test to read (the app's loopback page after connecting an app).
+  if (process.env.MAGNUS_SIGN_IN_AS) writeFileSync(`${process.env.MAGNUS_SIGN_IN_AS}.landed`, await page.locator("body").innerText().catch(() => ""));
   console.log(landed);
 } finally {
   await browser.close();

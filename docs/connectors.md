@@ -114,7 +114,7 @@ one commit), 2026-11-02.
 - [ ] The redirect URI is the relay callback (today a loopback address on the person's computer, RFC 8252)
 - [x] The desktop app opens the system browser at the provider's sign-in page; Magnus never sees a password (`app-apps.mjs`)
 - [ ] The provider redirects to the relay, which checks `state`, then sends the browser to the appliance's completion endpoint at its pyrallon.ai address, found from the appliance registry (proposed, not ruled)
-- [ ] The browser shows "Connected, return to Magnus." (the loopback page says "Signed in. You can close this page and return to Magnus.")
+- [x] The browser shows "Connected, return to Magnus." (the desktop app's loopback page after connecting an app; Magnus's own sign-in keeps its words; `desktop_app.rs` `the_owner_connects_an_app_from_settings_and_reapproves_a_changed_tool` reads the page the test's browser landed on)
 - [x] A public client exchanges the code directly with the provider (`connectors.rs`, fake app)
 - [ ] A confidential client exchanges through the relay's token proxy, which adds the secret and stores nothing (the appliance sends the secret itself)
 - [x] The appliance stores the tokens, marks the connection live, and the agent sees the tools (`connectors.rs`)
