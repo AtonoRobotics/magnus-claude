@@ -150,8 +150,35 @@ impl Kernel {
     pub async fn source_changed(&self, source: &str, id: &str, change: &str) -> Result<()> {
         let item = locator(source, id);
         let change = if matches!(change, "deleted" | "permissions_changed") { change } else { "changed" };
+        // K11: a document drawn from nothing else outside the bundle goes
+        // with the item, every version and the calls that wrote it.
+        let orphans: Vec<crate::state::BundleDoc> = if change == "deleted" {
+            self.read(|s| {
+                s.bundle
+                    .values()
+                    .filter(|d| d.sources.contains(&item) && d.sources.iter().filter(|x| !x.starts_with('/') && !x.starts_with("human:")).all(|x| *x == item))
+                    .cloned()
+                    .collect()
+            })
+        } else {
+            vec![]
+        };
         self.emit("kernel", crate::events::Ev::SourceChanged { source: source.into(), item: item.clone(), change: change.into() }).await?;
         forget_permits(&item);
+        for d in orphans {
+            let path = d.path.clone();
+            let containing = d.runs.iter().flat_map(|r| ["intent", "tool_result", "model_reply"].into_iter().map(|k| (k, r.clone(), path.clone())).collect::<Vec<_>>()).collect();
+            let holding = crate::log::Holding { kinds: vec!["bundle_written", "memory_invalidated"], field: "path", id: d.path.clone(), containing, ..Default::default() };
+            let seqs = self.log.content_seqs(&holding).await?;
+            // The record first, so an erasure cut short finishes at the next start.
+            self.emit("kernel", crate::events::Ev::Removed { item: d.path.clone(), seqs: seqs.clone() }).await?;
+            self.log.delete_content(&seqs).await?;
+        }
+        if change == "deleted" {
+            if let Err(e) = self.scrub_backups().await {
+                tracing::error!("taking erased content out of the backups: {e:#}");
+            }
+        }
         Ok(())
     }
 
