@@ -10,6 +10,9 @@
 // MAGNUS_PERSON, MAGNUS_PASSWORD  who signs in
 // MAGNUS_EXPECT      "admin" (signed in) or "refused" (not an admin)
 // MAGNUS_STEP_UP     optional: "1" to step up after signing in
+// MAGNUS_VISIT       optional: a screen (e.g. "#/users") to open signed in, which
+//                    must render in light, dark and glass, and at phone width
+//                    with no sideways scroll (admin console spec, invariant tests, UI)
 // MAGNUS_CHROMIUM    Chrome to drive; MAGNUS_SHOTS  where to keep screenshots
 //
 // Prints the console's session cookie (signed in) as its last line.
@@ -74,6 +77,24 @@ if (expect === "refused") {
       await page.waitForURL(u => new URL(u).host === new URL(base).host && u.toString().endsWith("/#/security"), { timeout: T });
     });
   }
+}
+
+const visit = process.env.MAGNUS_VISIT;
+if (visit && expect === "admin") {
+  await step(`${visit} renders in every look and at phone width`, async () => {
+    await page.goto(`${base}/${visit}`);
+    await page.locator("#view h1").waitFor({ timeout: T });
+    await page.locator("#view table, #view .empty").first().waitFor({ timeout: T });
+    for (const [mode, material] of [["light", "solid"], ["dark", "solid"], ["light", "glass"], ["dark", "glass"]]) {
+      for (const width of [1280, 390]) {
+        await page.setViewportSize({ width, height: 800 });
+        await page.evaluate(([mode, material]) => Theme.set({ mode, material }), [mode, material]);
+        const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        if (over > 0) throw new Error(`${visit} in ${mode} ${material} at ${width}px scrolls sideways by ${over}px`);
+        await shot(`${visit.replace(/\W/g, "")}-${mode}-${material}-${width}`);
+      }
+    }
+  });
 }
 
 if (errors.length) { console.error(`FAIL page errors: ${errors.join("; ")}`); await browser.close(); process.exit(1); }

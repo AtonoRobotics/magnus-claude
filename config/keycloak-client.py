@@ -15,7 +15,11 @@ With --admin-console JWKS_FILE, it registers the admin console instead
 one redirect https://<--admin-hostname>/auth/callback, proving itself with
 the console's own key, whose public half `magnus-admin jwk --config
 magnus.toml` prints into JWKS_FILE; and the person's realm roles in its ID
-token, since only the realm role `admin` opens the console.
+token, since only the realm role `admin` opens the console. It also
+registers the console's service account, magnus-admin-svc, proving itself
+with the same key and holding only user management in this realm
+(manage-users, view-users, query-users, view-realm): the Users screen
+invites, turns off and ends the sessions of the realm's people through it.
 """
 import argparse
 import json
@@ -118,6 +122,30 @@ else:
     print(f"Created client {a.client_id} in realm {a.realm}.")
 
 if a.admin_console:
+    svc = {
+        "clientId": "magnus-admin-svc",
+        "name": "Magnus admin console (people)",
+        "protocol": "openid-connect",
+        "enabled": True,
+        "publicClient": False,
+        "clientAuthenticatorType": "client-jwt",
+        "standardFlowEnabled": False,
+        "implicitFlowEnabled": False,
+        "directAccessGrantsEnabled": False,
+        "serviceAccountsEnabled": True,
+        "attributes": {"use.jwks.string": "true", "jwks.string": json.dumps(jwks), "token.endpoint.auth.signing.alg": "ES256"},
+    }
+    found = send("GET", f"{base}/clients?{urlencode({'clientId': svc['clientId']})}", token=token)
+    if found:
+        send("PUT", f"{base}/clients/{found[0]['id']}", body={**found[0], **svc, "attributes": {**found[0].get("attributes", {}), **svc["attributes"]}}, token=token)
+    else:
+        send("POST", f"{base}/clients", body=svc, token=token)
+    cid = send("GET", f"{base}/clients?{urlencode({'clientId': svc['clientId']})}", token=token)[0]["id"]
+    account = send("GET", f"{base}/clients/{cid}/service-account-user", token=token)["id"]
+    rm = send("GET", f"{base}/clients?{urlencode({'clientId': 'realm-management'})}", token=token)[0]["id"]
+    roles = [send("GET", f"{base}/clients/{rm}/roles/{r}", token=token) for r in ("manage-users", "view-users", "query-users", "view-realm")]
+    send("POST", f"{base}/users/{account}/role-mappings/clients/{rm}", body=roles, token=token)
+    print(f"The console's service account magnus-admin-svc may manage the people of realm {a.realm}, and no more.")
     print(f"""
 The admin console signs in through {issuer} as {a.client_id}. Give the
 realm role "admin" to the people who run the appliance; only they enter.

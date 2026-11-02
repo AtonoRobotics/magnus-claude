@@ -1,0 +1,149 @@
+//! The identity provider's real email, as tests read it. The build box lets
+//! no container reach the host, so the SMTP server (`mail-sink`, this
+//! crate's own) runs in a container of its own that shares the test
+//! Keycloak's network (`docker run --network container:magnus-claude-kc`,
+//! on the Keycloak image already on the box): Keycloak sends to it at
+//! 127.0.0.1, and it writes each message to a directory the test reads.
+
+use magnus_invariants::appliance::bin;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+#[derive(Clone, Debug)]
+pub struct Mail {
+    pub to: Vec<String>,
+    pub data: String,
+}
+
+pub struct Inbox {
+    /// Where Keycloak sends: in its own network.
+    pub addr: SocketAddr,
+    dir: tempfile::TempDir,
+    container: String,
+}
+
+impl Drop for Inbox {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("docker").args(["rm", "-f", &self.container]).output();
+    }
+}
+
+fn docker(args: &[&str]) -> String {
+    let out = std::process::Command::new("docker").args(args).output().expect("run docker");
+    assert!(out.status.success(), "docker {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+impl Inbox {
+    pub async fn start() -> Inbox {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // The Keycloak image runs as its own user.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let port = 20000 + (uuid::Uuid::new_v4().as_u128() % 20000) as u16;
+        let image = docker(&["inspect", "magnus-claude-kc", "--format", "{{.Image}}"]);
+        let sink = bin("mail-sink");
+        let (sink_mount, out_mount) = (format!("{}:/mail-sink:ro", sink.display()), format!("{}:/out", dir.path().display()));
+        let container = docker(&["run", "-d", "--rm", "--network", "container:magnus-claude-kc", "-v", &sink_mount, "-v", &out_mount, "--entrypoint", "/mail-sink", &image, &port.to_string(), "/out"]);
+        let inbox = Inbox { addr: SocketAddr::from(([127, 0, 0, 1], port)), dir, container };
+        for _ in 0..300 {
+            if inbox.dir.path().join("ready").exists() {
+                return inbox;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let logs = std::process::Command::new("docker").args(["logs", &inbox.container]).output().map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
+        panic!("the mail server beside Keycloak did not start: {logs}");
+    }
+
+    fn all(&self) -> Vec<Mail> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(self.dir.path()).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "eml")).collect();
+        files.sort();
+        files
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .map(|data| {
+                let to = data.lines().next().and_then(|l| l.strip_prefix("X-Envelope-To: ")).unwrap_or_default().split(',').map(String::from).collect();
+                Mail { to, data }
+            })
+            .collect()
+    }
+
+    /// The first mail to `to`, waiting up to a minute for it.
+    pub async fn wait_for(&self, to: &str) -> Mail {
+        for _ in 0..600 {
+            if let Some(m) = self.all().into_iter().find(|m| m.to.iter().any(|t| t.eq_ignore_ascii_case(to))) {
+                return m;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("no mail came for {to}; mail that came: {:?}", self.all().iter().map(|m| m.to.clone()).collect::<Vec<_>>());
+    }
+
+    pub fn count_for(&self, to: &str) -> usize {
+        self.all().iter().filter(|m| m.to.iter().any(|t| t.eq_ignore_ascii_case(to))).count()
+    }
+
+    /// How many connections the server has taken: none means the sender
+    /// never reached it.
+    pub fn connections(&self) -> usize {
+        std::fs::metadata(self.dir.path().join("connections")).map(|m| m.len() as usize).unwrap_or(0)
+    }
+}
+
+/// The text of a mail with its transfer encodings undone: quoted-printable
+/// soft breaks and escapes, and base64 parts.
+pub fn text_of(data: &str) -> String {
+    use base64::Engine;
+    let mut out = String::new();
+    // Quoted-printable: `=\r\n` joins lines, `=XX` is a byte.
+    let joined = data.replace("=\r\n", "").replace("=\n", "");
+    let b = joined.as_bytes();
+    let mut bytes = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'=' && i + 2 < b.len() {
+            if let Ok(x) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16) {
+                bytes.push(x);
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(b[i]);
+        i += 1;
+    }
+    out.push_str(&String::from_utf8_lossy(&bytes));
+    // Base64 parts: each run of base64 lines after a blank line.
+    for block in data.split("\r\n\r\n").chain(data.split("\n\n")) {
+        let compact: String = block.lines().map(str::trim).collect();
+        if compact.len() >= 40 && compact.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
+            if let Ok(d) = base64::engine::general_purpose::STANDARD.decode(compact) {
+                out.push('\n');
+                out.push_str(&String::from_utf8_lossy(&d));
+            }
+        }
+    }
+    out
+}
+
+/// The first link in a mail whose address contains `part`.
+pub fn link_in(data: &str, part: &str) -> Option<String> {
+    let t = text_of(data);
+    t.split(|c: char| c.is_whitespace() || c == '"' || c == '<' || c == '>' || c == '\'')
+        .filter(|w| w.starts_with("http://") || w.starts_with("https://"))
+        .map(|w| w.replace("&amp;", "&"))
+        .find(|w| w.contains(part))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_link_is_found_through_quoted_printable_and_base64() {
+        let qp = "Content-Transfer-Encoding: quoted-printable\r\n\r\nClick <a href=3D\"http://id.test/realms/r/login-actions/action-token?key=3Dab=\r\ncd&amp;client_id=3Dx\">here</a>\r\n";
+        assert_eq!(super::link_in(qp, "action-token").as_deref(), Some("http://id.test/realms/r/login-actions/action-token?key=abcd&client_id=x"));
+        use base64::Engine;
+        let body = base64::engine::general_purpose::STANDARD.encode("Set it here: http://id.test/realms/r/login-actions/action-token?key=zz9 thanks");
+        let b64 = format!("Content-Transfer-Encoding: base64\r\n\r\n{}\r\n{}\r\n", &body[..40], &body[40..]);
+        assert_eq!(super::link_in(&b64, "action-token").as_deref(), Some("http://id.test/realms/r/login-actions/action-token?key=zz9"));
+    }
+}

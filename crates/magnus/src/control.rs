@@ -31,7 +31,11 @@ pub async fn serve(k: Arc<Kernel>, state_dir: &Path) -> Result<()> {
     let l = tokio::net::UnixListener::bind(&path).with_context(|| format!("listen on {}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!("magnus control socket at {}", path.display());
-    let app = Router::new().route("/v1/audit", post(record).get(list)).route("/v1/kill-switch", post(switch).get(switch_state)).route("/v1/overview", axum::routing::get(overview)).with_state(k);
+    let app = Router::new().route("/v1/audit", post(record).get(list)).route("/v1/kill-switch", post(switch).get(switch_state)).route("/v1/overview", axum::routing::get(overview))
+        .route("/v1/people", axum::routing::get(people))
+        .route("/v1/people/{person}/sessions", axum::routing::get(sessions).delete(end_sessions))
+        .route("/v1/people/{person}/sessions/{id}", axum::routing::delete(end_session))
+        .route("/v1/people/{person}/turn-off", post(turn_off)).with_state(k);
     axum::serve(l, app).await?;
     Ok(())
 }
@@ -133,4 +137,76 @@ async fn overview(State(k): State<Arc<Kernel>>) -> Response {
         })
     });
     Json(v).into_response()
+}
+
+/// The person here whom the identity provider knows as `sub` (owner's
+/// ruling 3: people are bound to their provider's subject at their first
+/// sign-in through it). The console names people by their `sub`.
+fn person_of(k: &Kernel, sub: &str) -> Option<String> {
+    k.read(|s| s.subjects.iter().find(|(_, v)| v.as_str() == sub).map(|(p, _)| p.clone()))
+}
+
+/// Each person known here, by their provider `sub`: when they last signed
+/// in, and how many sessions they hold open (the console's Users list; the
+/// people themselves are the identity provider's).
+async fn people(State(k): State<Arc<Kernel>>) -> Response {
+    let bound: Vec<(String, String, Option<chrono::DateTime<chrono::Utc>>)> = k.read(|s| s.subjects.iter().map(|(p, sub)| (p.clone(), sub.clone(), s.last_sign_in.get(p).copied())).collect());
+    let out: serde_json::Map<String, Value> = bound.into_iter().map(|(p, sub, at)| (sub, json!({ "last_sign_in": at, "sessions": k.accounts.sessions_of(&p, "").len() }))).collect();
+    Json(json!({ "people": out })).into_response()
+}
+
+/// A person's open sessions here, newest first: each a device signed in.
+async fn sessions(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): axum::extract::Path<String>) -> Response {
+    let list: Vec<Value> = person_of(&k, &sub).map(|p| k.accounts.sessions_of(&p, "")).unwrap_or_default().into_iter().map(|(s, _)| json!({ "id": s.id, "client": s.client, "created": s.created, "expires": s.expires })).collect();
+    Json(json!({ "sessions": list })).into_response()
+}
+
+fn actor(b: &Value) -> Option<String> {
+    text(b, "actor")
+}
+
+async fn signed_out(k: &Kernel, actor: &str, person: &str, ended: Vec<String>) -> Response {
+    let n = ended.len();
+    let evs: Vec<(&str, Ev)> = ended.into_iter().map(|session| (actor, Ev::SignedOut { person: person.to_string(), session })).collect();
+    if !evs.is_empty() {
+        if let Err(e) = k.emit_all(evs).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
+        }
+    }
+    Json(json!({ "ended": n })).into_response()
+}
+
+/// End every session a person holds here, as `actor`.
+async fn end_sessions(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who ends them" }))).into_response() };
+    let Some(person) = person_of(&k, &sub) else { return Json(json!({ "ended": 0 })).into_response() };
+    match k.accounts.end_all(&person) {
+        Ok(ended) => signed_out(&k, &actor, &person, ended).await,
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+    }
+}
+
+/// End one of them.
+async fn end_session(State(k): State<Arc<Kernel>>, axum::extract::Path((sub, id)): axum::extract::Path<(String, String)>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who ends it" }))).into_response() };
+    let gone = match person_of(&k, &sub) {
+        Some(person) => k.accounts.end(&person, &id).map(|s| s.map(|s| (person, s))),
+        None => Ok(None),
+    };
+    match gone {
+        Ok(Some((person, s))) => signed_out(&k, &actor, &person, vec![s.id]).await,
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "no such session" }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+    }
+}
+
+/// An admin turned the person off: as when the provider does, their
+/// sessions end and their schedules pause (admin console spec, Users:
+/// "Disabling also suspends their schedules and triggers").
+async fn turn_off(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who turns them off" }))).into_response() };
+    let Some(person) = person_of(&k, &sub) else { return Json(json!({ "sessions_ended": 0, "schedules_paused": 0 })).into_response() };
+    let due = k.read(|s| s.schedules.values().filter(|x| x.person == person && x.next_due().is_some()).count());
+    let ended = k.turn_off(&person, &format!("{actor} turned {person} off in the admin console"), "An administrator has turned your account off").await;
+    Json(json!({ "sessions_ended": ended, "schedules_paused": due })).into_response()
 }

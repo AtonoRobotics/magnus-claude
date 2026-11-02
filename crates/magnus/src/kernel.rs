@@ -264,32 +264,39 @@ impl Kernel {
             match id.active(&person).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    let why = format!("{} has turned {person} off or no longer knows them", id.label());
-                    match self.accounts.end_all(&person) {
-                        Ok(sessions) => {
-                            if !sessions.is_empty() {
-                                tracing::warn!("{why}: their {} sessions here are ended", sessions.len());
-                            }
-                            ended += sessions.len();
-                            let evs: Vec<(&str, Ev)> = sessions.into_iter().map(|session| ("kernel", Ev::SignedOut { person: person.clone(), session })).collect();
-                            if !evs.is_empty() {
-                                self.tell(evs).await;
-                            }
-                        }
-                        Err(e) => tracing::error!("ending {person}'s sessions: {e:#}"),
-                    }
-                    // Their schedules stop acting for them until they are
-                    // turned back on and resume them.
-                    let schedules: Vec<crate::state::Schedule> = self.read(|s| s.schedules.values().filter(|x| x.person == person && x.next_due().is_some()).cloned().collect());
-                    for sc in schedules {
-                        let title = self.schedule_title_for_notice(&sc).await;
-                        let reason = format!("{} has turned your account off", id.label());
-                        let notice = self.notice_to(None, None, person.clone(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": reason } }));
-                        self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason, task: None }), ("kernel", notice)]).await;
-                    }
+                    let label = id.label();
+                    ended += self.turn_off(&person, &format!("{label} has turned {person} off or no longer knows them"), &format!("{label} has turned your account off")).await;
                 }
                 Err(e) => tracing::debug!("cannot ask whether {person} is still on: {e:#}"),
             }
+        }
+        ended
+    }
+
+    /// A person is turned off (at the provider, or by an admin in the
+    /// console): their sessions here end, and their schedules stop acting
+    /// for them until they are turned back on and resume them. `why` is for
+    /// the log, `told` for the person. How many sessions ended.
+    pub async fn turn_off(&self, person: &str, why: &str, told: &str) -> usize {
+        let mut ended = 0;
+        match self.accounts.end_all(person) {
+            Ok(sessions) => {
+                if !sessions.is_empty() {
+                    tracing::warn!("{why}: their {} sessions here are ended", sessions.len());
+                }
+                ended = sessions.len();
+                let evs: Vec<(&str, Ev)> = sessions.into_iter().map(|session| ("kernel", Ev::SignedOut { person: person.to_string(), session })).collect();
+                if !evs.is_empty() {
+                    self.tell(evs).await;
+                }
+            }
+            Err(e) => tracing::error!("ending {person}'s sessions: {e:#}"),
+        }
+        let schedules: Vec<crate::state::Schedule> = self.read(|s| s.schedules.values().filter(|x| x.person == person && x.next_due().is_some()).cloned().collect());
+        for sc in schedules {
+            let title = self.schedule_title_for_notice(&sc).await;
+            let notice = self.notice_to(None, None, person.to_string(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": told } }));
+            self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: told.to_string(), task: None }), ("kernel", notice)]).await;
         }
         ended
     }

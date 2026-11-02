@@ -33,13 +33,22 @@ const browser = await chromium.launch({ executablePath, headless: true });
 try {
   const page = await (await browser.newContext()).newPage();
   await page.goto(url);
-  await page.fill("#username", username);
-  await page.fill("#password", password);
-  // Each submit waits for the next page's own load: waiting for the load
-  // state returns at once on the page already loaded, and the steps below
-  // would then look at the page they are leaving (on a busy machine, the
-  // grant was skipped and the sign-in never approved).
-  await Promise.all([page.waitForEvent("load"), page.click("#kc-login")]);
+  // A link from the provider's email (an invitation) opens on "Perform the
+  // following action: Update password", then on choosing a password: there
+  // is no sign-in form to fill.
+  const proceed = page.locator("a[href*='login-actions/action-token']");
+  if (!(await page.locator("#username").count()) && (await proceed.count())) {
+    await Promise.all([page.waitForEvent("load"), proceed.first().click()]);
+  }
+  if (await page.locator("#username").count()) {
+    await page.fill("#username", username);
+    await page.fill("#password", password);
+    // Each submit waits for the next page's own load: waiting for the load
+    // state returns at once on the page already loaded, and the steps below
+    // would then look at the page they are leaving (on a busy machine, the
+    // grant was skipped and the sign-in never approved).
+    await Promise.all([page.waitForEvent("load"), page.click("#kc-login")]);
+  }
   // A new account may have to choose its password first (Keycloak's
   // "Update password" required action); the person keeps the same one.
   if (await page.locator("#password-new").count()) {
