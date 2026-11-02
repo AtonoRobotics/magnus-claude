@@ -1,7 +1,7 @@
 # Behavior: substance and character
 
-Status: plan. Source: the owner's spec "Magnus Desktop App — Behavior Spec"
-(2026-10-31, https://claude.ai/artifact/RJUmBfvY58fTNwj9EwRZ13). This plan
+Status: plan, being built. Source: the owner's spec "Magnus Desktop App — Behavior Spec"
+(2026-10-31, updated 2026-11-02; https://claude.ai/artifact/RJUmBfvY58fTNwj9EwRZ13). This plan
 maps the spec onto what Magnus already has and orders the rest into steps,
 each shipped and tested on its own. Where the spec gives a number (60-minute
 review, 3 interruptions a day), the number is the spec's.
@@ -32,20 +32,32 @@ gate (owner, 2026-10-31: "The character is integral. It is not a switch or
 something to be turned off by the models. All the testing of the models
 with the personality is over engineering.").
 
-1. **Identity and the character.**
-   - The functional personality (the spec's eight traits) is written into
-     both prompts (`instructions/chat.md`, `agent.md`) as a description of
-     who Magnus is, not as a list of commands, the same for every provider.
-   - Magnus has one character, the spec's appendix (the chief of staff):
-     `instructions/character.md`, appended to both prompts. Nothing to choose
-     and nothing to switch it off (owner, 2026-10-31: "if there is one
-     character there is no reason to have a switch to turn the character
-     off.").
-   - Its text is part of the instructions version every run pins and every
-     model call logs. It reads aloud in the appliance's installed voice.
-   - Tests: the identity and the character are on every call where Magnus
-     speaks; the logged instructions version is the hash of what was sent.
-2. **Relationship memory and reactions.**
+The spec was updated on 2026-11-02 (task proposals, standing authority, the
+commitment ledger, reply composition, tasks and schedules in conversation);
+the owner ruled the same day that people may grant standing authority over
+their own work within limits, with invariant 6 reworded and its test
+updated (below), and that the behavior spec comes before the rest of the
+admin console.
+
+1. **Identity and the character.** Done (DECISIONS.md, "Identity and
+   characters").
+2. **Tasks and schedules in conversation.**
+   - a. Control in conversation, and composed replies. Magnus has
+     `list_tasks`, `list_schedules`, `cancel_task`, `pause_schedule`,
+     `resume_schedule`, `edit_schedule` and `cancel_schedule`, the same
+     operations as the app's buttons (`controls.rs`); a person controls
+     their own, the owner and admins anyone's. A reply is composed, not
+     routed: one reply can answer, start a task, propose a schedule, act on
+     tasks and schedules, or ask, together. A cancel says what was already
+     done, the changes that cannot be undone first.
+   - b. Live cards. A task card (running, waiting, done or failed; Cancel,
+     Open) and a schedule card (next run, latest run and its result; Pause,
+     Resume, Cancel, Open) render from the object's current state, with
+     direct buttons. A one-off task posts its result in its conversation,
+     outcome first, as a new message quoting the request when the person has
+     moved on; each schedule run posts to the schedule's own thread, and the
+     originating card shows the latest run.
+3. **Relationship memory and reactions.**
    - The person's tone instructions ("fewer jokes"), what they delegated and
      standing decisions are kept as relationship memory, always in context
      (not searched for), and never shown to anyone else.
@@ -55,35 +67,64 @@ with the personality is over engineering.").
      logged.
    - Disagreements are logged: Magnus's position, the person's decision, and
      later the outcome.
-3. **Suggestions and observations.**
-   - One schema-validated card: title, plan, evidence, permissions, and
-     Accept / Not now / Decline with a reason. The validator refuses a card
-     whose evidence does not point at something real: an event in the log (a
-     task, a message), or an item in a connected app that Magnus actually
-     read (recorded when read). A cold-start card's evidence is the second
-     kind.
-   - Accept creates the task or schedule. Schedule cards become this card.
-   - Every card and its answer go in a ledger the model reads before it
-     suggests again.
+4. **Suggestions and proposals.**
+   - Two schema-validated cards. An automation suggestion: title, plan,
+     evidence, permissions; Accept (creates the task or schedule), Not now,
+     Decline with a reason. A task proposal: noticed (what and where),
+     outcome, why now, needs (permissions, estimated cost, input); Approve
+     (starts the task), Dismiss with a reason, Handle things like this
+     (opens a standing-authority grant).
+   - The validator refuses a card whose evidence does not point at something
+     real: an event in the log, or an item in a connected app that Magnus
+     actually read (recorded when read). Schedule cards become suggestions.
+   - Every card and its answer go in the suggestion ledger, which the model
+     reads before it suggests again; a declined one comes back only when
+     circumstances changed, saying what changed.
    - At cold start, and for each newly connected app, Magnus looks at what it
      may see and proposes two or three things it could take over.
-   - Tests: a card whose evidence is not real is refused.
-4. **The proactive loop.**
+5. **Standing authority.**
+   - A grant comes only from "Handle things like this" or the person asking
+     in conversation; approving one proposal never creates one.
+   - A grant is a Cedar policy in the person's layer: a category of work, a
+     budget per period (spend and model cost), and excluded actions that
+     still need approval. Excluded by default: sending on the person's
+     behalf, spending money, deleting, and committing them to anything; the
+     person can change these per grant.
+   - Within limits (owner's ruling, 2026-11-02): a person grants only over
+     their own work, and only actions they could approve themselves; the
+     organisation's policy still bounds every grant. Invariant 6 is reworded
+     to say so ("autonomy comes from policy: the owner's for the
+     organisation, each person's own grants over their own work within it"),
+     and its test is updated with it, both in this step.
+   - Work under a grant runs as tasks with their usual checks; grants are
+     listed with approvals, editable and revocable there or by telling
+     Magnus; Magnus reports every action taken under one.
+6. **Commitment ledger.** What the person and Magnus said they would do, to
+   whom, by when, from where, and its status (open, done, overdue,
+   released), recognised by the model in conversations and connected data.
+   It is in context for the review and the wakes it bears on; the person can
+   see, correct and remove entries.
+7. **The proactive loop.**
    - The kernel wakes a review run for each person every 60 minutes in their
      working hours and once overnight, and on events: a task done or failed,
      an approval left waiting, a schedule coming up, new items in a
-     connected app.
+     connected app, a commitment coming due.
    - The review decides: nothing (the usual), queue an observation for the
-     next session, interrupt now, propose an automation, or act.
+     next session, interrupt now, propose an automation or a task, or act
+     within a grant.
    - Cedar gets three actions per resource: suggest, interrupt, act. Acting
      without a grant becomes an approval request.
    - Interruptions: at most 3 per working day by default, a setting each
      person can change. Over-budget items wait for the next session. None
-     outside working hours. The kill switch stops the loop.
+     outside working hours. Delivering requested results does not count, and
+     quiet hours delay the notification, not the post. The kill switch stops
+     the loop.
    - Opening the app shows what changed and the queued observations.
    - Tests: the budget, quiet hours and the kill switch hold.
-Each step lands as its own pull request, with its tests, in this order: step 1 is what every later step speaks through, and step 4
-needs step 3's cards.
+
+Each step lands as its own pull request (or two), with its tests, in this
+order: steps 4 and 5 speak through step 3's memory, and step 7 needs the
+cards, grants and ledger before it.
 
 ## Open
 
