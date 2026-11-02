@@ -311,6 +311,11 @@ impl Kernel {
             for (remote, class) in &c.tools {
                 let name = format!("{}__{remote}", c.name);
                 let Some(f) = boundary::facts(self, &name) else { continue };
+                // A tool the app no longer lists has left it: it leaves the
+                // agent at once, its pin kept should it come back unchanged.
+                if live.as_ref().is_some_and(|l| !l.iter().any(|t| &t.name == remote)) {
+                    continue;
+                }
                 if Risk::parse(&class.risk) == Some(Risk::Prohibited) || !boundary::has_rights(&person, &f) || (chat && f.risk != Risk::Read) {
                     continue;
                 }
