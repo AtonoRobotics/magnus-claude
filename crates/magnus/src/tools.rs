@@ -157,6 +157,10 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "find_apps", app: "apps", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "app_details", app: "apps", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "offer_app", app: "apps", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // Past `LOAD_ALL` tools across the person's connected apps, a run is
+    // offered only those it found with this (connectors spec: tools searched
+    // across connectors and full schemas loaded on demand).
+    Builtin { name: "find_tools", app: "apps", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     // Chat only: start a task for the person, or show them a schedule to
     // confirm. Neither leaves the appliance; the task carries the turn's taint.
     Builtin { name: "create_task", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -276,6 +280,20 @@ pub fn chat_specs() -> Vec<ToolSpec> {
 
 /// Specs for run records and built-in actions. Descriptions are part of the
 /// versioned instructions (X11): they live in `instructions/tools.json`.
+/// Up to this many tools across a person's connected apps, a run is offered
+/// all of them; past it, those it finds with `find_tools`.
+pub const LOAD_ALL: usize = 40;
+
+/// `find_tools`, offered only when a run's apps have more tools than `LOAD_ALL`.
+pub fn find_tools_spec() -> ToolSpec {
+    let desc: Value = serde_json::from_str(include_str!("../instructions/tools.json")).expect("tools.json");
+    ToolSpec {
+        name: "find_tools".into(),
+        description: desc["find_tools"].as_str().unwrap_or_default().to_string(),
+        input_schema: json!({ "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }),
+    }
+}
+
 pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec> {
     let desc: Value = serde_json::from_str(include_str!("../instructions/tools.json")).expect("tools.json");
     let d = |n: &str| desc[n].as_str().unwrap_or_default().to_string();

@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **Tools loaded on demand (connectors spec, How the agent uses connectors; branch `tool-search`).** With many apps connected, a run is no longer handed every tool at once: past 40 tools it searches them with `find_tools`, and what it finds is offered, with its full definition, from its next step.
 - **The app's card in approvals (connectors spec, The connector card; branch `approval-app-card`).** A decision about an app's action shows the app's card as the person whose task it is stands with it: connected, or one button to sign in again or approve more access. Whoever else decides it sees where that person stands, and no button of theirs.
 - **Magnus knows the person's apps (connectors spec, How the agent uses connectors; branch `agent-apps`).** Every chat and task holds the person's app index; Magnus finds an app by what is wanted, reads its details, and offers its card in the conversation with why, and the person connects it there. A task that needs an app shows its card on the task's page. A sign-in the app refused, and a call that needs more access, each raise the card to sign in again or approve more. Next: the card in approvals.
 - **A connection's life (connectors spec, Lifecycle; branch `connector-lifecycle`).** Disconnect revokes at the app before deleting and says whether the app ended the sign-in, naming the app's own page where it could not; connecting and disconnecting are in the log; a sign-in ended at the app turns the card to Needs attention.
