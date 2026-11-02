@@ -185,7 +185,8 @@ impl Kernel {
     /// Whose grant reads a source's changes: the organisation's key for an
     /// app that takes one, else someone connected to it (the owner first).
     fn change_reader(&self, c: &Connector) -> Option<String> {
-        let mut people: Vec<String> = self.owners().into_iter().map(|p| p.id).collect();
+        let mut people: Vec<String> = self.read(|s| s.source_connected_by.get(&c.name).cloned()).into_iter().collect();
+        people.extend(self.owners().into_iter().map(|p| p.id));
         people.extend(self.cfg.people.iter().map(|p| p.id.clone()));
         people.into_iter().find(|p| self.connected(c, p))
     }
@@ -225,6 +226,32 @@ impl Kernel {
                 }
             }
         });
+    }
+
+    /// A source connected by `by`: the first connection makes them its
+    /// `connected_by`, and starts its survey under their grant (K1, T15).
+    pub async fn source_connected(self: &std::sync::Arc<Self>, source: &str, by: &str) -> Result<()> {
+        if self.connector(source).and_then(|c| c.source).is_none() || self.read(|s| s.source_connected_by.contains_key(source)) {
+            return Ok(());
+        }
+        self.emit(&format!("person:{by}"), crate::events::Ev::SourceConnected { source: source.into(), by: by.into() }).await?;
+        self.survey(source).await.map(|_| ())
+    }
+
+    /// The survey: an ordinary run, given the goal of making a source
+    /// navigable in the bundle and what is known of it, never a list of
+    /// steps. It runs as the person who connected the source (the owner, if
+    /// no one has yet). The task's id.
+    pub async fn survey(self: &std::sync::Arc<Self>, source: &str) -> Result<String> {
+        let c = self.connector(source).ok_or_else(|| anyhow::anyhow!("no such source"))?;
+        let by = self.read(|s| s.source_connected_by.get(source).cloned()).or_else(|| self.owners().first().map(|p| p.id.clone())).ok_or_else(|| anyhow::anyhow!("no one to survey it as"))?;
+        let name = c.title.clone().unwrap_or_else(|| c.name.clone());
+        let about = c.summary.clone().map(|s| format!(" It says of itself: {s}")).unwrap_or_default();
+        let text = format!(
+            "Survey {name}, one of the organisation's sources (`{source}`), connected by {by}.{about} Goal: make it navigable in the context bundle, so later work knows what it holds and how to find things in it: its source document (/sources/{source}.md), a line for it in the top index, and draft type documents for anything it is the system of record for."
+        );
+        let (task, _) = self.create_run("kernel:survey", &by, text, vec![], crate::kernel::NewRun::default()).await?;
+        Ok(task)
     }
 
     /// The person a recipient is: by their address, or their id.

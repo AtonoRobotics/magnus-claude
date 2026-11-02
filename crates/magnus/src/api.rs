@@ -151,6 +151,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/adapters/{id}/sign-in", post(sign_in_begin))
         .route("/v1/adapters/{id}/sign-in/complete", post(sign_in_complete))
         .route("/v1/sources/{name}/changes", post(source_changes))
+        .route("/v1/sources/{name}/survey", post(survey_source))
         .route("/v1/memory", get(memory).put(edit_memory))
         .route("/v1/memory/forget", post(forget_path))
         .route("/v1/memory/no-longer-true", post(mark_memory))
@@ -1526,6 +1527,24 @@ async fn source_changes(State(k): K, h: HeaderMap, Path(name): Path<String>, Jso
         }
     }
     Json(json!({ "recorded": changes.len() })).into_response()
+}
+
+/// Survey a source again, on the owner's say: a run as whoever connected it.
+async fn survey_source(State(k): K, h: HeaderMap, Path(name): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if !p.is_owner() {
+        return err(StatusCode::FORBIDDEN, "only the owner asks for a survey");
+    }
+    if k.connector(&name).and_then(|c| c.source).is_none() {
+        return err(StatusCode::NOT_FOUND, "no such source");
+    }
+    match k.survey(&name).await {
+        Ok(task) => (StatusCode::CREATED, Json(json!({ "task_id": task }))).into_response(),
+        Err(e) => internal(e),
+    }
 }
 
 /// The person's own edit of something kept about them, by its path.

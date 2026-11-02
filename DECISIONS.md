@@ -1056,3 +1056,10 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Removing a person's org context (their user-scope documents, and their org documents relabelled `human:removed`) comes with deleting a person in the console (Users 5b), where a person is removed. Memory entries citing a deleted item are documents in the person's memory and go the same way.
 - Test: `a_deleted_item_takes_what_was_drawn_only_from_it` (erasure.rs, T12 for items).
 
+## Org context, step 7a: the survey run (2026-11-02, `org-context-7`)
+
+- A source's first connection (a person's sign-in completing, for a connector that is one of the org's sources) records who connected it (`source_connected`: its `connected_by`) and starts its survey: an ordinary run as that person, under their grant (K1), given the goal of making the source navigable in the bundle (its source document, a line in the top index, draft types for what it is the system of record for) and what is known of it, never a list of steps. Its work is reviewed like any task's.
+- Later connections do not survey again; the owner can ask for a survey (`POST /v1/sources/<name>/survey`), which runs as whoever connected the source (the owner when no one has). The change watch now reads changes as `connected_by` first.
+- The curator run (nightly at the admin's time, and on demand, with the kernel's brief) is step 7b.
+- Test: `connecting_a_source_surveys_it_into_the_bundle_as_whoever_connected_it` (survey.rs, T15).
+
