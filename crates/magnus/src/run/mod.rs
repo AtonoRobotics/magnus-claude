@@ -106,6 +106,14 @@ impl Kernel {
         if !index.is_empty() {
             first.push(Block::Text { text: format!("The organisation's context index, as this person may see it (bundle /index.md):\n\n{index}") });
         }
+        // How the person wants Magnus to work with them, from what they
+        // said (the owner's ruling: in every run of theirs by code), as it
+        // stood when the run began. Their own words, as the task is.
+        let ways = self.relationship(&run.person, run.created_at).await?;
+        if !ways.is_empty() {
+            let lines: Vec<String> = ways.iter().map(|w| format!("- {w}")).collect();
+            first.push(Block::Text { text: format!("How the person wants you to work with them, from what they told you; keep to it:\n{}", lines.join("\n")) });
+        }
         // The person's apps, as they stand at this call, before what they said (connectors spec,
         // How the agent uses connectors: "the context always holds the
         // user's connector index").
@@ -271,7 +279,7 @@ impl Kernel {
         let chat = self.is_chat_turn(run);
         let mut specs = tools::builtin_specs(self.sandboxes.available(), self.web.can_search(), self.browser.available());
         if chat {
-            specs.retain(|t| tools::builtin(&t.name).is_some_and(|b| b.risk == Risk::Read || b.name == "memory_write"));
+            specs.retain(|t| tools::builtin(&t.name).is_some_and(|b| b.risk == Risk::Read || b.app == "memory"));
             specs.extend(tools::chat_specs());
         }
         // project_read only where there are reference files to read.

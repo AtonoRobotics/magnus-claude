@@ -1489,7 +1489,7 @@ async fn memory(State(k): K, h: HeaderMap) -> Response {
             .into_iter()
             .map(|r| {
                 let m = r.entry;
-                json!({ "id": m.id, "fact": r.fact, "topic": r.topic, "label": m.label, "run": m.run, "by": m.by.as_deref().unwrap_or("model"), "at": m.at })
+                json!({ "id": m.id, "path": m.path(), "fact": r.fact, "topic": r.topic, "label": m.label, "run": m.run, "by": m.by.as_deref().unwrap_or("model"), "at": m.at, "relationship": m.relationship, "no_longer_true": m.invalidated.is_some() })
             })
             .collect(),
         Err(e) => return internal(e),
