@@ -1064,7 +1064,7 @@ function scheduleLine(e) {
   const act = (k, label) => `<button class="link small" data-sched-act="${k}" data-schedule-id="${esc(sc.id)}">${label}</button>`;
   return `<div class="reqgroup sched-state" data-schedule="${esc(sc.id)}"><a class="rg-row" href="#/schedules" data-open="schedule:${esc(sc.id)}" title="Open the schedule">
     <span class="st sch">${icon("calendar")}</span><span class="rg-main"><span class="ttl">${esc(sc.title)}</span><span class="sub" data-last>${esc(scheduleText(sc))}</span></span><span class="chip sch">${sc.paused ? "Paused" : "Scheduled"}</span>${icon("chev", "chev")}</a>
-    <div class="card-acts">${sc.paused ? act("resume", "Resume") : act("pause", "Pause")}${act("cancel", "Cancel")}<a class="small" href="#/schedules" data-open="schedule:${esc(sc.id)}">Open</a></div></div>`;
+    <div class="card-acts">${sc.paused ? act("resume", "Resume") : act("pause", "Pause")}${act("cancel", "Cancel")}<a class="small" href="#/schedules" data-open="schedule:${esc(sc.id)}">Open</a>${sc.started ? `<a class="small" href="#/chat/${enc(`schedule-${sc.id}`)}" data-schedule-runs>Its runs</a>` : ""}</div></div>`;
 }
 
 // Motion (U7): what is new in the thread rises into place, a task whose

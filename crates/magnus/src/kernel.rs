@@ -571,6 +571,10 @@ impl Kernel {
                             label: (sc.label != crate::tools::Label::PRINCIPAL).then_some(sc.label),
                             project: self.read(|s| s.project_of(&sc.id)),
                             scope: w.opt(sc.seq, "scope"),
+                            // Each run posts to the schedule's own thread,
+                            // so recurring output does not bury the
+                            // conversation it was set up in (behavior spec).
+                            chat: Some(crate::events::ChatOrigin { thread: crate::chat::schedule_thread(&sc.id), turn: false, from_run: None, conversation: vec![] }),
                             ..Default::default()
                         };
                         self.create_run(&format!("schedule:{}", sc.id), &sc.person, w.text(sc.seq).to_string(), vec![], o).await
