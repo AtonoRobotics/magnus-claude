@@ -15,6 +15,7 @@ pub mod cert;
 pub mod connectors;
 pub mod directory;
 pub mod kernel;
+pub mod knowledge;
 pub mod live;
 pub mod net;
 pub mod ops;
@@ -219,6 +220,23 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/api/v1/updates/desktop-channel", axum::routing::patch(ops::desktop_channel))
         .route("/api/v1/network", get(ops::network))
         .route("/api/v1/network/allowlist", axum::routing::patch(ops::set_allowlist))
+        .route("/api/v1/ontology/types", get(knowledge::types).post(knowledge::create_type))
+        .route("/api/v1/ontology/types/merge", axum::routing::post(knowledge::merge_types))
+        .route("/api/v1/ontology/types/{id}", get(knowledge::get_type).patch(knowledge::edit_type).delete(knowledge::delete_type))
+        .route("/api/v1/ontology/types/{id}/history", get(knowledge::type_history))
+        .route("/api/v1/ontology/types/{id}/rollback", axum::routing::post(knowledge::type_rollback))
+        .route("/api/v1/knowledge/documents/{id}", get(knowledge::document))
+        .route("/api/v1/knowledge/documents/{id}/versions/{v}", get(knowledge::version))
+        .route("/api/v1/context/assembled", get(knowledge::assembled))
+        .route("/api/v1/context/{section}", get(knowledge::context).patch(knowledge::edit_context))
+        .route("/api/v1/memory", get(knowledge::memory))
+        .route("/api/v1/memory/bulk", axum::routing::post(knowledge::memory_bulk))
+        .route("/api/v1/memory/{id}", get(knowledge::document).patch(knowledge::edit_memory).delete(knowledge::delete_memory))
+        .route("/api/v1/memory/{id}/rollback", axum::routing::post(knowledge::memory_rollback))
+        .route("/api/v1/activity", get(knowledge::activity))
+        .route("/api/v1/activity/revert-batch", axum::routing::post(knowledge::revert_batch))
+        .route("/api/v1/activity/{id}", get(knowledge::change))
+        .route("/api/v1/activity/{id}/revert", axum::routing::post(knowledge::revert_one))
         .route("/api/v1/audit", get(audit_list))
         .route("/api/v1/audit.csv", get(audit_csv))
         .route("/api/v1/{*rest}", axum::routing::any(api_not_found))

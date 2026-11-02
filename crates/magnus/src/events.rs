@@ -823,6 +823,11 @@ pub enum Ev {
         #[serde(default)]
         body: String,
     },
+    /// An admin removed an org document from the bundle (admin console
+    /// spec, Knowledge). Its versions stay in the log, to roll back to.
+    BundleRemoved {
+        path: String,
+    },
     KnowledgeAdded {
         id: String,
         #[serde(default)]

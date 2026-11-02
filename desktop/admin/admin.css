@@ -127,3 +127,16 @@ button.danger { background: #B42318; border-color: #B42318; color: #fff; }
 .ad-diff .dr { background: var(--bad-soft); color: var(--bad); display: inline-block; min-width: 100%; }
 @media (max-width: 720px) { .ad-policy { grid-template-columns: 1fr; } .ad-editor { height: 260px; } }
 .ad-form label.row, .ad-narrow label.row { display: flex; flex-direction: row; align-items: center; gap: 8px; color: var(--fg); }
+/* Knowledge. */
+.ad-okf { font: 12.5px/1.5 "Plex Mono", ui-monospace, monospace; }
+.ad-wide { width: min(720px, calc(100vw - 32px)); }
+.ad-graph { width: 100%; max-width: 480px; height: auto; display: block; margin: 8px 0; }
+.ad-graph .g-e { stroke: var(--line-strong); stroke-width: 1.5; }
+.ad-graph .g-l { font-size: 10px; fill: var(--muted); text-anchor: middle; }
+.ad-graph .g-n { fill: var(--surface); stroke: var(--line-strong); }
+.ad-graph .g-main { fill: var(--accent-soft); stroke: var(--accent); }
+.ad-graph .g-t { font-size: 11px; fill: var(--fg); }
+.ad-feed { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.ad-feed li { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 10px 14px; }
+.ad-feed-body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#ctx-seen { max-height: 60vh; overflow: auto; }

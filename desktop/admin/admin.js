@@ -1090,6 +1090,373 @@ function userDelete(pane, u, id, view) {
   };
 }
 
+// ---- Knowledge ---------------------------------------------------------
+//
+// The organisation's shared ontology, context and memory, which agents
+// curate (the org context bundle), as an admin oversees, corrects and
+// rolls it back. Documents are edited as OKF writes them: YAML
+// frontmatter, then the body.
+
+const KNOW_TABS = [["ontology", "Ontology"], ["context", "Context"], ["memory", "Memory"], ["activity", "Activity"]];
+const byWho = by => { const b = String(by || ""); return b.startsWith("human:") ? who(`admin:${b.slice(6)}`) : b.startsWith("magnus/") ? `an agent (${b})` : who(b); };
+
+function knowledgeView(view, rest) {
+  const tab = KNOW_TABS.some(([k]) => k === rest[0]) ? rest[0] : "ontology";
+  if (!$("#know-tabs", view)) view.innerHTML = `<h1>Knowledge</h1><nav class="ad-tabs" id="know-tabs" aria-label="Knowledge">${KNOW_TABS.map(([k, l]) => `<a href="#/knowledge/${k}" data-tab="${k}">${l}</a>`).join("")}</nav><div id="know"></div>`;
+  for (const a of $$("#know-tabs a", view)) { if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
+  const box = $("#know", view);
+  if (box.dataset.tab !== tab) { box.dataset.tab = tab; box.innerHTML = ""; UI.closePanel(); }
+  return ({ ontology: ontologyView, context: contextView, memory: memoryView, activity: activityView })[tab](box, rest[1]);
+}
+
+// A document's versions, each shown against now and rolled back to.
+function versionsHtml(d) {
+  return `<table class="t small"><thead><tr><th>Version</th><th>When</th><th>By</th><th></th></tr></thead><tbody>${d.versions.map((v, i) => `<tr><td>${esc(v.version)}${i === 0 ? ` <span class="chip ok">now</span>` : ""}</td><td>${esc(when(v.at))}</td><td>${esc(byWho(v.by))}${v.run ? ` <span class="muted mono">${esc(v.run)}</span>` : ""}</td>
+    <td><button class="link small" data-vshow="${v.version}">Show</button>${i === 0 ? "" : ` <button class="link small" data-vback="${v.version}">Roll back to this</button>`}</td></tr>`).join("")}</tbody></table><div class="ad-vout"></div>`;
+}
+
+function bindVersions(el, d, rollback, after) {
+  for (const b of $$("[data-vshow]", el)) b.onclick = async () => {
+    const v = await act("GET", `/knowledge/documents/${d.id}/versions/${b.dataset.vshow}`);
+    if (v) $(".ad-vout", el).innerHTML = `<h4>Version ${esc(b.dataset.vshow)} against now</h4>${diffHtml(diff(d.text, v.text))}`;
+  };
+  for (const b of $$("[data-vback]", el)) b.onclick = async () => {
+    if (await UI.confirm({ title: `Go back to version ${b.dataset.vback}?`, body: "It is written again as a new version; nothing is lost.", verb: "Roll back" }))
+      act("POST", rollback, { version: Number(b.dataset.vback) }, () => { UI.toast(`Version ${b.dataset.vback} is back.`); after(); });
+  };
+}
+
+// An OKF text editor: the text, Save, and the kernel's reason when it
+// refuses.
+function okfEditor(text, save) {
+  const id = `okf-${Math.random().toString(36).slice(2)}`;
+  return { html: `<form class="ad-form" id="${id}"><textarea class="mono ad-okf" rows="14" spellcheck="false" aria-label="The document, as OKF text">${esc(text)}</textarea><p class="error" hidden></p><div class="row"><button class="primary">Save</button></div></form>`,
+    bind: el => { const f = $(`#${id}`, el); f.onsubmit = async e => { e.preventDefault(); try { await save($("textarea", f).value); } catch (err) { const p = $(".error", f); p.textContent = err.message; p.hidden = false; } }; } };
+}
+
+// The type and its directly related types, drawn: the type in the middle,
+// each related type around it, each edge named with its cardinality.
+function typeGraph(t, all) {
+  const rels = (t.relations || []).filter(r => r.to);
+  const others = [...new Set(rels.map(r => r.to))];
+  const back = all.filter(x => x.path !== t.path && (x.relations || []).some(r => r.to === t.path));
+  for (const b of back) if (!others.includes(b.path)) others.push(b.path);
+  const W = 360, H = 240, cx = W / 2, cy = H / 2, R = 92;
+  const title = p => (all.find(x => x.path === p)?.title) || p.replace(/^\/types\//, "").replace(/\.md$/, "");
+  const pos = others.map((p, i) => { const a = (2 * Math.PI * i) / Math.max(others.length, 1) - Math.PI / 2; return [p, cx + R * Math.cos(a), cy + R * Math.sin(a)]; });
+  const edges = pos.map(([p, x, y]) => {
+    const out = rels.filter(r => r.to === p).map(r => `${r.type}${r.cardinality ? ` (${r.cardinality})` : ""}`);
+    const inn = back.find(b => b.path === p) ? (back.find(b => b.path === p).relations || []).filter(r => r.to === t.path).map(r => `← ${r.type}`) : [];
+    return `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" class="g-e"/><text x="${(cx + x) / 2}" y="${(cy + y) / 2 - 4}" class="g-l">${esc([...out, ...inn].join(", "))}</text>`;
+  }).join("");
+  const node = (x, y, label, main) => `<g><rect x="${x - 52}" y="${y - 14}" width="104" height="28" rx="8" class="${main ? "g-n g-main" : "g-n"}"/><text x="${x}" y="${y + 4}" text-anchor="middle" class="g-t">${esc(label.length > 15 ? label.slice(0, 14) + "…" : label)}</text></g>`;
+  return `<svg class="ad-graph" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(t.title)} and the types it relates to">${edges}${pos.map(([p, x, y]) => node(x, y, title(p), false)).join("")}${node(cx, cy, t.title || "", true)}</svg>`;
+}
+
+// Knowledge › Ontology: the types on the left, searchable; the chosen one
+// on the right with its definition, attributes, relations, graph, entries
+// and history; create, edit, relations, merge, deprecate, delete.
+async function ontologyView(box, id) {
+  if (!$("#onto-list", box)) {
+    box.innerHTML = `<div class="ad-policy"><aside><div class="row ad-bar"><input id="onto-q" type="search" placeholder="Find a type" aria-label="Find a type" autocomplete="off"><button class="primary" id="onto-new">New type</button></div><ul class="ad-list" id="onto-list"></ul></aside><section id="onto-detail"></section></div>`;
+    $("#onto-q", box).oninput = () => drawTypes(box);
+    $("#onto-new", box).onclick = () => newType(box);
+  }
+  UI.loading($("#onto-list", box), "the types");
+  try { box.types = (await api("GET", "/ontology/types")).documents; } catch (e) { return UI.error($("#onto-list", box), "The types could not be read.", e, () => ontologyView(box, id)); }
+  box.cur = id || box.types[0]?.id?.replace(/^types~/, "");
+  drawTypes(box);
+  typeDetail(box);
+}
+
+function drawTypes(box) {
+  const q = $("#onto-q", box).value.trim().toLowerCase();
+  const l = box.types.filter(t => !q || `${t.title} ${t.description} ${t.id}`.toLowerCase().includes(q));
+  $("#onto-list", box).innerHTML = l.length ? l.map(t => { const k = t.id.replace(/^types~/, ""); return `<li><a href="#/knowledge/ontology/${esc(k)}" ${k === box.cur ? 'aria-current="page"' : ""}>${esc(t.title || k)}</a> ${t.status ? `<span class="chip ${t.status === "stable" ? "ok" : t.status === "deprecated" ? "" : "warn"}">${esc(t.status)}</span>` : ""}<div class="small muted">${esc(t.version)} version${t.version === 1 ? "" : "s"}</div></li>`; }).join("")
+    : `<li>${UI.empty(box.types.length ? "No type matches." : "Agents have defined no types yet.")}</li>`;
+}
+
+async function typeDetail(box) {
+  const el = $("#onto-detail", box);
+  if (!box.cur) { el.innerHTML = UI.empty("No type chosen."); return; }
+  UI.loading(el, "the type");
+  let d;
+  try { d = await api("GET", `/ontology/types/${box.cur}`); } catch (e) { return UI.error(el, "The type could not be read.", e, () => typeDetail(box)); }
+  const fm = d.frontmatter || {}, rels = d.relations || [], again = () => ontologyView(box, box.cur);
+  const others = box.types.filter(t => t.path !== d.path);
+  el.innerHTML = `<div class="spread"><h2>${esc(fm.title || box.cur)}</h2><span class="chip ${fm.status === "stable" ? "ok" : fm.status === "deprecated" ? "" : "warn"}">${esc(fm.status || "")}</span></div>
+    <p>${esc(fm.description || "")}</p>
+    <dl class="kv small"><dt>Attributes</dt><dd>${(fm.identity_keys || []).map(k => `<span class="mono">${esc(k)}</span>`).join(", ") || "–"} <span class="muted">(identity keys)</span></dd>
+      <dt>System of record</dt><dd>${esc(fm.system_of_record ?? "–")}</dd><dt>Cedar entity</dt><dd class="mono">${esc(fm.cedar_entity ?? "–")}</dd>
+      <dt>Entries</dt><dd>${d.entities.length} ${d.entities.length ? `<a href="#/knowledge/memory">in Memory</a>` : ""}</dd><dt>Referred to by</dt><dd>${d.referenced_by.length ? d.referenced_by.map(r => `<span class="mono">${esc(r.path)}</span>`).join(", ") : "nothing"}</dd></dl>
+    ${typeGraph({ ...d, title: fm.title, path: d.path, relations: rels }, box.types)}
+    <h3>Relations</h3>
+    <table class="t small"><thead><tr><th>Name</th><th>To</th><th>Cardinality</th><th></th></tr></thead><tbody>${rels.map((r, i) => `<tr><td class="mono">${esc(r.type)}</td><td>${esc(r.to ? (box.types.find(t => t.path === r.to)?.title || r.to) : "–")}</td><td>${esc(r.cardinality || "–")}</td><td><button class="link small" data-rel-rm="${i}">Remove</button></td></tr>`).join("") || `<tr><td colspan="4" class="muted">None.</td></tr>`}</tbody></table>
+    <form id="rel-add" class="row ad-bar"><input name="type" placeholder="relation, e.g. owned_by" required autocomplete="off" aria-label="Relation name"><select name="to" aria-label="To">${others.map(t => `<option value="${esc(t.path)}">${esc(t.title || t.path)}</option>`).join("")}</select><select name="card" aria-label="Cardinality"><option value="one">one</option><option value="many">many</option></select><button>Add relation</button></form>
+    <div class="row ad-bar">${fm.status !== "stable" ? `<button id="ty-stable" class="primary">Approve as stable</button>` : ""}${fm.status !== "deprecated" ? `<button id="ty-dep">Deprecate</button>` : `<button id="ty-draft">Bring back as draft</button>`}
+      <button id="ty-merge">Merge into…</button><button id="ty-del" class="danger">Delete</button></div>
+    <h3>Edit</h3><div id="ty-edit"></div>
+    <h3>History</h3><div id="ty-hist">${versionsHtml(d)}</div>`;
+  const setRels = (list, what) => act("PATCH", `/ontology/types/${box.cur}`, { relations: list }, () => { UI.toast(what, () => act("PATCH", `/ontology/types/${box.cur}`, { relations: rels }, again)); again(); });
+  for (const b of $$("[data-rel-rm]", el)) b.onclick = () => setRels(rels.filter((_, i) => String(i) !== b.dataset.relRm), "Relation removed.");
+  $("#rel-add", el).onsubmit = e => { e.preventDefault(); const f = new FormData(e.target); setRels([...rels, { type: f.get("type").trim(), to: f.get("to"), cardinality: f.get("card") }], "Relation added."); };
+  const status = (st, msg) => act("PATCH", `/ontology/types/${box.cur}`, { status: st }, () => { UI.toast(msg, () => act("PATCH", `/ontology/types/${box.cur}`, { status: fm.status }, again)); again(); });
+  $("#ty-stable", el)?.addEventListener("click", () => status("stable", "Approved as stable: agents may rely on it."));
+  $("#ty-dep", el)?.addEventListener("click", () => status("deprecated", "Deprecated: agents stop using it for new entries."));
+  $("#ty-draft", el)?.addEventListener("click", () => status("draft", "Back as a draft."));
+  $("#ty-merge", el).onclick = () => mergeType(box, d, fm);
+  $("#ty-del", el).onclick = async () => {
+    if (await UI.confirm({ title: `Delete the type ${fm.title}?`, body: d.entities.length || d.referenced_by.length ? "It is in use: merge it into another type, or move its entries, first." : "Its versions stay in the log, to roll back to.", verb: "Delete", danger: true, typed: box.cur }))
+      act("DELETE", `/ontology/types/${box.cur}`, null, () => { UI.toast(`${fm.title} is deleted.`); location.hash = "#/knowledge/ontology"; ontologyView(box); });
+  };
+  const ed = okfEditor(d.text, async text => { await api("PATCH", `/ontology/types/${box.cur}`, { text }); UI.toast("Saved as a new version."); again(); });
+  $("#ty-edit", el).innerHTML = ed.html;
+  ed.bind(el);
+  bindVersions($("#ty-hist", el), d, `/ontology/types/${box.cur}/rollback`, again);
+}
+
+async function mergeType(box, d, fm) {
+  const others = box.types.filter(t => t.path !== d.path);
+  if (!others.length) { UI.toast("There is no other type to merge it into."); return; }
+  const dlg = document.createElement("dialog");
+  dlg.className = "ad-sheet";
+  dlg.innerHTML = `<form method="dialog"><h2>Merge ${esc(fm.title)} into…</h2><p class="small">Each of its entries becomes the other type's, every relation to it points to the other, and it goes. Each step is a version, so each can be rolled back.</p>
+    <label>Into <select name="into">${others.map(t => `<option value="${esc(t.id.replace(/^types~/, ""))}">${esc(t.title || t.id)}</option>`).join("")}</select></label>
+    <div class="row ad-sheet-actions"><button value="no" formnovalidate>Cancel</button><button value="yes" class="primary">Merge</button></div></form>`;
+  document.body.append(dlg);
+  dlg.addEventListener("close", () => {
+    const into = $("select", dlg).value, yes = dlg.returnValue === "yes";
+    dlg.remove();
+    if (yes) act("POST", "/ontology/types/merge", { from: box.cur, into }, v => { UI.toast(`Merged: ${v?.entities_moved ?? 0} entries moved, ${v?.documents_repointed ?? 0} documents repointed.`); location.hash = `#/knowledge/ontology/${into}`; });
+  });
+  dlg.showModal();
+}
+
+function newType(box) {
+  const tmpl = `---\ntype: Entity Type\ntitle: \ndescription: \nscope: org\ngenerated:\n  by: human:${Admin.me.sub}\n  at: "${new Date().toISOString()}"\nstatus: draft\nsystem_of_record: \nidentity_keys: []\nrelations: []\ncedar_entity: \n---\n\n`;
+  const dlg = document.createElement("dialog");
+  dlg.className = "ad-sheet ad-wide";
+  dlg.innerHTML = `<form><h2>A new type</h2><label>Its id <input name="id" required pattern="[a-z0-9_-]+" autocomplete="off" placeholder="customer"></label><label>The type <textarea name="text" rows="14" class="mono ad-okf" spellcheck="false">${esc(tmpl)}</textarea></label><p class="error" hidden></p><div class="row ad-sheet-actions"><button type="button" id="nt-cancel">Cancel</button><button class="primary">Create</button></div></form>`;
+  document.body.append(dlg);
+  dlg.addEventListener("close", () => dlg.remove());
+  $("#nt-cancel", dlg).onclick = () => dlg.close();
+  $("form", dlg).onsubmit = async e => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try { await api("POST", "/ontology/types", { id: f.get("id"), text: f.get("text") }); dlg.close(); UI.toast("Created as a draft."); location.hash = `#/knowledge/ontology/${f.get("id")}`; }
+    catch (err) { const p = $(".error", dlg); p.textContent = err.message; p.hidden = false; }
+  };
+  dlg.showModal();
+}
+
+// Knowledge › Context: what every agent receives (the map, who does what,
+// the conventions, the sources), each edited in place; the map as one
+// person's agent sees it.
+const CONTEXT = [["map", "The map"], ["structure", "Who does what"], ["conventions", "Terminology and standing facts"], ["sources", "Sources"]];
+
+async function contextView(box) {
+  box.innerHTML = `<div class="ad-policy"><section id="ctx">${CONTEXT.map(([k, l]) => `<h2>${l}</h2><div data-sec="${k}"></div>`).join("")}</section>
+    <aside class="card flat"><h2>As agents see it</h2><label>For <select id="ctx-person"></select></label><pre class="ad-json" id="ctx-seen"></pre></aside></div>`;
+  for (const [k] of CONTEXT) loadSection(box, k);
+  const sel = $("#ctx-person", box);
+  try {
+    const p = await api("GET", "/policy/sets");
+    sel.innerHTML = (p.people || []).map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("");
+  } catch { /* the default person */ }
+  const seen = async () => {
+    const out = $("#ctx-seen", box);
+    try { const v = await api("GET", `/context/assembled?person=${encodeURIComponent(sel.value || "")}`); out.textContent = v.text ?? "There is no map yet: agents receive no org context."; }
+    catch (e) { out.textContent = e.message; }
+  };
+  sel.onchange = seen;
+  seen();
+}
+
+async function loadSection(box, sec) {
+  const el = $(`[data-sec="${sec}"]`, box);
+  UI.loading(el, "it");
+  let v;
+  try { v = await api("GET", `/context/${sec}`); } catch (e) { return UI.error(el, "It could not be read.", e, () => loadSection(box, sec)); }
+  el.innerHTML = v.documents.length ? `<ul class="ad-list">${v.documents.map(d => `<li class="card flat"><div class="spread"><strong>${esc(d.title || d.path)}</strong><button class="link small" data-edit="${esc(d.id)}">Edit</button></div>
+      ${d.description ? `<div class="small">${esc(d.description)}</div>` : ""}<div class="small muted"><span class="mono">${esc(d.path)}</span> · changed by ${esc(byWho(d.changed_by))} ${esc(when(d.changed_at))}</div><div data-ed="${esc(d.id)}"></div></li>`).join("")}</ul>`
+    : UI.empty("Nothing here yet.", "Agents write it as they learn the organisation.");
+  for (const b of $$("[data-edit]", el)) b.onclick = async () => {
+    const slot = $(`[data-ed="${b.dataset.edit}"]`, el);
+    if (slot.innerHTML) { slot.innerHTML = ""; return; }
+    const d = await act("GET", `/knowledge/documents/${b.dataset.edit}`);
+    if (!d) return;
+    const ed = okfEditor(d.text, async text => { await api("PATCH", `/context/${sec}`, { id: d.id, text }); UI.toast("Saved as a new version."); loadSection(box, sec); });
+    slot.innerHTML = ed.html;
+    ed.bind(slot);
+  };
+}
+
+// Knowledge › Memory: the entries, searched and filtered; a row opens the
+// entry with its provenance and versions; edit, delete, roll back; and in
+// bulk, with a fresh password.
+async function memoryView(box, id) {
+  if (!$("#mem-rows", box)) {
+    box.innerHTML = `<form class="row ad-bar" id="mem-f" role="search">
+        <input name="q" type="search" placeholder="Search the memory" aria-label="Search the memory" autocomplete="off">
+        <select name="source" aria-label="Source"><option value="">Any source</option></select>
+        <select name="agent" aria-label="Written by"><option value="">Anyone</option></select>
+        <select name="entity" aria-label="Linked to"><option value="">Linked to anything</option></select>
+        <label class="row small">Since <input name="since" type="date"></label></form>
+      <div class="row ad-bar" id="mem-bulk" hidden><span class="small" id="mem-n"></span><button id="mem-del" class="danger">Delete…</button><button id="mem-back">Roll back…</button></div>
+      <div id="mem-rows"></div>`;
+    $("#mem-f", box).oninput = () => drawMemory(box);
+    $("#mem-f", box).onsubmit = e => e.preventDefault();
+    $("#mem-del", box).onclick = () => memoryBulk(box, "delete");
+    $("#mem-back", box).onclick = () => memoryBulk(box, "rollback");
+    await loadMemory(box);
+  }
+  if (!id) return UI.closePanel();
+  memoryPanel(box, id);
+}
+
+async function loadMemory(box) {
+  const el = $("#mem-rows", box);
+  UI.loading(el, "the memory");
+  try { box.mem = (await api("GET", "/memory")).documents; } catch (e) { return UI.error(el, "The memory could not be read.", e, () => loadMemory(box)); }
+  box.picked = new Set();
+  const uniq = xs => [...new Set(xs.filter(Boolean))].sort();
+  const opt = (sel, xs, label) => { $(sel, box).innerHTML = `<option value="">${label}</option>${xs.map(x => `<option>${esc(x)}</option>`).join("")}`; };
+  opt('[name="source"]', uniq(box.mem.flatMap(m => m.sources || [])), "Any source");
+  opt('[name="agent"]', uniq(box.mem.map(m => m.changed_by)), "Anyone");
+  opt('[name="entity"]', uniq(box.mem.flatMap(m => (m.relations || []).map(r => r.to))), "Linked to anything");
+  drawMemory(box);
+}
+
+function drawMemory(box) {
+  const f = Object.fromEntries(new FormData($("#mem-f", box)));
+  const q = (f.q || "").toLowerCase();
+  const rows = box.mem.filter(m => (!q || `${m.title} ${m.description} ${m.path}`.toLowerCase().includes(q)) && (!f.source || (m.sources || []).includes(f.source))
+    && (!f.agent || m.changed_by === f.agent) && (!f.entity || (m.relations || []).some(r => r.to === f.entity)) && (!f.since || (m.changed_at && m.changed_at >= f.since)));
+  const el = $("#mem-rows", box);
+  el.innerHTML = rows.length ? `<div class="ad-scroll"><table class="t small"><thead><tr><th><input type="checkbox" id="mem-all" aria-label="Choose all shown"></th><th>Summary</th><th>Linked to</th><th>Source</th><th>Created</th><th>Last used</th></tr></thead><tbody>${rows.map(m => `<tr class="click" data-href="#/knowledge/memory/${esc(m.id)}" tabindex="0">
+      <td><input type="checkbox" data-pick="${esc(m.id)}" ${box.picked.has(m.id) ? "checked" : ""} aria-label="Choose ${esc(m.title || m.path)}"></td>
+      <td><strong>${esc(m.title || m.path)}</strong><div class="muted">${esc(m.type || "")}</div></td>
+      <td>${(m.relations || []).map(r => `<span class="mono">${esc(r.type)} → ${esc(String(r.to).replace(/^\/entities\//, ""))}</span>`).join("<br>") || "–"}</td>
+      <td class="ad-wrap">${(m.sources || []).map(esc).join("<br>") || "–"}</td><td>${esc(when(m.created))}</td><td>${esc(m.last_used ? when(m.last_used) : "never")}</td></tr>`).join("")}</tbody></table></div>`
+    : UI.empty(box.mem.length ? "No entry matches." : "The organisation's memory is empty.", box.mem.length ? "Clear a filter to see more." : "Agents add to it as they work.");
+  rowLinks(el);
+  const bulk = () => { $("#mem-bulk", box).hidden = !box.picked.size; $("#mem-n", box).textContent = `${box.picked.size} chosen`; };
+  for (const c of $$("[data-pick]", el)) c.onchange = () => { if (c.checked) box.picked.add(c.dataset.pick); else box.picked.delete(c.dataset.pick); bulk(); };
+  const all = $("#mem-all", el);
+  if (all) all.onchange = () => { for (const r of rows) all.checked ? box.picked.add(r.id) : box.picked.delete(r.id); drawMemory(box); };
+  bulk();
+}
+
+async function memoryBulk(box, action) {
+  const ids = [...box.picked];
+  if (!(await UI.confirm({ title: action === "delete" ? `Delete ${ids.length} entries?` : `Roll back ${ids.length} entries?`, body: action === "delete" ? "They leave the memory; their versions stay in the log, to bring back. It asks for your password again." : "Each goes back to its previous version. It asks for your password again.", verb: action === "delete" ? "Delete" : "Roll back", danger: action === "delete" }))) return;
+  act("POST", "/memory/bulk", { action, ids }, v => {
+    const done = v.results.filter(r => r.done).length, not = v.results.filter(r => !r.done);
+    UI.toast(`${done} of ${ids.length} done.${not.length ? ` Not done: ${not.map(r => `${r.id.replace(/^entities~/, "")} (${r.why || "refused"})`).join(", ")}` : ""}`);
+    loadMemory(box);
+  });
+}
+
+async function memoryPanel(box, id) {
+  const body = UI.panel("Entry", "", "#/knowledge/memory");
+  UI.loading(body, "the entry");
+  let d;
+  try { d = await api("GET", `/memory/${id}`); } catch (e) { return UI.error(body, "The entry could not be read.", e, () => memoryPanel(box, id)); }
+  const fm = d.frontmatter || {}, again = () => { loadMemory(box); memoryPanel(box, id); };
+  $("#panel h2").textContent = fm.title || d.path;
+  body.innerHTML = `<p class="small muted mono">${esc(d.path)}</p>${fm.description ? `<p>${esc(fm.description)}</p>` : ""}
+    <h3>Where it came from</h3><dl class="kv small"><dt>Written by</dt><dd>${esc(byWho(d.versions[0]?.by))}</dd><dt>Run</dt><dd class="mono">${esc(d.versions[0]?.run || "–")}</dd><dt>When</dt><dd>${esc(when(d.versions[0]?.at))}</dd>
+      <dt>Sources</dt><dd class="ad-wrap">${(d.sources || []).map(esc).join("<br>") || "–"}</dd><dt>Read under</dt><dd>${d.label?.untrusted ? "untrusted content" : "trusted content"}${d.label?.private ? ", private data" : ""}</dd><dt>Last used</dt><dd>${esc(d.last_used ? when(d.last_used) : "never")}</dd></dl>
+    <h3>Linked to</h3>${(fm.relations || []).length ? `<ul class="small">${fm.relations.map(r => `<li><span class="mono">${esc(r.type)}</span> → <span class="mono">${esc(r.to)}</span></li>`).join("")}</ul>` : UI.empty("Nothing.")}
+    <h3>The entry</h3><div id="mem-ed"></div>
+    <div class="row ad-bar"><button class="danger" id="mem-rm">Delete</button></div>
+    <h3>Versions</h3><div id="mem-hist">${versionsHtml(d)}</div>`;
+  const ed = okfEditor(d.text, async text => { await api("PATCH", `/memory/${id}`, { text }); UI.toast("Saved as a new version."); again(); });
+  $("#mem-ed", body).innerHTML = ed.html;
+  ed.bind(body);
+  $("#mem-rm", body).onclick = async () => {
+    if (await UI.confirm({ title: "Delete this entry?", body: "It leaves the memory; its versions stay in the log, to bring back.", verb: "Delete", danger: true }))
+      act("DELETE", `/memory/${id}`, null, () => { UI.toast("Deleted."); location.hash = "#/knowledge/memory"; loadMemory(box); });
+  };
+  bindVersions($("#mem-hist", body), d, `/memory/${id}/rollback`, again);
+}
+
+// Knowledge › Activity: every change agents make, newest first, with its
+// before and after; one undone, or a selection as a batch with a fresh
+// password. Kept live by the stream.
+async function activityView(box, seq) {
+  if (!$("#act-rows", box)) {
+    box.innerHTML = `<form class="row ad-bar" id="act-f" role="search">
+        <select name="agent" aria-label="By"><option value="">Every agent</option></select>
+        <select name="area" aria-label="Area"><option value="">Every area</option>${["type", "entity", "convention", "people", "source", "index", "log"].map(a => `<option>${a}</option>`).join("")}</select>
+        <select name="change" aria-label="Change"><option value="">Every change</option><option>created</option><option>updated</option><option>removed</option></select>
+        <label class="row small">Since <input name="since" type="date"></label>
+        <label class="row small"><input type="checkbox" name="everyone"> Admins' changes too</label></form>
+      <div class="row ad-bar" id="act-bulk" hidden><span class="small" id="act-n"></span><button id="act-undo" class="danger">Undo these…</button></div>
+      <div id="act-rows"></div>`;
+    $("#act-f", box).oninput = e => (e.target.name === "everyone" ? loadActivity(box) : drawActivity(box));
+    $("#act-undo", box).onclick = () => undoActivity(box, [...box.picked], true);
+    await loadActivity(box);
+    const on = e => {
+      if (!document.body.contains(box)) return document.removeEventListener("ad-status", on);
+      if (box.last !== undefined && e.detail.knowledge_last_change !== box.last) loadActivity(box);
+      box.last = e.detail.knowledge_last_change;
+    };
+    document.addEventListener("ad-status", on);
+  }
+  if (!seq) return UI.closePanel();
+  changePanel(box, seq);
+}
+
+async function loadActivity(box) {
+  const el = $("#act-rows", box);
+  if (!box.acts) UI.loading(el, "the activity");
+  const everyone = $('[name="everyone"]', box).checked ? "1" : "0";
+  try { box.acts = (await api("GET", `/activity?everyone=${everyone}`)).changes; } catch (e) { return UI.error(el, "The activity could not be read.", e, () => loadActivity(box)); }
+  box.picked = box.picked || new Set();
+  const agents = [...new Set(box.acts.map(c => c.by))].sort();
+  const sel = $('[name="agent"]', box), was = sel.value;
+  sel.innerHTML = `<option value="">Every agent</option>${agents.map(a => `<option value="${esc(a)}">${esc(byWho(a))}</option>`).join("")}`;
+  sel.value = was;
+  drawActivity(box);
+}
+
+function drawActivity(box) {
+  const f = Object.fromEntries(new FormData($("#act-f", box)));
+  const rows = box.acts.filter(c => (!f.agent || c.by === f.agent) && (!f.area || c.area === f.area) && (!f.change || c.change === f.change) && (!f.since || String(c.at) >= f.since));
+  const el = $("#act-rows", box);
+  el.innerHTML = rows.length ? `<ul class="ad-feed">${rows.map(c => `<li class="card flat"><label class="row"><input type="checkbox" data-pick="${c.seq}" ${box.picked.has(c.seq) ? "checked" : ""} aria-label="Choose this change"></label>
+      <div class="ad-feed-body"><div><span class="chip ${c.change === "removed" ? "bad" : c.change === "created" ? "ok" : ""}">${esc(c.change)}</span> <a href="#/knowledge/activity/${c.seq}" class="mono">${esc(c.path)}</a></div>
+      <div class="small muted">${esc(byWho(c.by))} · ${esc(when(c.at))}${c.run ? ` · run <span class="mono">${esc(c.run)}</span>` : ""}${(c.sources || []).length ? ` · from ${c.sources.map(esc).join(", ")}` : ""}</div></div>
+      <button class="link small" data-undo="${c.seq}">Undo</button></li>`).join("")}</ul>`
+    : UI.empty(box.acts.length ? "No change matches." : "Agents have changed nothing yet.");
+  const bulk = () => { $("#act-bulk", box).hidden = !box.picked.size; $("#act-n", box).textContent = `${box.picked.size} chosen`; };
+  for (const c of $$("[data-pick]", el)) c.onchange = () => { const s = Number(c.dataset.pick); if (c.checked) box.picked.add(s); else box.picked.delete(s); bulk(); };
+  for (const b of $$("[data-undo]", el)) b.onclick = () => undoActivity(box, [Number(b.dataset.undo)], false);
+  bulk();
+}
+
+async function undoActivity(box, seqs, batch) {
+  if (!(await UI.confirm({ title: batch ? `Undo ${seqs.length} changes?` : "Undo this change?", body: `Each document goes back to how it was before ${batch ? "the earliest of them" : "it"}, as a new version.${batch ? " It asks for your password again." : ""}`, verb: "Undo" }))) return;
+  act("POST", batch ? "/activity/revert-batch" : `/activity/${seqs[0]}/revert`, batch ? { seqs } : null, v => {
+    UI.toast(`Undone: ${(v?.restored || []).map(r => r.path).join(", ")}.`);
+    box.picked = new Set();
+    loadActivity(box);
+  });
+}
+
+async function changePanel(box, seq) {
+  const body = UI.panel("Change", "", "#/knowledge/activity");
+  UI.loading(body, "the change");
+  let c;
+  try { c = await api("GET", `/activity/${seq}`); } catch (e) { return UI.error(body, "The change could not be read.", e, () => changePanel(box, seq)); }
+  $("#panel h2").textContent = c.path;
+  body.innerHTML = `<p class="small">${esc(byWho(c.by))} · ${esc(when(c.at))}${c.run ? ` · run <span class="mono">${esc(c.run)}</span>` : ""}</p>${(c.sources || []).length ? `<p class="small">From ${c.sources.map(s => `<span class="mono">${esc(s)}</span>`).join(", ")}</p>` : ""}
+    <h3>Before and after</h3>${c.before == null ? `<p class="small muted">New: it did not exist before.</p>` : ""}${c.after == null ? `<p class="small muted">Removed.</p>` : ""}${diffHtml(diff(c.before || "", c.after || ""))}
+    <div class="row ad-bar"><button class="primary" id="ch-undo">Undo this change</button></div>`;
+  $("#ch-undo", body).onclick = () => undoActivity(box, [seq], false);
+}
+
 // ---- Sections ----------------------------------------------------------
 
 const SECTIONS = {
@@ -1097,18 +1464,19 @@ const SECTIONS = {
   users: (view, rest) => usersView(view, rest[0], rest[1]),
   security: (view, rest) => securityView(view, rest),
   operations: (view, rest) => operationsView(view, rest),
+  knowledge: (view, rest) => knowledgeView(view, rest),
 };
 
 function section() {
   const parts = (location.hash.replace(/^#\/?/, "") || "overview").split("/");
-  const name = parts[0] in SECTIONS || parts[0] === "knowledge" ? parts[0] : "overview";
+  const name = parts[0] in SECTIONS ? parts[0] : "overview";
   for (const a of $$("#nav a")) {
     if (a.dataset.section === name) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   }
   let view = $("#view");
   // A different section starts its screen afresh; within one, the list
   // stays and only the panel changes.
-  const keep = name === "users" || name === "security" || name === "operations";
+  const keep = ["users", "security", "operations", "knowledge"].includes(name);
   if (!view || view.dataset.section !== `${name}/${parts[1] && !keep ? parts[1] : ""}`) {
     view?.remove();
     UI.closePanel();

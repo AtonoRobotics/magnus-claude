@@ -56,7 +56,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] Reversible changes show a toast with Undo (`admin-shell`; `admin_shell.rs`)
 - [x] Destructive changes open a confirm sheet; the riskiest ask for the target's name typed (`admin-shell`; `admin_shell.rs`; typed, under Users › Delete)
 - [x] Step-up opens the provider's sign-in in a sheet and returns to the action (`admin-shell`; `admin_shell.rs`)
-- [x] Live data over server-sent events, `/api/v1/events`: status and the kill switch (`admin-shell`; `admin_shell.rs`); tasks and activity join with their sections
+- [x] Live data over server-sent events, `/api/v1/events`: status, the kill switch, tasks, microVMs and knowledge changes (`admin-shell`, `admin-operations`, `admin-knowledge`)
 - [x] Designed empty, loading and error states on every screen built so far (`admin-shell`), and on each section as it is built
 
 ### Overview
@@ -71,11 +71,11 @@ Each line names the pull request that built it, or the one building it.
 
 ### Knowledge
 
-- [ ] Ontology: searchable types; definition, attributes, relations with cardinality, a graph of related types, entries referencing it, history
-- [ ] Ontology: create, edit, add or remove a relation, merge, deprecate, delete (refused while in use); every change versioned, diff per version, rollback
-- [ ] Context: org profile, structure, terminology, standing facts; who last changed each and when; edit in place; "As agents see it"
-- [ ] Memory: searchable table (summary, entities, source, created, last used) with filters; detail with provenance, entities, versions; edit, delete, rollback; bulk delete and rollback with step-up
-- [ ] Activity: every agent change, newest first, with before/after and source; revert one; revert a range with step-up; filters
+- [x] Ontology: searchable types; definition, attributes, relations with cardinality, a graph of related types, entries referencing it, history (`admin-knowledge`; `admin_knowledge.rs`)
+- [x] Ontology: create, edit, add or remove a relation, merge, deprecate, delete (refused while in use); every change versioned, diff per version, rollback (`admin-knowledge`; `admin_knowledge.rs`)
+- [x] Context: the map, who does what, terminology and standing facts, sources; who last changed each and when; edit in place; "As agents see it" (`admin-knowledge`; `admin_knowledge.rs`)
+- [x] Memory: searchable table (summary, entities, source, created, last used) with filters; detail with provenance, entities, versions; edit, delete, rollback; bulk delete and rollback with step-up (`admin-knowledge`; `admin_knowledge.rs`)
+- [x] Activity: every agent change, newest first, with before/after and source; revert one; revert a selection with step-up; filters; live (`admin-knowledge`; `admin_knowledge.rs`)
 
 ### Users
 
@@ -138,8 +138,8 @@ Data and audit
 - [x] `magnus_root` cannot change an audit entry (`admin_audit.rs`)
 
 Knowledge
-- [ ] An admin edits an ontology type and a memory entry, sees provenance on both, and rolls each back
-- [ ] An agent's change to org memory appears in Activity, and reverting it restores the prior state
+- [x] An admin edits an ontology type and a memory entry, sees provenance on both, and rolls each back (`admin_knowledge.rs`)
+- [x] An agent's change to org memory appears in Activity, and reverting it restores the prior state (`admin_knowledge.rs`)
 
 Kill switch
 - [x] Hold-to-stop at phone width halts a running task and a pending schedule within 5 seconds (#71)

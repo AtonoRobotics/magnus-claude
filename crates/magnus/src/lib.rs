@@ -29,6 +29,7 @@ pub mod events;
 pub mod inbox;
 pub mod kernel;
 pub mod knowledge;
+pub mod knowledge_admin;
 pub mod library;
 pub mod log;
 pub mod identity;
