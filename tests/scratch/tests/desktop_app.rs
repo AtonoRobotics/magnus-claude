@@ -650,8 +650,7 @@ async fn the_installed_app_updates_itself_from_the_appliance_while_a_task_waits(
     })
     .await;
     let whats_new = d.config().join("app.magnus.desktop/whats-new.json");
-    let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&whats_new).expect("what's new was not kept for after the restart")).unwrap();
-    assert_eq!((kept["version"].as_str(), kept["notes"].as_str()), (Some(fresh.as_str()), Some(notes.as_str())), "{kept}");
+    let shown = whats_new.with_file_name("whats-new-shown.json");
     // The copy the app restarted, outside the session.
     let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while std::time::Instant::now() < end {
@@ -660,7 +659,15 @@ async fn the_installed_app_updates_itself_from_the_appliance_while_a_task_waits(
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(whats_new.exists(), "the restarted copy showed what's new before it was stopped; nothing left to check");
+    assert!(processes_of(&app).is_empty(), "the restarted copy is still running");
+    // That copy starts the moment the new release is written, and can reach
+    // its window (which marks what's new as shown) before it is stopped.
+    // Nobody saw it, so it is put back: the new session below must show it.
+    if !whats_new.exists() && shown.exists() {
+        std::fs::rename(&shown, &whats_new).unwrap();
+    }
+    let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&whats_new).expect("what's new was not kept for after the restart")).unwrap();
+    assert_eq!((kept["version"].as_str(), kept["notes"].as_str()), (Some(fresh.as_str()), Some(notes.as_str())), "{kept}");
 
     let (ok, log) = d.script("app-update.mjs", &url, &fingerprint, &[envs[0], envs[1], ("MAGNUS_PHASE", "after"), ("MAGNUS_NOTES", &notes)]).await;
     assert!(ok, "the updated app failed:\n{log}\n{}", f.report().await);
