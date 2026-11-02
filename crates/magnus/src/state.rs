@@ -68,6 +68,8 @@ pub struct ResultRec {
     pub is_error: bool,
     pub status: String,
     pub data: Option<Value>,
+    /// Whose words and whose data it is, as the kernel labeled it.
+    pub label: crate::tools::Label,
 }
 
 #[derive(Clone, Debug)]
@@ -1540,7 +1542,7 @@ impl State {
             }
             Ev::ToolResult { run, call_id, key, status, text, is_error, label, data, sources, check } => {
                 if let Some(r) = self.runs.get_mut(run) {
-                    let rec = ResultRec { seq: e.seq, text: text.clone(), is_error: *is_error, status: status.clone(), data: data.clone() };
+                    let rec = ResultRec { seq: e.seq, text: text.clone(), is_error: *is_error, status: status.clone(), data: data.clone(), label: *label };
                     if let Some(k) = key {
                         if let Some(i) = r.intents.get_mut(k) {
                             i.result = Some(rec.clone());
