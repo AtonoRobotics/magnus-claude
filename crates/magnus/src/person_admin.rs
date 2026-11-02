@@ -132,7 +132,7 @@ impl Kernel {
                 Some(_) => format!("{by} opened one of your {what}"),
             };
             let read = Ev::PersonDataRead { person: target.id.clone(), what: what.to_string(), item: item.map(String::from) };
-            let notice = self.notice_to(None, None, target.id.clone(), said, json!({ "reason": "data_read", "evidence": { "by": reader, "what": what, "item": item } }));
+            let notice = self.notice_to(None, None, target.id.clone(), said, json!({ "reason": "data_read", "evidence": { "by": reader.strip_prefix("person:").unwrap_or(reader), "what": what, "item": item } }));
             self.emit_all(vec![(reader, read), ("kernel", notice)]).await.map_err(failed)?;
         }
         Ok(json!({ "person": target.id, what: v }))
