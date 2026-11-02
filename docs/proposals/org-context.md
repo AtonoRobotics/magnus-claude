@@ -90,6 +90,10 @@ what it builds.
 
 ## Open
 
-- The OKF v0.2 format is the spec's; this plan reads it from the spec's
-  table. Where OKF itself says more (frontmatter forms, link syntax), the
-  first step follows the published OKF document.
+- The bundle follows the Open Knowledge Format v0.2 as published
+  (https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md):
+  index files carry no frontmatter except `okf_version: "0.2"` on the
+  bundle root; `generated.at` and frontmatter `sources` (v0.2) rather than
+  v0.1's `timestamp` and body citations. Where OKF says more than the spec's
+  table (frontmatter forms, link syntax), step 1 follows OKF; the Magnus
+  profile's required fields are the spec's.
