@@ -151,7 +151,8 @@ if (visit && expect === "admin") {
   await step(`${visit} renders in every look and at phone width`, async () => {
     await page.goto(`${base}/${visit}`);
     await page.locator("#view h1").waitFor({ timeout: T });
-    await page.locator("#view table, #main .ad-empty, #panel table").first().waitFor({ timeout: T });
+    // Drawn: nothing on the screen is still loading.
+    await page.waitForFunction(() => document.querySelector("#main") && !document.querySelector('#main [aria-busy="true"]') && document.querySelector("#view h1, #panel h2"), null, { timeout: T });
     for (const [mode, material] of [["light", "solid"], ["dark", "solid"], ["light", "glass"], ["dark", "glass"]]) {
       for (const width of [1280, 390]) {
         await page.setViewportSize({ width, height: 800 });
