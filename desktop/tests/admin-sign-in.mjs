@@ -117,7 +117,10 @@ if (process.env.MAGNUS_SHELL === "1" && expect === "admin") {
     await page.getByRole("heading", { name: "Confirm it's you" }).waitFor({ timeout: T });
     const [popup] = await Promise.all([page.waitForEvent("popup"), page.locator("#step-go").click()]);
     await popup.locator("#password").waitFor({ timeout: T });
-    await login(popup);
+    // The window closes itself once the console has the password: no load to wait for.
+    if (await popup.locator("#username").count()) await popup.locator("#username").fill(person);
+    await popup.locator("#password").fill(password);
+    await popup.locator("#kc-login").click();
     await page.locator("#kill-banner").waitFor({ state: "detached", timeout: T });
     await page.getByText("Agents may run again.").waitFor({ timeout: T });
   });
