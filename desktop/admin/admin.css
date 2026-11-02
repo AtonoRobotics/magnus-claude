@@ -101,3 +101,7 @@ button.danger { background: #B42318; border-color: #B42318; color: #fff; }
 .ad-form { display: grid; gap: 4px; margin: 4px 0 12px; }
 .ad-form input, .ad-form select, .ad-form textarea { width: 100%; box-sizing: border-box; }
 .ad-panel h3 { margin: 20px 0 6px; }
+.ad-list { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 8px; }
+.ad-list .link { text-align: left; }
+.ad-seg button[aria-pressed="true"] { background: var(--seg-on); font-weight: 600; }
+#data-kinds { margin: 12px 0; }

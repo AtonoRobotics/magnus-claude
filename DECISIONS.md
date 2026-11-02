@@ -650,3 +650,24 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - the key and Google's secret revoked; the added app removed, a catalog app refused;
   - each change in the audit log, the rotation recorded as `{ kind: key, set: true }`;
   - the screen in every look and at phone width.
+
+## The admin console's Users › Schedules, Data and Delete (2026-11-02, `admin-users-detail`)
+
+- **Schedules** (admin console spec: "Schedules and triggers: each one, with Suspend and Resume"): a person's schedules with what each does, its rule, next run, runs and failures, and whether it is suspended and why. An admin suspends one ("Suspended by <admin>, an admin", which the person sees in their own list) or resumes it; a schedule whose run waits on its person goes on when they answer. Magnus starts work on request or on a schedule and has no other triggers, so there are only schedules to show.
+- **Data** (owner's ruling 14): a person's tasks, conversations, files and memory, each list or one item (a task with its steps, a conversation's messages, a file's details and text, a memory), recalled as them, through their wall. Nothing is read until the admin chooses what to open. Each read is in the console's audit log before it is made (the admin, the person, the resource, the item, the time), in the kernel's log (`PersonDataRead`, now with the item), and in the person's inbox ("<admin> read your files", "opened one of your files"). While the organisation's policy keeps people's data private, the console reads none of it. Reading moved into the kernel (`read_person_data`), which the app's owner route and the console both call.
+- **Delete**: needs a fresh password and the person's email typed, and is refused for oneself and for the last admin. The kernel, as the admin:
+  - stops their runs and ends their schedules;
+  - ends their sessions;
+  - revokes their own sign-ins to apps, at each app;
+  - records their content as removed (`Removed`, so a deletion cut short finishes at the next start), deletes it from the content store, and takes it out of the backups (as removing from the trash does);
+  - drops their records from the appliance's state (`PersonErased`: tasks, runs, inbox, schedules, memory, files, projects, trash, preferences, binding).
+  Then their account is deleted at the provider. The log keeps that they existed and that root deleted them.
+- The spec says deletion "destroys that user's encryption key". Magnus has no key per person: what people write is in the content store, walled per person in the database (owner's ruling 9), and is searched there. So deletion removes the content itself, from the store and from every backup, which leaves it as unrecoverable as destroying a key would. Per-person keys would mean Postgres could no longer search what people wrote; that would be the owner's call.
+- Test: `root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_deletes_them_for_good` (admin_people.rs), against Keycloak:
+  - Bob's schedule is suspended (his own list says an admin did) and resumed;
+  - his files are listed and one file's words read;
+  - each read is in the audit log with admin, person, resource and time (the spec's invariant), and Bob is told;
+  - with people's data private, the console reads none;
+  - Delete is refused without a fresh password and with the wrong email typed;
+  - once deleted, his account, session, schedule and every row of his content are gone, and the deletion is in the audit log;
+  - the screens in every look and at phone width.

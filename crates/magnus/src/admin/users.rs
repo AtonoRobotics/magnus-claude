@@ -305,6 +305,93 @@ pub async fn cancel(State(c): State<Arc<Console>>, Extension(a): Extension<Admin
     }
 }
 
+/// Their schedules (admin console spec, Users › Schedules and triggers).
+pub async fn schedules(State(c): State<Arc<Console>>, Path(id): Path<String>) -> Response {
+    if let Err(r) = one(&c, &id).await {
+        return r;
+    }
+    match c.kernel.call(Method::GET, &format!("/v1/people/{id}/schedules"), None).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
+/// Suspend or resume one of their schedules.
+pub async fn schedule(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Path((id, sid, change)): Path<(String, String, String)>) -> Response {
+    if !plain(&sid) || !matches!(change.as_str(), "suspend" | "resume") {
+        return refuse(StatusCode::NOT_FOUND, "not_found", "No such schedule.");
+    }
+    if let Err(r) = one(&c, &id).await {
+        return r;
+    }
+    let on = change == "resume";
+    let action = if on { "user_schedule_resumed" } else { "user_schedule_suspended" };
+    let body = json!({ "actor": actor(&a), "name": a.session.name });
+    match recorded(&c, &a, action, &format!("{id}/{sid}"), Some(json!({ "suspended": on })), Some(json!({ "suspended": !on })), c.kernel.call(Method::POST, &format!("/v1/people/{id}/schedules/{sid}/{change}"), Some(&body))).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => r,
+    }
+}
+
+/// Root's reading of their tasks, conversations, files or memory, or one of
+/// them (admin console spec, Users › Data; owner's ruling 14). Each read is
+/// in the audit log, with the admin, the person, what and when, before it
+/// is made; the kernel records it too and tells the person.
+pub async fn data(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Path(p): Path<Vec<(String, String)>>) -> Response {
+    let get = |k: &str| p.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let (Some(id), Some(kind)) = (get("id"), get("kind")) else { return refuse(StatusCode::NOT_FOUND, "not_found", "Nothing here.") };
+    let item = get("item");
+    if !crate::person_admin::KINDS.contains(&kind.as_str()) || item.as_deref().is_some_and(|i| !plain(i)) {
+        return refuse(StatusCode::NOT_FOUND, "not_found", "Their tasks, chats, files or memory.");
+    }
+    if let Err(r) = one(&c, &id).await {
+        return r;
+    }
+    let body = json!({ "actor": actor(&a), "name": a.session.name, "item": item });
+    let read = json!({ "resource": kind, "item": item });
+    match recorded(&c, &a, "user_data_read", &id, None, Some(read), c.kernel.call(Method::POST, &format!("/v1/people/{id}/data/{kind}"), Some(&body))).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => r,
+    }
+}
+
+/// Delete them (admin console spec, Users › Delete): their data first (the
+/// kernel stops their runs, ends their schedules, sessions and sign-ins,
+/// and removes their content from the store and the backups), then their
+/// account at the provider. A fresh password, and their email typed.
+pub async fn delete(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
+    if let Err(r) = a.step_up() {
+        return r;
+    }
+    let (p, _) = match one(&c, &id).await {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
+    let typed = b["email"].as_str().map(|e| e.trim().to_lowercase()).unwrap_or_default();
+    if p["email"].as_str().is_none_or(|e| e.to_lowercase() != typed) {
+        return refuse(StatusCode::BAD_REQUEST, "confirm", "Type their email address to delete them.");
+    }
+    if id == a.session.sub {
+        return refuse(StatusCode::CONFLICT, "self", "You cannot delete yourself: another admin can.");
+    }
+    if let Err(r) = last_admin(&c, &id).await {
+        return r;
+    }
+    let before = json!({ "name": p["name"], "email": p["email"], "role": p["role"] });
+    let body = json!({ "actor": actor(&a) });
+    let r = recorded(&c, &a, "user_deleted", &id, Some(before), None, async {
+        let erased = c.kernel.call(Method::POST, &format!("/v1/people/{id}/erase"), Some(&body)).await?;
+        c.directory.sign_out(&c.idp, &c.key, &id).await?;
+        c.directory.delete(&c.idp, &c.key, &id).await?;
+        Ok(erased)
+    })
+    .await;
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => r,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

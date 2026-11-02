@@ -632,13 +632,16 @@ async function userPanel(view, id, tab) {
   let u;
   try { u = await api("GET", `/users/${id}`); } catch (e) { return UI.error(body, "This person could not be read.", e, () => userPanel(view, id, tab)); }
   $("#panel h2").textContent = u.name;
-  const tabs = [["overview", "Overview"], ["sessions", "Sessions"]];
+  const tabs = [["overview", "Overview"], ["sessions", "Sessions"], ["schedules", "Schedules"], ["data", "Data"], ["delete", "Delete"]];
   const sessions = Array.isArray(u.sessions) ? u.sessions : [];
   const again = () => { loadUsers(view); userPanel(view, id, tab); };
   body.innerHTML = `<p class="muted small">${esc(u.email || "")} · ${u.role === "admin" ? "Admin" : "Member"} · ${pill(u.status)}</p>
     <nav class="ad-tabs" aria-label="${esc(u.name)}">${tabs.map(([k, l]) => `<a href="#/users/${esc(id)}/${k}" ${k === tab ? 'aria-current="page"' : ""}>${l}</a>`).join("")}</nav>
     <div id="user-tab"></div>`;
   const pane = $("#user-tab", body);
+  if (tab === "schedules") return userSchedules(pane, u, id);
+  if (tab === "data") return userData(pane, u, id);
+  if (tab === "delete") return userDelete(pane, u, id, view);
   if (tab === "sessions") {
     pane.innerHTML = sessions.length ? `<table class="t small"><thead><tr><th>Signed in</th><th>From</th><th>Ends</th><th></th></tr></thead><tbody>${sessions.map(s => `<tr><td>${esc(when(s.created))}</td><td>${esc(s.client === "browser" ? "A browser" : "The app")}</td><td>${esc(when(s.expires))}</td><td><button class="link small" data-end="${esc(s.id)}">End</button></td></tr>`).join("")}</tbody></table>`
       : UI.empty("No sessions open on the appliance.");
@@ -670,6 +673,100 @@ async function userPanel(view, id, tab) {
   $("#u-end", pane).onclick = async () => {
     if (await UI.confirm({ title: `End every session ${u.name} has open?`, body: "Every device they use is signed out, here and at sign-in.", verb: "End all sessions", danger: true }))
       act("DELETE", `/users/${id}/sessions`, null, () => { UI.toast("Every session ended."); again(); });
+  };
+}
+
+// A schedule's rule in words.
+const rule = x => (x.daily_at ? `Every day at ${x.daily_at}` : x.every_minutes ? (x.every_minutes % 1440 === 0 ? `Every ${x.every_minutes / 1440} day${x.every_minutes === 1440 ? "" : "s"}` : x.every_minutes % 60 === 0 ? `Every ${x.every_minutes / 60} hour${x.every_minutes === 60 ? "" : "s"}` : `Every ${x.every_minutes} minutes`) : "Once");
+
+// Users › Schedules and triggers: each of their schedules, suspended or
+// resumed by an admin. (Magnus starts work on a schedule or on request;
+// it has no other triggers.)
+async function userSchedules(pane, u, id) {
+  UI.loading(pane, "their schedules");
+  let v;
+  try { v = await api("GET", `/users/${id}/schedules`); } catch (e) { return UI.error(pane, "Their schedules could not be read.", e, () => userSchedules(pane, u, id)); }
+  const list = v.schedules;
+  pane.innerHTML = list.length ? `<div class="ad-scroll"><table class="t small"><thead><tr><th>Schedule</th><th>When</th><th>Next</th><th class="n">Runs</th><th class="n">Failures</th><th></th></tr></thead><tbody>${list.map(x => `<tr>
+      <td>${esc(x.title)}${x.paused ? `<div class="small"><span class="chip warn">Suspended</span> <span class="muted">${esc(x.paused.reason || x.paused)}</span></div>` : ""}</td>
+      <td>${esc(rule(x))}${x.until ? `<div class="small muted">until ${esc(when(x.until))}</div>` : ""}</td>
+      <td>${x.paused ? "–" : esc(when(x.next))}</td><td class="n">${esc(x.runs)}</td><td class="n">${esc(x.failures)}</td>
+      <td>${x.paused ? `<button class="link small" data-resume="${esc(x.id)}">Resume</button>` : `<button class="link small" data-suspend="${esc(x.id)}">Suspend</button>`}</td></tr>`).join("")}</tbody></table></div>`
+    : UI.empty(`${u.name} has no schedules.`);
+  const again = () => userSchedules(pane, u, id);
+  for (const b of $$("[data-suspend]", pane)) b.onclick = () => act("POST", `/users/${id}/schedules/${b.dataset.suspend}/suspend`, null, () => {
+    UI.toast("Suspended: it does not run until it is resumed.", () => act("POST", `/users/${id}/schedules/${b.dataset.suspend}/resume`, null, again));
+    again();
+  });
+  for (const b of $$("[data-resume]", pane)) b.onclick = () => act("POST", `/users/${id}/schedules/${b.dataset.resume}/resume`, null, () => { UI.toast("Resumed."); again(); });
+}
+
+// Users › Data: root's access to their tasks, conversations, files and
+// memory. Nothing is read until asked; each read is in the audit log and
+// in their inbox.
+const DATA_KINDS = [["tasks", "Tasks"], ["chats", "Conversations"], ["files", "Files"], ["memory", "Memory"]];
+
+function userData(pane, u, id) {
+  pane.innerHTML = `<div class="banner" role="note"><strong>Each access is recorded.</strong> Opening ${esc(u.name)}'s tasks, conversations, files or memory writes it to the audit log, and they are told in their inbox.</div>
+    <div class="ad-seg" role="group" aria-label="Their data" id="data-kinds">${DATA_KINDS.map(([k, l]) => `<button data-kind="${k}">${l}</button>`).join("")}</div>
+    <div id="data-box">${UI.empty("Choose what to open.")}</div>`;
+  const box = $("#data-box", pane);
+  for (const b of $$("[data-kind]", pane)) b.onclick = () => {
+    for (const x of $$("[data-kind]", pane)) x.setAttribute("aria-pressed", String(x === b));
+    dataList(box, u, id, b.dataset.kind);
+  };
+}
+
+async function dataList(box, u, id, kind) {
+  UI.loading(box, `their ${kind}`);
+  let v;
+  try { v = await api("GET", `/users/${id}/data/${kind}`); } catch (e) { return UI.error(box, `Their ${kind} could not be read.`, e, () => dataList(box, u, id, kind)); }
+  const rows = v[kind] || [];
+  const open = item => dataItem(box, u, id, kind, item);
+  const line = {
+    tasks: t => [t.task_id, t.title || t.text, `${t.status} · ${when(t.created_at)}`],
+    chats: t => [t.id || t.thread, t.title || "Conversation", when(t.updated_at || t.at || t.created_at)],
+    files: f => [f.id, f.name, `${f.media_type || ""} · ${when(f.created_at || f.at)}`],
+    memory: m => [m.id, m.fact, `${m.topic || ""} · ${when(m.at)}`],
+  }[kind];
+  box.innerHTML = rows.length ? `<ul class="ad-list">${rows.map(r => { const [key, title, sub] = line(r); return `<li><button class="link" data-open="${esc(key)}">${esc(title || "(untitled)")}</button><div class="small muted">${esc(sub)}</div></li>`; }).join("")}</ul>`
+    : UI.empty(`${u.name} has no ${kind === "chats" ? "conversations" : kind}.`);
+  for (const b of $$("[data-open]", box)) b.onclick = () => (kind === "memory" ? null : open(b.dataset.open));
+}
+
+async function dataItem(box, u, id, kind, item) {
+  UI.loading(box, "it");
+  let v;
+  try { v = (await api("GET", `/users/${id}/data/${kind}/${encodeURIComponent(item)}`))[kind]; } catch (e) { return UI.error(box, "It could not be read.", e, () => dataItem(box, u, id, kind, item)); }
+  const back = `<p class="small"><button class="link" id="data-back">← All their ${kind === "chats" ? "conversations" : kind}</button></p>`;
+  let html = "";
+  if (kind === "tasks") {
+    const t = v.task;
+    html = `<h3>${esc(t.title || t.text)}</h3><p class="small muted">${esc(t.status)} · ${esc(when(t.created_at))}${t.summary ? ` · ${esc(t.summary)}` : ""}</p>
+      ${(v.timeline.steps || []).map(st => `<div class="card flat small"><div class="muted">Step ${esc(st.step)}</div>${st.text ? `<p>${esc(st.text)}</p>` : ""}${st.calls.map(c => `<div><span class="mono">${esc(c.tool)}</span> ${c.is_error ? `<span class="chip bad">failed</span>` : ""}${c.result ? `<pre class="ad-json">${esc(c.result)}</pre>` : ""}</div>`).join("")}</div>`).join("") || UI.empty("No steps.")}`;
+  } else if (kind === "chats") {
+    html = (v.entries || []).map(e => `<div class="card flat small"><div class="muted">${esc(e.kind === "message" ? u.name : "Magnus")} · ${esc(when(e.at))}</div><p class="ad-wrap">${esc(e.text || e.summary || "")}</p></div>`).join("") || UI.empty("Nothing was said.");
+  } else if (kind === "files") {
+    const f = v.file;
+    html = `<h3>${esc(f.name)}</h3><p class="small muted">${esc(f.media_type)} · ${esc(v.bytes)} bytes · ${esc(when(f.created_at || f.at))}</p>${v.text != null ? `<pre class="ad-json">${esc(v.text)}</pre>` : UI.empty("Not text: nothing to show here.")}`;
+  }
+  box.innerHTML = back + html;
+  $("#data-back", box).onclick = () => dataList(box, u, id, kind);
+}
+
+// Users › Delete: the account and everything of theirs, for good. It asks
+// for a fresh password, and their email typed.
+function userDelete(pane, u, id, view) {
+  pane.innerHTML = `<p>Deleting ${esc(u.name)} removes their account at sign-in and everything of theirs on the appliance: their running tasks stop, their schedules end, their sessions and their sign-ins to apps are revoked, and their tasks, conversations, files and memory are deleted, from the backups too. It cannot be undone.</p>
+    <div class="row ad-bar"><button class="danger" id="u-delete">Delete ${esc(u.name)}</button></div>
+    <p class="small muted">It asks for your password again, and for their email address typed.</p>`;
+  $("#u-delete", pane).onclick = async () => {
+    if (!(await UI.confirm({ title: `Delete ${u.name} for good?`, body: "Their account and all of their data go, and nothing brings them back.", verb: "Delete", danger: true, typed: u.email }))) return;
+    act("DELETE", `/users/${id}`, { email: u.email }, v => {
+      UI.toast(`${u.name} is deleted: ${v?.runs_stopped ?? 0} tasks stopped, ${v?.schedules_ended ?? 0} schedules ended, ${v?.content_removed ?? 0} records removed.`);
+      location.hash = "#/users";
+      loadUsers(view);
+    });
   };
 }
 

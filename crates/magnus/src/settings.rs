@@ -186,43 +186,10 @@ async fn person_data(State(k): K, h: HeaderMap, Path((id, what)): Path<(String, 
         Err(r) => return r,
     };
     let Some(target) = k.person(&id) else { return err(StatusCode::NOT_FOUND, "no such person") };
-    if k.read(|s| s.data_private) && target.id != me.id {
-        return err(StatusCode::FORBIDDEN, "People's data is private here: the organisation's policy keeps it from the admin.");
+    match k.read_person_data(&format!("person:{}", me.id), &me.name, &target, &what, None).await {
+        Ok(v) => Json(v).into_response(),
+        Err((st, m)) => err(st, m),
     }
-    // Their tasks' words are recalled as them, through their wall.
-    let words = match what.as_str() {
-        "tasks" | "files" => match k.person_words(&target.id).await {
-            Ok(w) => w,
-            Err(e) => return crate::api::internal(e),
-        },
-        _ => Default::default(),
-    };
-    let items: Vec<Value> = match what.as_str() {
-        "tasks" => k.read(|s| {
-            s.tasks.values().filter(|t| t.person == target.id && !t.is_chat_turn()).filter_map(|t| s.runs.get(&t.run_id).map(|r| crate::api::task_row(&k, s, &target, t, r, &words))).collect()
-        }),
-        "chats" => match k.threads(&target.id).await {
-            Ok(t) => t,
-            Err(e) => return crate::api::internal(e),
-        },
-        "files" => k.read(|s| crate::library::files_matching(s, &target, &[], &Default::default(), None, &words)),
-        // Recalled from the content store as the person, through the wall.
-        "memory" => {
-            match k.remembered(&target.id, |_| true).await {
-                Ok(r) => r.into_iter().map(|r| json!({ "id": r.entry.id, "fact": r.fact, "topic": r.topic, "at": r.entry.at })).collect(),
-                Err(e) => return internal(e),
-            }
-        }
-        _ => return err(StatusCode::NOT_FOUND, "tasks, chats, files or memory"),
-    };
-    if target.id != me.id {
-        let read = Ev::PersonDataRead { person: target.id.clone(), what: what.clone() };
-        let notice = k.notice_to(None, None, target.id.clone(), format!("{} read your {what}", me.name), json!({ "reason": "data_read", "evidence": { "by": me.id, "what": what } }));
-        if let Err(e) = k.emit_all(vec![(&format!("person:{}", me.id), read), ("kernel", notice)]).await {
-            return internal(e);
-        }
-    }
-    Json(json!({ "person": target.id, what: items })).into_response()
 }
 
 async fn get_preferences(State(k): K, h: HeaderMap) -> Response {

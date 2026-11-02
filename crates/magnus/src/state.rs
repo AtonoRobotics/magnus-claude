@@ -1145,6 +1145,21 @@ impl State {
             }
             Ev::DataAccessSet { private } => self.data_private = *private,
             Ev::PersonDataRead { .. } => {}
+            Ev::PersonErased { person } => {
+                let runs: HashSet<String> = self.runs.values().filter(|r| &r.person == person).map(|r| r.id.clone()).collect();
+                self.tasks.retain(|_, t| &t.person != person);
+                self.runs.retain(|_, r| &r.person != person);
+                self.items.retain(|_, i| &i.person != person && i.run.as_ref().is_none_or(|r| !runs.contains(r)));
+                self.schedules.retain(|_, x| &x.person != person);
+                self.memory.retain(|m| &m.person != person);
+                self.files.retain(|_, f| &f.person != person);
+                self.projects.retain(|_, x| &x.person != person);
+                self.trash.retain(|_, t| &t.person != person);
+                self.preferences.remove(person);
+                self.hidden.remove(person);
+                self.subjects.remove(person);
+                self.last_sign_in.remove(person);
+            }
             Ev::RolesSet { person, roles } => {
                 self.roles_set.insert(person.clone(), roles.clone());
             }
