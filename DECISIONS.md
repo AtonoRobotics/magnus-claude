@@ -875,3 +875,8 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Tests (tool_search.rs):
   - `past_the_limit_a_run_is_offered_the_tools_it_finds_and_they_go_through`: 45 tools; the first step has `find_tools` and no app tool; "calendar events" finds `list_events`; from the next step it alone of the app's tools is offered, with its definition, and its call goes through.
   - `within_the_limit_every_tool_is_offered_and_there_is_nothing_to_find`.
+
+## An app's content in shared org memory passes policy, proven (2026-11-02, `app-content-policy`)
+
+- The connectors spec, How the agent uses connectors: "Writing a connection's content into shared org memory passes policy like any other action." Nothing needed building. `knowledge_add` is a tool like any other, so the boundary puts it to the Cedar policy with the run's taint. What it files is readable only by whom its sources allow. No test showed the first part for an app's content.
+- Test: `filing_an_apps_private_content_in_the_knowledge_base_is_decided_by_policy` (app_content_policy.rs). An org rule forbids `knowledge_add` when the run holds private content. After Alice's calendar is read through her app, filing is refused by that rule and nothing is filed. Filing from a public web page goes through.
