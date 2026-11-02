@@ -573,3 +573,22 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Tests: the validator's unit tests in `bundle.rs` (every place and its kind; T9's malformed documents: no type, a bad time, an identity key or relation the type does not declare, a relative link, the wrong scope; indexes, logs and T10's cap; actors); `magnus_writes_the_bundle_through_the_kernel_which_checks_every_write_and_guards_who_sees_what` (org_context_bundle.rs, through real tasks).
 - The console's step-up tests use a 30-second window (were 8 and 4) and wait past it to see it lapse. Reason: CI on #76 failed both (`stepped_up_until` null right after a step-up; release refused right after a fresh sign-in): a window counts from the password typed on Keycloak's page, and a real browser's sign-in on the loaded build box takes longer than 4-8 seconds to come back. Nothing in the console changed.
 
+## The admin console on strix-alpha (2026-11-02, `admin-on-appliance`)
+
+- The owner (2026-11-02): "I don't have admin dashboard so I can't even see what is built or should be available", then "yes, do the admin console and connectors first". The console's program shipped with every release, but nothing configured or started it on the appliance. The org context queue waits behind this and the connectors.
+- `release/admin-on-appliance.sh`, run by CI after each master build is on the build box's appliance, safe to run again. It decides once, from the spec and the machine, what the spec leaves to the organisation (the owner, 2026-11-02, chose the local name):
+  - hostname: `<machine>.local` (mDNS), port 7443;
+  - listen: the machine's address on the network its default route uses (strix-alpha: 192.168.0.50) and its Tailscale address, never every address or loopback;
+  - allow: those networks only (the LAN's /24 and Tailscale's 100.64.0.0/10);
+  - certificate: from an organisation CA made on the appliance (its key owner-only beside the config), naming the hostname and those addresses, which the owner trusts once on their computers;
+  - the console's database role: a password made there, kept in the owner-only config.
+- Each run, the script also:
+  - migrates, which creates or updates that role;
+  - registers the console's client and service account in the realm with the console's own key, as root (the CI user has sudo there and the realm administrator's file is root-only);
+  - gives the appliance's owners the realm role `admin` (`keycloak-client.py --assign-admin`, new);
+  - installs the console as a systemd user service beside the appliance, on the installed programs, restarted so it runs the release;
+  - turns mDNS on where it is installed.
+- It prints the console's address, a hosts-file line for computers where `.local` does not resolve, and the CA's certificate (public) with its fingerprint. It prints no secret.
+- The same CI step carries Google's client secret, when the repository's `GOOGLE_CLIENT_SECRET` is set, into the appliance's vault through its owner-only `PUT /v1/registrations/google`. Nothing else holds it until the relay does.
+- Test: `the_setup_writes_an_admin_console_that_answers_its_hostname_on_the_network_only` (admin_on_appliance.rs). From a config with no `[admin]`, the console starts on what the script wrote, answers its hostname over TLS the new CA verifies, refuses another hostname, keeps its keys owner-only, and a second run writes nothing more. The realm and systemd parts run on the build box only.
+

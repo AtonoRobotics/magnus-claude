@@ -252,3 +252,12 @@ jobs:
           p=${MAGNUS_BUILT:+$MAGNUS_BUILT/appliance}
           [ -n "$p" ] || { cargo build --release --workspace --bins; p=target/release; }
           release/to-appliance.sh "${{ vars.MAGNUS_APPLIANCE_CONFIG }}" "$MAGNUS_APPLIANCE_VERSION" "$RUNNER_TEMP/notes" "$p"
+          echo "MAGNUS_APPLIANCE_PROGRAMS=$p" >> "$GITHUB_ENV"
+      # The admin console beside it (DECISIONS.md, "The admin console on
+      # strix-alpha"), and Google's client secret into its vault when the
+      # repository has it (owner, 2026-11-02).
+      - name: The admin console on the build box's appliance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: release/admin-on-appliance.sh "${{ vars.MAGNUS_APPLIANCE_CONFIG }}" "$MAGNUS_APPLIANCE_PROGRAMS"
