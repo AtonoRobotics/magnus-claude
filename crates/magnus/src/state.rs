@@ -645,6 +645,8 @@ pub struct State {
     /// first time on the identity provider's own page, which can walk them
     /// through what their account still needs (a new password, two-factor).
     pub signed_in_before: HashSet<String>,
+    /// When each person last signed in here (the console's Users list).
+    pub last_sign_in: HashMap<String, DateTime<Utc>>,
     /// The latest backup's restore check: file, whether it restored, detail, when.
     pub last_backup: Option<(String, bool, String, DateTime<Utc>)>,
     /// An appliance update in progress: from, to, and whether it is a rollback.
@@ -1115,6 +1117,7 @@ impl State {
             }
             Ev::SignedIn { person, .. } => {
                 self.signed_in_before.insert(person.clone());
+                self.last_sign_in.insert(person.clone(), e.at);
             }
             Ev::SignedOut { .. } => {}
             Ev::ScheduleSet { id, person, every_minutes, daily_at, budget, card, label, until, max_runs, .. } => {

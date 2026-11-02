@@ -136,8 +136,16 @@ pub struct Admin {
     /// changing it. `magnus migrate` creates it.
     #[serde(default)]
     pub database_url: Option<String>,
+    /// The console's service account in the realm (admin console spec,
+    /// Server and API): how it manages people there, proving itself with
+    /// the console's own key, and only after the admin's own check passes.
+    #[serde(default = "admin_service_client")]
+    pub service_client_id: String,
 }
 
+fn admin_service_client() -> String {
+    "magnus-admin-svc".into()
+}
 fn admin_step_up_seconds() -> u32 {
     300
 }

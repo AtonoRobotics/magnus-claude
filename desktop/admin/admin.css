@@ -40,3 +40,15 @@ body:has(#kill-banner) { padding-top: 52px; }
 .ad-dot.ok { background: var(--ok-icon); } .ad-dot.down { background: var(--bad); }
 .ad-alerts, .ad-services { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.ad-bar { flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+.ad-bar input[type=search] { flex: 1; min-width: 0; }
+.ad-scroll { overflow-x: auto; }
+.ad-pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--row-sel); }
+.ad-pill.disabled { background: var(--bad); color: #fff; }
+.ad-pill.invited { border: 1px dashed var(--line-strong); background: transparent; }
+.ad-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 12px 0; overflow-x: auto; }
+.ad-tabs a { padding: 8px 12px; color: var(--fg); white-space: nowrap; }
+.ad-tabs a[aria-current="page"] { border-bottom: 2px solid var(--fg); font-weight: 600; }
+#invite { max-width: min(440px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--fg); padding: 20px; }
+#invite form { display: grid; gap: 10px; }
+#invite label { display: grid; gap: 4px; font-size: 13px; }

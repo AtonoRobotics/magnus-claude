@@ -13,33 +13,6 @@ use magnus_scratch::*;
 use reqwest::StatusCode;
 use serde_json::Value;
 
-/// The browser signs in as `who` (and steps up after, if asked): the
-/// console's session cookie, or the script's log when it fails.
-async fn sign_in(p_url: &str, at: std::net::SocketAddr, who: &str, expect: &str, step_up: bool) -> Result<String, String> {
-    let out = tokio::process::Command::new("node")
-        .arg(magnus_invariants::appliance::workspace_root().join("desktop/tests/admin-sign-in.mjs"))
-        .env("MAGNUS_ADMIN_URL", p_url)
-        .env("MAGNUS_ADMIN_AT", at.to_string())
-        .env("MAGNUS_PERSON", who.to_lowercase())
-        .env("MAGNUS_PASSWORD", password_of(who))
-        .env("MAGNUS_EXPECT", expect)
-        .env("MAGNUS_STEP_UP", if step_up { "1" } else { "0" })
-        .env("MAGNUS_CHROMIUM", chromium())
-        .envs(shots())
-        .kill_on_drop(true)
-        .output();
-    let out = tokio::time::timeout(std::time::Duration::from_secs(150), out).await.map_err(|_| "the browser did not finish in 150 seconds".to_string())?.unwrap();
-    let log = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    if !out.status.success() {
-        return Err(log);
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).lines().last().unwrap_or_default().trim().to_string())
-}
-
-fn with_cookie(b: reqwest::RequestBuilder, sid: &str) -> reqwest::RequestBuilder {
-    b.header("cookie", format!("__Host-magnus_admin={sid}"))
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn only_an_admin_signs_in_on_the_providers_page_and_the_session_holds_to_its_rules() {
     let kc = Keycloak::start().await;

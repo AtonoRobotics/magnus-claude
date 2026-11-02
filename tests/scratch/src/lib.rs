@@ -6,6 +6,7 @@ use axum::{body::Body, extract::State, http::HeaderMap, response::Response, rout
 use magnus_invariants::appliance::bin;
 
 pub mod admin;
+pub mod mail;
 mod keycloak;
 pub use keycloak::*;
 mod oauth_app;
