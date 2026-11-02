@@ -731,6 +731,32 @@ pub enum Ev {
     /// (`person:<id>`, `group:<id>`); none means everyone. `integrity` is
     /// `company`, `verified` or `untrusted`; `source` keeps where it came
     /// from (citations, file, app, or the entry a value was extracted from).
+    /// A version of a document in the org context bundle (OKF v0.2, the
+    /// Magnus profile; `bundle.rs`). Its frontmatter and body are content:
+    /// the log keeps what the kernel needs to find and guard it.
+    BundleWritten {
+        path: String,
+        version: u32,
+        doc_kind: String,
+        /// `org`, or `user` for a person's own document under `/users/<owner>/`.
+        scope: String,
+        #[serde(default)]
+        owner_user: Option<String>,
+        /// The OKF actor that wrote it (`magnus/<version>`, `human:<id>`).
+        actor: String,
+        #[serde(default)]
+        run: Option<String>,
+        /// The taint of what it was written from (M1): read back with it.
+        label: Label,
+        /// The items it lists in `sources` (their `resource`s): who may see
+        /// it follows from who may read these (K2).
+        #[serde(default)]
+        sources: Vec<String>,
+        #[serde(default)]
+        frontmatter: Value,
+        #[serde(default)]
+        body: String,
+    },
     KnowledgeAdded {
         id: String,
         #[serde(default)]
@@ -826,6 +852,7 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("graded", &["details"]),
     ("memory", &["fact", "topic"]),
     ("knowledge_added", &["title", "text", "source", "verification", "value"]),
+    ("bundle_written", &["frontmatter", "body"]),
     ("knowledge_extraction", &["reply"]),
     ("spoken_written", &["script"]),
     ("schedule_ended", &["reason"]),

@@ -140,6 +140,12 @@ pub const BUILTINS: &[Builtin] = &[
     // The company knowledge base. A search's result carries the taint of
     // what it returns; filing research changes nothing outside the appliance.
     Builtin { name: "knowledge_search", app: "knowledge", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // The org context bundle (org context build spec): reads carry the
+    // taint their documents were written under; writes stay on the
+    // appliance, versioned and reversible.
+    Builtin { name: "bundle_read", app: "bundle", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "bundle_search", app: "bundle", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "bundle_write", app: "bundle", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "knowledge_add", app: "knowledge", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // A project's reference file, read when the work needs it (M2). Its
     // result carries the file's own taint; an upload is private and untrusted.
@@ -354,6 +360,17 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             name: "memory_write".into(),
             description: d("memory_write"),
             input_schema: obj(json!({ "fact": { "type": "string" }, "topic": { "type": "string" } }), &["fact"]),
+        },
+        ToolSpec { name: "bundle_read".into(), description: d("bundle_read"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
+        ToolSpec {
+            name: "bundle_search".into(),
+            description: d("bundle_search"),
+            input_schema: obj(json!({ "query": { "type": "string" }, "kinds": { "type": "array", "items": { "type": "string" } }, "limit": { "type": "integer" } }), &["query"]),
+        },
+        ToolSpec {
+            name: "bundle_write".into(),
+            description: d("bundle_write"),
+            input_schema: obj(json!({ "path": { "type": "string" }, "frontmatter": { "type": "object" }, "body": { "type": "string" } }), &["path", "frontmatter", "body"]),
         },
         ToolSpec {
             name: "memory_search".into(),

@@ -13,6 +13,7 @@ pub mod apps;
 pub mod backup;
 pub mod boundary;
 pub mod browser;
+pub mod bundle;
 pub mod catalog;
 pub mod chat;
 pub mod chat_actions;
