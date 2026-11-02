@@ -21,6 +21,7 @@ pub mod compose;
 pub mod config;
 pub mod conformance;
 pub mod connectors;
+pub mod controls;
 pub mod control;
 pub mod dev;
 pub mod events;

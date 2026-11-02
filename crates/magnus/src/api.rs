@@ -153,8 +153,9 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/memory", get(memory))
         .route("/v1/memory/{id}", axum::routing::delete(forget))
         .route("/v1/schedules", get(schedules).post(add_schedule))
-        .route("/v1/schedules/{id}", axum::routing::delete(remove_schedule))
+        .route("/v1/schedules/{id}", axum::routing::delete(remove_schedule).patch(edit_schedule))
         .route("/v1/schedules/{id}/resume", post(resume_schedule))
+        .route("/v1/schedules/{id}/pause", post(pause_schedule))
         .merge(crate::dev::router())
         .merge(crate::connectors::router())
         .merge(crate::library::router())
@@ -1024,15 +1025,19 @@ async fn cancel(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let Some((_, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
-    if run.status.terminal() {
-        return err(StatusCode::CONFLICT, "the task has ended");
+    controlled(k.cancel_task(&p, &id).await.map(|v| { let mut v = v; v["ok"] = json!(true); v }))
+}
+
+/// A control's answer as the app gets it.
+fn controlled(r: Result<Value, crate::controls::Refused>) -> Response {
+    use crate::controls::Refused;
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err(e @ Refused::NotFound(_)) => err(StatusCode::NOT_FOUND, e.to_string()),
+        Err(Refused::Conflict(m)) => err(StatusCode::CONFLICT, m),
+        Err(Refused::Invalid(m)) => err(StatusCode::BAD_REQUEST, m),
+        Err(Refused::Failed(m)) => err(StatusCode::INTERNAL_SERVER_ERROR, m),
     }
-    if let Err(e) = k.emit(&format!("person:{}", p.id), Ev::Cancelled { run: run.id.clone() }).await {
-        return internal(e);
-    }
-    k.on_stop(&run.id, true).await;
-    Json(json!({ "ok": true })).into_response()
 }
 
 /// The person's verdict on an outcome that has ended: right, partly or
@@ -1691,34 +1696,42 @@ async fn resume_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
         Ok(p) => p,
         Err(r) => return r,
     };
-    let Some((person, paused, on)) = k.read(|s| s.schedules.get(&id).map(|x| (x.person.clone(), x.paused.is_some(), x.paused_on.clone()))) else { return err(StatusCode::NOT_FOUND, "no such schedule") };
-    if person != p.id {
-        return err(StatusCode::NOT_FOUND, "no such schedule");
-    }
-    if !paused {
-        return err(StatusCode::CONFLICT, "the schedule is not paused");
-    }
-    if on.is_some() {
-        return err(StatusCode::CONFLICT, "its run is waiting on you: answer it, or resume or cancel that task, and the schedule goes on");
-    }
-    match k.emit(&format!("person:{}", p.id), Ev::ScheduleResumed { id }).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => internal(e),
+    match controlled(k.resume_schedule(&p, &id).await.map(|_| Value::Null)) {
+        r if r.status() == StatusCode::OK => StatusCode::NO_CONTENT.into_response(),
+        r => r,
     }
 }
 
+/// Pause: no more runs until it is resumed.
+async fn pause_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    match controlled(k.pause_schedule(&p, &id).await.map(|_| Value::Null)) {
+        r if r.status() == StatusCode::OK => StatusCode::NO_CONTENT.into_response(),
+        r => r,
+    }
+}
+
+/// Change when it runs and when it ends.
+async fn edit_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    controlled(k.edit_schedule(&p, &id, &b).await)
+}
+
+/// Cancel: no more runs, and one still going stops.
 async fn remove_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
     let p = match who(&k, &h) {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let Some(owner_id) = k.read(|s| s.schedules.get(&id).map(|x| x.person.clone())) else { return err(StatusCode::NOT_FOUND, "no such schedule") };
-    if owner_id != p.id {
-        return err(StatusCode::NOT_FOUND, "no such schedule");
-    }
-    match k.emit(&format!("person:{}", p.id), Ev::ScheduleRemoved { id }).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => internal(e),
+    match controlled(k.cancel_schedule(&p, &id).await) {
+        r if r.status() == StatusCode::OK => StatusCode::NO_CONTENT.into_response(),
+        r => r,
     }
 }
 

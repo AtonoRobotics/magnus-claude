@@ -356,6 +356,15 @@ pub enum Ev {
         #[serde(default)]
         task: Option<String>,
     },
+    /// When a schedule runs and when it ends, changed by its person (or the
+    /// owner or an admin); what each run does stays.
+    ScheduleChanged {
+        id: String,
+        every_minutes: Option<u32>,
+        daily_at: Option<String>,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+        max_runs: Option<u32>,
+    },
     ScheduleResumed {
         id: String,
     },

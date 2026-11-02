@@ -104,7 +104,8 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
     })
 }
 
-/// The appliance's own chat tools (`create_task`, `create_schedule`), never
+/// The appliance's own chat tools (`create_task`, `create_schedule`, the
+/// task and schedule controls), never
 /// a connector's, whatever the connector is called.
 /// The Rule of Two asks before a web lookup; one approval covers a task's
 /// lookups (or a conversation's).
@@ -721,6 +722,10 @@ impl Kernel {
                 "web_search" => Ok((self.web.search(&s("query")).await?, false, None)),
                 "create_task" => self.chat_task(a, key).await,
                 "create_schedule" => Ok(self.chat_card(a, key)),
+                t if crate::controls::TOOLS.contains(&t) => {
+                    let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
+                    Ok(self.chat_control(&person, t, &a.input).await)
+                }
                 "sandbox_exec" => {
                     let t = a.input["timeout_s"].as_u64().unwrap_or(120);
                     let v = if a.issuer.reads_only() {
