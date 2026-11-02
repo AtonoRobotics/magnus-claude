@@ -27,7 +27,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] The realm role `admin`, checked on every request from the session's validated token (#69; `admin_sign_in.rs`)
 - [x] Admins sign in and step up with their password and code (ruling 1, no passkeys) (#69)
 - [x] Server-side session, cookie `__Host-magnus_admin`, HttpOnly, Secure, SameSite=Strict (#69)
-- [x] 30 minutes idle, 12 hours absolute (#69); adjustable under Security › Sign-in ( )
+- [x] 30 minutes idle, 12 hours absolute (#69); adjustable under Security › Sign-in (`admin-security`; `admin_security.rs`)
 - [x] A CSRF token on every change (#69)
 - [x] Sign-out ends the console's session and the provider's (#69)
 - [x] An admin turned off at the provider loses the console within 5 minutes (#69; `admin_sign_in.rs`)
@@ -88,10 +88,10 @@ Each line names the pull request that built it, or the one building it.
 
 ### Security
 
-- [ ] Sign-in: member methods (password, and whether a code is required), admin method shown fixed, session lifetimes for members and the console, lockout thresholds; applied through the provider's admin API with step-up
-- [ ] Agent policy: each Cedar policy set in an editor with highlighting and inline validation errors
-- [ ] Agent policy: a test panel (principal, action, resource, context → the decision and the policies that decided it)
-- [ ] Agent policy: a diff against the live version; Apply with step-up; history and rollback
+- [x] Sign-in: member methods (password, and whether a code is required), admin method shown fixed, session lifetimes for members and the console, lockout thresholds; applied through the provider's admin API with step-up (`admin-security`; `admin_security.rs`)
+- [x] Agent policy: each Cedar policy set in an editor with highlighting and inline validation errors against Magnus's schema (`admin-security`; `admin_security.rs`, `policy_admin.rs`)
+- [x] Agent policy: a test panel (principal, action, resource, context → the decision and the policies that decided it) (`admin-security`; `admin_security.rs`)
+- [x] Agent policy: a diff against the live version; Apply with step-up; history and rollback (`admin-security`; `admin_security.rs`)
 - [x] Connectors and credentials: the organisation's connectors with status, scopes, last used; add, turn off or on, who may use it, set, rotate, revoke, remove; credentials write-only, shown "set" and when (`admin-connectors`; `admin_connectors.rs`)
 - [x] Audit: the whole log, filtered by actor, action, target and time, with CSV (#70)
 

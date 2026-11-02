@@ -17,9 +17,10 @@ the console's own key, whose public half `magnus-admin jwk --config
 magnus.toml` prints into JWKS_FILE; and the person's realm roles in its ID
 token, since only the realm role `admin` opens the console. It also
 registers the console's service account, magnus-admin-svc, proving itself
-with the same key and holding only user management in this realm
-(manage-users, view-users, query-users, view-realm): the Users screen
-invites, turns off and ends the sessions of the realm's people through it.
+with the same key and holding this realm's management only (manage-users,
+view-users, query-users, view-realm, manage-realm): the Users screen
+invites, turns off and ends the sessions of the realm's people through it,
+and Security › Sign-in sets the realm's sign-in rules.
 """
 import argparse
 import json
@@ -145,9 +146,9 @@ if a.admin_console:
     cid = send("GET", f"{base}/clients?{urlencode({'clientId': svc['clientId']})}", token=token)[0]["id"]
     account = send("GET", f"{base}/clients/{cid}/service-account-user", token=token)["id"]
     rm = send("GET", f"{base}/clients?{urlencode({'clientId': 'realm-management'})}", token=token)[0]["id"]
-    roles = [send("GET", f"{base}/clients/{rm}/roles/{r}", token=token) for r in ("manage-users", "view-users", "query-users", "view-realm")]
+    roles = [send("GET", f"{base}/clients/{rm}/roles/{r}", token=token) for r in ("manage-users", "view-users", "query-users", "view-realm", "manage-realm")]
     send("POST", f"{base}/users/{account}/role-mappings/clients/{rm}", body=roles, token=token)
-    print(f"The console's service account magnus-admin-svc may manage the people of realm {a.realm}, and no more.")
+    print(f"The console's service account magnus-admin-svc may manage the people and the sign-in rules of realm {a.realm}, and no more.")
     # The realm role that opens the console, and the people who hold it.
     if a.assign_admin:
         try:

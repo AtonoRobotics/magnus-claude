@@ -40,6 +40,12 @@ pub async fn serve(k: Arc<Kernel>, state_dir: &Path) -> Result<()> {
         .route("/v1/people/{person}/schedules/{id}/{change}", post(person_schedule))
         .route("/v1/people/{person}/data/{what}", post(person_data))
         .route("/v1/people/{person}/erase", post(erase_person))
+        .route("/v1/admin/policy", axum::routing::get(policy_sets))
+        .route("/v1/admin/policy/draft", post(policy_draft))
+        .route("/v1/admin/policy/apply", post(policy_apply))
+        .route("/v1/admin/policy/test", post(policy_test))
+        .route("/v1/admin/policy/history", axum::routing::get(policy_history))
+        .route("/v1/admin/console-settings", axum::routing::get(console_settings).put(set_console_settings))
         .route("/v1/admin/connectors", axum::routing::get(connectors).post(add_connector))
         .route("/v1/admin/connectors/{name}", axum::routing::patch(connector_settings).delete(remove_connector))
         .route("/v1/admin/connectors/{name}/credential", axum::routing::put(set_credential).delete(revoke_credential))
@@ -315,6 +321,62 @@ async fn erase_person(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): ax
     match k.erase_person(&actor, &person).await {
         Ok(v) => Json(v).into_response(),
         Err(r) => person_refused(r),
+    }
+}
+
+// The agent policy (admin console spec, Security › Agent policy), as the
+// kernel keeps it: sets, drafts, versions, tests.
+
+fn policy_refused((st, m): crate::policy_admin::Refusal) -> Response {
+    (st, Json(json!({ "error": m }))).into_response()
+}
+
+/// The sets, and what a test can name: the appliance's people and the
+/// organisation's tools.
+async fn policy_sets(State(k): State<Arc<Kernel>>) -> Response {
+    let people: Vec<Value> = k.cfg.people.iter().filter_map(|p| k.person(&p.id)).map(|p| json!({ "id": p.id, "name": p.name, "groups": p.groups })).collect();
+    let tools: Vec<Value> = k.connectors().into_iter().flat_map(|c| c.tools.iter().map(|(t, cl)| json!({ "name": format!("{}__{t}", c.name), "risk": cl.risk, "audience": c.audience })).collect::<Vec<_>>()).collect();
+    Json(json!({ "sets": k.policy_sets(), "people": people, "tools": tools })).into_response()
+}
+
+async fn policy_draft(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let (Some(actor), Some(layer)) = (actor(&b), text(&b, "layer")) else { return policy_refused((StatusCode::BAD_REQUEST, "name who drafts which layer".into())) };
+    match k.policy_draft(&actor, &layer, b["cedar"].as_str().map(String::from)).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => policy_refused(r),
+    }
+}
+
+async fn policy_apply(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let (Some(actor), Some(layer)) = (actor(&b), text(&b, "layer")) else { return policy_refused((StatusCode::BAD_REQUEST, "name who applies which layer".into())) };
+    match k.policy_apply(&actor, &layer, b["cedar"].as_str().unwrap_or_default()).await {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => policy_refused(r),
+    }
+}
+
+async fn policy_test(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    match k.policy_test(&b) {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => policy_refused(r),
+    }
+}
+
+async fn policy_history(State(k): State<Arc<Kernel>>, Query(q): Query<HashMap<String, String>>) -> Response {
+    Json(json!({ "versions": k.policy_history(q.get("layer").map(String::as_str).unwrap_or("org")) })).into_response()
+}
+
+/// The console's own session lifetimes, as an admin last set them.
+async fn console_settings(State(k): State<Arc<Kernel>>) -> Response {
+    Json(k.read(|s| s.console_settings.clone()).unwrap_or(json!({}))).into_response()
+}
+
+async fn set_console_settings(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return policy_refused((StatusCode::BAD_REQUEST, "name who sets them".into())) };
+    let (Some(idle), Some(hours)) = (b["idle_minutes"].as_i64(), b["session_hours"].as_i64()) else { return policy_refused((StatusCode::BAD_REQUEST, "give idle_minutes and session_hours".into())) };
+    match k.emit(&actor, Ev::ConsoleSettings { idle_minutes: idle, session_hours: hours }).await {
+        Ok(_) => Json(json!({ "idle_minutes": idle, "session_hours": hours })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
     }
 }
 

@@ -740,6 +740,10 @@ pub struct State {
     pub bundle: BTreeMap<String, BundleDoc>,
     /// Every policy a layer ever had, oldest first.
     pub policy_history: Vec<PolicyVersion>,
+    /// The admin console's session lifetimes, as an admin set them.
+    pub console_settings: Option<Value>,
+    /// Admins' drafts of policy layers, not in force.
+    pub policy_drafts: BTreeMap<String, String>,
     /// Model and harness changes, for version notices (U5): (seq, at, what, value).
     pub version_changes: Vec<(i64, DateTime<Utc>, String, String)>,
     /// Increments with every playbook change (I3).
@@ -1048,6 +1052,17 @@ impl State {
                 let n = self.policy_history.iter().filter(|p| &p.layer == layer).count();
                 self.version_changes.push((e.seq, e.at, format!("policy:{layer}"), format!("v{n}")));
             }
+            Ev::ConsoleSettings { idle_minutes, session_hours } => {
+                self.console_settings = Some(serde_json::json!({ "idle_minutes": idle_minutes, "session_hours": session_hours }));
+            }
+            Ev::PolicyDrafted { layer, cedar } => match cedar {
+                Some(c) => {
+                    self.policy_drafts.insert(layer.clone(), c.clone());
+                }
+                None => {
+                    self.policy_drafts.remove(layer);
+                }
+            },
             Ev::KillSwitch { engaged } => {
                 self.kill_switch = *engaged;
                 self.kill_switch_by = Some((e.actor.clone(), e.at));

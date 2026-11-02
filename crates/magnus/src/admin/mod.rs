@@ -18,7 +18,9 @@ pub mod kernel;
 pub mod live;
 pub mod net;
 pub mod ops;
+pub mod policy;
 pub mod session;
+pub mod signin;
 pub mod users;
 
 use crate::config::Config;
@@ -45,8 +47,10 @@ pub struct Console {
     pub idp: session::Idp,
     pub key: auth::Key,
     pub store: auth::Store,
-    pub idle_minutes: i64,
-    pub session_hours: i64,
+    /// The console's own session lifetimes: the config's, until an admin
+    /// sets them under Security › Sign-in (kept in the log).
+    pub idle_minutes: std::sync::atomic::AtomicI64,
+    pub session_hours: std::sync::atomic::AtomicI64,
     pub step_up_seconds: i64,
     pub refresh_seconds: i64,
     pub kernel: kernel::Kernel,
@@ -121,8 +125,8 @@ pub async fn serve(cfg: Config) -> Result<()> {
         idp: session::Idp::new(issuer, a.client_id.clone(), roles_claim, a.idp_internal.clone()),
         key: auth::Key::load_or_make(&key_dir(&cfg))?,
         store: Default::default(),
-        idle_minutes: a.idle_minutes.into(),
-        session_hours: a.session_hours.into(),
+        idle_minutes: std::sync::atomic::AtomicI64::new(a.idle_minutes.into()),
+        session_hours: std::sync::atomic::AtomicI64::new(a.session_hours.into()),
         step_up_seconds: a.step_up_seconds.into(),
         refresh_seconds: a.refresh_seconds.into(),
         kernel: kernel::Kernel { path: crate::control::socket_path(&cfg.appliance.state_dir) },
@@ -133,6 +137,10 @@ pub async fn serve(cfg: Config) -> Result<()> {
             .filter_map(|(what, p)| p.map(|p| (what, p)))
             .collect(),
     });
+    // Lifetimes an admin set before this start.
+    if let Ok(v) = console.kernel.call(axum::http::Method::GET, "/v1/admin/console-settings", None).await {
+        signin::adopt(&console, &v);
+    }
     let l = net::Listener::bind(&addrs, allow, tls).await?;
     // tap_io gives the listener axum's connect-info: each request's source,
     // for the audit log.
@@ -177,6 +185,14 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/api/v1/connectors", get(connectors::list).post(connectors::add))
         .route("/api/v1/connectors/{id}", axum::routing::patch(connectors::update).delete(connectors::remove))
         .route("/api/v1/connectors/{id}/credential", axum::routing::put(connectors::set_credential).delete(connectors::revoke_credential))
+        .route("/api/v1/security/sign-in", get(signin::get).patch(signin::patch))
+        .route("/api/v1/policy/sets", get(policy::sets))
+        .route("/api/v1/policy/sets/{id}/draft", axum::routing::put(policy::draft).delete(policy::drop_draft))
+        .route("/api/v1/policy/validate", axum::routing::post(policy::validate))
+        .route("/api/v1/policy/test", axum::routing::post(policy::test))
+        .route("/api/v1/policy/sets/{id}/apply", axum::routing::post(policy::apply))
+        .route("/api/v1/policy/sets/{id}/history", get(policy::history))
+        .route("/api/v1/policy/sets/{id}/rollback", axum::routing::post(policy::rollback))
         .route("/api/v1/audit", get(audit_list))
         .route("/api/v1/audit.csv", get(audit_csv))
         .route("/api/v1/{*rest}", axum::routing::any(api_not_found))

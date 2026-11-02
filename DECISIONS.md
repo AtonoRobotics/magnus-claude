@@ -671,3 +671,33 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - Delete is refused without a fresh password and with the wrong email typed;
   - once deleted, his account, session, schedule and every row of his content are gone, and the deletion is in the audit log;
   - the screens in every look and at phone width.
+
+## The admin console's Security › Sign-in and Agent policy (2026-11-02, `admin-security`)
+
+- **Sign-in** (admin console spec; owner's ruling 1, no passkeys):
+  - How members sign in: their password, and a code from an authenticator app that is optional (whoever set one up is asked) or required (everyone sets one up and is asked). Required sets the code step of the realm's browser and direct-grant flows from CONDITIONAL to REQUIRED, so a password alone signs no one in; optional sets it back.
+  - How admins sign in: shown as fixed, the password and their code as members.
+  - Session lifetimes: members' (the realm's idle and longest) and the console's own (idle 5-240 minutes, longest 1-24 hours, kept in the log as `ConsoleSettings` and taken by the console at start).
+  - Lockout: on or off, failures before it, the first and longest waits, and whether it is for good.
+  - Every change needs a fresh password and is audited with before and after. The console's service account gains `manage-realm` in its realm (still that realm's management only, as the spec allows).
+- **Agent policy**:
+  - Each Cedar policy set (the organisation's, a group's, a person's) is shown with its live text (the organisation's default when none was written) and an admin's draft. A draft (`PolicyDrafted`) changes nothing in force.
+  - Magnus now has a Cedar schema (`policy_admin::SCHEMA`: people in groups, tools in apps with risk and audience, the two actions, the run's taint as context). Every draft and every apply is checked against it, and each problem is given with its line and column (Cedar's diagnostics, via `miette`). The editor highlights the text and marks the lines with problems as it is typed.
+  - The test panel tries a principal, action, resource (a tool, with its risk as classified or given) and context against what is live, or with the draft in place. It shows the decision (acts without asking, asks first, refused), the rule that decided it, and the layers it went through.
+  - A diff against the live text, and Apply, which needs a fresh password, accepts only a policy that fits the schema, and drops the draft.
+  - Every version is listed; rolling back puts an earlier one in force again as a new version, also with a fresh password. Applies and rollbacks are audited with the text before and after.
+- In the console, sets are named `org`, `group:<name>` and `user:<person>`, so each fits one path segment.
+- Layout fixes found on the way:
+  - the app's stylesheet fixes `body` at the window's height, which cut the console's main area short on long screens;
+  - form rules made checkboxes full width;
+  - admins named in the log by their provider id are now shown by name.
+- Test: `root_sets_the_sign_in_rules_and_edits_tests_applies_and_rolls_back_the_agent_policy` (admin_security.rs), against Keycloak:
+  - the rules are read; with the step-up lapsed, the sign-in rules, Apply and rollback all answer `step_up_required` (the spec's invariant, for these);
+  - with a fresh password the rules land in the realm; a code required makes Carol's password alone fail, and optional again lets it through; bad rules are refused;
+  - a problem is placed on its line;
+  - a draft is not in force, and the test panel gives "allow" live and "ask" with the draft, naming the rule;
+  - a policy that does not fit the schema is refused, and the draft applied is the app's own policy;
+  - a rollback brings version 1 back as version 3;
+  - each change is audited;
+  - both screens in every look and at phone width.
+- Tests: `the_schema_parses_and_the_default_policy_fits_it` and `a_problem_names_its_line_and_column` (policy_admin.rs).

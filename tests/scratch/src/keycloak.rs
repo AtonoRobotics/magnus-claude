@@ -267,7 +267,7 @@ impl Keycloak {
         let account = self.admin(reqwest::Method::GET, &format!("/clients/{client}/service-account-user"), None).await["id"].as_str().unwrap().to_string();
         let rm = self.admin(reqwest::Method::GET, "/clients?clientId=realm-management", None).await[0]["id"].as_str().unwrap().to_string();
         let mut roles = vec![];
-        for r in ["manage-users", "view-users", "query-users", "view-realm"] {
+        for r in ["manage-users", "view-users", "query-users", "view-realm", "manage-realm"] {
             roles.push(self.admin(reqwest::Method::GET, &format!("/clients/{rm}/roles/{r}"), None).await);
         }
         self.admin(reqwest::Method::POST, &format!("/users/{account}/role-mappings/clients/{rm}"), Some(Value::Array(roles))).await;
@@ -284,6 +284,11 @@ impl Keycloak {
     pub async fn password_works(&self, username: &str, password: &str) -> bool {
         let r = self.http.post(format!("{}/protocol/openid-connect/token", self.issuer)).form(&[("grant_type", "password"), ("client_id", IDP_CLIENT), ("username", username), ("password", password), ("scope", "openid")]).send().await.unwrap();
         r.status().is_success()
+    }
+
+    /// The realm's own settings, as its admin API gives them.
+    pub async fn realm(&self) -> Value {
+        self.admin(reqwest::Method::GET, "", None).await
     }
 
     /// Turn the person's account back on.

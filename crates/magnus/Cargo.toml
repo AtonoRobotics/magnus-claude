@@ -26,6 +26,8 @@ async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
 cedar-policy = "4"
+# The places of a policy's problems, which Cedar reports as diagnostics.
+miette = "7"
 chacha20poly1305 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
