@@ -283,7 +283,12 @@ impl Kernel {
         }
         let c = self.log.contents(&[d.seq()]).await?.remove(&d.seq()).unwrap_or_default();
         let body = self.without_hidden_links(person, c["body"].as_str().unwrap_or_default());
-        Ok(Some((c["frontmatter"].clone(), body, d.label, d.version())))
+        let mut fm = c["frontmatter"].clone();
+        // An item it lists changed at its source (K10): the reader is told.
+        if let (Some(at), Some(o)) = (d.stale_after, fm.as_object_mut()) {
+            o.insert("stale_after".into(), json!(at.to_rfc3339()));
+        }
+        Ok(Some((fm, body, d.label, d.version())))
     }
 
     /// A body with every link to a document `person` cannot see turned into

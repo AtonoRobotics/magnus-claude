@@ -413,6 +413,8 @@ pub struct BundleDoc {
     pub runs: Vec<String>,
     /// Marked no longer true since its last version, by which event.
     pub invalidated: Option<(i64, DateTime<Utc>)>,
+    /// An item it lists changed at its source then (K10): to be checked.
+    pub stale_after: Option<DateTime<Utc>>,
 }
 
 impl BundleDoc {
@@ -1619,6 +1621,12 @@ impl State {
             }
             // The audit trail is read from the log, not kept in memory.
             Ev::Audit { .. } => {}
+            // K10: every document listing the item is stale from now.
+            Ev::SourceChanged { item, .. } => {
+                for d in self.bundle.values_mut().filter(|d| d.sources.contains(item)) {
+                    d.stale_after.get_or_insert(e.at);
+                }
+            }
             Ev::Decision { run, call_id, tool, outcome, stage, rule, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.decisions.push(DecisionRec { seq: e.seq, call_id: call_id.clone(), tool: tool.clone(), stage: stage.clone(), outcome: outcome.clone(), rule: rule.clone() });
@@ -1893,13 +1901,14 @@ impl State {
             }
             Ev::BundleWritten { path, version, doc_kind: kind, scope, owner_user, actor, run, label, sources, .. } => {
                 let writer = run.as_ref().and_then(|r| self.runs.get(r)).map(|r| r.person.clone());
-                let d = self.bundle.entry(path.clone()).or_insert_with(|| BundleDoc { path: path.clone(), kind: kind.clone(), scope: scope.clone(), owner_user: owner_user.clone(), label: *label, sources: vec![], versions: vec![], writer: None, runs: vec![], invalidated: None });
+                let d = self.bundle.entry(path.clone()).or_insert_with(|| BundleDoc { path: path.clone(), kind: kind.clone(), scope: scope.clone(), owner_user: owner_user.clone(), label: *label, sources: vec![], versions: vec![], writer: None, runs: vec![], invalidated: None, stale_after: None });
                 d.writer = writer;
                 if let Some(r) = run.as_ref().filter(|r| !d.runs.contains(r)) {
                     d.runs.push(r.clone());
                 }
                 // A new version says what is true now.
                 d.invalidated = None;
+                d.stale_after = None;
                 d.kind = kind.clone();
                 d.scope = scope.clone();
                 d.owner_user = owner_user.clone();

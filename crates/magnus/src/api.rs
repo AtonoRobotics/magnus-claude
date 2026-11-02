@@ -150,6 +150,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/adapters/{id}/conformance", post(conformance))
         .route("/v1/adapters/{id}/sign-in", post(sign_in_begin))
         .route("/v1/adapters/{id}/sign-in/complete", post(sign_in_complete))
+        .route("/v1/sources/{name}/changes", post(source_changes))
         .route("/v1/memory", get(memory).put(edit_memory))
         .route("/v1/memory/forget", post(forget_path))
         .route("/v1/memory/no-longer-true", post(mark_memory))
@@ -1502,6 +1503,29 @@ async fn memory(State(k): K, h: HeaderMap) -> Response {
         Err(e) => return internal(e),
     };
     Json(json!({ "memory": items, "kept": kept })).into_response()
+}
+
+/// Changes at one of the org's sources, as it reports them (a connector's
+/// push, relayed): `{"changes": [{"id", "change"}]}`. The owner's to send.
+async fn source_changes(State(k): K, h: HeaderMap, Path(name): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if !p.is_owner() {
+        return err(StatusCode::FORBIDDEN, "only the owner reports changes at a source");
+    }
+    if k.connector(&name).and_then(|c| c.source).is_none() {
+        return err(StatusCode::NOT_FOUND, "no such source");
+    }
+    let changes = b["changes"].as_array().cloned().unwrap_or_default();
+    for c in &changes {
+        let Some(id) = c["id"].as_str() else { return err(StatusCode::BAD_REQUEST, "each change needs an id") };
+        if let Err(e) = k.source_changed(&name, id, c["change"].as_str().unwrap_or("changed")).await {
+            return internal(e);
+        }
+    }
+    Json(json!({ "recorded": changes.len() })).into_response()
 }
 
 /// The person's own edit of something kept about them, by its path.
