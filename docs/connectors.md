@@ -210,7 +210,7 @@ one commit), 2026-11-02.
 
 ### The connector card
 
-- [ ] The same card in the Library, in chat, in a task and in approvals (Library, chat and task: `offered_card`, `agent_apps.rs`, `chat-app-card.mjs`; not yet in approvals)
+- [x] The same card in the Library, in chat, in a task and in approvals (`offered_card`: chat and task in `agent_apps.rs` and `chat-app-card.mjs`; an approval for an app's action in `approval_app_card.rs` and `approval-app-card.mjs`, for the person and for whoever decides it)
 - [x] Not connected: name, icon, one sentence, Connect (`connectors.mjs`; the icon is a letters tile)
 - [ ] Connecting: the system browser opens at the provider's page; on approval the browser says to return, and the card flips to Connected (`app-apps.mjs` against a fake app; not for Google)
 - [ ] On this computer: "Blender 5.2 is on this computer" and Enable; the one setting to turn on; Ready when the server answers
