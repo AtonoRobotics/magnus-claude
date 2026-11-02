@@ -116,10 +116,13 @@ fn is_chat_tool(f: &Facts) -> bool {
 }
 
 pub fn has_rights(person: &Person, f: &Facts) -> bool {
-    match &f.connector {
-        Some(c) if !c.access_groups.is_empty() => c.access_groups.iter().any(|g| person.groups.contains(g)),
-        _ => true,
-    }
+    f.connector.as_ref().is_none_or(|c| may_use(person, c))
+}
+
+/// Whether a person may use one of the organisation's apps: in one of the
+/// groups it is for (none named: everyone), and in none it is blocked for.
+pub fn may_use(person: &Person, c: &crate::config::Connector) -> bool {
+    (c.access_groups.is_empty() || c.access_groups.iter().any(|g| person.groups.contains(g))) && !c.blocked_groups.iter().any(|g| person.groups.contains(g))
 }
 
 pub fn idempotency_key(run: &str, step_id: &str, tool: &str) -> String {
@@ -1025,4 +1028,34 @@ pub fn media_type_for(name: &str) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_use;
+    use crate::config::{Connector, Person};
+
+    fn app(allow: &[&str], block: &[&str]) -> Connector {
+        serde_json::from_value(serde_json::json!({ "name": "gmail", "url": "https://x.test/mcp", "audience": "public", "label": "private", "access_groups": allow, "blocked_groups": block })).unwrap()
+    }
+
+    fn in_groups(groups: &[&str]) -> Person {
+        serde_json::from_value(serde_json::json!({ "id": "p", "groups": groups })).unwrap()
+    }
+
+    #[test]
+    fn an_app_is_for_its_groups_and_never_for_the_groups_it_is_blocked_for() {
+        let (staff, finance, both, none) = (in_groups(&["staff"]), in_groups(&["finance"]), in_groups(&["staff", "finance"]), in_groups(&[]));
+        // No rule: everyone.
+        assert!([&staff, &finance, &both, &none].iter().all(|p| may_use(p, &app(&[], &[]))));
+        // Allowed for staff only.
+        let a = app(&["staff"], &[]);
+        assert!(may_use(&staff, &a) && may_use(&both, &a) && !may_use(&finance, &a) && !may_use(&none, &a));
+        // Blocked for finance: a block wins over an allow.
+        let a = app(&["staff"], &["finance"]);
+        assert!(may_use(&staff, &a) && !may_use(&both, &a) && !may_use(&finance, &a));
+        // Blocked only: everyone else.
+        let a = app(&[], &["finance"]);
+        assert!(may_use(&staff, &a) && may_use(&none, &a) && !may_use(&both, &a));
+    }
 }

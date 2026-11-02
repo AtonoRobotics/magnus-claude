@@ -788,3 +788,11 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - `loopback_wait` now returns `iss` too, and the Library sends it.
 - The installed-app test (`the_owner_connects_an_app_from_settings_and_reapproves_a_changed_tool`, `desktop/tests/app-apps.mjs`) now signs in to an app that names itself as Google does (`FakeOAuthApp::naming_itself`). With the old shell, the card never turns Connected. The kernel tests keep the fake that names no one, which RFC 9207 still allows.
 - Ships with the next development build of the desktop app, which the owner's apps follow.
+## An app blocked for a group leaves that group's Library (2026-11-02, `library-groups`)
+
+- The connectors spec (Org policy, isolation and audit): "For groups: allowed or blocked per group, and blocked connectors disappear from those users' Library." Until now an app had only the groups it is for (`access_groups`). The boundary enforced them (`has_rights`), but the Library listed every app to everyone, so a person saw, opened and could start signing in to an app they could never use.
+- An app also has the groups it is blocked for (`blocked_groups`, set from the admin console beside who may use it, and kept in the log in `ConnectorSettings`). A block wins over an allow.
+- One rule decides both who reaches an app and who sees it (`boundary::may_use`): in one of its groups (or it names none), and in none it is blocked for.
+- A person's Library, the app's page and starting a sign-in all apply it: the app is not listed, its page is not found, and a sign-in is refused with "your organisation has not made this app available to you". The owner still manages every app in Settings, each marked as theirs or not (`for_you`), and their own Library hides the ones not theirs.
+- Group-scoped knowledge from an app's documents still follows only `access_groups`: a block list cannot be written as the knowledge ACL's groups.
+- Tests: `an_app_blocked_for_a_group_leaves_that_groups_library_and_cannot_be_signed_in_to` (library_groups.rs: Gmail allowed for staff and blocked for finance; Carol has it, Bob and Dana neither see it, open it, nor start signing in; the owner still manages it; clearing the block keeps who may use it); `an_app_is_for_its_groups_and_never_for_the_groups_it_is_blocked_for` (boundary.rs).

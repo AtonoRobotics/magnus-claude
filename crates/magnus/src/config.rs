@@ -652,6 +652,11 @@ pub struct Connector {
     pub label: String,
     #[serde(default)]
     pub access_groups: Vec<String>,
+    /// Groups it is blocked for (connectors spec, Org policy: "allowed or
+    /// blocked per group"): their people neither see it in the Library nor
+    /// reach it, whatever `access_groups` says.
+    #[serde(default)]
+    pub blocked_groups: Vec<String>,
     #[serde(default = "header")]
     pub idempotency: String,
     #[serde(default)]

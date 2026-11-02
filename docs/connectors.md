@@ -26,7 +26,7 @@ one commit), 2026-11-02.
 - [ ] Removable modules: each connector added, disabled or removed without rebuilding Magnus (disable: admin console, `admin_connectors.rs`; add or remove a catalog connector needs a release, manifests are compiled in)
 - [x] Isolation: a person's connections and tokens are theirs alone; no one else's agent acts through them (`connectors.rs` `the_owner_adds_an_app_each_person_signs_in_with_their_own_account_and_the_kill_switch_revokes_every_sign_in`)
 - [x] Connector results are the organisation's data by default, private where the data-access policy says (ruling 14; `data_access.rs` `the_admin_reads_a_persons_data_unless_the_policy_makes_it_private`)
-- [ ] Org control: admins decide which connectors their users may use (org-wide on/off works, `admin_connectors.rs`; per group it is enforced at the boundary but the Library still shows a connector to people outside its groups: `connectors.rs` `list` does not filter `access_groups`)
+- [x] Org control: admins decide which connectors their users may use: on or off for the organisation (`admin_connectors.rs`), and allowed or blocked per group (`library-groups`; `library_groups.rs`)
 - [ ] Done: every launch-catalog connector meets all six on Windows and Linux, against an appliance reached through pyrallon.ai
 - [ ] Done: Magnus, asked about any catalog service, says whether it can work with it and offers that connector's card (no catalog tools for the agent)
 
@@ -88,7 +88,7 @@ one commit), 2026-11-02.
 - [x] `tools`: every tool's class, read, reversible, irreversible or financial (`every_manifest_is_well_formed`; named `reversible_write`)
 - [ ] `platforms`: local only, `windows`, `linux` and supported program versions
 - [ ] `signature`: Alpha Vector's catalog signature over everything above
-- [ ] An org admin's library is the catalog filtered by the org's policy (org-wide on/off, `admin_connectors.rs`; per group not filtered) plus servers the admin added by URL
+- [x] A person's library is the catalog filtered by the org's policy: off for the organisation (`admin_connectors.rs`), and per group, allowed or blocked (`library_groups.rs`), plus servers the admin added by URL (`connectors.rs`)
 - [ ] Admin-added entries are org-local manifests signed by the appliance
 
 ## Credential plane
@@ -242,7 +242,7 @@ one commit), 2026-11-02.
 ### Policy
 
 - [x] From the admin dashboard an admin allows or blocks each connector for the whole org; blocked, it leaves those users' Library (`admin_connectors.rs`: turned off, Gmail leaves the Library)
-- [ ] For groups: allowed or blocked per group, and blocked connectors disappear from those users' Library (stored and enforced at the boundary, `boundary.rs:120`; the Library still lists them; only an allow-list, no block)
+- [x] For groups: allowed or blocked per group, and blocked connectors disappear from those users' Library, cannot be opened or signed in to, and are refused at the boundary (`library-groups`; `library_groups.rs` `an_app_blocked_for_a_group_leaves_that_groups_library_and_cannot_be_signed_in_to`, `boundary.rs` `an_app_is_for_its_groups_and_never_for_the_groups_it_is_blocked_for`)
 - [x] Cedar policies act on connector, tool, user, group and tool class (`policy.rs` entities `Person` in `Group`, `Tool` in `App` with `risk`; `inv6_policy.rs`, `inv8_layers.rs`)
 - [x] A catalog manifest declares each tool's class, which counts as the owner's classification; annotations only inform vetting (ruling 7; `catalog.rs`, `inv1_boundary.rs`)
 - [x] For an admin-added server, the admin classifies each tool when it first appears; an unclassified tool cannot run (`connectors.rs` test, through the owner's Settings › Connectors in the app; not in the admin console, where the spec puts admin work)

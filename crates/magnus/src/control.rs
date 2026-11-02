@@ -279,8 +279,8 @@ async fn add_connector(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Re
 
 async fn connector_settings(State(k): State<Arc<Kernel>>, axum::extract::Path(name): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
     let Some(actor) = actor(&b) else { return no_actor() };
-    let groups = b.get("access_groups").and_then(|g| g.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
-    done(k.connector_settings(&actor, &name, b["enabled"].as_bool(), groups).await)
+    let list = |f: &str| b.get(f).and_then(|g| g.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+    done(k.connector_settings(&actor, &name, b["enabled"].as_bool(), list("access_groups"), list("blocked_groups")).await)
 }
 
 async fn remove_connector(State(k): State<Arc<Kernel>>, axum::extract::Path(name): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {

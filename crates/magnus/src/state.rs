@@ -654,6 +654,15 @@ pub enum NotTrashable {
     Running,
 }
 
+/// An admin's settings for one of the organisation's apps: on or off, and
+/// who may use it (None: the app's own groups).
+#[derive(Clone, Debug, Default)]
+pub struct ConnectorSetting {
+    pub enabled: bool,
+    pub access_groups: Option<Vec<String>>,
+    pub blocked_groups: Option<Vec<String>>,
+}
+
 #[derive(Default)]
 pub struct State {
     /// Trashed items by id.
@@ -687,7 +696,7 @@ pub struct State {
     /// and secret are in the vault).
     pub registrations: std::collections::BTreeSet<String>,
     /// The admin's settings for each app: on or off, and who may use it.
-    pub connector_settings: BTreeMap<String, (bool, Option<Vec<String>>)>,
+    pub connector_settings: BTreeMap<String, ConnectorSetting>,
     /// When each organisation credential was last set or revoked: an app's
     /// key by the app's name, a provider's client secret as
     /// `registration:<provider>`. Never the value.
@@ -1121,8 +1130,8 @@ impl State {
                 }
                 self.connectors.insert(connector.name.clone(), connector.clone());
             }
-            Ev::ConnectorSettings { name, enabled, access_groups } => {
-                self.connector_settings.insert(name.clone(), (*enabled, access_groups.clone()));
+            Ev::ConnectorSettings { name, enabled, access_groups, blocked_groups } => {
+                self.connector_settings.insert(name.clone(), ConnectorSetting { enabled: *enabled, access_groups: access_groups.clone(), blocked_groups: blocked_groups.clone() });
             }
             Ev::CredentialSet { connector, set } => {
                 self.credential_changed.insert(connector.clone(), (*set, e.at));
