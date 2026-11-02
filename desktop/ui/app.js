@@ -169,6 +169,7 @@ const UI = {
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
   download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
   chev: '<path d="m9 6 6 6-6 6"/>',
+  grid: '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
 };
 const icon = (k, cls = "") => `<svg class="ic${cls ? ` ${cls}` : ""}" viewBox="0 0 24 24" aria-hidden="true">${UI[k]}</svg>`;
 
@@ -196,7 +197,8 @@ function nav() {
     <div class="views">
       <a href="#/tasks" data-open="tasks" class="${on("tasks").trim()}">${icon("tasks")}<span class="ttl">Tasks</span>${running ? `<span class="count">${running} running</span>` : ""}</a>
       <a href="#/schedules" data-open="schedules" class="${on("schedules").trim()}">${icon("calendar")}<span class="ttl">Schedules</span>${count(App.schedules.length)}</a>
-      <a href="#/library" data-open="library" class="${on("library").trim()}">${icon("file")}<span class="ttl">Library</span></a>
+      <a href="#/files" data-open="files" class="${on("files").trim()}">${icon("file")}<span class="ttl">Files</span></a>
+      <a href="#/library" class="${route.startsWith("#/library") ? "on" : ""}">${icon("grid")}<span class="ttl">Library</span></a>
       ${link("#/trash", "Trash", "trash")}</div></div>
     <div class="foot">
     ${isDev() ? `<div class="group"><span>Developer</span></div>
@@ -325,7 +327,7 @@ function verdictBar(taskId, v) {
 }
 // Where a library file came from, as a link.
 const fileFrom = f => f.origin.kind === "task" ? `<a href="#/task/${enc(f.origin.task_id)}" data-open="task:${esc(f.origin.task_id)}">${esc(f.origin.title)}</a>`
-  : f.origin.kind === "chat" ? `<a href="#/chat/${enc(f.origin.thread)}">Chat: ${esc(f.origin.title || "conversation")}</a>` : `<span class="faint">Uploaded to the library</span>`;
+  : f.origin.kind === "chat" ? `<a href="#/chat/${enc(f.origin.thread)}">Chat: ${esc(f.origin.title || "conversation")}</a>` : `<span class="faint">Uploaded to Files</span>`;
 function readFile(file) {
   return new Promise((ok, no) => {
     const r = new FileReader();
@@ -898,7 +900,7 @@ async function showThread(main, thread) {
         toast(`Shared with ${ui.people.find(p => p.id === to)?.name || to}.`); return draw();
       }
       case "export": return toast(`Saved ${await Magnus.download(path(id, "export"), safeName(e))}`);
-      case "save": await api("POST", path(id, "save"), {}); return toast("Saved to the library.");
+      case "save": await api("POST", path(id, "save"), {}); return toast("Saved to Files.");
       case "listen": { b.disabled = true; try { await readAloud((await api("POST", path(id, "spoken"), {})).script); } finally { b.disabled = false; } return; }
       case "hush": return hush();
       case "task": { const r = await api("POST", path(id, "task"), {}); toast("Started a task."); await refresh(); return r; }
@@ -961,7 +963,10 @@ route(/^#\/chat\/new\/([^/]+)$/, (m, project) => showNewChat(m, project), true);
 // Where the views over tasks, schedules, files and decisions used to be
 // pages: each opens beside the latest conversation.
 route(/^#\/inbox$/, main => home(main, "needs"), true);
-route(/^#\/(tasks|schedules|library|projects)$/, (main, k) => home(main, k), true);
+route(/^#\/(tasks|schedules|files|projects)$/, (main, k) => home(main, k), true);
+// The Library is the connector catalog, a page of its own (connectors spec,
+// Library); a connector's page is under it.
+route(/^#\/library(?:\/([^/]+))?$/, (main, name) => showLibrary(main, name));
 route(/^#\/new$/, main => home(main), true);
 route(/^#\/file\/([^/]+)$/, (main, id) => home(main, `file:${id}`), true);
 route(/^#\/project\/([^/]+)$/, (main, id) => home(main, `project:${id}`), true);
@@ -1126,7 +1131,7 @@ function msgActions(e, ui) {
   if (!e.id) return "";
   const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn";
   const acts = [["copy", "Copy"], mine && ["edit", "Edit"], magnus && ["retry", "Retry"], e.kind === "answer" && ["listen", "Read aloud"], e.kind === "answer" && ["hush", "Stop"], ["branch", "Branch"], ["share", "Share"],
-    ["export", "Export"], ["save", "Save to library"], ["task", "Make a task"], ["delete", "Delete"]].filter(Boolean);
+    ["export", "Export"], ["save", "Save to Files"], ["task", "Make a task"], ["delete", "Delete"]].filter(Boolean);
   const share = ui.sharing === e.id ? `<div class="row small share-to"><label class="sr" for="share-${esc(e.id)}">Share with</label>
     <select id="share-${esc(e.id)}" data-share-to>${ui.people.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>
     <button class="primary" data-msg-act="share-send">Share</button><button class="link" data-msg-act="share-cancel">Cancel</button></div>` : "";
@@ -1560,7 +1565,7 @@ function stopPanelLive() {
   Panel.liveText = "";
 }
 
-const PANEL_TITLES = { needs: "Needs you", tasks: "Tasks", schedules: "Schedules", library: "Library", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Decision", search: "Search", connector: "Connector" };
+const PANEL_TITLES = { needs: "Needs you", tasks: "Tasks", schedules: "Schedules", files: "Files", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Decision", search: "Search", connector: "Connector" };
 
 async function drawPanel() {
   const el = $("#detail");
@@ -1599,7 +1604,7 @@ const PANELS = {
   },
   task: taskView,
   file: fileView,
-  library: libraryView,
+  files: filesView,
   connector: connectorView,
   projects: projectsView,
   project: projectView,
@@ -1655,7 +1660,7 @@ function fileRow(f, project) {
   const type = FILE_TYPES[f.media_type] || (f.media_type || "").split("/").pop().slice(0, 4).toUpperCase() || "FILE";
   const p = project && (typeof project === "object" ? project : App.projects.find(x => x.id === project));
   return `<div class="frow" data-file-row="${esc(f.id)}"><span class="ftype ${type === "PDF" ? "pdf" : ""}">${esc(type)}</span>
-    <div class="rg-main"><a class="ttl" href="#/file/${enc(f.id)}" data-open="file:${esc(f.id)}">${esc(f.name)}</a><span class="sub">Saved to Library${p ? ` · ${esc(p.name)}` : ""} · ${esc(kb(f.size))}</span></div>
+    <div class="rg-main"><a class="ttl" href="#/file/${enc(f.id)}" data-open="file:${esc(f.id)}">${esc(f.name)}</a><span class="sub">Saved to Files${p ? ` · ${esc(p.name)}` : ""} · ${esc(kb(f.size))}</span></div>
     <button class="icon-btn" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}" title="Download ${esc(f.name)}">${icon("download")}<span class="sr">Download</span></button></div>`;
 }
 
@@ -1683,33 +1688,163 @@ async function fileView(id) {
   };
 }
 
-// Library: every file uploaded or delivered, as a view over the same files
-// the conversations show.
-// ---------- Connectors in the Library ----------
+// ---------- The Library: the connector catalog ----------
 
-// The organisation provides each app; each person connects it with their
-// own sign-in, on the app's own page (connectors spec: The connector card,
-// Library). The card never shows protocol words, and nothing is typed but
-// the person's own login, there.
-const CONNECTOR_GROUPS = [["connected", "Connected"], ["local", "On this computer"], ["needs_attention", "Needs attention"], ["available", "Available"]];
+// The Library is a catalog of apps, laid out as the owner's catalog mockup
+// draws it in every look (connectors spec rev 48, Library): Discover shows
+// the whole catalog, Yours what this person has connected or needs to fix;
+// one search box and category chips; cards in sections, each with its tile,
+// the review mark, one plain sentence, who makes it, and one action at its
+// corner. Connecting is a click and the person's own login on the
+// provider's page: nothing is typed in Magnus but the search.
+const Lib = { tab: "discover", cat: "all", q: "" };
+const CATEGORIES = [["all", "All"], ["email", "Email & chat"], ["files", "Files"], ["code", "Code"], ["work", "Work"], ["design", "Design & CAD"]];
 const Connecting = {};
+const SVG = {
+  plus: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`,
+  check: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`,
+  again: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v5h-5"/></svg>`,
+  lock: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>`,
+  search: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>`,
+};
+const reviewed = `<svg class="lc-rev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Reviewed by Alpha Vector"><path d="M12 2.5l2.3 1.7 2.8-.2 1 2.6 2.4 1.5-.7 2.8 1 2.6-2.3 1.7-.5 2.8-2.8.4-1.9 2.1-2.6-1.1-2.6 1.1-1.9-2.1-2.8-.4-.5-2.8L2.6 15.2l1-2.6-.7-2.8 2.4-1.5 1-2.6 2.8.2z"/><path d="M8.5 12.2l2.3 2.3 4.7-4.8"/></svg>`;
+const stateOf = c => (Connecting[c.name] ? "connecting" : c.state);
+const tintOf = c => (/^#[0-9a-f]{6}$/i.test(c.listing?.tint || "") ? c.listing.tint : "#3A3F48");
+const tile = (c, big) => `<span class="ctile${big ? " big" : ""}" aria-hidden="true" style="background:${tintOf(c)}">${esc(c.listing?.letters || (c.title || "?").slice(0, 2))}</span>`;
+const byline = c => (c.listing?.publisher ? `by ${c.listing.publisher}` : "Added by your organisation");
+const provider = c => c.listing?.publisher || c.title;
 
 function connectorAction(c) {
-  const state = Connecting[c.name] ? "connecting" : c.state;
-  return {
-    connecting: `<p class="small">Finish signing in in your browser, then come back here.</p><button class="link small" data-act="connect-page" id="connect-open" data-url="${esc(Connecting[c.name] || "")}">Open the sign-in page again</button>`,
-    available: c.ready === false ? `<span class="small muted">Not ready on this appliance yet</span>` : `<button class="primary" data-act="connect" data-app="${esc(c.name)}">Connect</button>`,
-    needs_attention: `<button class="primary" data-act="connect" data-app="${esc(c.name)}">Sign in again</button>`,
-    connected: `<span class="chip ok">Connected</span>`,
-  }[state] || "";
+  const name = esc(c.title);
+  switch (stateOf(c)) {
+    case "connecting": return `<span class="lc-act busy" role="status" aria-label="Signing in to ${name}"><span class="spin"></span></span>`;
+    case "connected": return `<a class="lc-act ok" href="#/library/${enc(c.name)}" aria-label="${name} is connected. Open details">${SVG.check}</a>`;
+    case "needs_attention": return `<button class="lc-act warn" data-act="connect" data-app="${esc(c.name)}" aria-label="Sign in to ${name} again">${SVG.again}</button>`;
+    case "local": return `<button class="primary lc-enable" data-act="connect" data-app="${esc(c.name)}">Enable</button>`;
+    default: return c.ready === false
+      ? `<span class="lc-act off" title="Not ready on this appliance yet" aria-label="${name} is not ready on this appliance yet">${SVG.plus}</span>`
+      : `<button class="lc-act" data-act="connect" data-app="${esc(c.name)}" aria-label="Connect ${name}">${SVG.plus}</button>`;
+  }
 }
 
 function connectorCard(c) {
-  const state = Connecting[c.name] ? "connecting" : c.state;
-  const note = state === "needs_attention" ? `Your sign-in to ${c.title} stopped working.` : state === "connected" && c.account ? `Connected as ${c.account}.` : c.summary;
-  return `<li class="ccard" data-connector="${esc(c.name)}" data-state="${state}"><span class="cicon" aria-hidden="true">${esc((c.title || "?").slice(0, 1))}</span>
-    <div class="rg-main"><a href="#" data-open="connector:${esc(c.name)}"><strong>${esc(c.title)}</strong></a><span class="small muted">${esc(note)}</span></div>
-    <div class="row">${connectorAction(c)}</div></li>`;
+  const st = stateOf(c);
+  const line = {
+    connecting: `<p class="lc-note">Finish signing in on ${esc(provider(c))}'s page… <button class="link" data-act="connect-page" data-url="${esc(Connecting[c.name] || "")}">Open it again</button></p>`,
+    needs_attention: `<p class="lc-note warn">Sign in again to keep using ${esc(c.title)}.</p>`,
+    connected: c.account ? `<p class="lc-note ok">Connected as ${esc(c.account)}</p>` : "",
+  }[st] || "";
+  return `<article class="lcard" data-connector="${esc(c.name)}" data-state="${esc(st)}">${tile(c)}
+    <div class="lc-main"><div class="lc-name"><h3><a href="#/library/${enc(c.name)}">${esc(c.title)}</a></h3>${c.listing?.reviewed ? reviewed : ""}</div>
+    <p class="lc-sum">${esc(c.summary)}</p>${line}<p class="lc-by">${esc(byline(c))}</p></div>${connectorAction(c)}</article>`;
+}
+
+// What a search or a chip leaves: a service's name, or what the person
+// wants done, against its name, sentence, publisher and abilities.
+function libMatches(c) {
+  if (Lib.cat !== "all" && (c.listing?.category || "work") !== Lib.cat) return false;
+  const words = Lib.q.toLowerCase().split(/\s+/).filter(Boolean);
+  const hay = [c.title, c.summary, c.listing?.publisher, ...(c.listing?.abilities || [])].join(" ").toLowerCase();
+  return words.every(w => hay.includes(w));
+}
+
+function librarySections(all) {
+  const shown = all.filter(libMatches);
+  const of = (...states) => shown.filter(c => states.includes(stateOf(c)));
+  const sections = Lib.tab === "discover"
+    ? [["local", "On this computer", "Programs Magnus found here. Enable one and Magnus can work in it.", of("local")],
+       ["attention", "Needs attention", "Sign in again and Magnus picks up where it left off.", of("needs_attention")],
+       ["popular", "Popular", "Connect any of these by signing in to your own account.", of("available", "connected", "connecting")]]
+    : [["connected", "Connected", "What Magnus can work in for you right now.", of("connected", "connecting")],
+       ["attention", "Needs attention", "Sign in again and Magnus picks up where it left off.", of("needs_attention")],
+       ["local", "Ready to enable", "Programs on this computer you have not turned on yet.", of("local")]];
+  const html = sections.filter(x => x[3].length).map(([k, title, sub, items]) => `<section class="lsect" data-section="${k}">
+    <div class="lsect-head"><div><h2>${title}</h2><p>${sub}</p></div><span class="lsect-n">${items.length === 1 ? "1 connector" : `${items.length} connectors`}</span></div>
+    <div class="lgrid">${items.map(connectorCard).join("")}</div></section>`).join("");
+  if (html) return html;
+  return `<div class="lempty">${Lib.q || Lib.cat !== "all" ? "No connectors match. Try another word, or ask Magnus what you want done."
+    : Lib.tab === "yours" ? "Nothing connected yet. Discover shows every app Magnus can work in." : "Your organisation's catalog is empty."}</div>`;
+}
+
+async function showLibrary(main, name) {
+  Lib.main = main;
+  if (name) return showConnectorPage(main, name);
+  const { connectors } = await api("GET", "/v1/connectors");
+  Lib.all = connectors;
+  const seg = (k, label) => `<button data-lib-tab="${k}" aria-pressed="${Lib.tab === k}">${label}</button>`;
+  main.innerHTML = `<div class="libpage"><header class="lhead"><div><h1>Library</h1><p>Connect the apps and programs you want Magnus to work in. You only ever sign in.</p></div>
+    <a class="icon-btn lclose" href="#/home" aria-label="Close Library">${icon("close")}</a></header>
+    <div class="lbar"><div class="lseg" role="group" aria-label="Show">${seg("yours", "Yours")}${seg("discover", "Discover")}</div>
+    <div class="lsearch">${SVG.search}<label class="sr" for="libq">Search connectors</label><input id="libq" type="search" value="${esc(Lib.q)}" placeholder="Search connectors, or describe what you want done" autocomplete="off"></div></div>
+    <div class="lchips" role="group" aria-label="Category">${CATEGORIES.map(([k, l]) => `<button data-lib-cat="${k}" aria-pressed="${Lib.cat === k}">${esc(l)}</button>`).join("")}</div>
+    <div id="lib-sections">${librarySections(connectors)}</div></div>`;
+  bindConnectorActs(main);
+  let t;
+  $("#libq", main).addEventListener("input", e => { clearTimeout(t); t = setTimeout(() => { Lib.q = e.target.value.trim(); $("#lib-sections", main).innerHTML = librarySections(Lib.all); }, 150); });
+}
+
+// One connector's page, in the two states the mockup draws: before
+// connecting, what Magnus can do with it and what it asks for; connected,
+// as whom, what it can and cannot do, when, what Magnus did, Disconnect.
+function connectorBody(c) {
+  const st = stateOf(c), L = c.listing || {};
+  const head = `<div class="cp-head">${tile(c, true)}<div><div class="cp-name"><h2 class="ptitle">${esc(c.title)}</h2>${st === "connected" ? `<span class="chip ok">${SVG.check}Connected</span>` : ""}</div>
+    <p class="muted">${esc(byline(c))}${L.reviewed ? " · Reviewed by Alpha Vector" : ""}</p></div></div>`;
+  const recent = `<h3>Recent actions</h3>${c.recent?.length ? `<ol class="cp-recent">${c.recent.map(u => `<li><a href="#/task/${enc(u.task)}" data-open="task:${esc(u.task)}">${esc(u.action.charAt(0).toUpperCase() + u.action.slice(1))}</a><span class="small faint">${esc(when(u.at))}${u.worked === false ? " · did not work" : ""}</span></li>`).join("")}</ol>` : `<p class="empty">Magnus has not used it for you yet.</p>`}`;
+  if (st === "connected" || (st === "needs_attention" && c.connected_at)) {
+    return `${head}${st === "needs_attention" ? `<p class="lc-note warn">Your sign-in to ${esc(c.title)} stopped working. Sign in again to keep using it.</p>` : ""}
+      <dl class="kv cp-kv"><dt>Account</dt><dd>${esc(c.account || "Your own account")}</dd><dt>It can</dt><dd>${esc(L.can || c.summary)}</dd>${L.cannot ? `<dt>It cannot</dt><dd>${esc(L.cannot)}</dd>` : ""}
+      ${c.connected_at ? `<dt>Connected</dt><dd>${esc(when(c.connected_at))}</dd>` : ""}<dt>Last used</dt><dd>${c.last_used ? esc(when(c.last_used)) : "Not yet"}</dd></dl>
+      ${recent}<div class="row cp-actions">${st === "needs_attention" ? `<button class="primary" data-act="connect" data-app="${esc(c.name)}">Sign in to ${esc(c.title)} again</button>` : ""}${c.signs_in ? `<button data-act="disconnect" data-app="${esc(c.name)}">Disconnect ${esc(c.title)}</button>` : ""}</div>`;
+  }
+  const can = L.abilities?.length ? L.abilities : c.allows || [];
+  const go = st === "connecting"
+    ? `<p class="lc-note">Finish signing in on ${esc(provider(c))}'s page, then come back here. <button class="link" data-act="connect-page" data-url="${esc(Connecting[c.name] || "")}">Open it again</button></p>`
+    : c.ready === false ? `<p class="small muted">${esc(c.title)} is not ready on this appliance yet.</p>`
+    : `<button class="primary cp-connect" data-act="connect" data-app="${esc(c.name)}">${st === "needs_attention" ? `Sign in to ${esc(c.title)} again` : `Connect ${esc(c.title)}`}</button>`;
+  return `${head}<h3>What Magnus can do with ${esc(c.title)}</h3>${can.length ? `<ul class="cp-list">${can.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : `<p class="empty">Nothing yet: your organisation has not chosen what Magnus may do with it.</p>`}
+    ${L.asks?.length ? `<h3>What it asks for</h3><ul class="cp-list">${L.asks.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}
+    <p class="cp-lock">${SVG.lock}<span>You sign in on ${esc(provider(c))}'s own page. Magnus never sees your password, and you can disconnect at any time.</span></p>${go}`;
+}
+
+async function showConnectorPage(main, name) {
+  const c = await api("GET", `/v1/connectors/${enc(name)}`);
+  main.innerHTML = `<div class="libpage cpage"><p class="small"><a href="#/library">Library</a></p><section class="cp" aria-label="${esc(c.title)}">${connectorBody(c)}</section></div>`;
+  bindConnectorActs(main);
+}
+
+// The same connector in the panel, from a card in chat or a task.
+async function connectorView(name) {
+  return plain(`<section class="cp">${connectorBody(await api("GET", `/v1/connectors/${enc(name)}`))}</section>`);
+}
+
+// Connect, again or for the first time, and Disconnect, wherever a card is.
+function bindConnectorActs(root) {
+  if (root.dataset.connActs) return;
+  root.dataset.connActs = "1";
+  root.addEventListener("click", async e => {
+    const tab = e.target.closest("[data-lib-tab]"), cat = e.target.closest("[data-lib-cat]");
+    if (tab || cat) {
+      if (tab) Lib.tab = tab.dataset.libTab; else Lib.cat = cat.dataset.libCat;
+      return showLibrary(root);
+    }
+    const a = e.target.closest("[data-act]");
+    if (!a || !root.contains(a)) return;
+    if (a.dataset.act === "connect") { e.preventDefault(); connectApp(a.dataset.app).catch(err => toast(err.message)); }
+    if (a.dataset.act === "connect-page") { e.preventDefault(); Magnus.openExternal(a.dataset.url).catch(() => {}); }
+    if (a.dataset.act === "disconnect") {
+      e.preventDefault();
+      if (!confirm("Disconnect? Your sign-in is ended at the app, and Magnus can no longer use it for you until you connect again.")) return;
+      try { await api("DELETE", `/v1/connectors/${enc(a.dataset.app)}/connection`); toast("Disconnected."); connectorsChanged(); } catch (err) { toast(err.message); }
+    }
+  });
+}
+
+// Wherever connectors are shown, they are drawn again.
+function connectorsChanged() {
+  const m = /^#\/library(?:\/([^/]+))?$/.exec(location.hash);
+  if (m && Lib.main?.isConnected) showLibrary(Lib.main, m[1]);
+  drawPanel();
 }
 
 // Connect: the system browser opens at the app's own sign-in page; the
@@ -1719,7 +1854,7 @@ async function connectApp(name) {
   const redirect = await Magnus.loopbackOpen();
   const r = await api("POST", `/v1/connectors/${enc(name)}/sign-in`, { redirect_uri: redirect });
   Connecting[name] = r.authorize_url;
-  drawPanel();
+  connectorsChanged();
   Magnus.openExternal(r.authorize_url).catch(() => {});
   try {
     const got = await Magnus.loopbackWait();
@@ -1727,46 +1862,20 @@ async function connectApp(name) {
     await api("POST", `/v1/connectors/${enc(name)}/sign-in/complete`, { state: got.state, code: got.code, iss: got.iss });
     toast("Connected.");
   } catch (e) { toast(e.message); }
-  finally { delete Connecting[name]; drawPanel(); }
+  finally { delete Connecting[name]; connectorsChanged(); }
 }
 
-function connectorsSectionHtml(connectors, q) {
-  const words = (q || "").toLowerCase().split(/\s+/).filter(Boolean);
-  const shown = connectors.filter(c => words.every(w => `${c.title} ${c.summary}`.toLowerCase().includes(w)));
-  if (!connectors.length) return `<h3>Connectors</h3><p class="empty">Your organisation has not added any apps yet.</p>`;
-  if (!shown.length) return `<h3>Connectors</h3><p class="empty">No connector matches.</p>`;
-  return `<h3>Connectors</h3>${CONNECTOR_GROUPS.map(([state, label]) => {
-    // A card keeps its group while it connects.
-    const g = shown.filter(c => c.state === state);
-    return g.length ? `<div class="cgroup" data-group="${state}"><h4 class="small muted">${label}</h4><ul class="clist">${g.map(connectorCard).join("")}</ul></div>` : "";
-  }).join("")}`;
-}
-
-// One connector: as whom and since when it is connected, what it allows in
-// plain words, what Magnus did through it lately, and Disconnect.
-async function connectorView(name) {
-  const c = await api("GET", `/v1/connectors/${enc(name)}`);
-  const at = c.connected_at ? when(c.connected_at) : null;
-  return plain(`<div class="spread"><h2 class="ptitle">${esc(c.title)}</h2><div class="row">${connectorAction(c)}</div></div>
-    <p class="muted">${esc(c.summary)}</p>
-    ${c.state === "needs_attention" ? `<p>Your sign-in to ${esc(c.title)} stopped working. Sign in again to keep using it.</p>` : ""}
-    ${c.state !== "available" ? `<dl class="kv"><dt>Connected as</dt><dd>${esc(c.account || "Your own account")}</dd>${at ? `<dt>Connected</dt><dd>${esc(at)}</dd>` : ""}<dt>Last used</dt><dd>${c.last_used ? esc(when(c.last_used)) : "Not yet"}</dd></dl>` : ""}
-    <h3>What it allows</h3>${c.allows.length ? `<ul class="allows">${c.allows.map(l => `<li>${esc(l)}</li>`).join("")}</ul>` : `<p class="empty">Nothing yet: your organisation has not chosen what Magnus may do with it.</p>`}
-    <h3>Recent actions</h3>${c.recent.length ? `<ul class="tlist">${c.recent.map(u => `<li class="trow"><a href="#/task/${enc(u.task)}" data-open="task:${esc(u.task)}"><span class="ttl">${esc(u.action.charAt(0).toUpperCase() + u.action.slice(1))}</span><span class="small faint when">${esc(when(u.at))}${u.worked === false ? " · did not work" : ""}</span></a></li>`).join("")}</ul>` : `<p class="empty">Magnus has not used it for you yet.</p>`}
-    ${c.state !== "available" && c.signs_in ? `<div class="row" style="margin-top:16px"><button data-act="disconnect" data-app="${esc(c.name)}">Disconnect</button></div>` : ""}`);
-}
-
-async function libraryView() {
+// Files: every file uploaded or delivered, as a view over the same files
+// the conversations show.
+async function filesView() {
   const { q, project } = Panel.lib;
   const qs = new URLSearchParams();
   if (q) qs.set("q", q);
   if (project) qs.set("project", project);
-  const [{ files }, { connectors }] = await Promise.all([api("GET", `/v1/files${qs.size ? `?${qs}` : ""}`), api("GET", "/v1/connectors")]);
-  return plain(`<div class="row lib-bar"><label class="sr" for="lq">Search files and connectors</label><input id="lq" type="search" data-draft="lib-q" placeholder="Connectors, files, tasks, projects or text" autocomplete="off">
+  const { files } = await api("GET", `/v1/files${qs.size ? `?${qs}` : ""}`);
+  return plain(`<div class="row lib-bar"><label class="sr" for="lq">Search files</label><input id="lq" type="search" data-draft="lib-q" placeholder="Files, tasks, projects or text" autocomplete="off">
     <label class="sr" for="lp">Project</label><select id="lp" aria-label="Filter by project"><option value="">All files</option><option value="none"${project === "none" ? " selected" : ""}>In no project</option>${App.projects.map(p => `<option value="${esc(p.id)}"${p.id === project ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
     ${attachButton("Upload")}</div>
-    ${connectorsSectionHtml(connectors, q)}
-    <h3>Files</h3>
     ${files.length ? `<ul class="flist">${files.map(f => `<li data-lib-file="${esc(f.id)}"><div class="rg-main">${fileChip(f)}<span class="small muted">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"} · ${esc(when(f.at))} · ${fileFrom(f)}</span></div>${moveControl(f.id, f.project, App.projects, true)}</li>`).join("")}</ul>`
       : `<p class="empty">${q || project ? "No file matches." : "No files yet. Upload one, or ask Magnus for a document."}</p>`}`);
 }

@@ -26,8 +26,8 @@ await d.step("connect it from its card in the Library; the code comes back to th
   // a person's would): the page approves and sends its code to the shell's
   // one-time loopback address, and the card turns Connected. Nothing else
   // may use that address first.
-  await d.click(d.button("Connect", "//li[@data-connector='calendar']"));
-  await d.css('li[data-connector="calendar"][data-state="connected"]');
+  await d.click(d.xpath("//*[@data-connector='calendar']//button[starts-with(@aria-label,'Connect ')]"));
+  await d.css('[data-connector="calendar"][data-state="connected"]');
   await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
   await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Connectors']"));
 });

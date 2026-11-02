@@ -27,6 +27,19 @@ pub struct Manifest {
     pub version: String,
     pub name: String,
     pub summary: String,
+    /// The Library's card and page (connectors spec, Catalog and connector
+    /// manifests): who makes it ("by …"), its category chip, what Magnus can
+    /// do with it, each scope in plain words, and what it can and cannot do
+    /// here. `letters` and `tint` draw its tile until the provider's own mark
+    /// is in its listing.
+    pub publisher: String,
+    pub category: String,
+    pub abilities: Vec<String>,
+    pub asks: Vec<String>,
+    pub can: String,
+    pub cannot: String,
+    pub letters: String,
+    pub tint: String,
     pub kind: String,
     pub endpoint: String,
     pub audience: String,
@@ -47,6 +60,13 @@ pub struct Manifest {
 pub fn manifests() -> &'static [Manifest] {
     static M: OnceLock<Vec<Manifest>> = OnceLock::new();
     M.get_or_init(|| SOURCES.iter().map(|s| toml::from_str(s).expect("a catalog manifest parses (checked by a unit test)")).collect())
+}
+
+/// The Library's category chips, in their order.
+pub const CATEGORIES: [&str; 5] = ["email", "files", "code", "work", "design"];
+
+pub fn manifest(id: &str) -> Option<&'static Manifest> {
+    manifests().iter().find(|m| m.id == id)
 }
 
 /// Alpha Vector's own client with a provider.
@@ -120,7 +140,16 @@ mod tests {
             for (t, risk) in &m.tools {
                 assert!(["read", "reversible_write", "irreversible", "financial"].contains(&risk.as_str()), "{}: {t} is {risk}", m.id);
             }
-            assert!(!m.summary.to_lowercase().contains("mcp") && !m.summary.to_lowercase().contains("oauth"), "{}: protocol words", m.id);
+            // What the Library shows: a category chip, abilities, a plain line
+            // for every scope asked for, and never a protocol word.
+            assert!(super::CATEGORIES.contains(&m.category.as_str()), "{}: category {}", m.id, m.category);
+            assert!(!m.publisher.is_empty() && !m.abilities.is_empty() && !m.can.is_empty() && !m.cannot.is_empty(), "{}: its listing is incomplete", m.id);
+            assert_eq!(m.asks.len(), m.scopes.len(), "{}: one plain line for each scope asked for", m.id);
+            assert!((1..=2).contains(&m.letters.chars().count()) && m.tint.starts_with('#') && m.tint.len() == 7, "{}: its tile", m.id);
+            let shown = [&m.summary, &m.can, &m.cannot].into_iter().chain(&m.abilities).chain(&m.asks).map(|s| s.to_lowercase()).collect::<Vec<_>>();
+            for word in ["mcp", "oauth", "scope", "token", "api", "port"] {
+                assert!(shown.iter().all(|s| !s.split(|c: char| !c.is_alphanumeric()).any(|w| w == word)), "{}: protocol word {word:?} in what the Library shows", m.id);
+            }
             // A preregistered connector is set up already: its provider's client is in the catalog.
             if let Some(p) = &m.provider {
                 assert!(super::client(p).is_some(), "{}: no client for {p} in catalog/registrations.toml", m.id);
