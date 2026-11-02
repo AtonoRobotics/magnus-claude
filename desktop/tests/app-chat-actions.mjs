@@ -73,9 +73,9 @@ await d.step("retry an answer", async () => {
   if (await count(entry("message", "Second, edited")) !== 1) throw new Error("the retried message shows twice");
 });
 
-await d.step("save to the library and export as a file", async () => {
-  await act("answer", "Answer to: Second, edited", "Save to library");
-  await d.seen("Saved to the library.");
+await d.step("save to Files and export as a file", async () => {
+  await act("answer", "Answer to: Second, edited", "Save to Files");
+  await d.seen("Saved to Files.");
   await savedPath(d, () => act("answer", "Answer to: Second, edited", "Export"));
 });
 

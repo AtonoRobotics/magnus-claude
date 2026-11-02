@@ -2,6 +2,19 @@ id = "google-chat"
 version = "1.0.0"
 name = "Google Chat"
 summary = "Magnus can read and search your Chat conversations and send messages for you."
+# The Library's card and page (connectors spec, Catalog and connector
+# manifests; Library): who makes it, its category chip, what Magnus can do
+# with it, each scope in plain words (in the order of `scopes`), and what it
+# can and cannot do here, from its tools. `letters` and `tint` draw its tile
+# until the provider's own mark is in its listing.
+publisher = "Google"
+category = "email"
+abilities = ["Find a conversation or a decision when you ask about it", "Catch you up on spaces you have been away from", "Send messages for you, when you allow it"]
+asks = ["See your spaces and conversations", "See who is in your spaces", "Read your messages", "Send messages as you"]
+can = "Read and search your conversations, and send messages when you allow it"
+cannot = "Delete messages, or add or remove people"
+letters = "Ch"
+tint = "#1A7F64"
 kind = "remote"
 endpoint = "https://chatmcp.googleapis.com/mcp/v1"
 # Messages reach a conversation's members, who may be outside the organisation.

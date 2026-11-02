@@ -500,3 +500,73 @@ dl.kv { margin: 8px 0 12px; }
 dl.kv dt { color: var(--muted); }
 dl.kv dd { margin: 0; }
 ul.allows { margin: 4px 0 8px; padding-left: 18px; }
+
+/* The Library: the connector catalog, as the owner's catalog mockup draws
+   it (connectors spec rev 48, Library), in the app's own tokens so every
+   look applies. */
+.libpage { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+.lhead { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.lhead h1 { margin: 0 0 6px; font-size: 28px; font-weight: 600; letter-spacing: -0.015em; }
+.lhead p { margin: 0; font-size: 15px; color: var(--muted); }
+.lclose { width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--btn-border); background: var(--button-bg); color: var(--fg); }
+.lbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.lseg { display: flex; gap: 4px; padding: 4px; border-radius: 14px; background: var(--seg); border: 1px solid var(--line); }
+.lseg button { height: 40px; padding: 0 18px; border-radius: 10px; border: 0; background: transparent; color: var(--fg); font: inherit; font-size: 15px; font-weight: 500; cursor: pointer; }
+.lseg button[aria-pressed="true"] { background: var(--seg-on); box-shadow: var(--shadow); }
+.lsearch { flex: 1 1 320px; min-width: 0; display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 16px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); color: var(--muted); box-sizing: border-box; }
+.lsearch input { flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: transparent; color: var(--fg); font: inherit; font-size: 15px; padding: 0; }
+.lsearch:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.lchips { display: flex; flex-wrap: wrap; gap: 8px; }
+.lchips button { height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--fg); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }
+.lchips button[aria-pressed="true"] { background: var(--fg); color: var(--main); border-color: var(--fg); }
+#lib-sections { display: flex; flex-direction: column; gap: 36px; padding-top: 8px; }
+.lsect { display: flex; flex-direction: column; gap: 14px; }
+.lsect-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.lsect-head h2 { margin: 0 0 4px; font-size: 19px; font-weight: 600; letter-spacing: -0.01em; }
+.lsect-head p, .lsect-n { margin: 0; font-size: 14px; color: var(--muted); }
+.lgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr)); gap: 14px; }
+.lcard { display: flex; gap: 16px; align-items: flex-start; padding: 20px; min-height: 132px; box-sizing: border-box; border-radius: 18px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); min-width: 0; }
+.ctile { width: 52px; height: 52px; flex: none; border-radius: 14px; color: #fff; display: grid; place-items: center; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+.ctile.big { width: 64px; height: 64px; border-radius: 16px; font-size: 21px; }
+.lc-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.lc-name { display: flex; align-items: center; gap: 8px; }
+.lc-name h3 { margin: 0; font-size: 17px; font-weight: 600; }
+.lc-name h3 a { color: var(--fg); text-decoration: none; }
+.lc-name h3 a:hover { text-decoration: underline; }
+.lc-rev { color: var(--muted); flex: none; }
+.lc-sum { margin: 0; font-size: 14px; line-height: 1.45; color: var(--muted); }
+.lc-by { margin: 2px 0 0; font-size: 13px; color: var(--muted); }
+.lc-note { margin: 0; font-size: 14px; font-weight: 500; color: var(--accent-text); }
+.lc-note.warn { color: var(--warn); } .lc-note.ok { color: var(--ok); }
+.lc-act { width: 44px; height: 44px; flex: none; border-radius: 12px; border: 1px solid var(--btn-border); background: var(--button-bg); color: var(--fg); display: grid; place-items: center; cursor: pointer; padding: 0; }
+.lc-act.ok { border: 0; background: var(--ok-soft); color: var(--ok); }
+.lc-act.warn { border: 0; background: var(--warn-soft); color: var(--warn); }
+.lc-act.off { opacity: .45; cursor: default; }
+.lc-act.busy { border: 0; background: none; }
+.lc-act .spin { width: 22px; height: 22px; box-sizing: border-box; border-radius: 50%; border: 2.5px solid var(--line); border-top-color: var(--accent); animation: lspin .9s linear infinite; }
+@keyframes lspin { to { transform: rotate(360deg); } }
+.lc-enable { height: 44px; padding: 0 18px; border-radius: 12px; flex: none; }
+.lempty { padding: 48px 24px; text-align: center; border-radius: 18px; border: 1px dashed var(--line-strong); color: var(--muted); font-size: 15px; }
+/* A connector's page. */
+.cpage { max-width: 760px; }
+.cp { display: flex; flex-direction: column; gap: 12px; }
+.cp-head { display: flex; align-items: center; gap: 16px; }
+.cp-head p { margin: 4px 0 0; }
+.cp-name { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cp-name h2 { margin: 0; }
+.cp-name .chip { display: inline-flex; align-items: center; gap: 4px; }
+.cp-name .chip svg { width: 14px; height: 14px; }
+.cp h3 { margin: 12px 0 0; font-size: 15px; }
+.cp-list { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.cp-lock { display: flex; gap: 10px; align-items: flex-start; margin: 8px 0 0; padding: 14px 16px; border-radius: 12px; background: var(--raised); color: var(--fg2); font-size: 14px; }
+.cp-lock svg { flex: none; color: var(--muted); }
+.cp-connect { align-self: flex-start; height: 44px; padding: 0 20px; margin-top: 4px; }
+.cp-recent { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.cp-recent li { display: flex; justify-content: space-between; gap: 12px; }
+.cp-actions { margin-top: 12px; }
+@media (max-width: 640px) {
+  .lhead h1 { font-size: 24px; }
+  .lcard { padding: 16px; gap: 12px; }
+  .ctile { width: 44px; height: 44px; font-size: 15px; }
+  .lseg button { padding: 0 14px; }
+}

@@ -84,13 +84,13 @@ await step("a decision in Settings > Connectors is sent once", async () => {
   if (await page.getByText("already decided").count()) throw new Error("the person was told it was already decided");
 });
 
-await step("the next person's Library is theirs, unfiltered", async () => {
-  await page.locator("nav.side [data-open=library]").click();
+await step("the next person's Files are theirs, unfiltered", async () => {
+  await page.locator("nav.side [data-open=files]").click();
   await page.locator("#lq").fill("no-such-file-anywhere");
   await page.getByText("No file matches.").waitFor({ timeout: T });
   await page.locator("nav.side [data-act=sign-out]").click();
   await signIn(other, otherPassword);
-  await page.locator("nav.side [data-open=library]").click();
+  await page.locator("nav.side [data-open=files]").click();
   await page.locator("[data-lib-file]", { hasText: otherFile }).waitFor({ timeout: T });
 });
 

@@ -2,6 +2,19 @@ id = "google-gmail"
 version = "1.0.0"
 name = "Gmail"
 summary = "Magnus can search and read your email, write drafts for you to send, and file, label or trash messages."
+# The Library's card and page (connectors spec, Catalog and connector
+# manifests; Library): who makes it, its category chip, what Magnus can do
+# with it, each scope in plain words (in the order of `scopes`), and what it
+# can and cannot do here, from its tools. `letters` and `tint` draw its tile
+# until the provider's own mark is in its listing.
+publisher = "Google"
+category = "email"
+abilities = ["Find an email or a thread when you ask about it", "Summarize long threads and catch you up", "Write drafts for you to read and send", "Label, file or trash messages"]
+asks = ["See your email and its settings", "Write drafts and send email", "Read, change and label your email"]
+can = "Read your email, write drafts, and label, file or trash messages"
+cannot = "Send email, or delete email for good"
+letters = "Gm"
+tint = "#B3261E"
 kind = "remote"
 endpoint = "https://gmailmcp.googleapis.com/mcp/v1"
 # Its tools write drafts, labels and the trash in the person's own mailbox:

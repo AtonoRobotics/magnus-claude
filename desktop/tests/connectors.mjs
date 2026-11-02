@@ -1,11 +1,14 @@
-// Connectors in the Library, as a person sees them (connectors spec rev 46,
-// What the user sees, The connector card and Library), with the real
-// catalog: Google's Gmail, Calendar, Drive and Chat, already set up. Each
-// card is its name, one plain sentence and one button, with no protocol
-// words; a connector opens to what it allows. Connecting is the desktop
-// app's, at Google's own page. Nothing on the connect path, and nothing in
-// the owner's Connectors settings, asks anyone to type anything: no client
-// ID, secret or address. No fakes (owner, 2026-11-01).
+// The Library, the connector catalog, as a person sees it (connectors spec
+// rev 48, What the user sees, The connector card and Library, and the
+// owner's catalog mockup), with the real catalog: Google's Gmail, Calendar,
+// Drive and Chat, already set up. Discover and Yours; search and category
+// chips; each card its tile, the review mark, one plain sentence, who makes
+// it and one action, with no protocol words; a connector opens to what
+// Magnus can do with it and what it asks for. The page renders in light,
+// dark and glass, and at phone width with no sideways scroll. Connecting is
+// the desktop app's, at Google's own page. Nothing on the connect path, and
+// nothing in the owner's Connectors settings, asks anyone to type anything:
+// no client ID, secret or address. No fakes (owner, 2026-11-01).
 //
 // MAGNUS_URL, MAGNUS_PERSON, MAGNUS_PASSWORD  where and who (the owner)
 // MAGNUS_CHROMIUM  Chrome to drive; MAGNUS_SHOTS  where to keep screenshots
@@ -47,39 +50,80 @@ await step("sign in", async () => {
   await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
-await step("the Library lists the catalog's Google apps, available to connect", async () => {
+await step("the Library is the catalog: Google's apps under Popular, each a card with a plus to connect", async () => {
   await page.getByRole("link", { name: "Library", exact: true }).click();
-  const available = page.locator("#detail .cgroup[data-group=available]");
-  for (const name of ["google-gmail", "google-calendar", "google-drive", "google-chat"]) await available.locator(`[data-connector=${name}]`).getByRole("button", { name: "Connect" }).waitFor({ timeout: T });
-  const said = (await page.locator("#detail .clist").allInnerTexts()).join(" ");
+  await page.getByRole("heading", { name: "Library", level: 1 }).waitFor({ timeout: T });
+  const popular = page.locator(".lsect[data-section=popular]");
+  for (const name of ["google-gmail", "google-calendar", "google-drive", "google-chat"]) await popular.locator(`[data-connector=${name}]`).getByRole("button", { name: /^Connect / }).waitFor({ timeout: T });
+  const gmail = popular.locator("[data-connector=google-gmail]");
+  await gmail.getByRole("img", { name: "Reviewed by Alpha Vector" }).waitFor({ timeout: T });
+  await gmail.getByText("by Google", { exact: true }).waitFor({ timeout: T });
+  const said = (await page.locator("#lib-sections").allInnerTexts()).join(" ");
   if (PROTOCOL.test(said)) throw new Error(`a card shows a protocol word: ${said}`);
-  for (const t of ["Gmail", "Google Calendar", "Google Drive", "Google Chat", "Magnus can search and read your email"]) if (!said.includes(t)) throw new Error(`the cards do not say "${t}": ${said}`);
+  for (const t of ["Gmail", "Google Calendar", "Google Drive", "Google Chat", "Magnus can search and read your email", "4 connectors"]) if (!said.includes(t)) throw new Error(`the Library does not say "${t}": ${said}`);
+  // Yours: nothing connected yet.
+  await page.getByRole("button", { name: "Yours", exact: true }).click();
+  await page.getByText("Nothing connected yet.", { exact: false }).waitFor({ timeout: T });
+  await page.getByRole("button", { name: "Discover", exact: true }).click();
+  await gmail.waitFor({ timeout: T });
 });
 
-await step("a search finds connectors too", async () => {
-  await page.getByLabel(/Search files and connectors/).fill("drive");
-  await page.locator("#detail [data-connector=google-gmail]").waitFor({ state: "detached", timeout: T });
-  await page.locator("#detail [data-connector=google-drive]").waitFor({ timeout: T });
-  await page.getByLabel(/Search files and connectors/).fill("");
-  await page.locator("#detail [data-connector=google-gmail]").waitFor({ timeout: T });
+await step("search and the category chips narrow the catalog", async () => {
+  await page.getByLabel("Search connectors").fill("drive");
+  await page.locator("[data-connector=google-gmail]").waitFor({ state: "detached", timeout: T });
+  await page.locator("[data-connector=google-drive]").waitFor({ timeout: T });
+  // What the person wants done finds it too.
+  await page.getByLabel("Search connectors").fill("free or busy");
+  await page.locator("[data-connector=google-drive]").waitFor({ state: "detached", timeout: T });
+  await page.getByLabel("Search connectors").fill("find a time");
+  await page.locator("[data-connector=google-calendar]").waitFor({ timeout: T });
+  await page.getByLabel("Search connectors").fill("no-such-app-anywhere");
+  await page.getByText("No connectors match.", { exact: false }).waitFor({ timeout: T });
+  await page.getByLabel("Search connectors").fill("");
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await page.locator("[data-connector=google-drive]").waitFor({ timeout: T });
+  await page.locator("[data-connector=google-gmail]").waitFor({ state: "detached", timeout: T });
+  await page.getByRole("button", { name: "Code", exact: true }).click();
+  await page.getByText("No connectors match.", { exact: false }).waitFor({ timeout: T });
+  await page.getByRole("button", { name: "All", exact: true }).click();
+  await page.locator("[data-connector=google-gmail]").waitFor({ timeout: T });
+});
+
+await step("the Library renders in light, dark and glass, and at phone width with no sideways scroll", async () => {
+  for (const [mode, material] of [["light", "solid"], ["dark", "solid"], ["light", "glass"], ["dark", "glass"]]) {
+    for (const width of [win.width, 390]) {
+      await page.setViewportSize({ width, height: win.height });
+      await page.evaluate(([mode, material]) => Theme.set({ mode, material }), [mode, material]);
+      const over = await page.evaluate(() => Math.max(document.documentElement.scrollWidth - document.documentElement.clientWidth, ...[...document.querySelectorAll("main")].map(m => m.scrollWidth - m.clientWidth)));
+      if (over > 0) throw new Error(`the Library in ${mode} ${material} at ${width}px scrolls sideways by ${over}px`);
+      await shot(`library-${mode}-${material}-${width}`);
+    }
+  }
+  await page.setViewportSize({ width: win.width, height: win.height });
+  await page.evaluate(() => Theme.set({ mode: "system", material: "solid" }));
 });
 
 await step("connecting happens in the desktop app, on the app's own page, and asks nothing here", async () => {
-  if (await typed("#detail")) throw new Error("the Library asks for something to be typed");
-  await page.locator("#detail [data-connector=google-gmail]").getByRole("button", { name: "Connect" }).click();
+  if (await typed("main")) throw new Error("the Library asks for something to be typed");
+  await page.locator("[data-connector=google-gmail]").getByRole("button", { name: "Connect Gmail" }).click();
   await page.getByText("Connect apps from the Magnus desktop app.").waitFor({ timeout: T });
-  for (const scope of ["#detail", "[role=dialog]", ".sheet", ".toast"]) if (await typed(scope)) throw new Error(`connecting asks for something to be typed in Magnus (${scope})`);
+  for (const scope of ["main", "#detail", "[role=dialog]", ".sheet", ".toast"]) if (await typed(scope)) throw new Error(`connecting asks for something to be typed in Magnus (${scope})`);
 });
 
-await step("a connector opens to what it allows, in plain words", async () => {
-  await page.locator("#detail [data-connector=google-gmail]").getByRole("link", { name: "Gmail" }).click();
-  const d = page.locator("#detail");
-  await d.getByRole("heading", { name: "Gmail" }).waitFor({ timeout: T });
-  for (const t of ["What it allows", "Recent actions", "Magnus has not used it for you yet."]) await d.getByText(t, { exact: true }).first().waitFor({ timeout: T });
+await step("a connector opens to what Magnus can do with it and what it asks for, in plain words", async () => {
+  await page.locator("[data-connector=google-gmail]").getByRole("link", { name: "Gmail" }).click();
+  const d = page.locator(".cp");
+  await d.getByRole("heading", { name: "Gmail", exact: true }).waitFor({ timeout: T });
+  for (const t of ["What Magnus can do with Gmail", "What it asks for", "Write drafts for you to read and send", "Write drafts and send email"]) await d.getByText(t, { exact: true }).first().waitFor({ timeout: T });
+  await d.getByText("by Google · Reviewed by Alpha Vector").waitFor({ timeout: T });
+  await d.getByText("You sign in on Google's own page. Magnus never sees your password, and you can disconnect at any time.").waitFor({ timeout: T });
+  await d.getByRole("button", { name: "Connect Gmail" }).waitFor({ timeout: T });
   const text = await d.innerText();
-  if (!/Reads: .*search threads/.test(text)) throw new Error(`it does not say what Magnus may read: ${text}`);
   if (PROTOCOL.test(text)) throw new Error(`the connector's page shows a protocol word: ${text}`);
-  if (await d.getByRole("button", { name: "Disconnect" }).count()) throw new Error("Disconnect is offered for an app the person has not connected");
+  if (await d.getByRole("button", { name: /Disconnect/ }).count()) throw new Error("Disconnect is offered for an app the person has not connected");
+  if (await typed("main")) throw new Error("the connector's page asks for something to be typed");
+  await page.getByRole("link", { name: "Library", exact: true }).first().click();
+  await page.locator("[data-connector=google-gmail]").waitFor({ timeout: T });
 });
 
 await step("the owner's Connectors settings are the catalog's apps, and ask for nothing", async () => {
@@ -93,7 +137,7 @@ await step("the owner's Connectors settings are the catalog's apps, and ask for 
 
 await step("from Settings, the Library's address opens the Library", async () => {
   await page.evaluate(() => { location.hash = "#/library"; });
-  await page.locator("#detail [data-connector=google-gmail]").waitFor({ timeout: T });
+  await page.locator(".lsect [data-connector=google-gmail]").waitFor({ timeout: T });
 });
 
 if (errors.length) { console.error(`FAIL page errors: ${errors.join("; ")}`); await browser.close(); process.exit(1); }
