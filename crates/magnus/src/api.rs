@@ -1089,7 +1089,17 @@ async fn inbox_list(State(k): K, h: HeaderMap) -> Response {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let items: Vec<Value> = k.read(|s| s.items.values().filter(|i| inbox::visible(&p, i)).map(|i| inbox::render(s, &p, i)).collect());
+    let mut items: Vec<Value> = k.read(|s| s.items.values().filter(|i| inbox::visible(&p, i)).map(|i| inbox::render(s, &p, i)).collect());
+    // An approval for an app's action carries the app's card, as the person
+    // whose task it is stands with it (connectors spec: the same card in the
+    // Library, in chat, in a task and in approvals).
+    let apps: Vec<String> = k.connectors().into_iter().map(|c| c.name).collect();
+    for i in items.iter_mut().filter(|i| i["kind"] == "approval") {
+        let app = i["details"]["tool"].as_str().and_then(|t| t.split_once("__")).map(|(a, _)| a.to_string());
+        if let Some(app) = app.filter(|a| apps.contains(a)) {
+            i["app"] = k.offered_card(i["person"].as_str().unwrap_or_default(), &json!({ "connector": app }));
+        }
+    }
     Json(json!({ "items": items })).into_response()
 }
 
