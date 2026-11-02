@@ -734,6 +734,18 @@ impl Kernel {
                 Ok(o) => Ok((o.text, o.is_error, o.structured)),
                 Err(crate::apps::CallError::NotSent(m)) => Err(CallFailure::NotDone(m)),
                 Err(crate::apps::CallError::Unknown(m)) => Err(CallFailure::Unknown(m)),
+                // The app wants more access for this (connectors spec,
+                // Remote MCP connectors: a scope challenge becomes a card
+                // asking for it). Nothing happened at the app.
+                Err(crate::apps::CallError::NeedsScope(scopes)) => {
+                    let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
+                    if let Err(e) = self.want_scopes(&c.name, &person, &scopes) {
+                        return Err(CallFailure::NotDone(format!("{} wants more access, which could not be kept: {e:#}", f.app)));
+                    }
+                    let title = c.title.clone().unwrap_or_else(|| crate::connectors::title(&c.name));
+                    let data = json!({ "card": crate::chat::derived("card", key), "connector": c.name, "why": format!("{title} needs more access from you to do this") });
+                    Ok((format!("{} needs more access from the person for {}. Its card is in front of them to approve it; nothing happened at the app. Once they have approved it, call it again.", title, f.remote), true, Some(data)))
+                }
             };
         }
         let s = |v: &str| a.input[v].as_str().unwrap_or_default().to_string();

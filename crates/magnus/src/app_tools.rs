@@ -25,6 +25,8 @@ impl Kernel {
             .map(|c| {
                 let state = if self.lapsed(&c, &person.id) {
                     State::Lapsed
+                } else if !self.wanted_scopes(&c, &person.id).is_empty() {
+                    State::MoreAccess
                 } else if self.connected(&c, &person.id) {
                     State::Connected
                 } else {
@@ -47,6 +49,7 @@ impl Kernel {
             let says = match state {
                 State::Connected => "Connected.",
                 State::Lapsed => "Needs signing in again: the app no longer accepts their sign-in; offer_app lets them sign in again.",
+                State::MoreAccess => "Connected, but it needs more access for something you asked of it; offer_app asks them to approve it.",
                 State::Not => "Not connected.",
             };
             t.push_str(&format!("- {} ({}): {} {says}\n", l["title"].as_str().unwrap_or_default(), c.name, l["summary"].as_str().unwrap_or_default()));
@@ -107,6 +110,7 @@ impl Kernel {
                 e["state"] = json!(match state {
                     State::Connected => "connected",
                     State::Lapsed => "needs_attention",
+                    State::MoreAccess => "needs_more_access",
                     State::Not => "available",
                 });
                 e["ready"] = json!(self.provider_ready(&c));
@@ -142,6 +146,8 @@ pub enum State {
     Connected,
     /// The app refused their sign-in: they sign in again.
     Lapsed,
+    /// Connected, and the app asked for more access than it holds.
+    MoreAccess,
     Not,
 }
 
@@ -157,6 +163,7 @@ fn line(c: &Connector, state: State) -> Value {
         "state": match state {
             State::Connected => "connected",
             State::Lapsed => "needs signing in again",
+            State::MoreAccess => "needs more access",
             State::Not => "not connected",
         },
     })

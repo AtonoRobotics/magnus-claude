@@ -217,3 +217,50 @@ async fn a_sign_in_the_app_refused_is_offered_again_as_a_card_and_its_tools_wait
     let (_, c) = carol.get(&format!("/v1/connectors/{name}")).await;
     assert_eq!(c["state"], "connected", "{c}");
 }
+
+/// Sign `api` in to the app; the address it was sent to.
+async fn sign_in(api: &Api, name: &str) -> String {
+    let (st, v) = api.post(&format!("/v1/connectors/{name}/sign-in"), json!({ "redirect_uri": "http://127.0.0.1:9/callback" })).await;
+    assert!(st.is_success(), "{v}");
+    let at = v["authorize_url"].as_str().unwrap().to_string();
+    let (code, state) = magnus_scratch::FakeOAuthApp::browse(&at).await;
+    assert_eq!(api.post(&format!("/v1/connectors/{name}/sign-in/complete"), json!({ "state": state, "code": code })).await.0, 204);
+    at
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_that_needs_more_access_asks_for_it_with_a_card_and_goes_through_once_approved() {
+    let plan = Arc::new(Mutex::new(vec![]));
+    let seen: Arc<Mutex<Vec<(Value, Vec<String>)>>> = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start(model(plan.clone(), seen.clone())).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let cal = magnus_scratch::FakeOAuthApp::start(3600).await;
+    cal.state.lock().unwrap().share_scope = Some("calendar.share".into());
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "url": cal.url, "audience": "public", "label": "private+untrusted" })).await;
+    assert!(st.is_success(), "{v}");
+    let name = v["name"].as_str().unwrap().to_string();
+    sign_in(&alice, &name).await;
+    assert_eq!(alice.put(&format!("/v1/connectors/{name}/tools/share_calendar"), json!({ "risk": "read" })).await.0, 204);
+    let carol = app.api("carol");
+    let first = sign_in(&carol, &name).await;
+    assert!(!first.contains("calendar.share"), "the first sign-in already asked for the added access: {first}");
+
+    // The app refuses the call for want of access: the card asks for it.
+    let tool = format!("{name}__share_calendar");
+    let (_, thread) = say(&carol, &plan, "Share my calendar with Dana.", vec![(&tool, json!({ "with": "dana" }))]).await;
+    let card = thread.iter().find(|e| e["kind"] == "connector_card").unwrap_or_else(|| panic!("no card asking for more access: {thread:?}"));
+    assert_eq!((card["connector"].as_str(), card["state"].as_str()), (Some(name.as_str()), Some("needs_more_access")), "{card}");
+    assert!(said_back(&seen).contains("needs more access"), "{}", said_back(&seen));
+    assert_eq!(cal.calls("share_calendar"), 0, "the refused call counted as done");
+    let (_, c) = carol.get(&format!("/v1/connectors/{name}")).await;
+    assert_eq!(c["more_access"], true, "the Library does not ask for more access: {c}");
+
+    // Approving is signing in again, asking for that access too; then the call goes through.
+    let again = sign_in(&carol, &name).await;
+    assert!(again.contains("calendar.share"), "signing in again did not ask for the added access: {again}");
+    let (_, c) = carol.get(&format!("/v1/connectors/{name}")).await;
+    assert_eq!((c["state"].as_str(), c["more_access"].as_bool()), (Some("connected"), Some(false)), "{c}");
+    let _ = say(&carol, &plan, "Share my calendar with Dana now.", vec![(&tool, json!({ "with": "dana" }))]).await;
+    assert_eq!(cal.calls("share_calendar"), 1, "the call did not go through once approved");
+}

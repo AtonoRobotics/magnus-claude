@@ -847,3 +847,11 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - The boundary's refusal tells Magnus to offer the card, and `offer_app` gives one with "Sign in to … again".
   - Signing in again brings it back.
   - Test: `a_sign_in_the_app_refused_is_offered_again_as_a_card_and_its_tools_wait` (agent_apps.rs).
+- More access (connectors spec, Remote MCP connectors: "a call needing an ungranted scope … becomes a Connect card asking for the added scope, and the call proceeds once approved"):
+  - An app that refuses a call with MCP authorization's step-up challenge (HTTP 403, `insufficient_scope`, the scopes it names) is answered by the kernel itself:
+    - the scopes are kept on the person's sign-in (`wants`);
+    - the card "Approve more access" is placed in the conversation or task;
+    - Magnus is told nothing happened at the app, and to call again once approved.
+  - Her index says the app needs more access, and the Library's card turns to approving it.
+  - Approving is signing in again: the sign-in asks for the added scopes too. The new sign-in holds them, and the call then goes through.
+  - Test: `a_call_that_needs_more_access_asks_for_it_with_a_card_and_goes_through_once_approved` (agent_apps.rs). The fake app holds per-token scopes and challenges a tool that needs one more.

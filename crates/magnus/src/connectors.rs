@@ -94,6 +94,10 @@ struct Tokens {
     /// and is not tried again meanwhile (connectors spec, Lifecycle).
     #[serde(default)]
     lapsed: bool,
+    /// Access the app asked for that this sign-in does not hold (its
+    /// step-up challenge): the next sign-in asks for it too.
+    #[serde(default)]
+    wants: Vec<String>,
 }
 
 /// The account a sign-in's answer names, from its ID token's claims, for
@@ -479,7 +483,13 @@ impl Kernel {
                 .append_pair("state", &state)
                 .append_pair("resource", &c.url);
             // Exactly what the app's manifest asks for, where it names it.
-            let scopes = if c.scopes.is_empty() { scopes } else { c.scopes.clone() };
+            let mut scopes = if c.scopes.is_empty() { scopes } else { c.scopes.clone() };
+            // More access the app asked of this person's sign-in.
+            for w in self.wanted_scopes(c, person) {
+                if !scopes.contains(&w) {
+                    scopes.push(w);
+                }
+            }
             if !scopes.is_empty() {
                 q.append_pair("scope", &scopes.join(" "));
             }
@@ -536,6 +546,7 @@ impl Kernel {
             connected_at: Some(chrono::Utc::now().timestamp()),
             account: account_of(&v),
             lapsed: false,
+            wants: vec![],
         };
         let account = t.account.clone();
         self.vault.put(&connection_name(app, person), &serde_json::to_string(&t)?)?;
@@ -574,6 +585,25 @@ impl Kernel {
         });
         uses.sort_by(|a, b| b.0.cmp(&a.0));
         uses.into_iter().take(n).map(|(_, v)| v).collect()
+    }
+
+    /// The app asked for access the person's sign-in does not hold: kept on
+    /// it, so their next sign-in asks for it (MCP authorization, step-up).
+    pub fn want_scopes(&self, app: &str, person: &str, scopes: &[String]) -> Result<()> {
+        let name = connection_name(app, person);
+        let Some(raw) = self.vault.get(&name)? else { return Ok(()) };
+        let mut t: Tokens = serde_json::from_str(raw.expose()).context("stored sign-in")?;
+        for s in scopes {
+            if !t.wants.contains(s) {
+                t.wants.push(s.clone());
+            }
+        }
+        self.vault.put(&name, &serde_json::to_string(&t)?)
+    }
+
+    /// The access the app asked of the person's sign-in that it does not hold.
+    pub fn wanted_scopes(&self, c: &Connector, person: &str) -> Vec<String> {
+        self.vault.get(&connection_name(&c.name, person)).ok().flatten().and_then(|raw| serde_json::from_str::<Tokens>(raw.expose()).ok()).map(|t| t.wants).unwrap_or_default()
     }
 
     /// Whether the person's sign-in to an app was refused by the app: they
@@ -1084,6 +1114,9 @@ async fn card(k: &Kernel, c: &Connector, person: &str) -> Value {
         "connected_at": at.and_then(|s| chrono::DateTime::from_timestamp(s, 0)), "account": account, "last_used": last,
         // False only on an appliance Alpha Vector has not finished setting up.
         "ready": k.provider_ready(c),
+        // The app asked for more access than the sign-in holds: approving
+        // it is signing in again, asking for that too.
+        "more_access": !k.wanted_scopes(c, person).is_empty(),
         "listing": listing(c),
     })
 }
