@@ -153,6 +153,7 @@ pub const BUILTINS: &[Builtin] = &[
     // appliance, versioned and reversible.
     Builtin { name: "bundle_read", app: "bundle", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "bundle_search", app: "bundle", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "entity_resolve", app: "bundle", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "bundle_write", app: "bundle", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // The org's sources, searched and read under the person's own grant:
     // each result carries the label of the sources it came from.
@@ -430,6 +431,11 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
         },
         ToolSpec { name: "memory_forget".into(), description: d("memory_forget"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
         ToolSpec { name: "bundle_read".into(), description: d("bundle_read"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
+        ToolSpec {
+            name: "entity_resolve".into(),
+            description: d("entity_resolve"),
+            input_schema: obj(json!({ "key": { "type": "string", "description": "an identity value: a domain, an id, an email" }, "name": { "type": "string" }, "type": { "type": "string", "description": "only entities of this type" } }), &[]),
+        },
         ToolSpec {
             name: "org_search".into(),
             description: d("org_search"),
