@@ -107,6 +107,18 @@ pub enum Ev {
         layer: String,
         cedar: String,
     },
+    /// The admin console's own session lifetimes, as an admin set them
+    /// under Security › Sign-in.
+    ConsoleSettings {
+        idle_minutes: i64,
+        session_hours: i64,
+    },
+    /// An admin's draft of a policy layer (None: dropped). Nothing in force
+    /// changes until it is applied.
+    PolicyDrafted {
+        layer: String,
+        cedar: Option<String>,
+    },
     KillSwitch {
         engaged: bool,
     },

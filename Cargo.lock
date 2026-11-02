@@ -1505,6 +1505,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "magnus-adapter-proto",
+ "miette",
  "minisign-verify",
  "rand 0.8.8",
  "rcgen",

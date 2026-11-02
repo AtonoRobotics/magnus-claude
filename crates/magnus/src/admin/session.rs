@@ -294,7 +294,7 @@ fn current(c: &Console, h: &HeaderMap) -> Option<(String, Session)> {
     let mut sessions = c.store.sessions.lock().unwrap();
     let s = sessions.get(&sid)?.clone();
     let now = Utc::now();
-    if now - s.seen > Duration::minutes(c.idle_minutes) || now - s.started > Duration::hours(c.session_hours) {
+    if now - s.seen > Duration::minutes(c.idle_minutes.load(std::sync::atomic::Ordering::Relaxed)) || now - s.started > Duration::hours(c.session_hours.load(std::sync::atomic::Ordering::Relaxed)) {
         sessions.remove(&sid);
         return None;
     }
@@ -313,7 +313,7 @@ pub fn open(c: &Console, sid: &str) -> bool {
     let sessions = c.store.sessions.lock().unwrap();
     let Some(s) = sessions.get(sid) else { return false };
     let now = Utc::now();
-    now - s.seen <= Duration::minutes(c.idle_minutes) && now - s.started <= Duration::hours(c.session_hours)
+    now - s.seen <= Duration::minutes(c.idle_minutes.load(std::sync::atomic::Ordering::Relaxed)) && now - s.started <= Duration::hours(c.session_hours.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 fn refused(status: StatusCode, error: &str, message: &str) -> Response {

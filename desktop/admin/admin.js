@@ -12,7 +12,17 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": 
 const Admin = { me: null, live: null, status: null };
 const when = t => (t ? new Date(t).toLocaleString() : "–");
 const pct = x => (typeof x === "number" ? `${Math.round(x * 100)}%` : "–");
-const who = by => String(by || "").replace(/^admin:/, "an admin ").replace(/^person:/, "");
+// Who did something, by name: an admin is named by their provider id in
+// the log, and the console knows the names from Users.
+const who = by => {
+  const b = String(by || "");
+  const sub = b.startsWith("admin:") ? b.slice(6) : null;
+  if (sub) return Admin.names?.[sub] ? `${Admin.names[sub]} (admin)` : "an admin";
+  return b.replace(/^person:/, "");
+};
+async function loadNames() {
+  try { Admin.names = Object.fromEntries((await api("GET", "/users")).users.map(u => [u.id, u.name])); } catch { /* names stay ids until Users answers */ }
+}
 const org = () => document.title.split(" · ")[0];
 // A person's status as the app's pills draw it.
 const pill = st => `<span class="chip ${({ active: "ok", disabled: "bad", invited: "warn" })[st] || ""}">${esc(st)}</span>`;
@@ -389,10 +399,183 @@ function securityView(view, rest) {
   }
   for (const a of $$("#sec-tabs a", view)) { if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
   const box = $("#sec", view);
-  if (box.dataset.tab !== tab) { box.dataset.tab = tab; box.innerHTML = ""; UI.closePanel(); }
+  if (box.dataset.tab !== tab || tab === "policy" || tab === "sign-in") { box.dataset.tab = tab; box.innerHTML = ""; UI.closePanel(); }
   if (tab === "audit") return auditView(box, rest[1]);
   if (tab === "connectors") return connectorsView(box, rest[1]);
-  box.innerHTML = UI.empty("Not built yet.", "docs/admin-console.md lists what this holds when it is done.");
+  if (tab === "sign-in") return signInView(box);
+  if (tab === "policy") return policyView(box, rest[1]);
+}
+
+// Security › Sign-in: how members and admins sign in, how long sessions
+// last, and when failures lock an account. Saving asks for a fresh
+// password.
+async function signInView(box) {
+  UI.loading(box, "the sign-in rules");
+  let v;
+  try { v = await api("GET", "/security/sign-in"); } catch (e) { return UI.error(box, "The sign-in rules could not be read.", e, () => signInView(box)); }
+  const n = (name, value, min, max, label, unit) => `<label>${esc(label)} <span class="row"><input name="${name}" type="number" min="${min}" max="${max}" value="${esc(value)}" required> <span class="small muted">${esc(unit)}</span></span></label>`;
+  box.innerHTML = `<form id="si" class="ad-form ad-narrow">
+    <h2>How members sign in</h2>
+    <p class="small">With their password, typed in the app or on the sign-in page.</p>
+    <fieldset class="ad-choice"><legend>A code from an authenticator app</legend>
+      <label class="row"><input type="radio" name="code" value="optional" ${v.members.code === "optional" ? "checked" : ""}> Optional: whoever sets one up is asked for it</label>
+      <label class="row"><input type="radio" name="code" value="required" ${v.members.code === "required" ? "checked" : ""}> Required: everyone sets one up and is asked for it</label>
+    </fieldset>
+    <h2>How admins sign in</h2>
+    <p class="small">With their password, and their code as members do. This is fixed: the console has no other way in.</p>
+    <h2>Sessions</h2>
+    <div class="grid2">${n("m_idle", v.sessions.members.idle_minutes, 5, 1440, "Members: signed out after idle", "minutes")}${n("m_max", v.sessions.members.max_hours, 1, 720, "Members: longest session", "hours")}
+      ${n("c_idle", v.sessions.console.idle_minutes, 5, 240, "Console: signed out after idle", "minutes")}${n("c_hours", v.sessions.console.session_hours, 1, 24, "Console: longest session", "hours")}</div>
+    <h2>Lockout</h2>
+    <label class="row"><input type="checkbox" name="lock" ${v.lockout.enabled ? "checked" : ""}> Lock an account after repeated failed sign-ins</label>
+    <div class="grid2">${n("failures", v.lockout.failures, 1, 100, "Failures before a lockout", "tries")}${n("wait", Math.max(1, v.lockout.wait_minutes), 1, 1440, "First wait", "minutes")}${n("max_wait", Math.max(1, v.lockout.max_wait_minutes), 1, 10080, "Longest wait", "minutes")}</div>
+    <label class="row"><input type="checkbox" name="permanent" ${v.lockout.permanent ? "checked" : ""}> Lock for good, until an admin turns them back on</label>
+    <p class="error" id="si-error" hidden></p>
+    <div class="row"><button class="primary">Save the sign-in rules</button></div>
+    <p class="small muted">Saving asks for your password again. It changes the rules at ${esc(org())}'s sign-in for everyone.</p>
+  </form>`;
+  $("#si", box).onsubmit = async e => {
+    e.preventDefault();
+    const f = new FormData(e.target), num = k => Number(f.get(k));
+    const body = {
+      members: { code: f.get("code") },
+      sessions: { members: { idle_minutes: num("m_idle"), max_hours: num("m_max") }, console: { idle_minutes: num("c_idle"), session_hours: num("c_hours") } },
+      lockout: { enabled: f.get("lock") === "on", failures: num("failures"), wait_minutes: num("wait"), max_wait_minutes: num("max_wait"), permanent: f.get("permanent") === "on" },
+    };
+    try { await api("PATCH", "/security/sign-in", body); UI.toast("The sign-in rules are saved."); signInView(box); }
+    catch (err) { const el = $("#si-error", box); el.textContent = err.message; el.hidden = false; }
+  };
+}
+
+// Security › Agent policy: each Cedar policy set, edited as a draft
+// (highlighted, checked against Magnus's schema as it is typed), compared
+// with what is live, tried in the test panel, applied with a fresh
+// password; every version kept to go back to.
+
+const CEDAR = /(\/\/[^\n]*)|("(?:[^"\\]|\\.)*")|\b(permit|forbid|when|unless|in|has|like|is|if|then|else|true|false)\b|\b(principal|action|resource|context)\b|\b([A-Z][A-Za-z]*)(?=::)/g;
+function highlight(text, problems) {
+  const lines = new Set((problems || []).map(p => p.line));
+  const html = esc(text).replace(/&quot;/g, '"').replace(CEDAR, (m, comment, str, kw, scope, type) =>
+    comment ? `<span class="cx-c">${comment}</span>` : str ? `<span class="cx-s">${str}</span>` : kw ? `<span class="cx-k">${kw}</span>` : scope ? `<span class="cx-v">${scope}</span>` : `<span class="cx-t">${type}</span>`);
+  return html.split("\n").map((l, i) => `<span class="${lines.has(i + 1) ? "cx-bad" : ""}">${l || " "}</span>`).join("\n");
+}
+
+// The lines that differ between two texts: each removed or added, with
+// the unchanged around them.
+function diff(a, b) {
+  const x = (a || "").split("\n"), y = (b || "").split("\n");
+  const m = x.length, n = y.length, L = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--) for (let j = n - 1; j >= 0; j--) L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = [];
+  let i = 0, j = 0;
+  while (i < m && j < n) {
+    if (x[i] === y[j]) { out.push(["=", x[i]]); i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) out.push(["-", x[i++]]);
+    else out.push(["+", y[j++]]);
+  }
+  while (i < m) out.push(["-", x[i++]]);
+  while (j < n) out.push(["+", y[j++]]);
+  return out;
+}
+const diffHtml = d => (d.some(([k]) => k !== "=") ? `<pre class="ad-diff">${d.map(([k, l]) => `<span class="d${k === "+" ? "a" : k === "-" ? "r" : "s"}">${k === "=" ? " " : k} ${esc(l)}</span>`).join("\n")}</pre>` : UI.empty("No changes from what is live."));
+
+async function policyView(box, id) {
+  UI.loading(box, "the agent policy");
+  let v;
+  try { v = await api("GET", "/policy/sets"); } catch (e) { return UI.error(box, "The agent policy could not be read.", e, () => policyView(box, id)); }
+  const sets = v.sets;
+  const cur = sets.find(x => x.id === id) || sets.find(x => x.id === "org");
+  box.innerHTML = `<div class="ad-policy">
+    <aside class="ad-sets"><h2 class="vh">Policy sets</h2><ul class="ad-list">${sets.map(x => `<li><a href="#/security/policy/${esc(x.id)}" ${x.id === cur.id ? 'aria-current="page"' : ""}>${esc(x.id === "org" ? "The organisation" : x.id.replace(/^group:/, "Group ").replace(/^user:/, "Person "))}</a>
+      ${x.draft != null ? `<span class="chip warn">Draft</span>` : ""}${x.default ? `<span class="chip">Default</span>` : ""}<div class="small muted">${x.versions} version${x.versions === 1 ? "" : "s"}${x.changed_at ? ` · ${esc(when(x.changed_at))}` : ""}</div></li>`).join("")}</ul>
+      <form id="pol-new" class="ad-form"><label>New set <input name="id" placeholder="group:sales or user:bob" autocomplete="off" pattern="(group|user):[A-Za-z0-9._-]+" required></label><button>Start a draft</button></form>
+    </aside>
+    <section class="ad-editor-box">
+      <h2>${esc(cur.id === "org" ? "The organisation's policy" : cur.id)}</h2>
+      <p class="small muted">${cur.id === "org" ? "Every action goes through it first." : "It can only narrow what the organisation's policy allows."} ${cur.draft != null ? "You are editing the draft; what is live stays in force until it is applied." : "Editing starts a draft; nothing changes until it is applied."}</p>
+      <div class="ad-editor"><pre class="ad-hl" aria-hidden="true"></pre><textarea id="pol-text" spellcheck="false" aria-label="Policy text" autocapitalize="off" autocomplete="off"></textarea></div>
+      <div id="pol-problems" class="small" role="status" aria-live="polite"></div>
+      <div class="row ad-bar"><button id="pol-save">Save draft</button><button id="pol-diff">Compare with live</button><button class="primary" id="pol-apply">Apply…</button>${cur.draft != null ? `<button id="pol-drop" class="link">Discard draft</button>` : ""}</div>
+      <div id="pol-out"></div>
+      <h3>Test</h3>
+      <form id="pol-test" class="ad-form grid2">
+        <label>Principal <input name="principal" list="pol-people" required autocomplete="off"></label>
+        <label>Action <select name="action"><option value="execute">execute (act without asking)</option><option value="request_approval">request_approval (ask first)</option></select></label>
+        <label>Resource (tool) <input name="resource" list="pol-tools" required autocomplete="off" placeholder="app__tool"></label>
+        <label>Its risk <select name="risk"><option value="">As the tool is classified</option>${["read", "sandbox", "reversible_write", "irreversible", "financial", "prohibited"].map(r => `<option>${r}</option>`).join("")}</select></label>
+        <label class="row"><input type="checkbox" name="untrusted"> The run has read untrusted content</label>
+        <label class="row"><input type="checkbox" name="private"> The run holds private data</label>
+        <label>Against <select name="with"><option value="draft">This draft, with the rest live</option><option value="live">What is live</option></select></label>
+        <div class="row"><button class="primary">Try it</button></div>
+      </form>
+      <datalist id="pol-people">${(v.people || []).map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</datalist>
+      <datalist id="pol-tools">${(v.tools || []).map(t => `<option value="${esc(t.name)}">${esc(t.risk)}</option>`).join("")}</datalist>
+      <div id="pol-result"></div>
+      <h3>History</h3><div id="pol-history"></div>
+    </section></div>`;
+  const ta = $("#pol-text", box), hl = $(".ad-hl", box), probs = $("#pol-problems", box), out = $("#pol-out", box);
+  ta.value = cur.draft ?? cur.live ?? "";
+  let problems = [], timer = null;
+  const draw = () => { hl.innerHTML = highlight(ta.value, problems) + "\n"; hl.scrollTop = ta.scrollTop; hl.scrollLeft = ta.scrollLeft; };
+  const check = async () => {
+    try {
+      const r = await api("POST", "/policy/validate", { cedar: ta.value });
+      problems = r.problems;
+      probs.innerHTML = r.ok ? `<span class="chip ok">Fits the schema</span>` : `<ul class="ad-problems">${r.problems.map(p => `<li><button class="link" data-at="${p.offset ?? 0}">Line ${p.line}, column ${p.column}</button>: ${esc(p.message)}</li>`).join("")}</ul>`;
+      for (const b of $$("[data-at]", probs)) b.onclick = () => { ta.focus(); ta.setSelectionRange(Number(b.dataset.at), Number(b.dataset.at)); };
+    } catch (e) { probs.textContent = e.message; }
+    draw();
+  };
+  ta.oninput = () => { draw(); clearTimeout(timer); timer = setTimeout(check, 400); };
+  ta.onscroll = () => { hl.scrollTop = ta.scrollTop; hl.scrollLeft = ta.scrollLeft; };
+  ta.onkeydown = e => { if (e.key === "Tab") { e.preventDefault(); const p = ta.selectionStart; ta.setRangeText("  ", p, ta.selectionEnd, "end"); ta.oninput(); } };
+  check();
+  const reload = () => policyView(box, cur.id);
+  $("#pol-save", box).onclick = () => act("PUT", `/policy/sets/${cur.id}/draft`, { cedar: ta.value }, () => { UI.toast("Draft saved. It is not in force until it is applied."); reload(); });
+  $("#pol-diff", box).onclick = () => { out.innerHTML = `<h3>Changes from live</h3>${diffHtml(diff(cur.live, ta.value))}`; };
+  const drop = $("#pol-drop", box);
+  if (drop) drop.onclick = async () => {
+    const was = cur.draft;
+    act("DELETE", `/policy/sets/${cur.id}/draft`, null, () => { UI.toast("Draft discarded.", () => act("PUT", `/policy/sets/${cur.id}/draft`, { cedar: was }, reload)); reload(); });
+  };
+  $("#pol-apply", box).onclick = async () => {
+    await check();
+    if (problems.length) { UI.toast("Fix the problems before applying it."); return; }
+    const d = diff(cur.live, ta.value);
+    const changed = d.filter(([k]) => k !== "=").length;
+    if (!changed) { UI.toast("Nothing to apply: it is what is live."); return; }
+    out.innerHTML = `<h3>What changes</h3>${diffHtml(d)}`;
+    if (!(await UI.confirm({ title: `Apply this policy to ${cur.id === "org" ? "the organisation" : cur.id}?`, body: `${changed} line${changed === 1 ? "" : "s"} change. It is in force at once, for every task's next action. It asks for your password again.`, verb: "Apply" }))) return;
+    act("POST", `/policy/sets/${cur.id}/apply`, { cedar: ta.value }, v => { UI.toast(`Applied: version ${v?.version ?? ""} is in force.`); reload(); });
+  };
+  $("#pol-new", box).onsubmit = e => { e.preventDefault(); const nid = new FormData(e.target).get("id").trim(); act("PUT", `/policy/sets/${nid}/draft`, { cedar: "// What this set forbids, beyond the organisation's policy.\n" }, () => { location.hash = `#/security/policy/${nid}`; }); };
+  $("#pol-test", box).onsubmit = async e => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const body = { principal: f.get("principal"), resource: f.get("resource"), risk: f.get("risk") || undefined, untrusted: f.get("untrusted") === "on", private: f.get("private") === "on" };
+    if (f.get("with") === "draft") body.cedar = { [cur.layer]: ta.value };
+    const res = $("#pol-result", box);
+    try {
+      const r = await api("POST", "/policy/test", body);
+      const exec = r.decision === "allow", ask = r.decision !== "deny";
+      const yes = f.get("action") === "execute" ? exec : ask;
+      res.innerHTML = `<div class="card flat"><p><span class="chip ${yes ? "ok" : "bad"}">${f.get("action")}: ${yes ? "permitted" : "denied"}</span>
+        <strong>${{ allow: "It acts without asking.", ask: "It asks first.", deny: "It is refused." }[r.decision]}</strong></p>
+        <dl class="kv small"><dt>Decided by</dt><dd class="mono">${esc(r.rule || "no rule: refused by default")}</dd>${r.reason ? `<dt>Why</dt><dd>${esc(r.reason)}</dd>` : ""}<dt>Layers</dt><dd class="mono">${esc(r.layers.join(" → "))}</dd><dt>Tool</dt><dd>${esc(r.risk)}, ${esc(r.audience)}</dd></dl></div>`;
+    } catch (err) { res.innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+  };
+  const hist = $("#pol-history", box);
+  try {
+    const h = (await api("GET", `/policy/sets/${cur.id}/history`)).versions;
+    hist.innerHTML = h.length ? `<table class="t small"><thead><tr><th>Version</th><th>When</th><th>By</th><th></th></tr></thead><tbody>${h.map((x, i) => `<tr><td>${esc(x.version)}${i === 0 ? ` <span class="chip ok">live</span>` : ""}</td><td>${esc(when(x.at))}</td><td>${esc(who(x.by))}</td>
+      <td><button class="link small" data-show="${x.version}">Show</button>${i === 0 ? "" : ` <button class="link small" data-back="${x.version}">Roll back to this</button>`}</td></tr>`).join("")}</tbody></table>`
+      : UI.empty(cur.default ? "Never written: the default policy is in force." : "No versions yet.");
+    for (const b of $$("[data-show]", hist)) b.onclick = () => { const x = h.find(y => String(y.version) === b.dataset.show); out.innerHTML = `<h3>Version ${esc(x.version)} against live</h3>${diffHtml(diff(cur.live, x.cedar))}`; };
+    for (const b of $$("[data-back]", hist)) b.onclick = async () => {
+      if (await UI.confirm({ title: `Go back to version ${b.dataset.back}?`, body: "It is put in force again as a new version. It asks for your password again.", verb: "Roll back" }))
+        act("POST", `/policy/sets/${cur.id}/rollback`, { version: Number(b.dataset.back) }, () => { UI.toast(`Version ${b.dataset.back} is in force again.`); reload(); });
+    };
+  } catch (e) { UI.error(hist, "The history could not be read.", e); }
 }
 
 // Security › Connectors and credentials: the organisation's apps, their
@@ -813,6 +996,7 @@ async function session() {
   $("#sign-in").hidden = true;
   $("#nav").hidden = false;
   menu();
+  await loadNames();
   section();
   killSwitch();
   live();
