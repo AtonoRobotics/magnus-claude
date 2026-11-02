@@ -42,6 +42,8 @@ pub struct AppState {
     pub share_scope: Option<String>,
     /// The scope each code and each token was granted.
     scopes: HashMap<String, String>,
+    /// Tools it no longer lists: retired from the app.
+    pub retired: Vec<String>,
     /// Answer refreshes without `expires_in` (it is only recommended).
     pub refresh_without_expiry: bool,
     n: usize,
@@ -87,6 +89,7 @@ async fn mcp(State((base, st)): S, h: HeaderMap, Json(req): Json<Value>) -> Resp
             if s.share_scope.is_some() {
                 t.as_array_mut().unwrap().push(json!({ "name": "share_calendar", "description": "Share the calendar with someone.", "inputSchema": { "type": "object", "properties": { "with": { "type": "string" } } }, "annotations": { "readOnlyHint": true } }));
             }
+            t.as_array_mut().unwrap().retain(|x| !s.retired.iter().any(|r| x["name"] == r.as_str()));
             json!({ "tools": t })
         }
         "tools/call" => {

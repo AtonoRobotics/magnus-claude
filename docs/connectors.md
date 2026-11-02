@@ -144,7 +144,7 @@ one commit), 2026-11-02.
 - [x] One session per user per connection, carrying that user's token, never shared (`connectors.rs`: carol's task uses carol's sign-in)
 - [x] The appliance lists the server's tools (`run/mod.rs` `live_app_tools`)
 - [ ] It follows `list_changed` notifications
-- [ ] A retired tool leaves the agent at once (a pinned tool is still offered after the server stops listing it, `run/mod.rs` `tools_for`)
+- [x] A retired tool leaves the agent at once (a tool the app's live list no longer holds is not offered; its pin is kept, so its return unchanged needs no new review; `retired_tools.rs`)
 - [x] A new or changed tool reaches the agent only once classified, by the next manifest version or, for an admin-added server, by the admin (`inv1_boundary.rs` `a_changed_tool_definition_is_disabled_and_hidden`, `tools_the_owner_has_not_classified_cannot_run`)
 - [x] Server annotations inform the classification and do not replace it (`connectors.rs` `suggested_risk`; `connectors.rs` test)
 - [x] Scope challenges: a call needing an ungranted scope (GitHub's server returns a challenge) becomes a Connect card asking for the added scope, and the call proceeds once approved (`agent_apps.rs` `a_call_that_needs_more_access_asks_for_it_with_a_card_and_goes_through_once_approved`: MCP's `insufficient_scope` challenge, the card in the thread, sign-in asking for the added scope, the call through)

@@ -880,3 +880,10 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 
 - The connectors spec, How the agent uses connectors: "Writing a connection's content into shared org memory passes policy like any other action." Nothing needed building. `knowledge_add` is a tool like any other, so the boundary puts it to the Cedar policy with the run's taint. What it files is readable only by whom its sources allow. No test showed the first part for an app's content.
 - Test: `filing_an_apps_private_content_in_the_knowledge_base_is_decided_by_policy` (app_content_policy.rs). An org rule forbids `knowledge_add` when the run holds private content. After Alice's calendar is read through her app, filing is refused by that rule and nothing is filed. Filing from a public web page goes through.
+
+## A retired tool leaves the agent at once (2026-11-02, `retired-tools`)
+
+- The connectors spec, Remote MCP connectors: "A retired tool leaves the agent at once." A run was offered every pinned tool of a connected app, including one the app no longer listed. The agent then called a tool the app had retired, and the call failed at the app.
+- When the app's live list of tools is read (kept two seconds), a tool not on it is not offered. When the list cannot be read, the pinned tools are still offered as before: an app that cannot be reached fails its calls, and nothing is learned about which tools it retired.
+- The pin stays. A tool that comes back unchanged is offered again with no new review, and one that comes back changed waits for review as any changed definition does (B10).
+- Test: `a_tool_the_app_no_longer_lists_leaves_the_agent_at_once` (retired_tools.rs): create_event offered, retired and not offered, listed again and offered, with no new review.
