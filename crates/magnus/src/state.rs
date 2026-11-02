@@ -378,6 +378,17 @@ pub struct MemoryEntry {
     pub at: DateTime<Utc>,
     /// The event that wrote it: where its content is recalled from.
     pub seq: i64,
+    /// How the person wants Magnus to work with them: in each of their runs.
+    pub relationship: bool,
+    /// When it was marked no longer true, by which event (its reason).
+    pub invalidated: Option<(i64, DateTime<Utc>)>,
+}
+
+impl MemoryEntry {
+    /// Where it is in its person's memory.
+    pub fn path(&self) -> String {
+        format!("/users/{}/memory/{}.md", self.person, self.id)
+    }
 }
 
 /// A document in the org context bundle, as the kernel guards it: where it
@@ -396,6 +407,10 @@ pub struct BundleDoc {
     /// The person whose run wrote the current version, under whose grant
     /// its sources were read.
     pub writer: Option<String>,
+    /// The runs that wrote its versions: where its text also is.
+    pub runs: Vec<String>,
+    /// Marked no longer true since its last version, by which event.
+    pub invalidated: Option<(i64, DateTime<Utc>)>,
 }
 
 impl BundleDoc {
@@ -615,6 +630,8 @@ enum Held {
     Project(Project),
     Memory(MemoryEntry),
     Knowledge(Box<KnowledgeEntry>),
+    /// A document of a person's own memory, under `/users/<person>/`.
+    Bundle(Box<BundleDoc>),
 }
 
 impl Trashed {
@@ -635,6 +652,7 @@ impl Trashed {
             Held::Project(_) => "project",
             Held::Memory(_) => "memory",
             Held::Knowledge(_) => "knowledge",
+            Held::Bundle(_) => "memory",
         }
     }
 
@@ -893,6 +911,12 @@ impl State {
             _ => match () {
                 _ if self.files.get(item).is_some_and(|f| f.person == person) => true,
                 _ if self.projects.get(item).is_some_and(|p| p.person == person) => true,
+                _ if item.starts_with('/') => {
+                    // A document of the person's own memory; its text is
+                    // also in the runs that wrote it (invariant 3).
+                    let d = self.bundle.get(item).filter(|d| d.owner_user.as_deref() == Some(person)).ok_or(NotFound)?;
+                    return if d.runs.iter().all(|r| ended(r)) { Ok(()) } else { Err(Running) };
+                }
                 _ if self.memory.iter().any(|m| m.id == item && m.person == person) => {
                     // Deleting a memory deletes where it was written in its
                     // run, so the run must have ended (invariant 3).
@@ -948,6 +972,10 @@ impl State {
         if let Some(p) = self.projects.remove(item) {
             return Some((p.name.clone(), None, Held::Project(p)));
         }
+        if item.starts_with('/') {
+            let d = self.bundle.remove(item)?;
+            return Some((d.path.clone(), None, Held::Bundle(Box::new(d))));
+        }
         if let Some(i) = self.memory.iter().position(|m| m.id == item) {
             // Its title in the trash is its fact, recalled when listed.
             let m = self.memory.remove(i);
@@ -998,9 +1026,15 @@ impl State {
                 let text = serde_json::to_string(fact).unwrap_or_default();
                 let text = text.trim_matches('"').to_string();
                 let containing = ["intent", "tool_result", "model_reply", "memory_pass"].into_iter().map(|k| (k, m.run.clone(), text.clone())).filter(|_| !fact.trim().is_empty()).collect();
-                Holding { containing, ..named(vec!["memory"], "id", item) }
+                Holding { containing, matches: vec![("memory_invalidated", "path", m.path())], ..named(vec!["memory"], "id", item) }
             }
             Held::Knowledge(_) => named(vec!["knowledge_added"], "id", item),
+            // Every version, and the calls that wrote or read it in the
+            // runs that wrote it.
+            Held::Bundle(d) => {
+                let containing = d.runs.iter().flat_map(|r| ["intent", "tool_result", "model_reply"].into_iter().map(move |k| (k, r.clone(), d.path.clone()))).collect();
+                Holding { containing, ..named(vec!["bundle_written", "memory_invalidated"], "path", item) }
+            }
         })
     }
 
@@ -1040,6 +1074,9 @@ impl State {
             }
             Held::Knowledge(k) => {
                 self.knowledge.insert(k.id.clone(), *k);
+            }
+            Held::Bundle(d) => {
+                self.bundle.insert(d.path.clone(), *d);
             }
         }
     }
@@ -1804,8 +1841,13 @@ impl State {
             }
             Ev::BundleWritten { path, version, doc_kind: kind, scope, owner_user, actor, run, label, sources, .. } => {
                 let writer = run.as_ref().and_then(|r| self.runs.get(r)).map(|r| r.person.clone());
-                let d = self.bundle.entry(path.clone()).or_insert_with(|| BundleDoc { path: path.clone(), kind: kind.clone(), scope: scope.clone(), owner_user: owner_user.clone(), label: *label, sources: vec![], versions: vec![], writer: None });
+                let d = self.bundle.entry(path.clone()).or_insert_with(|| BundleDoc { path: path.clone(), kind: kind.clone(), scope: scope.clone(), owner_user: owner_user.clone(), label: *label, sources: vec![], versions: vec![], writer: None, runs: vec![], invalidated: None });
                 d.writer = writer;
+                if let Some(r) = run.as_ref().filter(|r| !d.runs.contains(r)) {
+                    d.runs.push(r.clone());
+                }
+                // A new version says what is true now.
+                d.invalidated = None;
                 d.kind = kind.clone();
                 d.scope = scope.clone();
                 d.owner_user = owner_user.clone();
@@ -1816,7 +1858,7 @@ impl State {
             Ev::BundleRemoved { path } => {
                 self.bundle.remove(path);
             }
-            Ev::Memory { id, person, run, label, sources, by, .. } => self.memory.push(MemoryEntry {
+            Ev::Memory { id, person, run, label, sources, by, relationship, .. } => self.memory.push(MemoryEntry {
                 id: id.clone(),
                 person: person.clone(),
                 run: run.clone(),
@@ -1825,7 +1867,17 @@ impl State {
                 by: by.clone(),
                 at: e.at,
                 seq: e.seq,
+                relationship: *relationship,
+                invalidated: None,
             }),
+            Ev::MemoryInvalidated { person, path, .. } => {
+                let mark = Some((e.seq, e.at));
+                if let Some(m) = self.memory.iter_mut().find(|m| m.person == *person && m.path() == *path) {
+                    m.invalidated = mark;
+                } else if let Some(d) = self.bundle.get_mut(path).filter(|d| d.owner_user.as_deref() == Some(person.as_str())) {
+                    d.invalidated = mark;
+                }
+            }
         }
     }
 

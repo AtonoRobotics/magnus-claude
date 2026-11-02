@@ -810,6 +810,12 @@ pub enum Ev {
         /// Who filed it: the run's model (None) or the memory pass.
         #[serde(default)]
         by: Option<String>,
+        /// How the person wants Magnus to work with them (their tone, what
+        /// they handed over, standing decisions): in every run of theirs by
+        /// code, never searched for (behavior spec, Per-user relationship;
+        /// owner's ruling on the org context spec).
+        #[serde(default)]
+        relationship: bool,
     },
     /// One model call of the memory pass after a chat turn or a run ended.
     MemoryPass {
@@ -900,6 +906,15 @@ pub enum Ev {
         script: String,
         usage: magnus_adapter_proto::Usage,
     },
+    /// Something in a person's memory (a fact, or a document under
+    /// `/users/<person>/`) is no longer true: kept, but out of searches and
+    /// of every later run's context (org context spec, `memory.invalidate`).
+    MemoryInvalidated {
+        person: String,
+        path: String,
+        #[serde(default)]
+        reason: String,
+    },
     /// The person had a memory forgotten; it is never read back again.
     MemoryForgotten {
         id: String,
@@ -949,6 +964,7 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("verdict", &["note"]),
     ("graded", &["details"]),
     ("memory", &["fact", "topic"]),
+    ("memory_invalidated", &["reason"]),
     ("knowledge_added", &["title", "text", "source", "verification", "value"]),
     ("bundle_written", &["frontmatter", "body"]),
     ("knowledge_extraction", &["reply"]),

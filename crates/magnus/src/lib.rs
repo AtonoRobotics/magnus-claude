@@ -50,5 +50,6 @@ pub mod tls;
 pub mod tools;
 pub mod trash;
 pub mod update;
+pub mod user_memory;
 pub mod vault;
 pub mod web;

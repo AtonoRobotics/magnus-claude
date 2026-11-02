@@ -137,6 +137,14 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "computer_scroll", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_write", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_search", app: "memory", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // The rest of the person's own memory (org context spec, per-user
+    // memory): reads carry the taint it was written under; marking
+    // something no longer true, or forgetting it, stays on the appliance
+    // and is undone from the trash.
+    Builtin { name: "memory_list", app: "memory", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "memory_read", app: "memory", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "memory_invalidate", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "memory_forget", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // The company knowledge base. A search's result carries the taint of
     // what it returns; filing research changes nothing outside the appliance.
     Builtin { name: "knowledge_search", app: "knowledge", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -407,8 +415,16 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
         ToolSpec {
             name: "memory_write".into(),
             description: d("memory_write"),
-            input_schema: obj(json!({ "fact": { "type": "string" }, "topic": { "type": "string" } }), &["fact"]),
+            input_schema: obj(json!({ "fact": { "type": "string" }, "topic": { "type": "string" }, "relationship": { "type": "boolean", "description": d("memory_write.relationship") } }), &["fact"]),
         },
+        ToolSpec { name: "memory_list".into(), description: d("memory_list"), input_schema: obj(json!({}), &[]) },
+        ToolSpec { name: "memory_read".into(), description: d("memory_read"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
+        ToolSpec {
+            name: "memory_invalidate".into(),
+            description: d("memory_invalidate"),
+            input_schema: obj(json!({ "path": { "type": "string" }, "reason": { "type": "string" } }), &["path"]),
+        },
+        ToolSpec { name: "memory_forget".into(), description: d("memory_forget"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
         ToolSpec { name: "bundle_read".into(), description: d("bundle_read"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
         ToolSpec {
             name: "bundle_search".into(),
