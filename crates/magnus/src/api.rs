@@ -569,7 +569,7 @@ const UI: &[(&str, &str, &[u8])] = &[
     ("app.js", "text/javascript; charset=utf-8", include_bytes!("../../../desktop/ui/app.js")),
     ("dev.js", "text/javascript; charset=utf-8", include_bytes!("../../../desktop/ui/dev.js")),
 ];
-const FONTS: &[(&str, &[u8])] = &[
+pub(crate) const FONTS: &[(&str, &[u8])] = &[
     ("inter-latin-wght-normal.woff2", include_bytes!("../../../desktop/ui/fonts/inter-latin-wght-normal.woff2")),
     ("inter-latin-ext-wght-normal.woff2", include_bytes!("../../../desktop/ui/fonts/inter-latin-ext-wght-normal.woff2")),
     ("ibm-plex-mono-latin-400-normal.woff2", include_bytes!("../../../desktop/ui/fonts/ibm-plex-mono-latin-400-normal.woff2")),

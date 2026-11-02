@@ -78,6 +78,19 @@ async fn provider_up(c: &Console) -> bool {
     matches!(tokio::time::timeout(std::time::Duration::from_secs(3), c.idp.http.get(&url).send()).await, Ok(Ok(r)) if r.status().is_success())
 }
 
+/// Each certificate the appliance serves: what it is for, when it expires,
+/// and how many whole days are left.
+pub fn certificates(c: &Console) -> Vec<Value> {
+    let now = chrono::Utc::now();
+    c.certs
+        .iter()
+        .map(|(what, path)| {
+            let end = super::cert::not_after(path);
+            json!({ "what": what, "path": path, "not_after": end, "days_left": end.map(|e| (e - now).num_days()), "readable": end.is_some() })
+        })
+        .collect()
+}
+
 /// The status strip, the cards and the alerts, each alert naming where it
 /// is fixed.
 pub async fn overview(State(c): State<Arc<Console>>) -> Response {
@@ -95,8 +108,17 @@ pub async fn overview(State(c): State<Arc<Console>>) -> Response {
     if h["disk_used"].as_f64().is_some_and(|d| d > 0.85) {
         alerts.push(json!({ "what": format!("The disk is {:.0}% full.", h["disk_used"].as_f64().unwrap_or(0.0) * 100.0), "fix": "#/operations/health" }));
     }
+    let certs = certificates(&c);
+    for x in &certs {
+        if let Some(days) = x["days_left"].as_i64().filter(|d| *d < 14) {
+            let what = x["what"].as_str().unwrap_or_default();
+            let when = if days < 0 { "has expired".to_string() } else if days == 0 { "expires today".to_string() } else { format!("expires in {days} day{}", if days == 1 { "" } else { "s" }) };
+            alerts.push(json!({ "what": format!("{what} {when}."), "fix": "#/operations/network" }));
+        }
+    }
     let k = k.unwrap_or(Value::Null);
     Json(json!({
+        "certificates": certs,
         "status": { "healthy": alerts.is_empty(), "kill_switch": k["kill_switch"], "version": k["version"] },
         "cards": { "running_tasks": k["running_tasks"], "waiting_tasks": k["waiting_tasks"], "signed_in": k["signed_in"], "knowledge_changes_24h": k["knowledge_changes_24h"] },
         "alerts": alerts,
