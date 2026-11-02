@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **A console sign-in is a step-up only with the password typed (admin console spec, Step-up; branch `step-up-typed`).** Found by the 2026-11-02 review of master against the owner's specs: a sign-in the provider let through on its own session counted as a fresh password, so it could release the kill switch or delete people. It now steps up first. The review's other findings, in order, are each their own pull request after this one.
 - **An app's content in the knowledge base passes policy (connectors spec; branch `app-content-policy`).** Proven by a test: the organisation's rule against filing private content refuses filing what a person's calendar said, and lets public content through.
 - **Tools loaded on demand (connectors spec, How the agent uses connectors; branch `tool-search`).** With many apps connected, a run is no longer handed every tool at once: past 40 tools it searches them with `find_tools`, and what it finds is offered, with its full definition, from its next step.
 - **The app's card in approvals (connectors spec, The connector card; branch `approval-app-card`).** A decision about an app's action shows the app's card as the person whose task it is stands with it: connected, or one button to sign in again or approve more access. Whoever else decides it sees where that person stands, and no button of theirs.
