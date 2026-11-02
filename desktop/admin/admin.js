@@ -317,18 +317,155 @@ async function overviewView(view) {
 
 // ---- Operations --------------------------------------------------------
 
-async function operationsView(view) {
-  view.innerHTML = `<h1>Operations</h1><h2>Kill switch</h2><div id="ops-kill"></div><h2 id="health">Health</h2><div id="ops-health"></div>`;
-  UI.loading($("#ops-kill", view), "the kill switch");
-  UI.loading($("#ops-health", view), "the appliance's health");
-  let k, h;
-  try { [k, h] = await Promise.all([api("GET", "/kill-switch"), api("GET", "/health")]); }
-  catch (e) { return UI.error($("#ops-health", view), "Operations could not be read.", e, () => operationsView(view)); }
-  $("#ops-kill", view).innerHTML = `<p>${k.engaged ? `<strong>On.</strong> Engaged by ${esc(who(k.by))}${k.at ? ` at ${esc(when(k.at))}` : ""}.` : `Off${k.by ? `. Last moved by ${esc(who(k.by))}${k.at ? ` at ${esc(when(k.at))}` : ""}` : ""}.`}</p>
-    <dl class="kv small"><dt>Tasks halted</dt><dd>${esc(k.tasks_halted)}</dd><dt>Schedules held</dt><dd>${esc(k.schedules_held)}</dd><dt>Sign-ins revoked</dt><dd>${esc(k.sign_ins_revoked)}</dd></dl>`;
-  $("#ops-health", view).innerHTML = `<ul class="ad-services">${h.services.map(s => `<li><span class="ad-dot ${s.up ? "ok" : "down"}"></span> ${esc(s.name)} <span class="small muted">${s.up ? "answering" : "not answering"}</span></li>`).join("")}</ul>
-    <dl class="kv small"><dt>Load</dt><dd>${esc(h.host.load ?? "–")} on ${esc(h.host.cpus)} processors</dd><dt>Memory used</dt><dd>${pct(h.host.memory_used)}</dd><dt>Disk used</dt><dd>${pct(h.host.disk_used)}</dd><dt>Tasks running</dt><dd>${esc(h.running_tasks ?? "–")}</dd></dl>
+const OPS_TABS = [["kill-switch", "Kill switch"], ["modules", "Modules"], ["providers", "Model providers"], ["health", "Health"], ["updates", "Updates"], ["network", "Network"]];
+
+function operationsView(view, rest) {
+  const tab = OPS_TABS.some(([k]) => k === rest[0]) ? rest[0] : "kill-switch";
+  if (!$("#ops-tabs", view)) view.innerHTML = `<h1>Operations</h1><nav class="ad-tabs" id="ops-tabs" aria-label="Operations">${OPS_TABS.map(([k, l]) => `<a href="#/operations/${k}" data-tab="${k}">${l}</a>`).join("")}</nav><div id="ops"></div>`;
+  for (const a of $$("#ops-tabs a", view)) { if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
+  const box = $("#ops", view);
+  box.innerHTML = "";
+  UI.closePanel();
+  return ({ "kill-switch": opsKill, modules: opsModules, providers: opsProviders, health: opsHealth, updates: opsUpdates, network: opsNetwork })[tab](box);
+}
+
+// Operations › Kill switch: its state, who moved it and when, and exactly
+// what it stopped. Release needs a fresh password.
+async function opsKill(box) {
+  UI.loading(box, "the kill switch");
+  let k;
+  try { k = await api("GET", "/kill-switch"); } catch (e) { return UI.error(box, "The kill switch could not be read.", e, () => opsKill(box)); }
+  box.innerHTML = `<p>${k.engaged ? `<span class="chip bad">On</span> Engaged by ${esc(who(k.by))}${k.at ? ` at ${esc(when(k.at))}` : ""}.` : `<span class="chip ok">Off</span>${k.by ? ` Last moved by ${esc(who(k.by))}${k.at ? ` at ${esc(when(k.at))}` : ""}.` : ""}`}</p>
+    <dl class="kv small"><dt>Tasks halted</dt><dd>${esc(k.tasks_halted)}</dd><dt>Schedules held</dt><dd>${esc(k.schedules_held)}</dd><dt>MicroVMs frozen</dt><dd>${esc(k.microvms_frozen ?? 0)} <span class="muted">(stopped, their disks kept)</span></dd><dt>MicroVMs running</dt><dd>${esc(k.microvms_running ?? 0)}</dd><dt>Sign-ins revoked</dt><dd>${esc(k.sign_ins_revoked)}</dd></dl>
+    ${k.engaged ? `<div class="row ad-bar"><button class="primary" id="ops-release">Release</button></div><p class="small muted">Release asks for your password again. Nothing stopped goes on by itself: each person is told, and continues their own.</p>`
+      : `<p class="small muted">"Stop all agents" in the top bar engages it at once, from any screen. It halts every task, holds every schedule, freezes every microVM, seals the vault and revokes every sign-in to apps.</p>`}`;
+  const r = $("#ops-release", box);
+  if (r) r.onclick = () => act("POST", "/kill-switch/release", null, async () => { UI.toast("Agents may run again."); drawKill(await api("GET", "/kill-switch")); opsKill(box); });
+}
+
+// Operations › Modules: Magnus's run modules, what each provides, on or off
+// for the organisation.
+async function opsModules(box) {
+  UI.loading(box, "the modules");
+  let v;
+  try { v = await api("GET", "/modules"); } catch (e) { return UI.error(box, "The modules could not be read.", e, () => opsModules(box)); }
+  box.innerHTML = `<p class="small muted">Modules help a model where it is weak. They come with Magnus's release, so a new one arrives with an update; here each is turned on or off for every task that starts from now. Tasks already running keep theirs.</p>
+    <div class="ad-scroll"><table class="t small"><thead><tr><th>Module</th><th>Version</th><th>Status</th><th>What it provides</th><th class="n">Acted</th><th></th></tr></thead><tbody>${v.modules.map(m => `<tr>
+      <td class="mono">${esc(m.name)}</td><td class="mono">${esc(m.version)}</td>
+      <td><span class="chip ${m.on ? "ok" : ""}">${m.on ? "On" : "Off"}</span>${m.set_by_admin ? ` <span class="small muted">set here</span>` : ""}</td>
+      <td>For ${esc(m.provides)}${m.escalate_to ? ` (to ${esc(m.escalate_to)})` : ""}</td><td class="n">${esc(m.acted)}</td>
+      <td><button class="link small" data-mod="${esc(m.name)}" data-on="${m.on ? "false" : "true"}">${m.on ? "Turn off" : "Turn on"}</button>${m.set_by_admin ? ` <button class="link small" data-mod="${esc(m.name)}" data-on="null">As configured</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
+  for (const b of $$("[data-mod]", box)) b.onclick = () => {
+    const on = JSON.parse(b.dataset.on), was = v.modules.find(m => m.name === b.dataset.mod);
+    act("PATCH", `/modules/${b.dataset.mod}`, { on }, () => {
+      UI.toast(on === null ? `${b.dataset.mod} is as configured.` : `${b.dataset.mod} is ${on ? "on" : "off"} for new tasks.`, () => act("PATCH", `/modules/${b.dataset.mod}`, { on: was.set_by_admin ? was.on : null }, () => opsModules(box)));
+      opsModules(box);
+    });
+  };
+}
+
+// Operations › Model providers: the appliance's own, never anyone's
+// credentials: enabled, where they answer, their models, a connection
+// test, the last error.
+async function opsProviders(box) {
+  UI.loading(box, "the model providers");
+  let v;
+  try { v = await api("GET", "/providers"); } catch (e) { return UI.error(box, "The model providers could not be read.", e, () => opsProviders(box)); }
+  box.innerHTML = v.providers.length ? v.providers.map(p => `<section class="card" data-p="${esc(p.id)}">
+      <div class="spread"><h2>${esc(p.id)} ${p.default ? `<span class="chip sch">Default</span>` : ""}</h2>
+        <span><span class="chip ${!p.enabled ? "" : p.answers ? "ok" : "bad"}">${!p.enabled ? "Disabled" : p.answers ? "Answering" : "Not answering"}</span></span></div>
+      <dl class="kv small"><dt>Program</dt><dd class="mono">${esc(p.program || "")}${p.running ? ` (${esc(p.running.adapter)} ${esc(p.running.version)})` : ""}</dd>
+        <dt>Endpoint</dt><dd class="mono ad-wrap">${esc(p.endpoint || "the provider's own")}</dd>
+        <dt>Models</dt><dd>${p.models ? (p.models.length ? p.models.map(m => `<span class="mono">${esc(m)}</span>`).join(", ") : "none listed") : `<span class="error">${esc(p.error || "")}</span>`}</dd>
+        ${p.default ? `<dt>New tasks run on</dt><dd class="mono">${esc(p.default_model)}</dd>` : ""}
+        <dt>Last checked</dt><dd>${p.conformance ? `${p.conformance.passed ? "passed" : "failed"} the conformance suite on ${esc(p.conformance.model)}` : "never"}</dd>
+        <dt>Last error</dt><dd>${p.last_error ? `${esc(p.last_error.error)} <span class="muted">${esc(when(p.last_error.at))}</span>` : "none"}</dd></dl>
+      <div class="row ad-bar"><button data-test="${esc(p.id)}">Test the connection</button>
+        ${p.enabled ? `<button class="danger" data-off="${esc(p.id)}">Disable</button>` : `<button data-on="${esc(p.id)}">Enable</button>`}
+        ${p.models && p.models.length ? `<label class="row small">New tasks run on <select data-default="${esc(p.id)}"><option value="">—</option>${p.models.map(m => `<option ${p.default && m === p.default_model ? "selected" : ""}>${esc(m)}</option>`).join("")}</select></label>` : ""}</div>
+      <p class="small" data-result="${esc(p.id)}" role="status"></p></section>`).join("")
+    : UI.empty("No model provider is set up.", "Providers are the appliance's adapters, set in its config.");
+  for (const b of $$("[data-test]", box)) b.onclick = async () => {
+    const out = $(`[data-result="${b.dataset.test}"]`, box);
+    out.textContent = "Asking it for its models…";
+    try { const r = await api("POST", `/providers/${b.dataset.test}/test`); out.innerHTML = r.ok ? `<span class="chip ok">Answered</span> in ${esc(r.ms)} ms with ${esc(r.models.length)} models.` : `<span class="chip bad">No answer</span> ${esc(r.error)} (${esc(r.ms)} ms)`; }
+    catch (e) { out.textContent = e.message; }
+  };
+  for (const b of $$("[data-off]", box)) b.onclick = () => act("PATCH", `/providers/${b.dataset.off}`, { enabled: false }, () => { UI.toast(`${b.dataset.off} is disabled: its models are offered to no one.`, () => act("PATCH", `/providers/${b.dataset.off}`, { enabled: true }, () => opsProviders(box))); opsProviders(box); });
+  for (const b of $$("[data-on]", box)) b.onclick = () => act("PATCH", `/providers/${b.dataset.on}`, { enabled: true }, () => { UI.toast(`${b.dataset.on} is enabled.`); opsProviders(box); });
+  for (const sel of $$("[data-default]", box)) sel.onchange = () => sel.value && act("PATCH", `/providers/${sel.dataset.default}`, { default_model: sel.value }, () => { UI.toast(`New tasks run on ${sel.value}.`); opsProviders(box); });
+}
+
+// Operations › Health: each service, the microVMs, the machine and recent
+// errors, kept live by the stream.
+async function opsHealth(box) {
+  UI.loading(box, "the appliance's health");
+  let h;
+  try { h = await api("GET", "/health"); } catch (e) { return UI.error(box, "The appliance's health could not be read.", e, () => opsHealth(box)); }
+  box.innerHTML = `<ul class="ad-services">${h.services.map(s => `<li><span class="ad-dot ${s.up === null ? "" : s.up ? "ok" : "down"}"></span> ${esc(s.name)} <span class="small muted">${s.up === null ? esc(s.note || "not set up") : s.up ? "answering" : "not answering"}</span></li>`).join("")}</ul>
+    <dl class="kv small" id="ops-live"><dt>Tasks running</dt><dd>${esc(h.running_tasks ?? "–")}</dd><dt>MicroVMs running</dt><dd>${esc(h.microvms_running ?? 0)}</dd><dt>Load</dt><dd>${esc(h.host.load ?? "–")} on ${esc(h.host.cpus)} processors</dd><dt>Memory used</dt><dd>${pct(h.host.memory_used)}</dd><dt>Disk used</dt><dd>${pct(h.host.disk_used)}</dd></dl>
     <h3>Recent errors</h3>${(h.recent_errors || []).length ? `<ul class="small">${h.recent_errors.map(e => `<li>${esc(e.reason || "failed")} <span class="muted">· ${esc(e.person)} · ${esc(when(e.at))}</span></li>`).join("")}</ul>` : UI.empty("No recent errors.")}`;
+  const on = e => {
+    if (!document.body.contains(box)) return document.removeEventListener("ad-status", on);
+    const l = $("#ops-live", box);
+    if (l) { l.children[1].textContent = e.detail.running_tasks ?? "–"; l.children[3].textContent = e.detail.microvms_running ?? 0; }
+  };
+  document.addEventListener("ad-status", on);
+}
+
+// Operations › Updates: this version and any available, with notes;
+// installing and going back need a fresh password. The desktop app's
+// channels, each with its published version.
+async function opsUpdates(box) {
+  UI.loading(box, "the updates");
+  let u;
+  try { u = await api("GET", "/updates"); } catch (e) { return UI.error(box, "The updates could not be read.", e, () => opsUpdates(box)); }
+  box.innerHTML = `<dl class="kv small"><dt>Running</dt><dd class="mono">${esc(u.version)}</dd><dt>Latest release</dt><dd class="mono">${esc(u.latest?.version ?? "none found")}</dd>
+      <dt>Installs by itself</dt><dd>${u.automatic ? "yes, with rollback if it fails its checks" : "no"}</dd>${u.previous ? `<dt>Kept to go back to</dt><dd class="mono">${esc(u.previous)}</dd>` : ""}
+      ${u.updating ? `<dt>Now</dt><dd>${u.updating.rollback ? "going back" : "installing"} ${esc(u.updating.from)} → ${esc(u.updating.to)}</dd>` : ""}
+      ${u.last ? `<dt>Last</dt><dd>${esc(u.last.what)} ${esc(u.last.to)} ${u.last.detail ? `— ${esc(u.last.detail)}` : ""} <span class="muted">${esc(when(u.last.at))}</span></dd>` : ""}</dl>
+    ${u.available ? `<div class="card flat"><h3>${esc(u.latest.version)} is available</h3>${u.latest.notes ? `<p class="small ad-wrap">${esc(u.latest.notes)}</p>` : ""}<button class="primary" id="up-install">Install now…</button></div>` : `<p class="small"><span class="chip ok">Up to date</span></p>`}
+    ${u.previous ? `<div class="row ad-bar"><button id="up-back">Go back to ${esc(u.previous)}…</button></div>` : ""}
+    <h3>The desktop app</h3>
+    <table class="t small"><thead><tr><th>Channel</th><th>Published</th><th>Who gets it</th></tr></thead><tbody>${u.desktop.channels.map(c => `<tr><td>${esc(c.channel)}</td><td class="mono">${esc(c.published || "none")}</td><td>${esc(c.channel === u.desktop.everyone && c.channel !== "production" ? `${c.who}, and everyone else` : c.who === "everyone else" && u.desktop.everyone !== "production" ? "no one" : c.who)}</td></tr>`).join("")}</tbody></table>
+    <label class="row small">Everyone but the owner and testers follows <select id="up-channel">${["production", "test"].map(c => `<option ${c === u.desktop.everyone ? "selected" : ""}>${c}</option>`).join("")}</select></label>`;
+  const inst = $("#up-install", box);
+  if (inst) inst.onclick = async () => {
+    if (await UI.confirm({ title: `Install ${u.latest.version} now?`, body: "Magnus restarts on it; running tasks go on afterwards. If it fails its checks, it goes back by itself. It asks for your password again.", verb: "Install" }))
+      act("POST", "/updates/install", null, r => { UI.toast(r?.status === "installing" ? `Installing ${r.latest}.` : "Already up to date."); opsUpdates(box); });
+  };
+  const back = $("#up-back", box);
+  if (back) back.onclick = async () => {
+    if (await UI.confirm({ title: `Go back to ${u.previous}?`, body: "Magnus restarts on the release before this one, and does not install this one again by itself. It asks for your password again.", verb: "Go back", danger: true }))
+      act("POST", "/updates/rollback", null, () => { UI.toast(`Going back to ${u.previous}.`); opsUpdates(box); });
+  };
+  $("#up-channel", box).onchange = e => { const was = u.desktop.everyone; act("PATCH", "/updates/desktop-channel", { channel: e.target.value }, () => { UI.toast(`Everyone's app follows ${e.target.value}.`, () => act("PATCH", "/updates/desktop-channel", { channel: was }, () => opsUpdates(box))); opsUpdates(box); }); };
+}
+
+// Operations › Network: the tunnel and its public names, the console's own
+// name (never public), the subnets it takes connections from, and the
+// certificates. A change to the subnets needs a fresh password, and one
+// that would shut out your own address is refused.
+async function opsNetwork(box) {
+  UI.loading(box, "the network");
+  let n;
+  try { n = await api("GET", "/network"); } catch (e) { return UI.error(box, "The network could not be read.", e, () => opsNetwork(box)); }
+  box.innerHTML = `<h3>Tunnel</h3>
+    <p class="small">${!n.tunnel.configured ? "No tunnel is set up on this appliance." : n.tunnel.connected ? `<span class="chip ok">Connected</span>` : `<span class="chip bad">Not connected</span> People outside the organisation's network cannot reach Magnus.`}</p>
+    ${n.tunnel.public_hostnames.length ? `<p class="small">Its public names: ${n.tunnel.public_hostnames.map(h => `<span class="mono">${esc(h)}</span>`).join(", ")}. The console is never one of them.</p>` : ""}
+    <h3>The console</h3>
+    <dl class="kv small"><dt>Name</dt><dd class="mono">${esc(n.admin.hostname)}</dd>${n.admin.aliases.length ? `<dt>Also</dt><dd class="mono">${n.admin.aliases.map(esc).join(", ")}</dd>` : ""}<dt>Listens on</dt><dd class="mono">${n.admin.listen.map(esc).join(", ")}</dd><dt>Public</dt><dd>No: only the organisation's network and VPN reach it.</dd><dt>You are at</dt><dd class="mono">${esc(n.you)}</dd></dl>
+    <form id="net-allow" class="ad-form ad-narrow"><label>It takes connections only from <textarea name="allow" rows="3" spellcheck="false" class="mono">${esc(n.allow.join("\n"))}</textarea></label>
+      <p class="small muted">One subnet a line, such as 192.168.0.0/24, and the VPN's, such as 100.64.0.0/10. Never loopback. Saving asks for your password again.</p>
+      <p class="error" id="net-error" hidden></p><div class="row"><button class="primary">Save</button></div></form>
+    <h3>Certificates</h3>
+    <table class="t small"><thead><tr><th>For</th><th>Ends</th><th></th></tr></thead><tbody>${n.certificates.map(c => `<tr><td>${esc(c.what)}</td><td>${c.not_after ? esc(when(c.not_after)) : "unreadable"}</td><td>${c.days_left == null ? "" : c.days_left < 14 ? `<span class="chip bad">${esc(c.days_left)} days left</span>` : `<span class="chip ok">${esc(c.days_left)} days left</span>`}</td></tr>`).join("")}</tbody></table>`;
+  $("#net-allow", box).onsubmit = async e => {
+    e.preventDefault();
+    const allow = new FormData(e.target).get("allow").split(/[\n,]/).map(x => x.trim()).filter(Boolean);
+    try { await api("PATCH", "/network/allowlist", { allow }); UI.toast("The allowed subnets are saved."); opsNetwork(box); }
+    catch (err) { const el = $("#net-error", box); el.textContent = err.message; el.hidden = false; }
+  };
 }
 
 // ---- Security › Audit --------------------------------------------------
@@ -959,7 +1096,7 @@ const SECTIONS = {
   overview: view => overviewView(view),
   users: (view, rest) => usersView(view, rest[0], rest[1]),
   security: (view, rest) => securityView(view, rest),
-  operations: view => operationsView(view),
+  operations: (view, rest) => operationsView(view, rest),
 };
 
 function section() {
@@ -971,7 +1108,7 @@ function section() {
   let view = $("#view");
   // A different section starts its screen afresh; within one, the list
   // stays and only the panel changes.
-  const keep = name === "users" || name === "security";
+  const keep = name === "users" || name === "security" || name === "operations";
   if (!view || view.dataset.section !== `${name}/${parts[1] && !keep ? parts[1] : ""}`) {
     view?.remove();
     UI.closePanel();

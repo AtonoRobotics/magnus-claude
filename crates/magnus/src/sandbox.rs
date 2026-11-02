@@ -242,6 +242,17 @@ impl Sandboxes {
         result
     }
 
+    /// How many microVMs are running now.
+    pub async fn running(&self) -> usize {
+        self.vms.lock().await.len()
+    }
+
+    /// Whether a run's VM is stopped with its disk kept, to go on from where
+    /// it was (a suspended run's, a kill switch's).
+    pub fn kept(&self, run: &str) -> bool {
+        self.dir(run).join("workspace.ext4").exists()
+    }
+
     /// Stop the run's VM and keep its disk (suspend).
     pub async fn stop(&self, run: &str) {
         if let Some(vm) = self.vms.lock().await.remove(run) {

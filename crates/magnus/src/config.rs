@@ -146,6 +146,14 @@ pub struct Admin {
     /// the console's own key, and only after the admin's own check passes.
     #[serde(default = "admin_service_client")]
     pub service_client_id: String,
+    /// Where the tunnel (cloudflared) says whether it is connected: its
+    /// metrics address's `/ready`, on this machine. None: no tunnel here.
+    #[serde(default)]
+    pub tunnel_ready: Option<String>,
+    /// The names the tunnel serves to the internet (the user API and the
+    /// realm), shown under Operations › Network; the console is never one.
+    #[serde(default)]
+    pub public_hostnames: Vec<String>,
 }
 
 fn admin_service_client() -> String {

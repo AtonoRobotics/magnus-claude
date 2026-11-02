@@ -61,6 +61,15 @@ pub struct Console {
     /// The certificates the appliance serves, by what each is for: Overview
     /// warns two weeks before one expires.
     pub certs: Vec<(String, std::path::PathBuf)>,
+    /// The subnets connections may come from, as the listener checks them,
+    /// and as written: the config's, until an admin changes them.
+    pub allow: Arc<std::sync::RwLock<Vec<net::Subnet>>>,
+    pub allow_text: std::sync::RwLock<Vec<String>>,
+    /// Where the console listens, its tunnel's readiness address and the
+    /// tunnel's public names (Operations › Network).
+    pub listen: Vec<String>,
+    pub tunnel_ready: Option<String>,
+    pub public_hostnames: Vec<String>,
 }
 
 impl Console {
@@ -108,7 +117,7 @@ pub fn main() {
 pub async fn serve(cfg: Config) -> Result<()> {
     let a = cfg.admin.clone().context("magnus.toml has no [admin] section: the admin console needs its hostname, listen addresses, allowed subnets and certificate")?;
     let addrs = net::listen_addrs(&a.listen)?;
-    let allow = net::allowlist(&a.allow)?;
+    let allow = Arc::new(std::sync::RwLock::new(net::allowlist(&a.allow)?));
     anyhow::ensure!(valid_host(&a.hostname), "admin.hostname {:?} is not a hostname", a.hostname);
     for alias in &a.aliases {
         anyhow::ensure!(valid_host(alias), "admin.aliases: {alias:?} is not a hostname or an address");
@@ -136,10 +145,16 @@ pub async fn serve(cfg: Config) -> Result<()> {
             .into_iter()
             .filter_map(|(what, p)| p.map(|p| (what, p)))
             .collect(),
+        allow: allow.clone(),
+        allow_text: std::sync::RwLock::new(a.allow.clone()),
+        listen: a.listen.clone(),
+        tunnel_ready: a.tunnel_ready.clone(),
+        public_hostnames: a.public_hostnames.clone(),
     });
     // Lifetimes an admin set before this start.
     if let Ok(v) = console.kernel.call(axum::http::Method::GET, "/v1/admin/console-settings", None).await {
         signin::adopt(&console, &v);
+        ops::adopt_allow(&console, &v);
     }
     let l = net::Listener::bind(&addrs, allow, tls).await?;
     // tap_io gives the listener axum's connect-info: each request's source,
@@ -193,6 +208,17 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/api/v1/policy/sets/{id}/apply", axum::routing::post(policy::apply))
         .route("/api/v1/policy/sets/{id}/history", get(policy::history))
         .route("/api/v1/policy/sets/{id}/rollback", axum::routing::post(policy::rollback))
+        .route("/api/v1/modules", get(ops::modules).post(ops::module_package))
+        .route("/api/v1/modules/{id}", axum::routing::patch(ops::set_module).delete(ops::module_package))
+        .route("/api/v1/providers", get(ops::providers))
+        .route("/api/v1/providers/{id}", axum::routing::patch(ops::set_provider))
+        .route("/api/v1/providers/{id}/test", axum::routing::post(ops::test_provider))
+        .route("/api/v1/updates", get(ops::updates))
+        .route("/api/v1/updates/install", axum::routing::post(ops::install))
+        .route("/api/v1/updates/rollback", axum::routing::post(ops::rollback))
+        .route("/api/v1/updates/desktop-channel", axum::routing::patch(ops::desktop_channel))
+        .route("/api/v1/network", get(ops::network))
+        .route("/api/v1/network/allowlist", axum::routing::patch(ops::set_allowlist))
         .route("/api/v1/audit", get(audit_list))
         .route("/api/v1/audit.csv", get(audit_csv))
         .route("/api/v1/{*rest}", axum::routing::any(api_not_found))

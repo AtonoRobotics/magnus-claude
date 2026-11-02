@@ -701,3 +701,30 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
   - each change is audited;
   - both screens in every look and at phone width.
 - Tests: `the_schema_parses_and_the_default_policy_fits_it` and `a_problem_names_its_line_and_column` (policy_admin.rs).
+
+## The admin console's Operations (2026-11-02, `admin-operations`)
+
+- **Kill switch**: besides the tasks halted, schedules held and sign-ins revoked, it says how many microVMs it froze (a run it stopped whose VM is stopped with its disk kept) and how many run now. Release, from here as from the banner, needs a fresh password.
+- **Modules**: Magnus's run modules (the verifier, the lost-run reset, escalation, the memory pass), each with what it provides, its version (Magnus's), whether it is on, and how often it acted. An admin turns one on or off for the organisation (`ModuleSet`), on top of the config, for runs that start from then (K9: running tasks keep theirs).
+  - The spec's "install from a package file" and "remove" have nothing to act on: Magnus's modules are part of its release (owner's ruling 22 keeps "module" for these), so a new one arrives with an update. The console says so; both answer 409.
+- **Model providers**: the appliance's adapters, each with whether it is enabled and answering, its program, its endpoint, the models it offers now, its last conformance run, and the last error a run met on it. Settings whose name holds key, secret, token, password or credential are never shown. The connection test asks it for its models and says how long that took.
+  - An admin disables or enables one (`ProviderSet`; a disabled provider's models are offered to no one), or makes one of its models the default for new tasks.
+  - The default model's provider cannot be disabled until another default is chosen.
+- **Health**: the tunnel (cloudflared) beside the other services, when `admin.tunnel_ready` names its readiness address (else "not set up"), and the microVMs running. Both are live through the stream.
+- **Updates**: the version running, the latest release with its notes, whether it is available, what is going on and what happened last, and the release kept to go back to.
+  - Install now and go back each need a fresh password (owner's ruling 6: automatic updates stay; step-up is for a manual install or a rollback).
+  - The desktop app's channels, each with its published version and who gets it. An admin sets the channel everyone but the owner and testers follows (`DesktopChannelSet`).
+- **Network**: the tunnel's state and its public names (`admin.public_hostnames`; the console is never one), the console's own name, aliases and addresses, the admin's own address, and every certificate with when it ends.
+  - The allowlist is changed from here with a fresh password, and refused when it would leave out the admin's own address, or take in loopback. It takes effect at the next connection, is kept in the log (`ConsoleSettings.allow`), and is taken by the console at its next start.
+- **Overview** now shows whether the tunnel is connected, and alerts when it is not and when an enabled model provider does not answer.
+- Test: `root_runs_the_appliance_modules_providers_updates_and_network_from_operations` (admin_operations.rs), against Keycloak:
+  - the kill switch counts microVMs;
+  - the verifier is turned off and back to the config's, and a module package is refused;
+  - providers are listed and tested, and the default's cannot be disabled;
+  - the desktop channel is set;
+  - the network shows the console's subnets and no tunnel, and Health names the tunnel and the microVMs;
+  - with the step-up lapsed, install, rollback and the allowlist all answer `step_up_required`;
+  - with a fresh password, install answers and rollback has nothing kept;
+  - an allowlist that shuts out the admin's own address is refused, one with loopback is invalid, and a wider one is saved with the console still answering;
+  - each change is audited;
+  - the screens in every look and at phone width.

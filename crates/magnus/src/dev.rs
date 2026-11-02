@@ -121,7 +121,7 @@ async fn modules(AxState(k): K, h: HeaderMap) -> Response {
                 .iter()
                 .map(|key| {
                     let (a, m) = key.split_once('/').unwrap_or((key, ""));
-                    let (on, to) = k.cfg.modules_for(a, m);
+                    let (on, to) = k.modules_for(a, m);
                     let v = if md.name == "escalation" { json!({ "on": on[md.name], "escalate_to": to }) } else { json!({ "on": on[md.name] }) };
                     (key.clone(), v)
                 })
@@ -498,7 +498,7 @@ async fn add_trial(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Json(b):
     // The same trial may run once on each model and module setting, to compare them.
     let tag = ExperimentTag { id, case: case.into(), trial: trial as u32 };
     let on = model.clone().unwrap_or_else(|| k.default_model());
-    let (mut want, _) = k.cfg.modules_for(&on.0, &on.1);
+    let (mut want, _) = k.modules_for(&on.0, &on.1);
     want.extend(modules.clone());
     let dup = k.read(|s| {
         s.runs.values().any(|r| {

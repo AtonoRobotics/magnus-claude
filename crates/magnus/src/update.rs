@@ -441,20 +441,27 @@ pub fn desktop_manifest(cfg: &Config, origin: &str, channel: &str) -> Option<Val
 /// A pre-release older than `MIN_APP` cannot sign in at all, so it gets
 /// production: everyone's builds, and its only way forward.
 pub fn assigned_channel(k: &Kernel, h: &HeaderMap) -> Option<&'static str> {
+    // Everyone else's, as an admin set it (Operations › Updates).
+    let everyone = k.read(|s| s.desktop_channel.clone()).and_then(|c| CHANNELS.iter().copied().find(|x| *x == c)).unwrap_or("production");
     if let Ok(p) = crate::api::who(k, h) {
         return Some(if p.is_owner() {
             "development"
         } else if p.has_role("tester") {
             "test"
         } else {
-            "production"
+            everyone
         });
     }
     let app = h.get("x-magnus-app").and_then(|v| v.to_str().ok()).and_then(|v| semver::Version::parse(v.trim()).ok());
     match app {
         Some(v) if !v.pre.is_empty() && !newer(MIN_APP, &v.to_string()) => None,
-        _ => Some("production"),
+        _ => Some(everyone),
     }
+}
+
+/// The release kept to go back to, if there is one.
+pub fn previous_version() -> Option<String> {
+    install_dir().ok().and_then(|d| std::fs::read_to_string(sibling(&d, ".prev").join("VERSION")).ok()).map(|v| v.trim().to_string())
 }
 
 use crate::api::{err, internal, owner, Transport};
