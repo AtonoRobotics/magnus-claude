@@ -179,3 +179,30 @@ async fn the_console_stops_all_agents_at_once_and_releases_only_with_a_fresh_pas
     let actions: Vec<&str> = audit["entries"].as_array().unwrap().iter().filter_map(|e| e["action"].as_str()).collect();
     assert!(actions.contains(&"kill_switch_engaged") && actions.contains(&"kill_switch_released"), "{audit}");
 }
+
+/// Signing in counts as a step-up only when the password was typed for it
+/// (admin console spec, Step-up; owner's ruling 2). The same browser, still
+/// signed in at the provider, comes back through Sign in with no password
+/// asked: that session must step up before an action that needs one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sign_in_the_provider_lets_through_without_a_password_is_no_step_up() {
+    let kc = Keycloak::start().await;
+    kc.add_person("Alice").await;
+    kc.set_roles("Alice", &["admin"]).await;
+    let m = FakeModel::start(steps(vec![])).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    kc.configure(&mut app).await;
+    let mine = format!("{}/32", lan_ip());
+    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", 30.into())]);
+    kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &p.jwks().await).await;
+    let url = p.url();
+    let c = launch(p).await;
+    let api = |path: &str| format!("{url}/api/v1{path}");
+    let b = browser(&c, false);
+    let sid = sign_in_with(&url, c.addr, "Alice", "admin", false, None, &[("MAGNUS_AGAIN", "1".into())]).await.unwrap_or_else(|e| panic!("{e}"));
+    let me: Value = with_cookie(b.get(api("/session")), &sid).send().await.unwrap().json().await.unwrap();
+    assert!(me["stepped_up_until"].is_null(), "a sign-in with no password typed counted as a step-up: {me}");
+    let r = with_cookie(b.post(api("/session/step-up")), &sid).header("x-csrf-token", me["csrf"].as_str().unwrap()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(r.json::<Value>().await.unwrap()["error"], "step_up_required");
+}
