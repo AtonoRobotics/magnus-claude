@@ -859,11 +859,10 @@ function addConnector(box) {
   d.setAttribute("aria-labelledby", "add-title");
   d.innerHTML = `<form id="add-form">
     <h2 id="add-title">Add an app</h2>
-    <p class="small muted">By its MCP address. Magnus asks the app whether people sign in to it with their own accounts.</p>
+    <p class="small muted">By its MCP address. Magnus finds its sign-in from the address; each person then connects it with their own account. A server that asks for a key or client details instead is refused.</p>
     <label>Address <input name="url" type="url" required placeholder="https://" autocomplete="off"></label>
     <label>What reaches it <select name="audience">${AUDIENCE.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select></label>
     <label>What it returns <select name="label">${LABEL.map(([k, l]) => `<option value="${k}" ${k === "private+untrusted" ? "selected" : ""}>${l}</option>`).join("")}</select></label>
-    <label>The organisation's key, if it takes one <input name="token" type="password" autocomplete="new-password" spellcheck="false"></label>
     <label>Who may use it <input name="groups" placeholder="Everyone" autocomplete="off"></label>
     <p class="error" id="add-error" hidden></p>
     <div class="row ad-sheet-actions"><button type="button" id="add-cancel">Cancel</button><button class="primary">Add</button></div>
@@ -874,7 +873,7 @@ function addConnector(box) {
   $("#add-form", d).onsubmit = async e => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
-    const body = { url: f.url, audience: f.audience, label: f.label, token: f.token || undefined, access_groups: f.groups.split(",").map(x => x.trim()).filter(Boolean) };
+    const body = { url: f.url, audience: f.audience, label: f.label, access_groups: f.groups.split(",").map(x => x.trim()).filter(Boolean) };
     try {
       const v = await api("POST", "/connectors", body);
       d.close();
