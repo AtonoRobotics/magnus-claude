@@ -750,6 +750,10 @@ pub struct State {
     pub playbook: BTreeMap<String, PlaybookItem>,
     /// The org context bundle, by path.
     pub bundle: BTreeMap<String, BundleDoc>,
+    /// The last version number each path was written with, kept through a
+    /// removal: a path written again counts on, so (path, version) names
+    /// one version in the log.
+    pub bundle_last: HashMap<String, u32>,
     /// Every policy a layer ever had, oldest first.
     pub policy_history: Vec<PolicyVersion>,
     /// Run modules an admin turned on or off for the organisation.
@@ -1821,6 +1825,8 @@ impl State {
                 d.label = *label;
                 d.sources = sources.clone();
                 d.versions.push((*version, e.seq, e.at, actor.clone()));
+                let last = self.bundle_last.entry(path.clone()).or_default();
+                *last = (*last).max(*version);
             }
             Ev::BundleRemoved { path } => {
                 self.bundle.remove(path);

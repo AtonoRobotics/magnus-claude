@@ -175,9 +175,24 @@ impl Kernel {
         Ok(k)
     }
 
+    /// Number each document version here, under the write lock: writes at
+    /// once never share a number, and a path removed and written again
+    /// counts on from its last.
+    fn number<'a>(&self, evs: impl Iterator<Item = &'a mut Ev>) {
+        let mut last: HashMap<String, u32> = HashMap::new();
+        for ev in evs {
+            if let Ev::BundleWritten { path, version, .. } = ev {
+                let n = last.get(path.as_str()).copied().unwrap_or_else(|| self.read(|s| s.bundle_last.get(path.as_str()).copied().unwrap_or(0))) + 1;
+                last.insert(path.clone(), n);
+                *version = n;
+            }
+        }
+    }
+
     /// Append an event, then apply it. Only correctness writes come here (K6).
-    pub async fn emit(&self, actor: &str, ev: Ev) -> Result<Event> {
+    pub async fn emit(&self, actor: &str, mut ev: Ev) -> Result<Event> {
         let _g = self.write.lock().await;
+        self.number(std::iter::once(&mut ev));
         let t = Instant::now();
         let owner = self.read(|s| s.content_owner(&ev, &HashMap::new()));
         let e = self.log.append(actor, &ev, owner.as_deref()).await?;
@@ -199,8 +214,9 @@ impl Kernel {
     /// Append several events, each with its actor, in one write and apply
     /// them together: no reader sees some of them without the rest, and no
     /// crash leaves some of them out.
-    pub async fn emit_all(&self, evs: Vec<(&str, Ev)>) -> Result<Vec<Event>> {
+    pub async fn emit_all(&self, mut evs: Vec<(&str, Ev)>) -> Result<Vec<Event>> {
         let _g = self.write.lock().await;
+        self.number(evs.iter_mut().map(|(_, e)| e));
         let owners = self.read(|s| {
             // A run started in this batch is the person's of its TaskCreated.
             let mut runs = HashMap::new();

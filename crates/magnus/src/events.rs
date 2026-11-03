@@ -967,6 +967,14 @@ pub fn content_fields(kind: &str) -> &'static [&'static str] {
 }
 
 impl Ev {
+    /// The version a document was written as (0 for any other event).
+    pub fn bundle_version(&self) -> u32 {
+        match self {
+            Ev::BundleWritten { version, .. } => *version,
+            _ => 0,
+        }
+    }
+
     pub fn run(&self) -> Option<&str> {
         use Ev::*;
         match self {

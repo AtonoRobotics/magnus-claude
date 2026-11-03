@@ -972,3 +972,10 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Found by the review of master against the specs (2026-11-02): "every console action in the append-only log with who, what, when, source and before/after". Keeping or dropping a policy draft went to the kernel's event log under the admin's name but not to the audit log.
 - Now `policy_drafted` and `policy_draft_dropped` are written to the audit log before the change, with the set's draft before and after; a draft is not in force, so neither asks for a fresh password.
 - Test: `root_sets_the_sign_in_rules_and_edits_tests_applies_and_rolls_back_the_agent_policy` (admin_security.rs, Keycloak) now drops the sales draft and finds both in the audit with their text. On master neither is there.
+
+## The kernel numbers each document version, and a path counts on through removal (2026-11-02, `bundle-versions`)
+
+- Found by the review of master against the specs (2026-11-02; "every write is a new version"). The version was worked out from the state before the kernel's write lock was taken, so writes at once to one path took the same number; and a removal dropped the path's count, so it began again at 1 and (path, version) named two versions in the log, the older one out of reach.
+- Now `emit` numbers each `BundleWritten` under the write lock from the last number the path was written with, which the state keeps through a removal. Callers take the number from the event recorded.
+- `a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with` rolled back to "version 2" because Bob's new document began again at 1; with the count kept it is version 3, and the test now says so.
+- Test: `every_version_of_a_document_has_its_own_number_through_removal_and_writes_at_once` (org_context_bundle.rs): written, removed and written again, a document is at version 2 and version 1 is still the first; eight writes at once take eight numbers. On master the second write is version 1 again, and the eight writes at once all took one number.
