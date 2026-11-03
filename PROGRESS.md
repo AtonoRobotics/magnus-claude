@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **A person deleted leaves no branch or attachment behind (admin console spec, Users › Delete; branch `erase-branches`).** Deleting someone left their branched conversations, with the entries as shown then, and their tasks' attachment lists in the running appliance's state until it restarted. Both now go with the rest of their data. Next from the same review: the admin console tracker's false lines and a false citation.
 - **A run ends once (behavior spec, Tasks and schedules in conversation; branch `cancel-races`).** A cancel that lost the race to a task's own end turned it into a cancelled task, and a run's end after a cancel overwrote the cancel. The first end now stands. Left: a schedule removed while its firing is starting. Next from the same review: cancel tools are irreversible.
 - **The provider's check asks after the bound account (owner's ruling 12; branch `active-by-account`).** With a person's account deleted at the provider and another made under their username, the check found the new one and kept the old one's sessions. It now asks after the account they are bound to. Next from the same review: cancel races.
 - **A person deleted keeps no rights and takes only their own sign-ins (admin console spec, Users; branch `erase-all`).** Deleting someone left the roles the owner gave them, so the next account known by their name started with them, and it revoked sign-ins of anyone whose name ended in theirs. Both are fixed. Next from the same review: the provider's check asks by the bound account, not the username.
