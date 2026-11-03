@@ -838,6 +838,10 @@ impl Config {
                 }
                 crate::brokered::digest(&c.url).map_err(|e| anyhow::anyhow!("connector {}: {e}", c.name))?;
                 anyhow::ensure!(!c.hosts.is_empty(), "connector {}: a brokered connector names the provider hosts it may reach", c.name);
+                // Its calls carry no idempotency key to its server, so one
+                // whose outcome is unknown cannot be sent again blindly: the
+                // person is asked (`none`).
+                anyhow::ensure!(c.idempotency != "header", "connector {}: a brokered connector's calls carry no idempotency key, so it cannot have idempotency = \"header\"; leave it out, and a call whose outcome is unknown is put to the person", c.name);
             }
         }
         Ok(cfg)
@@ -875,5 +879,31 @@ impl Person {
     /// The developer view: raw log, runs, experiments (K10, K45).
     pub fn is_developer(&self) -> bool {
         self.has_role("developer")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load(connector: &str) -> anyhow::Result<Config> {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("magnus.toml");
+        let text = format!("[appliance]\nstate_dir = \"/s\"\nlisten = \"127.0.0.1:0\"\n[database]\nurl = \"postgres://x\"\n[model]\nname = \"m\"\nadapter = \"a\"\nmax_tokens = 1\n[[connectors]]\nname = \"mail\"\naudience = \"public\"\nlabel = \"private+untrusted\"\n{connector}");
+        std::fs::write(&p, text).unwrap();
+        Config::load(&p)
+    }
+
+    /// A brokered connector's calls carry no idempotency key, so it is
+    /// never taken to deduplicate: one that says it does is refused, and
+    /// one that says nothing does not.
+    #[test]
+    fn a_brokered_connector_cannot_claim_to_deduplicate() {
+        let brokered = format!("transport = \"brokered\"\nurl = \"sha256:{}\"\nhosts = [\"api.example\"]\n", "0a".repeat(32));
+        let e = load(&format!("{brokered}idempotency = \"header\"\n")).unwrap_err();
+        assert!(format!("{e:#}").contains("carry no idempotency key"), "{e:#}");
+        assert_eq!(load(&brokered).unwrap().connectors[0].idempotency, "none");
+        // A remote app may say it honors the header.
+        assert!(load("url = \"https://a.example/mcp\"\nidempotency = \"header\"\n").is_ok());
     }
 }

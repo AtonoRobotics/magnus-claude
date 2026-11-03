@@ -82,7 +82,7 @@ async fn gmail_s_tools_do_what_they_say_against_gmail() {
 
     // Gmail itself, reached from the microVM over TLS it checks: a token
     // Gmail does not know is said as a sign-in to do again.
-    let r = b.call(&c, "contract", Some("ya29.not-a-token"), "list_labels", &json!({})).await.unwrap();
+    let r = b.call(&c, "contract", Some("ya29.not-a-token"), "list_labels", &json!({}), &|| Ok(())).await.unwrap();
     assert!(r.is_error && r.text.contains("Gmail rejected the sign-in"), "{}", r.text);
 
     let (Ok(refresh), Ok(secret), Ok(me)) = (std::env::var("MAGNUS_GMAIL_TEST_REFRESH_TOKEN"), std::env::var("MAGNUS_GOOGLE_CLIENT_SECRET"), std::env::var("MAGNUS_GMAIL_TEST_ADDRESS")) else {
@@ -95,7 +95,7 @@ async fn gmail_s_tools_do_what_they_say_against_gmail() {
     let call = |tool: &'static str, args: Value| {
         let (b, c, token) = (&b, &c, token.clone());
         async move {
-            let r: Result<CallOutput, CallError> = b.call(c, "contract", Some(&token), tool, &args).await;
+            let r: Result<CallOutput, CallError> = b.call(c, "contract", Some(&token), tool, &args, &|| Ok(())).await;
             let r = r.unwrap_or_else(|e| panic!("{tool}: {e:?}"));
             assert!(!r.is_error, "{tool}: {}", r.text);
             r.structured.unwrap_or_else(|| panic!("{tool}: no structured answer"))
@@ -114,7 +114,7 @@ async fn gmail_s_tools_do_what_they_say_against_gmail() {
     assert_eq!(got["message"]["subject"], subject.as_str(), "{got}");
     call("update_draft", json!({ "draft_id": id, "to": [me], "subject": subject, "body": "Rewritten." })).await;
     assert_eq!(call("delete_draft", json!({ "draft_id": id })).await["deleted"], true);
-    let gone = b.call(&c, "contract", Some(&token), "get_draft", &json!({ "draft_id": id })).await.unwrap();
+    let gone = b.call(&c, "contract", Some(&token), "get_draft", &json!({ "draft_id": id }), &|| Ok(())).await.unwrap();
     assert!(gone.is_error && gone.text.contains("could not find"), "{}", gone.text);
 
     // A draft sent to the account itself, found, replied to as a draft,
