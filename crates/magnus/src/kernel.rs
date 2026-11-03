@@ -29,6 +29,9 @@ pub struct Kernel {
     pub(crate) decide: tokio::sync::Mutex<()>,
     pub vault: Arc<Vault>,
     pub accounts: crate::accounts::Accounts,
+    /// Computers paired with this appliance, and the certificates Cloudflare
+    /// issued for them. Empty until device certificates are configured.
+    pub devices: crate::devices::Devices,
     /// Sign-in through an identity provider, when one is configured.
     pub oidc: Option<crate::oidc::Provider>,
     pub adapters: Adapters,
@@ -125,6 +128,7 @@ impl Kernel {
             vault.seal();
         }
         let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+        let devices = crate::devices::Devices::open(&cfg.appliance.state_dir)?;
         let oidc = cfg.sign_in.oidc.clone().map(|o| crate::oidc::Provider::new(o, vault.clone())).transpose()?;
         let adapters = Adapters::new(&cfg.appliance.state_dir, vault.clone(), &cfg.adapters);
         let live_text = Arc::new(Live { tx: tokio::sync::broadcast::channel(1024).0, so_far: Mutex::new(HashMap::new()) });
@@ -137,6 +141,7 @@ impl Kernel {
             adapters,
             vault,
             accounts,
+            devices,
             oidc,
             log,
             state: Mutex::new(state),

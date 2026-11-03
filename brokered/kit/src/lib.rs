@@ -4,7 +4,9 @@
 //! MCP on vsock, one session per connection, with newline-delimited
 //! JSON-RPC (MCP's stdio framing, carried on vsock), and reaches its
 //! provider only through the appliance's egress proxy, by HTTPS CONNECT to
-//! the host on vsock. The access token comes with each call
+//! the host on vsock, and only over TLS whose certificate it has checked
+//! for the provider's name (`https`), so no token leaves it in the clear,
+//! not even to the proxy. The access token comes with each call
 //! (`params._meta["io.magnus/access-token"]`) and is used for that call
 //! alone: nothing is kept between calls and nothing is written anywhere.
 
@@ -12,6 +14,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::net::UnixStream;
+use std::sync::{Arc, OnceLock};
 
 pub mod schema;
 
@@ -125,8 +128,8 @@ pub fn serve(server: &'static str, tools: Vec<Tool>) -> ! {
 
 /// A connection to `target` (`host:port`) through the appliance's egress
 /// proxy, which admits only the hosts in the connector's manifest: the
-/// proxy's refusal when it does not.
-pub fn tunnel(target: &str) -> Result<UnixStream, String> {
+/// proxy's refusal when it does not. Only TLS is carried on it (`https`).
+fn tunnel(target: &str) -> Result<UnixStream, String> {
     let mut s = vsock(libc::VMADDR_CID_HOST, PROXY_PORT, false).map_err(|e| format!("could not reach the appliance's proxy: {e}"))?;
     write!(s, "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").map_err(|e| e.to_string())?;
     let mut head = vec![];
@@ -145,7 +148,60 @@ pub fn tunnel(target: &str) -> Result<UnixStream, String> {
     }
 }
 
+/// The way out to a provider: TLS over the proxy's tunnel, its handshake
+/// done and the provider's certificate checked for its name.
+pub type Https = rustls::StreamOwned<rustls::ClientConnection, UnixStream>;
+
+/// Where the appliance names roots to trust beside the public ones (an
+/// organisation whose egress inspects TLS, or a test's stand-in): the
+/// kernel hands a `key=value` from its command line that it does not know
+/// to `/init` as its environment. Base64url DER certificates, separated by
+/// commas.
+pub const ROOTS_ENV: &str = "magnus_roots";
+
+/// The TLS client: the public roots (webpki-roots), and those the appliance
+/// names.
+fn tls() -> Arc<rustls::ClientConfig> {
+    static C: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    C.get_or_init(|| {
+        use base64::Engine;
+        let more = std::env::var(ROOTS_ENV).unwrap_or_default();
+        let more = more.split(',').filter_map(|d| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(d).ok());
+        client(more.collect())
+    })
+    .clone()
+}
+
+fn client(more: Vec<Vec<u8>>) -> Arc<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    for der in more {
+        let _ = roots.add(rustls::pki_types::CertificateDer::from(der));
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    Arc::new(rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().expect("TLS versions").with_root_certificates(roots).with_no_client_auth())
+}
+
+/// A connection to the provider at `target` (`host:port`): through the
+/// proxy, then TLS, and nothing is sent on it until the provider has shown
+/// a certificate for `host` from a trusted root. A failure here means
+/// nothing reached the provider.
+pub fn https(target: &str) -> Result<Https, String> {
+    let host = target.rsplit_once(':').map_or(target, |(h, _)| h);
+    secure(tunnel(target)?, host, tls())
+}
+
+fn secure<S: Read + Write>(sock: S, host: &str, config: Arc<rustls::ClientConfig>) -> Result<rustls::StreamOwned<rustls::ClientConnection, S>, String> {
+    let name = rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| format!("{host} is not a name to reach securely: {e}"))?;
+    let conn = rustls::ClientConnection::new(config, name).map_err(|e| e.to_string())?;
+    let mut s = rustls::StreamOwned::new(conn, sock);
+    while s.conn.is_handshaking() {
+        s.conn.complete_io(&mut s.sock).map_err(|e| format!("could not reach {host} securely: {e}"))?;
+    }
+    Ok(s)
+}
+
 /// An HTTP response: its status, its headers as sent, and its body.
+#[derive(Debug)]
 pub struct Response {
     pub status: u16,
     pub head: String,
@@ -159,8 +215,13 @@ impl Response {
     }
 }
 
-/// One HTTP/1.1 request over `s`, which is closed after it.
-pub fn exchange(mut s: impl Read + Write, method: &str, host: &str, path: &str, token: &str, body: Option<&Value>) -> Result<Response, String> {
+/// One HTTP/1.1 request to the provider over `s`, which is closed after it.
+/// An answer cut short is an error, never a response.
+pub fn exchange(s: Https, method: &str, host: &str, path: &str, token: &str, body: Option<&Value>) -> Result<Response, String> {
+    exchange_over(s, method, host, path, token, body)
+}
+
+fn exchange_over(mut s: impl Read + Write, method: &str, host: &str, path: &str, token: &str, body: Option<&Value>) -> Result<Response, String> {
     let data = body.map(|b| b.to_string()).unwrap_or_default();
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: {}\r\n", data.len());
     if body.is_some() {
@@ -170,121 +231,55 @@ pub fn exchange(mut s: impl Read + Write, method: &str, host: &str, path: &str, 
     req.push_str(&data);
     s.write_all(req.as_bytes()).and_then(|_| s.flush()).map_err(|e| format!("sending to {host}: {e}"))?;
     let mut raw = vec![];
-    // A TLS peer may end without its closing alert; what came is the answer.
-    let _ = s.read_to_end(&mut raw);
+    // A TLS peer may end without its closing alert (rustls says so as an
+    // unexpected end); that is an end only where the answer says it is
+    // whole, by its length or its last chunk.
+    let ended = match s.read_to_end(&mut raw) {
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Some(e),
+        Err(e) => return Err(format!("reading {host}'s answer: {e}")),
+    };
+    let cut = || format!("{host}'s answer was cut short");
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| format!("{host} gave no answer"))?;
     let head = String::from_utf8_lossy(&raw[..split]).to_string();
     let rest = &raw[split + 4..];
     let status = head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or_else(|| format!("{host} gave no status"))?;
-    let chunked = head.lines().any(|l| l.to_ascii_lowercase().replace(' ', "") == "transfer-encoding:chunked");
-    Ok(Response { status, body: if chunked { dechunk(rest) } else { rest.to_vec() }, head })
+    let r = Response { status, body: vec![], head };
+    let body = if status < 200 || status == 204 || status == 304 {
+        // These have no body, whatever they say (RFC 9112, 6.3).
+        vec![]
+    } else if r.header("transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked")) {
+        dechunk(rest).ok_or_else(cut)?
+    } else if let Some(n) = r.header("content-length") {
+        let n: usize = n.parse().map_err(|_| format!("{host} gave a length that is not one: {n}"))?;
+        rest.get(..n).ok_or_else(cut)?.to_vec()
+    } else if ended.is_some() {
+        // Delimited only by the end, which did not come as one.
+        return Err(cut());
+    } else {
+        rest.to_vec()
+    };
+    Ok(Response { body, ..r })
 }
 
-fn dechunk(mut b: &[u8]) -> Vec<u8> {
+/// A chunked body joined, or none unless it ends with its last chunk.
+fn dechunk(mut b: &[u8]) -> Option<Vec<u8>> {
     let mut out = vec![];
-    while let Some(eol) = b.windows(2).position(|w| w == b"\r\n") {
-        let size = usize::from_str_radix(String::from_utf8_lossy(&b[..eol]).split(';').next().unwrap_or("0").trim(), 16).unwrap_or(0);
-        if size == 0 || b.len() < eol + 2 + size {
-            break;
+    loop {
+        let eol = b.windows(2).position(|w| w == b"\r\n")?;
+        let size = usize::from_str_radix(std::str::from_utf8(&b[..eol]).ok()?.split(';').next()?.trim(), 16).ok()?;
+        if size == 0 {
+            return Some(out);
         }
-        out.extend_from_slice(&b[eol + 2..eol + 2 + size]);
-        b = &b[(eol + 4 + size).min(b.len())..];
+        let data = b.get(eol + 2..eol + 2 + size)?;
+        if b.get(eol + 2 + size..eol + 4 + size)? != b"\r\n" {
+            return None;
+        }
+        out.extend_from_slice(data);
+        b = &b[eol + 4 + size..];
     }
-    out
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn echo(args: &Value, token: &str) -> Result<Value, String> {
-        match args["say"].as_str() {
-            Some("wrong") => Ok(json!({ "said": 1 })),
-            Some(s) => Ok(json!({ "said": format!("{s} with {}", token.len()) })),
-            None => Err("nothing to say".into()),
-        }
-    }
-
-    fn tools() -> Vec<Tool> {
-        vec![Tool {
-            name: "echo",
-            description: "Say it back",
-            input: json!({ "type": "object", "properties": { "say": { "type": "string" } }, "additionalProperties": false }),
-            output: json!({ "type": "object", "properties": { "said": { "type": "string" } }, "required": ["said"], "additionalProperties": false }),
-            run: echo,
-        }]
-    }
-
-    fn talk(lines: &[Value]) -> Vec<Value> {
-        let input: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        let mut out = vec![];
-        session(input.as_bytes(), &mut out, "test", &tools());
-        String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
-    }
-
-    fn call(id: u32, args: Value, token: Option<&str>) -> Value {
-        let mut p = json!({ "name": "echo", "arguments": args });
-        if let Some(t) = token {
-            p["_meta"] = json!({ TOKEN_META: t });
-        }
-        json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": p })
-    }
-
-    /// A session answers MCP line by line: it lists each tool with both its
-    /// schemas, runs a call only with the call's token and an input its
-    /// schema admits, gives back only an answer its output schema admits,
-    /// and answers no notification.
-    #[test]
-    fn a_session_runs_a_call_only_with_its_token_and_schemas() {
-        let a = talk(&[
-            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
-            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
-            call(3, json!({ "say": "hi" }), Some("tok")),
-            call(4, json!({ "say": "hi" }), None),
-            call(5, json!({ "say": 7 }), Some("tok")),
-            call(6, json!({ "say": "wrong" }), Some("tok")),
-            call(7, json!({}), Some("tok")),
-            json!({ "jsonrpc": "2.0", "id": 8, "method": "resources/list" }),
-        ]);
-        assert_eq!(a.iter().map(|m| m["id"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(a[0]["result"]["protocolVersion"], PROTOCOL);
-        let t = &a[1]["result"]["tools"][0];
-        assert_eq!((t["name"].as_str(), t["inputSchema"]["type"].as_str(), t["outputSchema"]["required"][0].as_str()), (Some("echo"), Some("object"), Some("said")));
-        assert_eq!(a[2]["result"]["structuredContent"], json!({ "said": "hi with 3" }));
-        assert_eq!(a[2]["result"]["isError"], false);
-        for (m, says) in [(&a[3], "no access token"), (&a[4], "input does not match"), (&a[5], "answer does not match"), (&a[6], "nothing to say")] {
-            assert_eq!(m["result"]["isError"], true, "{m}");
-            assert!(m["result"]["content"][0]["text"].as_str().unwrap().contains(says), "{m}");
-            assert!(m["result"].get("structuredContent").is_none(), "{m}");
-        }
-        assert_eq!(a[7]["error"]["code"], -32601);
-    }
-
-    /// One request carries the token and the body, and the answer's status,
-    /// headers and body come back, a chunked body joined.
-    #[test]
-    fn an_exchange_sends_the_token_and_reads_a_chunked_answer() {
-        struct Peer(Vec<u8>, std::io::Cursor<Vec<u8>>);
-        impl Read for Peer {
-            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
-                self.1.read(b)
-            }
-        }
-        impl Write for Peer {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.write(b)
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let answer = b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n{\"a\":\r\n2\r\n1}\r\n0\r\n\r\n".to_vec();
-        let mut p = Peer(vec![], std::io::Cursor::new(answer));
-        let r = exchange(&mut p, "POST", "api.example", "/v1/x", "tok", Some(&json!({ "b": 2 }))).unwrap();
-        assert_eq!((r.status, r.header("retry-after"), r.body.as_slice()), (429, Some("7"), &b"{\"a\":1}"[..]));
-        let sent = String::from_utf8(p.0).unwrap();
-        assert!(sent.starts_with("POST /v1/x HTTP/1.1\r\nHost: api.example\r\nAuthorization: Bearer tok\r\n"), "{sent}");
-        assert!(sent.ends_with("\r\n\r\n{\"b\":2}"), "{sent}");
-    }
-}
+#[path = "../../../tests/brokered-kit/kit.rs"]
+mod tests;

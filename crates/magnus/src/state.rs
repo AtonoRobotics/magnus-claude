@@ -1251,7 +1251,7 @@ impl State {
                 // Signed in again: the provider has them back.
                 self.turned_off.remove(person);
             }
-            Ev::SignedOut { .. } => {}
+            Ev::SignedOut { .. } | Ev::DevicePaired { .. } | Ev::DeviceRevoked { .. } => {}
             Ev::PersonTurnedOff { person, .. } => {
                 self.turned_off.insert(person.clone());
             }

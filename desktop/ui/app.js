@@ -410,6 +410,18 @@ async function go() {
 async function signInScreen(note) {
   document.body.innerHTML = `<div class="signin"><h1>Magnus</h1><p class="muted">Sign in to your appliance.</p><div class="card" id="si"></div></div>`;
   const box = $("#si");
+  // Signed in. Pair this computer for the public name once, on the private
+  // address; a failure is said and sign-in still stands.
+  async function enter(person, data) {
+    if (data.person) localStorage.setItem("magnus.person", data.person);
+    if (Magnus.pairDevice && data.public_url) {
+      try { await Magnus.pairDevice(data.public_url); }
+      catch (err) { return ask("paired", { ...data, error: err.message || String(err), who: person }); }
+    }
+    App.me = person;
+    App.appliance = data.url || location.origin;
+    boot();
+  }
   const ask = async (stage, data = {}) => {
     if (stage === "address") {
       paint(box, `${note ? `<p class="small" style="color:var(--bad)">${esc(note)}</p>` : ""}
@@ -424,6 +436,7 @@ async function signInScreen(note) {
           const c = await Magnus.connect(url);
           localStorage.setItem("magnus.address", url);
           if (c.status === "trusted") ask("method", { url });
+          else if (c.status === "needs_device") ask("needs_device", { url });
           else ask("pin", { url, ...c });
         } catch (err) { note = err.message || String(err); ask("address", { url }); }
       };
@@ -435,11 +448,22 @@ async function signInScreen(note) {
         <div class="row" style="margin-top:14px"><button class="${changed ? "danger" : "primary"}" id="ok">They match</button><button id="no">Cancel</button></div>`);
       $("#ok").onclick = async () => { await Magnus.trust(data.url, data.fingerprint); ask("method", data); };
       $("#no").onclick = () => ask("address", data);
+    } else if (stage === "needs_device") {
+      paint(box, `<h3>This computer is not paired</h3>
+        <p class="small">magnus.pyrallon.ai accepts only a computer that was paired with the appliance. Sign in once on the appliance's private address, the one on your network or Tailscale. This computer is paired then, and this address works after that, from anywhere.</p>
+        <div class="row" style="margin-top:14px"><button id="back">Use a private address</button></div>`);
+      $("#back").onclick = () => ask("address", {});
+    } else if (stage === "paired") {
+      paint(box, `<h3>This computer was not paired</h3>
+        <p class="small" style="color:var(--bad)" role="alert">${esc(data.error)}</p>
+        <p class="small muted">You are signed in on this network. ${esc(data.public_url || "")} will not accept this computer until pairing works.</p>
+        <div class="row" style="margin-top:14px"><button class="primary" id="go">Continue</button></div>`);
+      $("#go").onclick = () => { App.me = data.who; App.appliance = data.url || location.origin; boot(); };
     } else if (stage === "method") {
       paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p><p class="small muted">Connecting…</p>`);
       try {
         const m = await Magnus.signInMethod();
-        ask("password", { ...data, label: m.method === "oidc" ? m.label : undefined });
+        ask("password", { ...data, public_url: m.public_url, label: m.method === "oidc" ? m.label : undefined });
       } catch (err) { note = err.message || String(err); ask(Magnus.kind === "app" ? "address" : "password", data); }
     } else if (stage === "browser") {
       // The provider's own page in the person's browser: for a passkey, the
@@ -456,9 +480,7 @@ async function signInScreen(note) {
         try {
           const r = await Magnus.providerSignIn(data.person);
           if (cancelled) return;
-          if (data.person) localStorage.setItem("magnus.person", data.person);
-          App.me = r.person; App.appliance = data.url || location.origin;
-          return boot();
+          return enter(r.person, data);
         } catch (err) { if (!cancelled) ask("password", { ...data, message: undefined, error: err.message || String(err) }); return; }
       }
       let s;
@@ -481,8 +503,7 @@ async function signInScreen(note) {
         try {
           const r = await Magnus.devicePoll(s.flow);
           if (r.pending) continue;
-          App.me = r.person; App.appliance = data.url || location.origin;
-          return boot();
+          return enter(r.person, data);
         } catch (err) { return ask("password", { ...data, message: undefined, error: err.message || String(err) }); }
       }
       if (!stop) ask("password", { ...data, message: undefined, error: "The sign-in code expired. Start again." });
@@ -514,9 +535,7 @@ async function signInScreen(note) {
           if (r?.machine_code_needed) return ask("machine", { ...data, person, password, error: r.error });
           if (r?.code_needed) return ask("code", { ...data, person, password, error: coding ? r.error : undefined });
           if (r?.browser) return ask("browser", { ...data, person, password: undefined, message: r.error });
-          localStorage.setItem("magnus.person", person);
-          App.me = r; App.appliance = data.url || location.origin;
-          boot();
+          return enter(r, { ...data, person });
         } catch (err) { ask("password", { ...data, person, password: undefined, error: err.message || String(err) }); }
       };
     }
