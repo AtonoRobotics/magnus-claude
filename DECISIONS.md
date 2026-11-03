@@ -1005,3 +1005,10 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Correction to the Modules entry above ("owner's ruling 22 keeps 'module' for these"): question 22 is open, not ruled. Install and remove still answer 409, as the owner's call rather than a ruling, in the tracker and in `admin/ops.rs`.
 - PROGRESS.md said org context steps 2 to 7b were committed on their branches; no branch has them, and the plan has no 7b. It now says steps 2 to 11, with only step 1 built.
 - Documents and a comment only: no behaviour changes, so no test.
+
+## How a document was checked is the kernel's record (2026-11-03, `kernel-verifications`)
+
+- Found by the review of master against the specs (2026-11-02). The org context build spec, Bundle format: each entry in `verified` is {by, at, kind, event, note}, `event` the event-log id; Outcome capture: acceptances, rejections and owner reviews are recorded by the kernel, corrections and downstream results by Magnus through `bundle.record_outcome`. But `bundle_write` took whatever `verified` Magnus wrote, so a run could record an owner's review no one gave, or drop one given; and a convention needed a non-empty `verified`, so a new one could be written only with an invented entry.
+- Now the record is kept by the kernel from version to version: Magnus's write carries it back unchanged or leaves it out (the kernel puts it back), and a write adding, changing or dropping an entry is refused with the reason. A new convention starts with an empty record. Recording outcomes (`bundle.record_outcome`, acceptances and rejections) is step 8 of the plan, still to build.
+- An admin's write in the console is unchanged: it is a person's, recorded as theirs, and stands in for the review queue until step 8.
+- Test: `a_conventions_verifications_are_the_kernels_record_and_no_write_of_magnus_makes_one` (org_context_bundle.rs): Magnus writes a new convention with no entry; its write adding Carol's review is refused; with Carol's review on the record, its rewrite with an empty list is refused and one leaving it out keeps the review. On master the first write is refused ("needs verified").

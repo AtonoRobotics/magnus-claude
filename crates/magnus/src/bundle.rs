@@ -245,7 +245,7 @@ pub fn validate(path: &str, fm: &Value, body: &str, type_doc: impl Fn(&str) -> O
     }
     let (fields, expect) = required(kind);
     for f in fields {
-        if fm.get(*f).is_none_or(|v| v.is_null() || v == "" || v.as_array().is_some_and(|a| a.is_empty() && *f != "relations")) {
+        if fm.get(*f).is_none_or(|v| v.is_null() || v == "" || v.as_array().is_some_and(|a| a.is_empty() && !["relations", "verified"].contains(f))) {
             return Err(format!("{path}: a {kind} document needs {f}"));
         }
     }
@@ -427,12 +427,37 @@ impl Kernel {
             ("entity", Some(d)) => self.log.contents(&[d.seq()]).await.map_err(|e| format!("{e:#}"))?.remove(&d.seq()).map(|c| c["frontmatter"].clone()),
             _ => None,
         };
+        let before = match &existing {
+            Some(d) => self.log.contents(&[d.seq()]).await.map_err(|e| format!("{e:#}"))?.remove(&d.seq()).map(|c| c["frontmatter"].clone()),
+            None => None,
+        };
+        // How a document was checked is the kernel's record, kept from
+        // version to version: a write carries it back unchanged or leaves it
+        // out, and never adds, changes or drops an entry.
+        let kept = before.as_ref().map(|b| b["verified"].clone()).filter(|v| !v.is_null());
+        let mut fm = fm.clone();
+        if let Some(asked) = fm.get("verified").filter(|v| !v.is_null()) {
+            if Some(asked) != kept.as_ref() && !(kept.is_none() && asked.as_array().is_some_and(Vec::is_empty)) {
+                return Err(format!("{path}: verified is the kernel's record of how this document was checked; a write keeps it as it is, and never adds or changes an entry"));
+            }
+        }
+        if let Some(m) = fm.as_object_mut() {
+            match kept {
+                Some(v) => {
+                    m.insert("verified".into(), v);
+                }
+                None if kind == "convention" => {
+                    m.insert("verified".into(), json!([]));
+                }
+                None => {
+                    m.remove("verified");
+                }
+            }
+        }
+        let fm = &fm;
         validate(path, fm, body, |_| tdoc.clone())?;
         // A type becomes a Cedar entity: only an admin makes one stable.
-        let was_stable = match &existing {
-            Some(d) if kind == "type" => self.log.contents(&[d.seq()]).await.map_err(|e| format!("{e:#}"))?.remove(&d.seq()).is_some_and(|c| c["frontmatter"]["status"] == "stable"),
-            _ => false,
-        };
+        let was_stable = kind == "type" && before.as_ref().is_some_and(|b| b["status"] == "stable");
         if kind == "type" && fm["status"] == "stable" && !was_stable {
             return Err(format!("{path}: a type becomes stable only with an admin's approval in the console; write it as draft"));
         }
