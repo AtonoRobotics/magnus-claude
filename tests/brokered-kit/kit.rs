@@ -114,6 +114,18 @@ fn an_exchange_sends_the_token_and_reads_a_chunked_answer() {
     assert!(sent.ends_with("\r\n\r\n{\"b\":2}"), "{sent}");
 }
 
+/// A body of its own media type goes as it is, bytes and all, with its
+/// type and length.
+#[test]
+fn a_body_of_any_type_goes_as_it_is() {
+    let mut p = Peer(vec![], std::io::Cursor::new(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec()), None);
+    let data = b"--b\r\n\x00\xff\r\n--b--";
+    assert_eq!(send_over(&mut p, "POST", "api.example", "/upload", "tok", Some(("multipart/related; boundary=b", data))).unwrap().status, 200);
+    let mut want = b"Content-Length: 14\r\nContent-Type: multipart/related; boundary=b\r\n\r\n".to_vec();
+    want.extend_from_slice(data);
+    assert!(p.0.ends_with(&want), "{}", String::from_utf8_lossy(&p.0));
+}
+
 /// A connection that fails while the answer comes is an error; a TLS
 /// peer's end without its closing alert is not, once the answer is
 /// whole.

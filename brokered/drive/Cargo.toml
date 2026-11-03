@@ -1,0 +1,20 @@
+[package]
+name = "magnus-drive"
+description = "Google Drive, brokered: an MCP server over Drive's REST API, run in a microVM of its own for each person on the appliance."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "magnus-drive"
+path = "src/main.rs"
+
+[dependencies]
+magnus-brokered-kit = { path = "../kit" }
+magnus-brokered-google = { path = "../google" }
+base64 = "0.22"
+serde_json = "1"
+
+[dev-dependencies]
+toml = "0.8"

@@ -368,7 +368,7 @@ FreeCAD.
 
 Google (Remote, Google Workspace MCP servers)
 - [ ] Gmail (brokered, manifest `google-gmail`: the image built from `brokered/gmail`, tools matched by `every_tool_is_classed_in_the_manifest`, sending only a draft the person approves, `gmail.rs`; sign-in cannot complete from the desktop app)
-- [ ] Drive (manifest `google-drive`; same)
+- [ ] Drive (brokered, manifest `google-drive`: the image built from `brokered/drive`, tools matched by `every_tool_is_classed_in_the_manifest`, each share and delete asked for first, `drive.rs`; sign-in cannot complete from the desktop app)
 - [ ] Docs
 - [ ] Sheets
 - [ ] Slides
