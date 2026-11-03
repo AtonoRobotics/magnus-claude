@@ -394,11 +394,13 @@ impl Kernel {
         }
         match self.mcp.list_tools(&c.url, secret.as_ref().map(|s| s.expose())).await {
             Ok(t) => {
+                self.refused_apps.lock().unwrap().remove(&key);
                 self.live_tools.lock().await.insert(key, (Instant::now(), t.clone()));
                 Some(t)
             }
             Err(e) => {
                 tracing::warn!("list tools of {}: {e:#}", c.name);
+                self.refused_apps.lock().unwrap().insert(key, crate::apps::refusal(&format!("{e:#}")));
                 None
             }
         }

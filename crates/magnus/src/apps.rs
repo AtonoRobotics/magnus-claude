@@ -47,6 +47,28 @@ pub fn insufficient_scope(h: &reqwest::header::HeaderMap) -> Option<Vec<String>>
     (!s.is_empty()).then_some(s)
 }
 
+/// What an app's refusal says in a sentence: its HTTP status and the
+/// challenge it gave, without the body (which may be long or carry data).
+pub fn refusal(error: &str) -> String {
+    let error = error.replace("\\\"", "\"");
+    let Some(at) = error.find("HTTP ") else { return error.chars().take(120).collect() };
+    let rest = &error[at..];
+    let status = &rest[..rest.find([':', '(']).unwrap_or(rest.len())];
+    let challenge = rest.find("(challenge: ").map(|c| &rest[c + "(challenge: ".len()..]).and_then(|c| c.find("):").map(|e| &c[..e]));
+    match challenge {
+        Some(c) => format!("{}; it says {}", status.trim(), c.chars().take(200).collect::<String>()),
+        None => status.trim().to_string(),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_refusal_says_its_status_and_challenge_and_never_its_body() {
+    let e = "NotSent(\"app returned HTTP 403 Forbidden (challenge: Bearer error=\\\"insufficient_scope\\\"): {\\\"tools\\\":[]}\")";
+    assert_eq!(refusal(e), "HTTP 403 Forbidden; it says Bearer error=\"insufficient_scope\"");
+    assert_eq!(refusal("NotSent(\"app returned HTTP 403 Forbidden: {\\\"result\\\":1}\")"), "HTTP 403 Forbidden");
+}
+
 pub struct CallOutput {
     pub text: String,
     pub structured: Option<Value>,
@@ -112,9 +134,10 @@ impl Mcp {
                     return Err(CallError::NeedsScope(scopes));
                 }
             }
+            let challenge = resp.headers().get(reqwest::header::WWW_AUTHENTICATE).and_then(|v| v.to_str().ok()).map(|v| format!(" (challenge: {v})")).unwrap_or_default();
             let text = resp.text().await.unwrap_or_default();
             // An HTTP-level rejection means the server did not run the tool.
-            return Err(CallError::NotSent(format!("app returned HTTP {status}: {}", text.chars().take(300).collect::<String>())));
+            return Err(CallError::NotSent(format!("app returned HTTP {status}{challenge}: {}", text.chars().take(300).collect::<String>())));
         }
         let sse = resp
             .headers()
