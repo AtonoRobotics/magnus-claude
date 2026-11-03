@@ -61,9 +61,9 @@ one commit), 2026-11-02.
 ## Connector kinds
 
 - [x] Remote MCP: the provider's hosted server, Magnus the client (`catalog.rs`, `apps.rs`; `google.rs` `each_google_manifest_names_exactly_the_tools_its_live_server_lists`)
-- [ ] Brokered API: an Alpha Vector MCP server over the provider's API, in its own sandbox on the appliance (the runtime is built, `brokered.rs`; no catalog connector is brokered yet)
+- [x] Brokered API: an Alpha Vector MCP server over the provider's API, in its own sandbox on the appliance (`brokered.rs`; Gmail, `gmail.rs`, `gmail_contract.rs`)
 - [ ] Local: an MCP server in or beside a desktop program, bridged by the desktop app
-- [ ] All three reach the agent the same way, as MCP tools on the appliance, in one library (remote and brokered run, `catalog::kind_problem`, `brokered.rs`; no local, and no catalog connector is brokered yet)
+- [ ] All three reach the agent the same way, as MCP tools on the appliance, in one library (remote and brokered run, `catalog::kind_problem`, `brokered.rs`, Gmail brokered; no local)
 - [ ] Remote called from the appliance's MCP client, brokered beside it, local through the desktop app; the relay talks only to providers' token endpoints
 - [ ] A service moves from brokered to remote with no change visible to the user
 - [x] An org admin adds a remote MCP server by its address, in the admin console only (`admin_connectors.rs` `the_console_sets_rotates_and_revokes_the_organisations_credentials_and_never_shows_one`; gone from the app, `connectors.mjs`)
@@ -158,8 +158,8 @@ one commit), 2026-11-02.
 - [x] Isolation: one instance per user per connector, each in its own Firecracker microVM, started on first call, stopped when idle (`brokered.rs` `each_person_has_their_own_microvm_called_with_their_current_token_reaching_only_its_hosts`; Disconnect, deletion and the kill switch stop it too, `disconnecting_erasing_and_the_kill_switch_stop_the_persons_microvm`)
 - [x] Credentials: a short-lived access token injected per request; no refresh token, no state between calls, nothing on disk (`each_person_has_their_own_microvm_called_with_their_current_token_reaching_only_its_hosts`: each call carries the token current then, never a refresh token, and an answer holding it is cleaned; the microVM has no disk, `an_instance_has_no_network_device_and_no_disk`; the server kit keeps nothing between calls)
 - [x] Network: the microVM reaches only the manifest's API hosts, through an egress proxy on the appliance (`each_person_has_their_own_microvm_called_with_their_current_token_reaching_only_its_hosts`: another host refused through the proxy, a direct connection unreachable, another host port refused; `the_proxy_admits_only_the_manifests_hosts_exactly`)
-- [ ] Tools at the level a person works (find, read, create, update, share, delete), schemas validated on both sides (the check on both sides is built, `schema::check` in the server kit and `brokered.rs`; the tools are each connector's)
-- [ ] Contract tests in CI against provider test accounts before publishing
+- [ ] Tools at the level a person works (find, read, create, update, share, delete), schemas validated on both sides (the check on both sides is built, `schema::check` in the server kit and `brokered.rs`; Gmail's tools, `brokered/gmail`; not yet Drive, Calendar, Docs, Sheets or Chat)
+- [ ] Contract tests in CI against provider test accounts before publishing (Gmail's, `gmail_contract.rs`: real Gmail reached from the microVM in every run; every tool once the owner's test account is given to CI, which it is not yet)
 - [ ] Switching to Remote retires the image; users keep their connection when the grant carries over, else reconnect once
 
 ## Local desktop connectors
@@ -367,7 +367,7 @@ Notion, GitHub, Vercel, Jira, Figma, Autodesk Fusion Data, Blender and
 FreeCAD.
 
 Google (Remote, Google Workspace MCP servers)
-- [ ] Gmail (manifest `google-gmail`, live tools matched; sign-in cannot complete from the desktop app)
+- [ ] Gmail (brokered, manifest `google-gmail`: the image built from `brokered/gmail`, tools matched by `every_tool_is_classed_in_the_manifest`, sending only a draft the person approves, `gmail.rs`; sign-in cannot complete from the desktop app)
 - [ ] Drive (manifest `google-drive`; same)
 - [ ] Docs
 - [ ] Sheets

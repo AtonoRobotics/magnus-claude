@@ -27,6 +27,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 
 [dev-dependencies]
+# The kernel itself, for a test that drives one part of it alone (gmail_contract.rs).
+magnus = { path = "../../crates/magnus" }
 flate2 = "1"
 minisign = "0.7"
 tar = "0.4"

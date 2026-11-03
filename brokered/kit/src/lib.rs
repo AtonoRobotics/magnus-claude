@@ -29,6 +29,31 @@ pub const PROTOCOL: &str = "2025-06-18";
 /// The most a proxy's answer to CONNECT may be (its status line and headers).
 const HEAD_MAX: usize = 8192;
 
+/// Where a failed call's result says what it means for what happened at the
+/// provider (`unknown` or `needs_scope`; nothing said, nothing happened).
+pub const OUTCOME_META: &str = "io.magnus/outcome";
+/// With `needs_scope`, the scopes the provider wants.
+pub const SCOPES_META: &str = "io.magnus/scopes";
+
+/// Why a call has no answer, in words for the agent, and what happened at
+/// the provider.
+#[derive(Debug, PartialEq)]
+pub enum Failure {
+    /// Nothing happened there.
+    NotDone(String),
+    /// The request may have reached it; what it did is unknown.
+    Unknown(String),
+    /// It refused for want of access the sign-in does not hold: the scopes
+    /// it wants. Nothing happened there.
+    NeedsScope(String, Vec<String>),
+}
+
+impl From<String> for Failure {
+    fn from(s: String) -> Self {
+        Failure::NotDone(s)
+    }
+}
+
 /// One tool: its schemas and what it does with its input and the call's
 /// access token.
 pub struct Tool {
@@ -36,7 +61,7 @@ pub struct Tool {
     pub description: &'static str,
     pub input: Value,
     pub output: Value,
-    pub run: fn(&Value, &str) -> Result<Value, String>,
+    pub run: fn(&Value, &str) -> Result<Value, Failure>,
 }
 
 /// The answer to one message, or none for a notification.
@@ -70,8 +95,15 @@ fn call(params: &Value, tools: &[Tool]) -> Value {
             Ok(()) => json!({ "content": [{ "type": "text", "text": v.to_string() }], "structuredContent": v, "isError": false }),
             Err(e) => failed(format!("{name}: the answer does not match its schema: {e}")),
         },
-        Err(e) => failed(e),
+        Err(Failure::NotDone(e)) => failed(e),
+        Err(Failure::Unknown(e)) => with_meta(failed(e), json!({ OUTCOME_META: "unknown" })),
+        Err(Failure::NeedsScope(e, scopes)) => with_meta(failed(e), json!({ OUTCOME_META: "needs_scope", SCOPES_META: scopes })),
     }
+}
+
+fn with_meta(mut v: Value, meta: Value) -> Value {
+    v["_meta"] = meta;
+    v
 }
 
 /// One session: answer each line until the appliance closes it.

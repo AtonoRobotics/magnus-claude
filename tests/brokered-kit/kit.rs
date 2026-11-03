@@ -3,11 +3,13 @@
 
 use super::*;
 
-fn echo(args: &Value, token: &str) -> Result<Value, String> {
+fn echo(args: &Value, token: &str) -> Result<Value, Failure> {
     match args["say"].as_str() {
         Some("wrong") => Ok(json!({ "said": 1 })),
+        Some("lost") => Err(Failure::Unknown("lost on the way".into())),
+        Some("more") => Err(Failure::NeedsScope("wants more".into(), vec!["s2".into()])),
         Some(s) => Ok(json!({ "said": format!("{s} with {}", token.len()) })),
-        None => Err("nothing to say".into()),
+        None => Err("nothing to say".to_string().into()),
     }
 }
 
@@ -52,8 +54,10 @@ fn a_session_runs_a_call_only_with_its_token_and_schemas() {
         call(6, json!({ "say": "wrong" }), Some("tok")),
         call(7, json!({}), Some("tok")),
         json!({ "jsonrpc": "2.0", "id": 8, "method": "resources/list" }),
+        call(9, json!({ "say": "lost" }), Some("tok")),
+        call(10, json!({ "say": "more" }), Some("tok")),
     ]);
-    assert_eq!(a.iter().map(|m| m["id"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(a.iter().map(|m| m["id"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     assert_eq!(a[0]["result"]["protocolVersion"], PROTOCOL);
     let t = &a[1]["result"]["tools"][0];
     assert_eq!((t["name"].as_str(), t["inputSchema"]["type"].as_str(), t["outputSchema"]["required"][0].as_str()), (Some("echo"), Some("object"), Some("said")));
@@ -65,6 +69,12 @@ fn a_session_runs_a_call_only_with_its_token_and_schemas() {
         assert!(m["result"].get("structuredContent").is_none(), "{m}");
     }
     assert_eq!(a[7]["error"]["code"], -32601);
+    // What happened at the provider goes with a failure: nothing, unless
+    // it says otherwise.
+    assert!(a[6]["result"].get("_meta").is_none());
+    assert_eq!(a[8]["result"]["_meta"], json!({ OUTCOME_META: "unknown" }));
+    assert_eq!(a[9]["result"]["_meta"], json!({ OUTCOME_META: "needs_scope", SCOPES_META: ["s2"] }));
+    assert_eq!((a[8]["result"]["isError"].as_bool(), a[9]["result"]["isError"].as_bool()), (Some(true), Some(true)));
 }
 
 /// A provider's side of one exchange: what it was sent, and its answer,

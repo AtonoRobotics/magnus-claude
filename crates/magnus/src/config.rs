@@ -672,6 +672,12 @@ pub struct Brokered {
     pub idle_s: u64,
     #[serde(default = "brokered_memory")]
     pub memory_mib: u32,
+    /// Where the egress proxy reaches a manifest host (`host:port`) instead
+    /// of the address DNS gives: a pinned address, or a stand-in for the
+    /// provider in a test. What a microVM may ask for is still only its
+    /// manifest's hosts.
+    #[serde(default)]
+    pub resolve: std::collections::BTreeMap<String, String>,
     /// Certificates (DER files) servers trust beside the public roots: an
     /// organisation whose egress inspects TLS, or a test's stand-in.
     #[serde(default)]
@@ -694,7 +700,7 @@ fn brokered_memory() -> u32 {
 
 impl Default for Brokered {
     fn default() -> Self {
-        Brokered { images: None, idle_s: brokered_idle(), memory_mib: brokered_memory(), roots: vec![] }
+        Brokered { images: None, idle_s: brokered_idle(), memory_mib: brokered_memory(), resolve: Default::default(), roots: vec![] }
     }
 }
 

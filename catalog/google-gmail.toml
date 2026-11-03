@@ -1,7 +1,7 @@
 id = "google-gmail"
 version = "1.0.0"
 name = "Gmail"
-summary = "Magnus can search and read your email, write drafts for you to send, and file, label or trash messages."
+summary = "Magnus can search and read your email, write drafts and send one when you allow it, and file, label or trash messages."
 # The Library's card and page (connectors spec, Catalog and connector
 # manifests; Library): who makes it, its category chip, what Magnus can do
 # with it, each scope in plain words (in the order of `scopes`), and what it
@@ -9,26 +9,35 @@ summary = "Magnus can search and read your email, write drafts for you to send, 
 # until the provider's own mark is in its listing.
 publisher = "Google"
 category = "email"
-abilities = ["Find an email or a thread when you ask about it", "Summarize long threads and catch you up", "Write drafts for you to read and send", "Label, file or trash messages"]
-asks = ["See your email and its settings", "Write drafts and send email", "Read, change and label your email"]
-can = "Read your email, write drafts, and label, file or trash messages"
-cannot = "Send email, or delete email for good"
+abilities = ["Find an email or a thread when you ask about it", "Summarize long threads and catch you up", "Write drafts, replies and forwards, and send one when you allow it", "Label, file or trash messages"]
+asks = ["Read, write, send and label your email"]
+can = "Read, write, send, reply to and forward your email (it asks you before each send), and label, file or trash messages"
+cannot = "Delete an email for good"
 letters = "Gm"
 tint = "#B3261E"
-kind = "remote"
-endpoint = "https://gmailmcp.googleapis.com/mcp/v1"
-# Its tools write drafts, labels and the trash in the person's own mailbox:
-# what reaches it stays theirs (it cannot send). What comes back is their
-# private mail, written by others.
-audience = "private"
+# Brokered (owner, 2026-11-03: Google's hosted Gmail server cannot send
+# email): Alpha Vector's server over Gmail's API (`brokered/gmail`), its
+# image named by digest and built from this commit by `brokered/build.sh`;
+# each person's runs in a microVM of its own that reaches only Gmail's API,
+# and people sign in at Google.
+kind = "brokered"
+endpoint = "sha256:5926b9c9a32e376ab5f49f0fdd69afff8e93cbbccb6d95a2605434ce9a9b7bff"
+hosts = ["gmail.googleapis.com"]
+issuer = "https://accounts.google.com"
+# A draft it sends reaches anyone the person writes to. What comes back is
+# their private mail, written by others.
+audience = "public"
 label = "private+untrusted"
 registration = "preregistered"
 provider = "google"
 # Where a person removes Magnus at Google when Disconnect could not revoke it.
 remove_access = "https://myaccount.google.com/connections"
-scopes = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.compose", "https://www.googleapis.com/auth/gmail.modify"]
+# `gmail.modify` alone: it is among the scopes of every method the tools use
+# (Gmail API reference, each method's Authorization scopes), and it never
+# deletes mail for good (only `https://mail.google.com/` can).
+scopes = ["https://www.googleapis.com/auth/gmail.modify"]
 
-# Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).
+# Exactly the tools its image lists (`every_tool_is_classed_in_the_manifest`).
 [tools]
 search_threads = "read"
 get_thread = "read"
@@ -37,6 +46,13 @@ list_drafts = "read"
 get_draft = "read"
 list_labels = "read"
 create_draft = "reversible_write"
+update_draft = "reversible_write"
+reply_draft = "reversible_write"
+forward_draft = "reversible_write"
+# Sent mail cannot be called back, and a deleted draft is gone for good
+# (drafts.delete: "Immediately and permanently deletes the specified draft").
+send_draft = "irreversible"
+delete_draft = "irreversible"
 create_label = "reversible_write"
 label_message = "reversible_write"
 unlabel_message = "reversible_write"
@@ -51,5 +67,3 @@ mark_message_spam = "reversible_write"
 unmark_message_spam = "reversible_write"
 mark_thread_spam = "reversible_write"
 unmark_thread_spam = "reversible_write"
-apply_sensitive_message_label = "irreversible"
-apply_sensitive_thread_label = "irreversible"

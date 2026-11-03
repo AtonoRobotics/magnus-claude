@@ -61,9 +61,24 @@ trap 'rm -rf "$links"' EXIT
 ln -s "../sandbox/$h/vmlinux" "$links/$(basename "$kernel")"
 ln -s "../sandbox/$h/rootfs.ext4" "$links/$(basename "$rootfs")"
 
+# The catalog's brokered connectors' server images (release/brokered-images,
+# built from this checkout by brokered/build.sh), beside the programs in
+# `brokered-images`, where the appliance looks for them; every image a
+# catalog manifest names is among them.
+images="$links/brokered-images"
+mkdir -p "$images"
+while read -r p; do brokered/build.sh "$p" "$images" > /dev/null; done < release/brokered-images
+python3 -I - "$images" catalog/*.toml <<'EOF'
+import sys, tomllib, os
+for f in sys.argv[2:]:
+    m = tomllib.load(open(f, "rb"))
+    if m.get("kind") == "brokered" and not os.path.exists(os.path.join(sys.argv[1], m["endpoint"].removeprefix("sha256:") + ".cpio")):
+        sys.exit(f"{f} names the server image {m['endpoint']}, which this checkout does not build (release/brokered-images)")
+EOF
+
 npm ci --prefix browser --omit=dev
 release/publish.sh appliance "$version" "$updates" "$notes" \
-  "${bins[@]}" browser \
+  "${bins[@]}" browser "$images" \
   "$links/$(basename "$kernel")" "$links/$(basename "$rootfs")"
 published=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$updates/appliance/latest.json")
 [ "$published" = "$version" ] || exit 0

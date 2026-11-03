@@ -20,7 +20,7 @@
 use crate::apps::{AppTool, CallError, CallOutput, Mcp};
 use crate::config::{Brokered as Cfg, Connector, Sandbox};
 use anyhow::{anyhow, Context, Result};
-use magnus_brokered_kit::{schema, MCP_PORT, PROTOCOL, PROXY_PORT, ROOTS_ENV, TOKEN_META};
+use magnus_brokered_kit::{schema, MCP_PORT, OUTCOME_META, PROTOCOL, PROXY_PORT, ROOTS_ENV, SCOPES_META, TOKEN_META};
 use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::HashMap;
@@ -70,6 +70,16 @@ pub fn vm_config(sb: &Sandbox, cfg: &Cfg, image: &Path, vsock: &Path) -> Value {
         "machine-config": { "vcpu_count": 1, "mem_size_mib": cfg.memory_mib },
         "vsock": { "guest_cid": 3, "uds_path": vsock }
     })
+}
+
+/// Where a release puts the server images of the catalog's brokered
+/// connectors, beside its programs (`release/to-appliance.sh`).
+pub const IMAGES: &str = "brokered-images";
+
+/// Where the server images are: `[brokered] images`, or else those of the
+/// release the appliance runs.
+fn images(cfg: &Cfg, install: Option<&Path>) -> Option<PathBuf> {
+    cfg.images.clone().or_else(|| install.map(|d| d.join(IMAGES)).filter(|d| d.is_dir()))
 }
 
 /// The kernel's command line, and the roots its server trusts beside the
@@ -151,7 +161,7 @@ impl Brokered {
 
     async fn launch(&self, c: &Connector, hosts: Option<Vec<String>>) -> Result<Instance> {
         let sb = self.sandbox.as_ref().ok_or_else(|| anyhow!("{} runs in a microVM, and this appliance has no [sandbox] to run it", c.name))?;
-        let images = self.cfg.images.as_ref().ok_or_else(|| anyhow!("{}'s server image is not on this appliance ([brokered] images is not set)", c.name))?;
+        let images = images(&self.cfg, crate::update::install_dir().ok().as_deref()).ok_or_else(|| anyhow!("{}'s server image is not on this appliance (no {IMAGES} beside its programs, and no [brokered] images)", c.name))?;
         let hex = digest(&c.url)?;
         let bytes = std::fs::read(images.join(format!("{hex}.cpio"))).with_context(|| format!("{}'s server image {hex} is not on this appliance", c.name))?;
         anyhow::ensure!(hex::encode(sha2::Sha256::digest(&bytes)) == hex, "{}'s server image on this appliance is not the one its manifest names", c.name);
@@ -160,7 +170,7 @@ impl Brokered {
         let vsock = dir.join("v.sock");
         let proxy = match hosts {
             // Where Firecracker sends the guest's connections to the host's port.
-            Some(h) => Some(tokio::spawn(proxy(UnixListener::bind(dir.join(format!("v.sock_{PROXY_PORT}")))?, h, c.name.clone()))),
+            Some(h) => Some(tokio::spawn(proxy(UnixListener::bind(dir.join(format!("v.sock_{PROXY_PORT}")))?, h, c.name.clone(), Arc::new(self.cfg.resolve.clone())))),
             None => None,
         };
         let inst = Instance { dir: dir.clone(), vsock: vsock.clone(), child: Mutex::new(None), proxy, used: Mutex::new(Instant::now()), busy: AtomicUsize::new(0) };
@@ -303,6 +313,21 @@ impl Brokered {
         let text = r["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
         let structured = r.get("structuredContent").cloned().filter(|v| !v.is_null());
         let is_error = r["isError"].as_bool().unwrap_or(false);
+        // What the server says happened at the provider, when it failed: a
+        // write that may have gone through, or a refusal for want of
+        // access the connector's scopes name.
+        if is_error {
+            match r["_meta"][OUTCOME_META].as_str() {
+                Some("unknown") => return Err(CallError::Unknown(Mcp::clean(&text, Some(token)))),
+                Some("needs_scope") => {
+                    let wanted: Vec<String> = r["_meta"][SCOPES_META].as_array().into_iter().flatten().filter_map(|s| s.as_str()).filter(|s| c.scopes.iter().any(|x| x == s)).map(String::from).collect();
+                    if !wanted.is_empty() {
+                        return Err(CallError::NeedsScope(wanted));
+                    }
+                }
+                _ => {}
+            }
+        }
         // Its answer is checked here too: a server with an output schema
         // answers with content that matches it (MCP, Tools).
         if let (false, Some(out_schema)) = (is_error, def.get("outputSchema")) {
@@ -398,13 +423,13 @@ impl Session {
 
 /// A microVM's egress proxy: each connection from it asks to CONNECT to a
 /// host, and only the manifest's hosts are reached.
-async fn proxy(l: UnixListener, hosts: Vec<String>, app: String) {
+async fn proxy(l: UnixListener, hosts: Vec<String>, app: String, resolve: Arc<std::collections::BTreeMap<String, String>>) {
     while let Ok((s, _)) = l.accept().await {
-        tokio::spawn(tunnel(s, hosts.clone(), app.clone()));
+        tokio::spawn(tunnel(s, hosts.clone(), app.clone(), resolve.clone()));
     }
 }
 
-async fn tunnel(mut s: UnixStream, hosts: Vec<String>, app: String) {
+async fn tunnel(mut s: UnixStream, hosts: Vec<String>, app: String, resolve: Arc<std::collections::BTreeMap<String, String>>) {
     let mut head = vec![];
     let mut b = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
@@ -421,7 +446,9 @@ async fn tunnel(mut s: UnixStream, hosts: Vec<String>, app: String) {
         let _ = s.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
         return;
     }
-    let mut up = match tokio::time::timeout(CONNECT_WAIT, TcpStream::connect(&target)).await {
+    let to = if target.contains(':') { target.to_ascii_lowercase() } else { format!("{}:443", target.to_ascii_lowercase()) };
+    let to = resolve.get(&to).cloned().unwrap_or(to);
+    let mut up = match tokio::time::timeout(CONNECT_WAIT, TcpStream::connect(&to)).await {
         Ok(Ok(u)) => u,
         _ => {
             let _ = s.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
@@ -505,6 +532,17 @@ mod tests {
         assert!(c.get("network-interfaces").is_none());
         assert_eq!(c["drives"], json!([]));
         assert_eq!(c["boot-source"]["initrd_path"], "/i.cpio");
+    }
+
+    /// The images are the release's unless the config names others.
+    #[test]
+    fn a_release_brings_its_server_images() {
+        let install = tempfile::tempdir().unwrap();
+        assert_eq!(images(&Cfg::default(), Some(install.path())), None);
+        std::fs::create_dir(install.path().join(IMAGES)).unwrap();
+        assert_eq!(images(&Cfg::default(), Some(install.path())), Some(install.path().join(IMAGES)));
+        let cfg = Cfg { images: Some("/elsewhere".into()), ..Cfg::default() };
+        assert_eq!(images(&cfg, Some(install.path())), Some(PathBuf::from("/elsewhere")));
     }
 
     #[test]
