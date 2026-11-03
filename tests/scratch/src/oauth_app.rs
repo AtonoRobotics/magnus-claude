@@ -46,6 +46,9 @@ pub struct AppState {
     pub retired: Vec<String>,
     /// Answer refreshes without `expires_in` (it is only recommended).
     pub refresh_without_expiry: bool,
+    /// Its authorization server lets no client register itself (no RFC
+    /// 7591 registration endpoint).
+    pub no_registration: bool,
     n: usize,
 }
 
@@ -119,13 +122,16 @@ async fn resource(State((base, _)): S) -> Json<Value> {
 }
 
 async fn metadata(State((base, st)): S) -> Json<Value> {
-    let (names_itself, no_revocation) = { let s = st.lock().unwrap(); (s.names_itself, s.no_revocation) };
+    let (names_itself, no_revocation, no_registration) = { let s = st.lock().unwrap(); (s.names_itself, s.no_revocation, s.no_registration) };
     let mut m = json!({
         "issuer": base, "authorization_endpoint": format!("{base}/authorize"), "token_endpoint": format!("{base}/token"),
         "registration_endpoint": format!("{base}/register"), "revocation_endpoint": format!("{base}/revoke"),
         "code_challenge_methods_supported": ["S256"], "grant_types_supported": ["authorization_code", "refresh_token"],
         "authorization_response_iss_parameter_supported": names_itself
     });
+    if no_registration {
+        m.as_object_mut().unwrap().remove("registration_endpoint");
+    }
     if no_revocation {
         m.as_object_mut().unwrap().remove("revocation_endpoint");
     }

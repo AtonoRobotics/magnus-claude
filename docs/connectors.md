@@ -20,7 +20,7 @@ one commit), 2026-11-02.
 - [ ] Breadth: Google, Microsoft, coding and deployment services (Vercel and peers), Slack, the other common business services, and FreeCAD, Autodesk Fusion, SolidWorks and Blender (today: four Google manifests, `catalog/google-*.toml`, compiled in by `crates/magnus/src/catalog.rs` `SOURCES`)
 - [ ] Plug and play: every connector is a Connect button that opens the provider's own login page and then works (the button and the page exist, `connectors.mjs`, `app-apps.mjs` against a fake app; a Google sign-in cannot finish in the desktop app, see Connect flow)
 - [x] No connector shows the user a form: no address, key, token, client ID or header fields in the app (`desktop/tests/connectors.mjs`, "asks nothing here", and the owner's Settings › Connectors)
-- [ ] A service whose provider offers no sign-in is not in the catalog (no check: an admin can add a server with a key, `add_connector`)
+- [ ] A service whose provider offers no sign-in is not in the catalog (every catalog manifest signs in; an admin can no longer add a server with a key, `add-by-sign-in`, but can still add one that asks for no sign-in at all: open with the owner)
 - [ ] Desktop programs detected and enabled with one consent (no detection, no bridge)
 - [ ] Non-technical users: nothing in connect, use or repair needs configuration, a terminal or a developer console (repair of a broken sign-in is untested; the Google client secret is put in by a CI step or typed in the admin console)
 - [ ] Removable modules: each connector added, disabled or removed without rebuilding Magnus (disable: admin console, `admin_connectors.rs`; add or remove a catalog connector needs a release, manifests are compiled in)
@@ -38,7 +38,7 @@ one commit), 2026-11-02.
 - [ ] Browse: or asks Magnus (no catalog tools)
 - [ ] Connect: click Connect, sign in on the provider's page, approve, the card turns Connected (works against a fake app, `app-apps.mjs`; never shown for a real provider, and Google's completion is refused, see Connect flow)
 - [x] Never asked, in the app: no client ID, secret, address, key, token, redirect URI or scope (`connectors.mjs`)
-- [ ] Never asked, in the admin console: today the console asks an admin for Google's client secret (Security › Connectors and credentials, `desktop/admin/admin.js` `connectorPanel` credential form) and for "The organisation's key" when adding an app (`addConnector`)
+- [ ] Never asked, in the admin console: the console still asks an admin for Google's client secret (Security › Connectors and credentials, `desktop/admin/admin.js` `connectorPanel` credential form) until the relay holds it; adding an app asks for no key (`add-by-sign-in`, `admin_connectors.rs`)
 - [ ] Where the org's credentials live: Alpha Vector's client IDs and secrets in the relay's secret store, nowhere in the app, console or manifests, the appliance getting client IDs from the relay (today: client IDs in `catalog/registrations.toml`, compiled in; Google's secret in the appliance's vault, put there by `release/admin-on-appliance.sh` from the repository secret)
 - [x] The connector form asking for a client ID, client secret and web address is deleted from the app, not hidden (#67; `connectors.mjs`, the owner's Settings › Connectors ask for nothing)
 - [ ] Acceptance: on a fresh install a user connects Gmail, Slack, GitHub and Vercel with only clicks and the providers' login pages (no Slack, GitHub or Vercel manifest; Gmail's completion fails in the desktop app)
@@ -68,7 +68,7 @@ one commit), 2026-11-02.
 - [ ] A service moves from brokered to remote with no change visible to the user
 - [x] An org admin adds a remote MCP server by its address, in the admin console only (`admin_connectors.rs` `the_console_sets_rotates_and_revokes_the_organisations_credentials_and_never_shows_one`; gone from the app, `connectors.mjs`)
 - [x] Magnus discovers the added server's sign-in from its address; then it is a card like any other, each user logging in (`connectors.rs`, the server's 401 and metadata)
-- [ ] A server that asks for a key, token or client details instead of a sign-in is refused, and the admin told why (today it is accepted with "The organisation's key", `add_connector`, and the kernel accepts a `client_id`)
+- [x] A server that asks for a key, token or client details instead of a sign-in is refused, and the admin told why (`admin_connectors.rs` `the_console_sets_rotates_and_revokes_the_organisations_credentials_and_never_shows_one`: a key, a client ID, a server answering 401 with no sign-in, and one whose sign-in registers no client, each refused with the reason)
 
 ## Catalog and connector manifests
 
@@ -102,8 +102,8 @@ one commit), 2026-11-02.
 - [ ] Client ID Metadata Document, used when the provider advertises it, one document at pyrallon.ai naming the relay callback
 - [x] Dynamic Client Registration as the fallback (`connectors.rs`, the fake app registers Magnus)
 - [ ] The order the MCP authorization spec (2026-07-28) sets: pre-registered, then CIMD, then DCR
-- [ ] Asking the user to type in client details is excluded (the kernel still takes a `client_id` on add, and its error says "register Magnus there and give its client id")
-- [ ] A server supporting none of the three cannot be added, and the admin is told why (nothing is checked when an app is added)
+- [x] Asking the user to type in client details is excluded (`add_connector` refuses a `client_id`; `admin_connectors.rs`)
+- [ ] A server supporting none of the three cannot be added, and the admin is told why (an added server must offer Dynamic Client Registration, else it is refused with the reason, `admin_connectors.rs`; one offering only CIMD is refused too until CIMD is built)
 
 ### Connect flow
 
