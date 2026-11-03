@@ -729,6 +729,11 @@ impl Kernel {
 
     async fn call(self: &Arc<Self>, a: &Action, f: &Facts, bearer: Option<&str>, key: &str) -> std::result::Result<(String, bool, Option<Value>), CallFailure> {
         if let Some(c) = &f.connector {
+            // A person turned off has no apps until they are back.
+            let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
+            if self.read(|s| s.turned_off.contains(&person)) {
+                return Err(CallFailure::NotDone(format!("{person}'s account is turned off at the organisation's sign-in, so their apps answer no calls for them until they are back. Nothing was sent to {}.", f.app)));
+            }
             let k = (c.idempotency == "header").then_some(key);
             return match self.mcp.call(&c.url, bearer, &f.remote, &a.input, k).await {
                 Ok(o) => Ok((o.text, o.is_error, o.structured)),

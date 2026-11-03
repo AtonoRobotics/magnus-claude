@@ -370,6 +370,12 @@ pub enum Ev {
         person: String,
         session: String,
     },
+    /// The identity provider, or an admin, turned a person off: their apps
+    /// answer no calls for them until they sign in again.
+    PersonTurnedOff {
+        person: String,
+        why: String,
+    },
     /// A recurring task a person set up (or accepted from the agent's proposal).
     ScheduleSet {
         id: String,

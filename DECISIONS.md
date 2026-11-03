@@ -887,11 +887,13 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - When the app's live list of tools is read (kept two seconds), a tool not on it is not offered. When the list cannot be read, the pinned tools are still offered as before: an app that cannot be reached fails its calls, and nothing is learned about which tools it retired.
 - The pin stays. A tool that comes back unchanged is offered again with no new review, and one that comes back changed waits for review as any changed definition does (B10).
 - Test: `a_tool_the_app_no_longer_lists_leaves_the_agent_at_once` (retired_tools.rs): create_event offered, retired and not offered, listed again and offered, with no new review.
+
 ## A sign-in is a step-up only when the password was typed for it (2026-11-02, `step-up-typed`)
 
 - Found by the review of master against the specs (2026-11-02). Every new console session counted as stepped up, but a plain sign-in does not ask the provider for a password: while the admin's session at the provider lives (and the console's own refresh keeps it alive), the console's Sign in comes straight back. That session could release the kill switch, delete people or change roles with no password typed, against the spec's Step-up ("a passkey check in the last 5 minutes"; owner's ruling 2: the password, and the code).
 - A new session is stepped up only when the ID token's `auth_time` is no earlier than the moment its sign-in started, the same check a step-up already makes; otherwise its first action that needs one asks for the password. "Signing in counts as one" (the step-up line under the console's authentication) now means a sign-in with the password typed.
 - Test: `a_sign_in_the_provider_lets_through_without_a_password_is_no_step_up` (admin_sign_in.rs): in the same browser, still signed in at the provider, Sign in again asks for nothing, and the new session has no step-up and is answered `step_up_required`.
+
 
 ## Who sees an org document comes from what its run read (2026-11-02, `bundle-readers`)
 
@@ -900,3 +902,12 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - An admin's edit, a rollback and an undo keep those sources and the writer: a version written with no run keeps the writer whose run read them. Otherwise an admin's edit would have hidden such a document from everyone, its writer included, or, with the new sources dropped, shown it to everyone.
 - Left for its own pull request: a document an admin removed and then restored is rebuilt from its frontmatter, so it loses these sources and its taint (the review's next finding, taint on rollback and undo).
 - Test: `an_org_document_from_private_content_is_its_writers_alone_whatever_it_cites` (org_context_bundle.rs): Alice's task is given her own file, its run writes what the file says into `/people/finance.md` citing only `human:alice`; Bob can neither read nor find it, also after an admin edits it, and the document's writer is still Alice.
+
+## A person's apps when they leave or are turned off (2026-11-02, `person-connections`)
+
+- The connectors spec, Isolation: "When an admin removes a user, every connection is revoked at the provider and its tokens deleted. When the identity provider turns a user off, their connections refuse every call and schedules pause until they are back; tokens stay in the vault unused."
+- Removing a person already revoked their sign-ins at each app (`erase_person`), but no test checked it. The admin console's delete test now has Bob connect an app first and checks that both his tokens are revoked at the app.
+- Turning a person off ended their sessions and paused their schedules, but a run of theirs already going, such as one waiting on an approval, still called their apps. Now `turn_off`, whether from the provider's check or the admin console, records `PersonTurnedOff`. The boundary refuses every app call for that person ("their apps answer no calls for them until they are back; nothing was sent"), and the app is never reached.
+- Their sign-ins stay in the vault unused: turning someone off is not removing them, and they may be back.
+- They are back when they sign in again (`SignedIn` clears it), since the provider let them in. Being turned back on at the provider alone changes nothing here until then, because no session can act for them before it.
+- Test: `a_person_turned_off_has_no_apps_until_they_are_back` (turned_off_apps.rs, Keycloak). Carol's task waits on an approval to read her calendar, and Keycloak turns her off. Approved after that, the call is refused and never reaches the app, and nothing is revoked. Turned back on and signed in again, her next task's call goes through with the same sign-in.

@@ -6,7 +6,8 @@
 //! one file's words, each read in the audit log and in the person's inbox,
 //! and refused while the organisation keeps people's data private; deletes
 //! them, only with a fresh password and their email typed, after which their
-//! account, sessions, schedules and content are gone.
+//! account, sessions, schedules and content are gone, and their sign-ins to
+//! apps revoked at each app.
 
 use magnus_invariants::*;
 use magnus_scratch::admin::*;
@@ -71,6 +72,14 @@ async fn root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_del
     assert_eq!(r.status().as_u16(), 201, "{}", r.text().await.unwrap());
     let r = bob(Method::POST, "/v1/schedules").json(&json!({ "text": "Check the dock contracts.", "daily_at": "03:00" })).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 201, "{}", r.text().await.unwrap());
+    // And connects the organisation's calendar with his own sign-in.
+    let cal = FakeOAuthApp::start(3600).await;
+    let (st, v) = app.api("alice").post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private+untrusted" })).await;
+    assert!(st.is_success(), "{v}");
+    let r: Value = bob(Method::POST, "/v1/connectors/calendar/sign-in").json(&json!({ "redirect_uri": "http://127.0.0.1:9/callback" })).send().await.unwrap().json().await.unwrap();
+    let (code, state) = FakeOAuthApp::browse(r["authorize_url"].as_str().unwrap_or_else(|| panic!("{r}"))).await;
+    let r = bob(Method::POST, "/v1/connectors/calendar/sign-in/complete").json(&json!({ "state": state, "code": code })).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 204, "{}", r.text().await.unwrap());
 
     let alice = s.session().await;
     let (_, users) = s.send(&alice, Method::GET, "/users", None).await;
@@ -136,6 +145,10 @@ async fn root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_del
     let (st, v) = s.send(&fresh, Method::DELETE, &format!("/users/{b_id}"), Some(json!({ "email": "bob@example.test" }))).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!((v["schedules_ended"].as_u64(), v["sessions_ended"].as_u64()), (Some(1), Some(1)), "{v}");
+    // His sign-in to the calendar is revoked at the app, both its tokens
+    // (connectors spec, Isolation).
+    assert_eq!(v["sign_ins_revoked"].as_u64(), Some(1), "{v}");
+    assert_eq!(cal.state.lock().unwrap().revoked.len(), 2, "the app did not revoke Bob's refresh and access tokens");
     assert!(v["content_removed"].as_u64().unwrap_or(0) >= 2, "{v}");
 
     // Gone: the account, the session, the schedule and every word of his.
