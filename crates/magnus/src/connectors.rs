@@ -468,7 +468,7 @@ impl Kernel {
                 let v: Value = r.json().await?;
                 (v["client_id"].as_str().ok_or_else(|| anyhow!("registration returned no client id"))?.to_string(), v["client_secret"].as_str().map(String::from))
             }
-            (None, None, None) => bail!("the app's authorization server does not register clients; register Magnus there and give its client id"),
+            (None, None, None) => bail!("the app's authorization server does not let Magnus register itself, and Magnus never asks for client details"),
         };
         let verifier = random();
         let state = random();
@@ -817,17 +817,27 @@ impl Kernel {
         if !url.starts_with("https://") && !(url.starts_with("http://") && self.cfg.web.allow_private_networks) {
             return Err(refusal(StatusCode::BAD_REQUEST, "the app's address must be https://"));
         }
+        // Never a key, token or client details: people sign in to an app
+        // with their own accounts, and nobody types one into Magnus
+        // (connectors spec, Remote MCP connectors and Client registration).
+        if !s("token").is_empty() || !b["client_id"].is_null() {
+            return Err(refusal(StatusCode::BAD_REQUEST, "Magnus never takes a key, token or client details for an app: each person signs in to it with their own account"));
+        }
         let oauth = match asks_sign_in(&url).await {
-            Ok(a) => a.is_some(),
+            Ok(None) => false,
+            Ok(Some(meta)) => {
+                let (asm, _, _) = discover(&url, meta).await.map_err(|e| refusal(StatusCode::UNPROCESSABLE_ENTITY, format!("This server asks for a key or token instead of a sign-in ({e:#}), so it cannot be added: people connect an app by signing in with their own accounts")))?;
+                // Alpha Vector's own clients are for the catalog's providers;
+                // an added server registers Magnus itself.
+                if asm["registration_endpoint"].as_str().is_none() {
+                    return Err(refusal(StatusCode::UNPROCESSABLE_ENTITY, "This server's sign-in does not let Magnus register itself, and Magnus never asks for client details, so it cannot be added. Alpha Vector can bring it into the catalog with its own registration."));
+                }
+                true
+            }
             Err(e) => return Err(refusal(StatusCode::BAD_GATEWAY, format!("{e:#}"))),
         };
-        // A credential only where there is one: the app's sign-in, or a key the
-        // owner gives. An app that asks for neither is called without one.
-        let token = s("token");
-        if !oauth && !token.is_empty() {
-            self.vault.put(&credential_name(&name), &token).map_err(failed)?;
-        }
-        let credential = (oauth || !token.is_empty()).then(|| credential_name(&name));
+        // A server that asks for no sign-in is called without a credential.
+        let credential = oauth.then(|| credential_name(&name));
         let c = Connector {
             name: name.clone(),
             transport: "mcp_http".into(),
@@ -841,7 +851,7 @@ impl Kernel {
             idempotency: "none".into(),
             tools: Default::default(),
             auth: oauth.then(|| OAUTH.to_string()),
-            client_id: b["client_id"].as_str().map(String::from),
+            client_id: None,
             scopes: vec![],
             registration: None,
             title: None,

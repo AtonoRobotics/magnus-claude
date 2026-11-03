@@ -39,6 +39,9 @@ pub struct Kernel {
     drivers: Mutex<HashSet<String>>,
     pub(crate) leases: Mutex<HashMap<String, String>>,
     pub(crate) live_tools: tokio::sync::Mutex<HashMap<String, (Instant, Vec<AppTool>)>>,
+    /// Each connection whose app refused Magnus the last time it asked for
+    /// the app's tools, with the app's answer: said in the person's app index.
+    pub(crate) refused_apps: Mutex<HashMap<String, String>>,
     pub live_text: Arc<Live>,
     /// The knowledge base's search index.
     pub knowledge: crate::knowledge::Index,
@@ -115,6 +118,7 @@ impl Kernel {
             state.apply(&e);
         }
         let vault = Arc::new(Vault::open(&cfg.appliance.state_dir)?);
+        vault.bind_unbound()?;
         if state.kill_switch {
             vault.seal();
         }
@@ -138,6 +142,7 @@ impl Kernel {
             drivers: Mutex::new(HashSet::new()),
             leases: Mutex::new(HashMap::new()),
             live_tools: tokio::sync::Mutex::new(HashMap::new()),
+            refused_apps: Mutex::new(HashMap::new()),
             live_text,
             knowledge: crate::knowledge::Index::new(&cfg.database.url),
             recall: crate::recall::Recall::new(&cfg.database.url),

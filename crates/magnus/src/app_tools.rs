@@ -37,6 +37,12 @@ impl Kernel {
             .collect()
     }
 
+    /// What a connected app answered when Magnus last asked it for its tools
+    /// and it refused, if it did.
+    fn refused(&self, c: &Connector, person: &Person) -> Option<String> {
+        self.refused_apps.lock().unwrap().get(&crate::connectors::connection_name(&c.name, &person.id)).cloned()
+    }
+
     /// The person's app index, as the run's context holds it.
     pub fn app_index(&self, person: &Person) -> Option<String> {
         let apps = self.apps_of(person);
@@ -46,7 +52,11 @@ impl Kernel {
         let mut t = "The person's apps (their Library), as of now. A connected app's tools are offered to you. For one they have not connected, offer_app puts its card in front of them, saying what it is for; only they sign in. find_apps and app_details tell you more.\n".to_string();
         for (c, state) in &apps {
             let l = line(c, *state);
+            let refused = (*state == State::Connected).then(|| self.refused(c, person)).flatten().map(|r| {
+                format!("Connected, but the app refused Magnus when asked for its tools ({r}), so none of them can be used now. Tell the person plainly that the app is refusing Magnus; do not try another way, such as the browser.")
+            });
             let says = match state {
+                State::Connected if refused.is_some() => refused.as_deref().unwrap_or_default(),
                 State::Connected => "Connected.",
                 State::Lapsed => "Needs signing in again: the app no longer accepts their sign-in; offer_app lets them sign in again.",
                 State::MoreAccess => "Connected, but it needs more access for something you asked of it; offer_app asks them to approve it.",
@@ -89,6 +99,9 @@ impl Kernel {
             l[k] = listing[k].clone();
         }
         l["signs_in"] = json!(c.auth.as_deref() == Some(crate::connectors::OAUTH));
+        if let Some(r) = (state == State::Connected).then(|| self.refused(&c, person)).flatten() {
+            l["refused"] = json!(format!("The app refused Magnus when asked for its tools ({r}): none of them can be used until it accepts Magnus again."));
+        }
         Ok(l)
     }
 

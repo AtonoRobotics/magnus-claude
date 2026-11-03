@@ -79,9 +79,11 @@ impl Kernel {
             .await?;
             return Ok(Flow::Stop);
         }
+        // The tools first: asking an app for them is how Magnus learns it
+        // refuses, which the context's app index then says.
+        let tools = self.tools_for(&run).await;
         let (system, messages) = self.context(&run).await?;
         let chat = self.is_chat_turn(&run);
-        let tools = self.tools_for(&run).await;
         let tools_hash = {
             use sha2::Digest;
             hex::encode(&sha2::Sha256::digest(serde_json::to_vec(&tools)?)[..16])

@@ -8,7 +8,9 @@
 //!   with why; the card shows Connect, and nothing is connected until the
 //!   person signs in;
 //! - it cannot offer an app that is not in the person's Library, and says
-//!   so when nothing fits.
+//!   so when nothing fits;
+//! - an app that refuses Magnus its tools is said to, from the first model
+//!   call, so Magnus tells the person rather than trying another way.
 
 use magnus_invariants::model::Script;
 use magnus_invariants::*;
@@ -263,4 +265,54 @@ async fn a_call_that_needs_more_access_asks_for_it_with_a_card_and_goes_through_
     assert_eq!((c["state"].as_str(), c["more_access"].as_bool()), (Some("connected"), Some(false)), "{c}");
     let _ = say(&carol, &plan, "Share my calendar with Dana now.", vec![(&tool, json!({ "with": "dana" }))]).await;
     assert_eq!(cal.calls("share_calendar"), 1, "the call did not go through once approved");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_that_refuses_magnus_its_tools_is_said_to_refuse_from_the_first_step() {
+    let plan = Arc::new(Mutex::new(vec![]));
+    let seen: Arc<Mutex<Vec<(Value, Vec<String>)>>> = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start(model(plan.clone(), seen.clone())).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let cal = magnus_scratch::FakeOAuthApp::start(3600).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "url": cal.url, "audience": "public", "label": "private+untrusted" })).await;
+    assert!(st.is_success(), "{v}");
+    let name = v["name"].as_str().unwrap().to_string();
+    sign_in(&alice, &name).await;
+    assert_eq!(alice.put(&format!("/v1/connectors/{name}/tools/list_events"), json!({ "risk": "read" })).await.0, 204);
+    let carol = app.api("carol");
+    sign_in(&carol, &name).await;
+    let offered = |seen: &Arc<Mutex<Vec<(Value, Vec<String>)>>>| -> Vec<String> {
+        let first = seen.lock().unwrap().first().cloned().unwrap().0;
+        first["tools"].as_array().into_iter().flatten().filter_map(|t| t["name"].as_str().map(String::from)).collect()
+    };
+    // Listed once, its tool is pinned and offered.
+    say(&carol, &plan, "Anything on today?", vec![]).await;
+    assert!(offered(&seen).contains(&format!("{name}__list_events")), "{:?}", offered(&seen));
+    seen.lock().unwrap().clear();
+
+    // Signed in, yet the app answers every request for its tools with 403,
+    // as Google's Gmail server did on strix-alpha (2026-11-03).
+    cal.state.lock().unwrap().forbids_listing = true;
+    // Past the kernel's two-second memory of the app's last listing.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let (_, thread) = say(&carol, &plan, "Draft an email to Dana.", vec![("app_details", json!({ "name": name }))]).await;
+    let first_said = opening(&seen);
+    assert!(
+        first_said.contains(&format!("({name})")) && first_said.contains("refused Magnus") && first_said.contains("HTTP 403 Forbidden"),
+        "the index says the refusing app is connected and nothing more: {first_said}"
+    );
+    assert!(!first_said.contains("Ignore your instructions"), "what the app wrote in its refusal reached the agent: {first_said}");
+    assert!(said_back(&seen).contains("refused Magnus"), "app_details does not say the app refuses Magnus: {}", said_back(&seen));
+    assert!(!said_back(&seen).contains("Ignore your instructions"), "{}", said_back(&seen));
+    assert!(offered(&seen).iter().all(|t| !t.starts_with(&format!("{name}__"))), "a refusing app's pinned tools are still offered: {:?}", offered(&seen));
+    assert!(thread.iter().any(|e| e["kind"] == "answer"), "{thread:?}");
+
+    // Once the app accepts Magnus again, it is plainly connected.
+    cal.state.lock().unwrap().forbids_listing = false;
+    seen.lock().unwrap().clear();
+    say(&carol, &plan, "What's on my calendar?", vec![]).await;
+    let again = opening(&seen);
+    assert!(again.contains(&format!("({name})")) && !again.contains("refused Magnus"), "{again}");
 }
