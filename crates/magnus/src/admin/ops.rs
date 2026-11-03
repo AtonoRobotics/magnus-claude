@@ -201,9 +201,10 @@ pub async fn set_module(State(c): State<Arc<Console>>, Extension(a): Extension<A
     }
 }
 
-/// Modules are part of Magnus's own release (owner's ruling 22: "module"
-/// stays the removable run modules): there is no package to install or
-/// remove apart from a release, which Updates installs.
+/// Modules are part of Magnus's own release: there is no package to install
+/// or remove apart from a release, which Updates installs. The spec's open
+/// question 22 (what "module" names) is not ruled; until it is, both answer
+/// 409.
 pub async fn module_package() -> Response {
     refuse(StatusCode::CONFLICT, "not_packaged", "Magnus's modules come with its release and are turned on or off here. A new module arrives with an update.")
 }

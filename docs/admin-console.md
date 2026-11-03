@@ -24,7 +24,7 @@ Each line names the pull request that built it, or the one building it.
 
 - [x] The `magnus-admin` confidential client, Authorization Code with PKCE, the one redirect URI per name, `private_key_jwt` (#69, #79)
 - [x] Back-channel calls to the provider's internal address, issuer unchanged (#69)
-- [x] The realm role `admin`, checked on every request from the session's validated token (#69; `admin_sign_in.rs`)
+- [ ] The realm role `admin`, checked on every request from the session's validated token. Built: checked at sign-in and again with the provider at each refresh, at most every 4 minutes (#69; `admin_sign_in.rs`); not on every request
 - [x] Admins sign in and step up with their password and code (ruling 1, no passkeys) (#69)
 - [x] Server-side session, cookie `__Host-magnus_admin`, HttpOnly, Secure, SameSite=Strict (#69)
 - [x] 30 minutes idle, 12 hours absolute (#69); adjustable under Security › Sign-in (`admin-security`; `admin_security.rs`)
@@ -37,7 +37,7 @@ Each line names the pull request that built it, or the one building it.
 
 ## Authority and audit
 
-- [x] Only `magnus-admin` holds `magnus_root` (BYPASSRLS) (#70)
+- [ ] Only `magnus-admin` holds `magnus_root` (BYPASSRLS). Built: `magnus migrate` creates the role (#70), but the console never connects as it, and its password is in the config file `magnus serve` also loads
 - [x] Every read or write of a person's private data through the console is audited: admin, person, resource, action, time (`admin-users-detail`; `admin_people.rs`)
 - [x] Deleting a person's data leaves it unrecoverable: removed from the store and every backup (no per-person key exists: DECISIONS.md) (`admin-users-detail`; `admin_people.rs`)
 - [x] Credentials are write-only everywhere (before #68; the console's routes, `admin_connectors.rs`)
@@ -99,7 +99,8 @@ Each line names the pull request that built it, or the one building it.
 
 - [x] Kill switch: state, who and when, tasks halted, schedules held (#71)
 - [x] Kill switch: microVMs frozen; Release with step-up from here (`admin-operations`; `admin_operations.rs`)
-- [x] Modules: name, version, status, what each provides; enable, disable (`admin-operations`; `admin_operations.rs`). Install from a package and remove: Magnus's modules come with its release (ruling 22), so both answer 409 and say so; the owner may rule otherwise
+- [x] Modules: name, version, status, what each provides; enable, disable (`admin-operations`; `admin_operations.rs`)
+- [ ] Install from a package and remove. Built: both answer 409 and say Magnus's modules come with its release; the spec's open question 22 (what "module" names) is not ruled, so this waits for the owner
 - [x] Model providers: enabled, endpoint, models, a connection test, last error; never a credential (`admin-operations`; `admin_operations.rs`)
 - [x] Health: kernel, event log, identity provider, console; CPU, memory, disk; recent errors (#71)
 - [x] Health: cloudflared, running microVMs, live (`admin-operations`; `admin_operations.rs`)
@@ -110,10 +111,10 @@ Each line names the pull request that built it, or the one building it.
 
 - [x] One Rust binary serving the UI and a JSON API under `/api/v1` (#68)
 - [x] The kernel over a local Unix socket (#70)
-- [x] Postgres as `magnus_root`, insert and select only on the log (#70)
+- [ ] Postgres as `magnus_root`, insert and select only on the log. Built: the role and its grants (#70); the console reads and writes through the kernel's control socket and never connects as it
 - [x] The provider's admin API through `magnus-admin-svc` with `private_key_jwt`, realm-management in the realm only (#72)
 - [x] The kill switch the kernel's own, persisted, refusing new runs while on (#71, before)
-- [x] Every endpoint in the spec's table (`admin-shell` to `admin-certificate`); `POST /modules` and `DELETE /modules/{id}` answer 409, because modules come with the release (owner's ruling 22)
+- [x] Every endpoint in the spec's table (`admin-shell` to `admin-certificate`); `POST /modules` and `DELETE /modules/{id}` answer 409 until the owner rules on the spec's open question 22 (see Modules)
 - [x] Every change audited before it answers; a step-up endpoint without a fresh check returns 401 `step_up_required` (#70, #69)
 
 ## Invariant tests
@@ -121,7 +122,8 @@ Each line names the pull request that built it, or the one building it.
 Reach
 - [x] Nothing on the public side serves a console page or admin route (`admin_reach.rs`)
 - [x] Loopback refused (`admin_reach.rs`)
-- [x] Outside the allowlist refused; the VPN subnet accepted (`admin_reach.rs`)
+- [x] Outside the allowlist refused; an address inside it accepted (`admin_reach.rs`)
+- [ ] A connection from the VPN subnet accepted: no test connects from a VPN address
 - [x] The wrong Host gets 404 (`admin_reach.rs`)
 
 Sign-in and authority
@@ -142,13 +144,13 @@ Knowledge
 - [x] An agent's change to org memory appears in Activity, and reverting it restores the prior state (`admin_knowledge.rs`)
 
 Kill switch
-- [x] Hold-to-stop at phone width halts a running task and a pending schedule within 5 seconds (#71)
+- [ ] Hold-to-stop at phone width halts a running task and a pending schedule within 5 seconds. Built: the kill switch halts both (#71); no test holds the button at phone width or times the stop
 - [x] Engaged across a restart, and no new run starts (before #68)
 - [x] `magnus kill` engages it with the network down (before #68)
 - [x] Release without step-up fails (#71)
 
 UI
-- [x] Every screen in light, dark and glass, and at phone width with no horizontal scroll, the sections in reach (each section's test visits its screens through `admin-sign-in.mjs`)
+- [ ] Every screen in light, dark and glass, and at phone width with no horizontal scroll, the sections in reach. Visited through `admin-sign-in.mjs`: Users, a person, Security › Sign-in, Agent policy and a connector, Operations › Network; not yet Overview, Knowledge, Audit, Modules, Model providers, Health or Updates
 
 ## Removals
 

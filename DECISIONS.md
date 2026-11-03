@@ -998,3 +998,10 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Left for its own pull request by `erase-all`: deleting a person removed their tasks, runs and files from the state but not the threads they branched (each holds the conversation up to the branch, as shown then) nor their tasks' attachment lists (file names and ids), which stayed until the appliance restarted.
 - Now `PersonErased` drops each branch of theirs and the attachments of each task of theirs; other people's stay.
 - Test: `a_person_erased_leaves_no_branch_or_attachment_of_theirs` (state.rs): Bob and Alice each branch a thread and attach a file to a task; Bob erased, his are gone and Alice's stay. On master Bob's both remain.
+
+## The admin console's tracker checks only what is built and tested (2026-11-02, `tracker-truth`)
+
+- Found by the review of master against the specs (2026-11-02). Unchecked in `docs/admin-console.md`, each with what is built: the realm role checked on every request (it is checked at sign-in and each refresh, at most every 4 minutes); only `magnus-admin` holding `magnus_root`, and Postgres as `magnus_root` (`magnus migrate` creates the role, but the console never connects as it, and its password is in the config `magnus serve` loads); a VPN connection accepted (no test connects from one); hold-to-stop at phone width within 5 seconds (untested); every screen in every look (seven screens are never visited); install and remove of modules.
+- Correction to the Modules entry above ("owner's ruling 22 keeps 'module' for these"): question 22 is open, not ruled. Install and remove still answer 409, as the owner's call rather than a ruling, in the tracker and in `admin/ops.rs`.
+- PROGRESS.md said org context steps 2 to 7b were committed on their branches; no branch has them, and the plan has no 7b. It now says steps 2 to 11, with only step 1 built.
+- Documents and a comment only: no behaviour changes, so no test.
