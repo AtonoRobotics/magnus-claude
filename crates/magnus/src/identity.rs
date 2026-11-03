@@ -60,7 +60,8 @@ pub trait Identity: Send + Sync {
     /// Check a username and password the person typed in the app, with the
     /// code from their authenticator app when they use one. Never kept.
     async fn password(&self, username: &str, password: &str, code: Option<&str>, app: bool) -> Result<Polled>;
-    /// Whether the provider still has this person, turned on. Their
-    /// sessions here end once it does not.
-    async fn active(&self, username: &str) -> Result<bool>;
+    /// Whether the provider still has this person, turned on: the account
+    /// they are bound to (`sub`), when they are. Their sessions here end
+    /// once it does not.
+    async fn active(&self, username: &str, sub: Option<&str>) -> Result<bool>;
 }
