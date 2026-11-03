@@ -24,6 +24,8 @@ const appBridge = tauri && {
   async connect(url) { return this.invoke("connect", { url }); },
   async trust(url, fingerprint) { return this.invoke("trust", { url, fingerprint }); },
   async signInMethod() { return this.invoke("sign_in_method"); },
+  // Pair this computer for the public address. The key never comes back to the page.
+  async pairDevice(publicUrl) { return this.invoke("pair_device", { publicUrl }); },
   // Resolves with who signed in, or { code_needed }, { browser } or
   // { machine_code_needed } (the owner's backup while the provider is down).
   async signIn(person, password, code, machineCode) { return this.invoke("sign_in", { person, password, code: code || null, machineCode: machineCode || null }); },
