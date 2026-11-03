@@ -307,6 +307,11 @@ impl Kernel {
                 continue;
             }
             let live = self.live_app_tools(&c, &run.person).await;
+            // An app refusing Magnus its tools offers none, not even those
+            // pinned before: the index says it refuses (app_tools.rs).
+            if live.is_none() && self.refused_apps.lock().unwrap().contains_key(&crate::connectors::connection_name(&c.name, &run.person)) {
+                continue;
+            }
             let mut fresh = vec![];
             for (remote, class) in &c.tools {
                 let name = format!("{}__{remote}", c.name);
@@ -394,11 +399,16 @@ impl Kernel {
         }
         match self.mcp.list_tools(&c.url, secret.as_ref().map(|s| s.expose())).await {
             Ok(t) => {
+                self.refused_apps.lock().unwrap().remove(&key);
                 self.live_tools.lock().await.insert(key, (Instant::now(), t.clone()));
                 Some(t)
             }
             Err(e) => {
                 tracing::warn!("list tools of {}: {e:#}", c.name);
+                // Only an app that answered refuses; a failed connection is no refusal.
+                if let Some(r) = crate::apps::refusal(&format!("{e:#}")) {
+                    self.refused_apps.lock().unwrap().insert(key, r);
+                }
                 None
             }
         }
