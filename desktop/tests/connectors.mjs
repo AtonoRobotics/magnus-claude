@@ -13,7 +13,7 @@
 // MAGNUS_URL, MAGNUS_PERSON, MAGNUS_PASSWORD  where and who (the owner)
 // MAGNUS_CHROMIUM  Chrome to drive; MAGNUS_SHOTS  where to keep screenshots
 import { createRequire } from "node:module";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +24,11 @@ const [base, person, password] = ["MAGNUS_URL", "MAGNUS_PERSON", "MAGNUS_PASSWOR
 const shots = process.env.MAGNUS_SHOTS;
 if (shots) mkdirSync(shots, { recursive: true });
 const win = JSON.parse(readFileSync(join(root, "desktop/src-tauri/tauri.conf.json"), "utf8")).app.windows[0];
+// The catalog as it ships (`catalog/*.toml`): how many connectors it has,
+// and which are code services, so the Library is checked against it.
+const manifests = readdirSync(join(root, "catalog")).filter(f => f.endsWith(".toml") && f !== "registrations.toml").map(f => readFileSync(join(root, "catalog", f), "utf8"));
+const field = (m, k) => m.match(new RegExp(`^${k} = "([^"]*)"`, "m"))?.[1];
+const code = manifests.filter(m => field(m, "category") === "code").map(m => field(m, "id"));
 
 const browser = await chromium.launch({ executablePath: env("MAGNUS_CHROMIUM"), args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 const page = await browser.newPage({ viewport: { width: win.width, height: win.height } });
@@ -60,7 +65,7 @@ await step("the Library is the catalog: Google's apps under Popular, each a card
   await gmail.getByText("by Google", { exact: true }).waitFor({ timeout: T });
   const said = (await page.locator("#lib-sections").allInnerTexts()).join(" ");
   if (PROTOCOL.test(said)) throw new Error(`a card shows a protocol word: ${said}`);
-  for (const t of ["Gmail", "Google Calendar", "Google Drive", "Google Chat", "Magnus can search and read your email", "4 connectors"]) if (!said.includes(t)) throw new Error(`the Library does not say "${t}": ${said}`);
+  for (const t of ["Gmail", "Google Calendar", "Google Drive", "Google Chat", "Magnus can search and read your email", `${manifests.length} connectors`]) if (!said.includes(t)) throw new Error(`the Library does not say "${t}": ${said}`);
   // Yours: nothing connected yet.
   await page.getByRole("button", { name: "Yours", exact: true }).click();
   await page.getByText("Nothing connected yet.", { exact: false }).waitFor({ timeout: T });
@@ -84,6 +89,9 @@ await step("search and the category chips narrow the catalog", async () => {
   await page.locator("[data-connector=google-drive]").waitFor({ timeout: T });
   await page.locator("[data-connector=google-gmail]").waitFor({ state: "detached", timeout: T });
   await page.getByRole("button", { name: "Code", exact: true }).click();
+  await page.locator("[data-connector=google-gmail]").waitFor({ state: "detached", timeout: T });
+  for (const id of code) await page.locator(`[data-connector=${id}]`).waitFor({ timeout: T });
+  await page.getByRole("button", { name: "Design & CAD", exact: true }).click();
   await page.getByText("No connectors match.", { exact: false }).waitFor({ timeout: T });
   await page.getByRole("button", { name: "All", exact: true }).click();
   await page.locator("[data-connector=google-gmail]").waitFor({ timeout: T });
