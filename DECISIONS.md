@@ -953,3 +953,9 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Found by the review of master against the specs (2026-11-02). Every five minutes, and as the appliance starts, the kernel asks the identity provider whether each person signed in or with a schedule is still there and turned on (owner's ruling 12). It asked by username. A person is the provider's account that first signed in as them (`subjects`, owner's rulings 2026-11-01), so with their account deleted and another made under the same username, the check found the new account and kept the old account's sessions and schedules going.
 - It now asks after the bound account by its id (`sub`, Keycloak's `/users/{id}`): deleted, it is no longer known, and the person is turned off as for an account turned off. A person not yet bound is still asked after by username.
 - Test: `a_persons_account_deleted_ends_their_session_though_another_takes_their_username` (people.rs, Keycloak): Carol signs in; her account is deleted and another made under her username; at the next check her session ends. On master it never does.
+
+## Policy drafts are console actions in the audit log (2026-11-02, `policy-drafts-audited`)
+
+- Found by the review of master against the specs (2026-11-02): "every console action in the append-only log with who, what, when, source and before/after". Keeping or dropping a policy draft went to the kernel's event log under the admin's name but not to the audit log.
+- Now `policy_drafted` and `policy_draft_dropped` are written to the audit log before the change, with the set's draft before and after; a draft is not in force, so neither asks for a fresh password.
+- Test: `root_sets_the_sign_in_rules_and_edits_tests_applies_and_rolls_back_the_agent_policy` (admin_security.rs, Keycloak) now drops the sales draft and finds both in the audit with their text. On master neither is there.
