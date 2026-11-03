@@ -19,4 +19,6 @@ manifest version classifies it.
   once by the owner (Settings, Connectors), kept in the vault. The connector
   is in no one's Library until it is set.
 
-Classes: `read`, `reversible_write`, `irreversible`, `financial`.
+Classes: `read`, `reversible_write`, `irreversible`, `financial`, and
+`prohibited` (listed by the server, never offered to Magnus and refused
+if called: the policy's hard deny).

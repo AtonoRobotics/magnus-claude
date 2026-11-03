@@ -7,6 +7,7 @@ use magnus_invariants::appliance::bin;
 
 pub mod admin;
 pub mod brokered;
+pub mod catalog;
 pub mod mail;
 pub mod stand_in;
 mod keycloak;
