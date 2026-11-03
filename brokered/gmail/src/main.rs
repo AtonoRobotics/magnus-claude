@@ -139,7 +139,10 @@ fn message(m: &Value) -> Value {
     attachments(p, &mut files);
     json!({
         "id": m["id"], "thread_id": m["threadId"], "labels": m["labelIds"].as_array().cloned().unwrap_or_default(),
-        "from": header(m, "From"), "to": header(m, "To"), "cc": header(m, "Cc"), "subject": header(m, "Subject"), "date": header(m, "Date"),
+        "from": header(m, "From"), "to": header(m, "To"), "cc": header(m, "Cc"),
+        // A draft's every recipient, shown before the person approves
+        // sending it (a message received has none).
+        "bcc": header(m, "Bcc"), "subject": header(m, "Subject"), "date": header(m, "Date"),
         "snippet": m["snippet"].as_str().unwrap_or_default(),
         "body": text_of(p, "text/plain").or_else(|| text_of(p, "text/html")).unwrap_or_default(),
         "attachments": files,
@@ -225,9 +228,25 @@ fn create_draft(a: &Value, t: &str) -> Result<Value, Failure> {
     new_draft(t, raw(&list(a, "to"), &list(a, "cc"), &list(a, "bcc"), &s(a, "subject"), &s(a, "body"), None)?, None)
 }
 
+/// A draft rewritten with the edit's recipients, subject and text, in the
+/// thread and with the reply headers it had: an edited reply stays one.
+fn rewritten(existing: &Value, a: &Value) -> Result<Value, String> {
+    let m = &existing["message"];
+    let in_reply_to = header(m, "In-Reply-To");
+    let refs = header(m, "References");
+    let refs = if refs.is_empty() { in_reply_to.clone() } else { refs };
+    let reply = (!in_reply_to.is_empty()).then_some((in_reply_to.as_str(), refs.as_str()));
+    let mut msg = json!({ "raw": raw(&list(a, "to"), &list(a, "cc"), &list(a, "bcc"), &s(a, "subject"), &s(a, "body"), reply)? });
+    if let Some(t) = m["threadId"].as_str() {
+        msg["threadId"] = json!(t);
+    }
+    Ok(msg)
+}
+
 fn update_draft(a: &Value, t: &str) -> Result<Value, Failure> {
     let d = id(a, "draft_id")?;
-    let body = json!({ "id": d, "message": { "raw": raw(&list(a, "to"), &list(a, "cc"), &list(a, "bcc"), &s(a, "subject"), &s(a, "body"), None)? } });
+    let existing = gmail("GET", &format!("/drafts/{d}?format=metadata"), t, None)?;
+    let body = json!({ "id": d, "message": rewritten(&existing, a)? });
     Ok(draft(&gmail("PUT", &format!("/drafts/{d}"), t, Some(&body))?))
 }
 
@@ -422,6 +441,34 @@ mod tests {
         assert_eq!(re("Re", "re: Plans"), "re: Plans");
         assert_eq!(re("Re", "Plans"), "Re: Plans");
         assert_eq!(enc("from:a b&c"), "from%3Aa%20b%26c");
+    }
+
+    /// A draft is read with every recipient, Bcc too, as the person
+    /// approves sending it.
+    #[test]
+    fn a_draft_is_read_with_every_recipient() {
+        let hs = |h: &[(&str, &str)]| h.iter().map(|(n, v)| json!({ "name": n, "value": v })).collect::<Vec<_>>();
+        let d = json!({ "id": "dm1", "threadId": "t1", "payload": { "mimeType": "text/plain", "headers": hs(&[("To", "a@example.com"), ("Cc", "c@example.com"), ("Bcc", "boss@example.com"), ("Subject", "Plan")]), "body": { "data": URL_SAFE.encode("Hi") } } });
+        let v = message(&d);
+        assert_eq!((v["to"].as_str(), v["cc"].as_str(), v["bcc"].as_str()), (Some("a@example.com"), Some("c@example.com"), Some("boss@example.com")));
+    }
+
+    /// A reply's draft, edited, stays in its thread with the headers that
+    /// make it a reply; a new draft's has none to keep.
+    #[test]
+    fn an_edited_reply_stays_a_reply() {
+        let hs = |h: &[(&str, &str)]| h.iter().map(|(n, v)| json!({ "name": n, "value": v })).collect::<Vec<_>>();
+        let reply = json!({ "id": "d1", "message": { "id": "dm1", "threadId": "t1", "payload": { "headers": hs(&[("To", "bo@example.com"), ("Subject", "Re: Plans"), ("In-Reply-To", "<1@x>"), ("References", "<0@x> <1@x>")]) } } });
+        let edit = json!({ "draft_id": "d1", "to": ["bo@example.com"], "bcc": ["boss@example.com"], "subject": "Re: Plans", "body": "Friday works." });
+        let m = rewritten(&reply, &edit).unwrap();
+        assert_eq!(m["threadId"], "t1");
+        let text = String::from_utf8(URL_SAFE.decode(m["raw"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(text.contains("Bcc: boss@example.com\r\n") && text.contains("In-Reply-To: <1@x>\r\nReferences: <0@x> <1@x>\r\n"), "{text}");
+        let fresh = json!({ "id": "d2", "message": { "id": "dm2", "threadId": "t2", "payload": { "headers": hs(&[("To", "bo@example.com"), ("Subject", "Plans")]) } } });
+        let m = rewritten(&fresh, &edit).unwrap();
+        let text = String::from_utf8(URL_SAFE.decode(m["raw"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(!text.contains("In-Reply-To") && !text.contains("References"), "{text}");
+        assert_eq!(m["threadId"], "t2");
     }
 
     fn answer(status: u16, head: &str, body: Value) -> Response {
