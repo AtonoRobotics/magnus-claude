@@ -961,6 +961,32 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Left, with no test that can fail on it at will: a schedule removed or paused while a firing it was due for is starting (its words are being recalled) still starts that run. Closing it needs the firing to check again after `create_run` (and cancel the run if the schedule is gone or paused) and `cancel_schedule` to list the schedule's runs after recording its removal, not before; it goes with a way to hold a firing between the two in a test.
 - Test: `a_run_ends_once_the_first_end_stands` (state.rs): a cancel after a run completed leaves it completed with its summary and end time; a failure after a cancel leaves it cancelled. On master both are overwritten.
 
+## A sign-in waits for the person who started it (2026-11-02, `pending-sign-in`)
+
+- Found by the review of master against the specs (2026-11-02). Finishing a sign-in to an app took it from those waiting before checking whose it was, so someone else's attempt with its state (refused) ended it, and the person who started it had to start again.
+- Now a sign-in is taken only by the person who started it, for the app it was started for; anyone else's attempt is refused and leaves it waiting. An expired one is still refused, and swept when the next sign-in starts.
+- Test: `another_persons_attempt_leaves_a_sign_in_waiting_for_its_owner` (connectors.rs): Carol's attempt at Alice's sign-in is refused, and Alice then finishes it. On master Alice's finish is refused.
+
+## Policy drafts are console actions in the audit log (2026-11-02, `policy-drafts-audited`)
+
+- Found by the review of master against the specs (2026-11-02): "every console action in the append-only log with who, what, when, source and before/after". Keeping or dropping a policy draft went to the kernel's event log under the admin's name but not to the audit log.
+- Now `policy_drafted` and `policy_draft_dropped` are written to the audit log before the change, with the set's draft before and after; a draft is not in force, so neither asks for a fresh password.
+- Test: `root_sets_the_sign_in_rules_and_edits_tests_applies_and_rolls_back_the_agent_policy` (admin_security.rs, Keycloak) now drops the sales draft and finds both in the audit with their text. On master neither is there.
+
+## The kernel numbers each document version, and a path counts on through removal (2026-11-02, `bundle-versions`)
+
+- Found by the review of master against the specs (2026-11-02; "every write is a new version"). The version was worked out from the state before the kernel's write lock was taken, so writes at once to one path took the same number; and a removal dropped the path's count, so it began again at 1 and (path, version) named two versions in the log, the older one out of reach.
+- Now `emit` numbers each `BundleWritten` under the write lock from the last number the path was written with, which the state keeps through a removal. Callers take the number from the event recorded.
+- `a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with` rolled back to "version 2" because Bob's new document began again at 1; with the count kept it is version 3, and the test now says so.
+- Test: `every_version_of_a_document_has_its_own_number_through_removal_and_writes_at_once` (org_context_bundle.rs): written, removed and written again, a document is at version 2 and version 1 is still the first; eight writes at once take eight numbers. On master the second write is version 1 again, and the eight writes at once all took one number.
+
+## A link to a hidden document is removed with its text, in every form (2026-11-02, `hidden-links`)
+
+- Found by the review of master against the specs (2026-11-02). The spec: documents come back with "links the user cannot see removed", and in the index "a line with some visible links keeps only those". A hidden link became its text (`[Carol's pay review](/people/finance.md)` became "Carol's pay review"), and links were found only in the inline form, so `[text][label]` with `[label]: /path` passed both the check on writing and the filter on reading.
+- Now a link to a document the person cannot see is removed with its text, inline (with or without a title) or by reference (`[text][label]`, `[label][]`, `[label]`), and a definition of one is dropped; a bullet whose links are all hidden is still dropped. Reference definitions are checked as links on writing. Links are found in the whole body: brackets nest, so a label's own brackets do not end it, a destination may begin on the next line, and a line is a definition only when it starts with `[label]:` (codex review of #108).
+- Frontmatter is left as written: the spec says documents come back "with their OKF frontmatter intact". Links to items a person cannot read inside an entity's frontmatter are step 4's (T3).
+- Test: `a_hidden_documents_link_leaves_with_its_text_whatever_its_form` (org_context_bundle.rs): Bob reads a page linking a document no one can see inline with a title and by reference, and sees the page's other link but neither the hidden link's text nor its path; his index keeps the visible link of a mixed bullet and drops the hidden-only one. On master he sees "Carol's pay review". And `a_hidden_link_leaves_whatever_its_label_or_line_holds` (bundle.rs): a label with brackets, a line with a later `[x]:`, a destination on the next line and a reference link each leave whole; a relative destination on the next line is still refused.
+
 ## An entity moved by a merge of types keeps what it was written from (2026-11-02, `merge-taint`)
 
 - Found by the review of master against the specs (2026-11-02; DEC "keeps the document's sources and taint, so editing launders nothing"). Merging a type wrote each entity at its new path through the admin's write, which takes the taint and private sources of the document at that path; there is none, so the entity came back clean, its `private:` sources and writer gone.

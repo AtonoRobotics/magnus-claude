@@ -162,12 +162,19 @@ async fn root_sets_the_sign_in_rules_and_edits_tests_applies_and_rolls_back_the_
     let (_, pol) = app.api("alice").get("/v1/policies").await;
     assert_eq!(pol["layers"]["org"], STRICT);
 
+    // A draft dropped, as a draft kept, is a console action.
+    let (st, _) = s.send(&fresh, Method::DELETE, "/policy/sets/group:sales/draft", None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+
     // Each change is in the audit log.
     let (_, audit) = s.send(&fresh, Method::GET, "/audit", None).await;
     let actions: Vec<&str> = audit["entries"].as_array().unwrap().iter().filter_map(|e| e["action"].as_str()).collect();
     for a in ["sign_in_rules_changed", "policy_applied", "policy_rolled_back"] {
         assert!(actions.contains(&a), "{a} is not in the audit: {actions:?}");
     }
+    let entry = |action: &str, target: &str| audit["entries"].as_array().unwrap().iter().find(|e| e["action"] == action && e["target"] == target).cloned().unwrap_or_else(|| panic!("{action} on {target} is not in the audit: {actions:?}"));
+    assert_eq!(entry("policy_drafted", "org")["after"]["cedar"], STRICT);
+    assert!(entry("policy_draft_dropped", "group:sales")["before"]["cedar"].as_str().is_some_and(|c| c.contains("financial")));
 
     // The screens, in every look and at phone width.
     sign_in_and_visit(&url, s.c.addr, "Alice", "admin", false, Some("#/security/policy/org")).await.unwrap_or_else(|e| panic!("{e}"));
