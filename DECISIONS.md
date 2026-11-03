@@ -966,3 +966,9 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Found by the review of master against the specs (2026-11-02). Finishing a sign-in to an app took it from those waiting before checking whose it was, so someone else's attempt with its state (refused) ended it, and the person who started it had to start again.
 - Now a sign-in is taken only by the person who started it, for the app it was started for; anyone else's attempt is refused and leaves it waiting. An expired one is still refused, and swept when the next sign-in starts.
 - Test: `another_persons_attempt_leaves_a_sign_in_waiting_for_its_owner` (connectors.rs): Carol's attempt at Alice's sign-in is refused, and Alice then finishes it. On master Alice's finish is refused.
+
+## Policy drafts are console actions in the audit log (2026-11-02, `policy-drafts-audited`)
+
+- Found by the review of master against the specs (2026-11-02): "every console action in the append-only log with who, what, when, source and before/after". Keeping or dropping a policy draft went to the kernel's event log under the admin's name but not to the audit log.
+- Now `policy_drafted` and `policy_draft_dropped` are written to the audit log before the change, with the set's draft before and after; a draft is not in force, so neither asks for a fresh password.
+- Test: `root_sets_the_sign_in_rules_and_edits_tests_applies_and_rolls_back_the_agent_policy` (admin_security.rs, Keycloak) now drops the sales draft and finds both in the audit with their text. On master neither is there.
