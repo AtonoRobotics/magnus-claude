@@ -372,7 +372,7 @@ Google (Remote, Google Workspace MCP servers)
 - [ ] Docs
 - [ ] Sheets
 - [ ] Slides
-- [ ] Calendar (manifest `google-calendar`; same)
+- [ ] Calendar (brokered, manifest `google-calendar`: the image built from `brokered/calendar`, tools matched by `every_tool_is_classed_in_the_manifest`, each change asked for first, `calendar.rs`; sign-in cannot complete from the desktop app)
 - [ ] Chat (manifest `google-chat`; same; Google's Chat app not configured)
 - [ ] Contacts
 

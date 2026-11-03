@@ -284,7 +284,7 @@ impl StandInGmail {
     }
 }
 
-async fn read_request(s: &mut (impl tokio::io::AsyncRead + Unpin), sni: String) -> Option<GmailRequest> {
+pub(crate) async fn read_request(s: &mut (impl tokio::io::AsyncRead + Unpin), sni: String) -> Option<GmailRequest> {
     use tokio::io::AsyncReadExt;
     let mut raw = vec![];
     let mut b = [0u8; 4096];
