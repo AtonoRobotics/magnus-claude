@@ -274,7 +274,13 @@ impl Kernel {
             if self.read(|s| s.bundle.contains_key(&new_path)) {
                 return Err((StatusCode::CONFLICT, format!("{new_path} is there already: rename one of them first")));
             }
-            self.admin_bundle_write(sub, &new_path, &fm, doc["body"].as_str().unwrap_or_default()).await?;
+            // It moves with what it was written from: its taint, the
+            // private content its run read and whose run that was (K2).
+            let Some(was) = self.read(|s| s.bundle.get(&old).cloned()) else { return Err((StatusCode::CONFLICT, format!("{old} changed during the merge; try again"))) };
+            let body = doc["body"].as_str().unwrap_or_default();
+            let kind = self.admin_bundle_check(&new_path, &fm, body).await?;
+            let read: Vec<String> = was.sources.iter().filter(|s| s.starts_with("private:")).cloned().collect();
+            self.admin_put(sub, &new_path, kind, &fm, body, was.label, read, was.writer.clone()).await?;
             self.emit(&format!("admin:{sub}"), Ev::BundleRemoved { path: old }).await.map_err(failed)?;
             moved += 1;
         }
