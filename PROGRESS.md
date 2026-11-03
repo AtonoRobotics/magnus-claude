@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **A version put back comes back as it was written (org context build spec, K2; admin console spec, Knowledge; branch `restored-taint`).** A rollback or an undo took the taint and private sources of the version there now, so a document from someone's private file, put back after its removal or over a clean version, was seen by everyone. It now comes back with its own taint, sources and writer. Next from the same review: an entity moved by merging types keeps its taint too.
 - **A person's apps when they leave or are turned off (connectors spec, Isolation; branch `person-connections`).** Turned off at the identity provider or by an admin, a person's apps answer no calls for them, their sign-ins kept unused, until they sign in again. Deleted, their sign-ins are revoked at each app (now tested).
 - **Who sees an org document comes from what its run read (org context build spec, K2; branch `bundle-readers`).** A run that read someone's private file could publish it to everyone by citing only a person; the kernel now records what the run read among the document's sources, so it stays its writer's, also through an admin's edit. Next from the same review: a restored document keeps its taint and these sources.
 - **A retired tool leaves the agent at once (connectors spec, Remote MCP connectors; branch `retired-tools`).** A tool an app stops listing is no longer offered to the next step; listed again unchanged, it is offered again with no new review.

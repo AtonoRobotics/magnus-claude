@@ -333,7 +333,7 @@ impl Kernel {
         if kind == "type" && fm["status"] == "stable" && !was_stable {
             return Err(format!("{path}: a type becomes stable only with an admin's approval in the console; write it as draft"));
         }
-        let (label, read) = self.read(|s| s.runs.get(run).map(|r| (Label { untrusted: r.untrusted, private: r.private }, r.private_from.clone()))).unwrap_or_default();
+        let (label, read, writer) = self.read(|s| s.runs.get(run).map(|r| (Label { untrusted: r.untrusted, private: r.private }, r.private_from.clone(), Some(r.person.clone())))).unwrap_or_default();
         let mut sources: Vec<String> = fm["sources"].as_array().into_iter().flatten().filter_map(|x| x["resource"].as_str().map(String::from)).collect();
         // What the run read, whatever the document cites: each place whose
         // private content it read is a source the kernel names itself (K2).
@@ -353,6 +353,7 @@ impl Kernel {
             run: Some(run.into()),
             label,
             sources,
+            writer,
             frontmatter: fm.clone(),
             body: body.into(),
         };
