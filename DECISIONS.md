@@ -948,6 +948,12 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 
 - Owner, 2026-11-02, on whether making people's data private covers the developer views: "Developer and admin are currently the same. That will change eventually. Currently I am the developer. Admin grew out of that with the appliance because the appliance will have admins that the org hired and won't be me." So the developer views stay as they are while the owner is both. Once an organisation's own admins run an appliance, the developer role is no longer theirs, and what it may see of people's data is decided then.
 
+## The provider's check asks after the account a person is bound to (2026-11-02, `active-by-account`)
+
+- Found by the review of master against the specs (2026-11-02). Every five minutes, and as the appliance starts, the kernel asks the identity provider whether each person signed in or with a schedule is still there and turned on (owner's ruling 12). It asked by username. A person is the provider's account that first signed in as them (`subjects`, owner's rulings 2026-11-01), so with their account deleted and another made under the same username, the check found the new account and kept the old account's sessions and schedules going.
+- It now asks after the bound account by its id (`sub`, Keycloak's `/users/{id}`): deleted, it is no longer known, and the person is turned off as for an account turned off. A person not yet bound is still asked after by username.
+- Test: `a_persons_account_deleted_ends_their_session_though_another_takes_their_username` (people.rs, Keycloak): Carol signs in; her account is deleted and another made under her username; at the next check her session ends. On master it never does.
+
 ## A run ends once: the first end stands (2026-11-02, `cancel-races`)
 
 - Found by the review of master against the specs (2026-11-02). Cancelling a task checks that its run has not ended, then records the cancel; a run that ended on its own in between (completed or failed) was turned into a cancelled one, and the person was told it was cancelled. The other way, a run's own end recorded after a cancel turned the cancelled run into a completed or failed one.

@@ -228,3 +228,26 @@ async fn an_account_made_again_under_the_same_username_is_not_the_old_person() {
     assert_eq!(st, 200, "the owner let the new account in, and it was refused: {v}");
     assert_eq!(bound(&alice.get("/v1/people").await.1), json!(true));
 }
+
+/// The provider's check asks after the account a person is bound to, not
+/// their username: Carol's account deleted and another made under her
+/// username, her session here ends as for an account turned off.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persons_account_deleted_ends_their_session_though_another_takes_their_username() {
+    let m = FakeModel::start(worker()).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let kc = Keycloak::start().await;
+    kc.add_person("carol").await;
+    kc.configure(&mut app).await;
+    let (st, v) = kc.app_sign_in(&app, "carol").await;
+    assert_eq!(st, 200, "{v}");
+    let mut carol = app.api("carol");
+    carol.token = v["token"].as_str().unwrap().to_string();
+    assert_eq!(carol.get("/v1/me").await.0, 200);
+
+    kc.delete("carol").await;
+    kc.add_person("carol").await;
+    // The check runs as the appliance starts.
+    app.restart().await;
+    eventually("the session of carol's deleted account ended", PATIENCE, || async { (carol.get("/v1/me").await.0 == 401).then_some(()) }).await;
+}
