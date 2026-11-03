@@ -5,7 +5,8 @@
 //! without the work of the one before is refused); the appliance decides
 //! which channel each app gets, never the app: the owner's apps
 //! development, testers' test, everyone else's production; a pull request
-//! closed without merging, or pushed again, stops no later build.
+//! closed without merging, or pushed again, stops no later build, nor does
+//! one squash-merged, whose head master never holds.
 
 use magnus_invariants::*;
 use reqwest::StatusCode;
@@ -42,6 +43,13 @@ fn publish_from(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: 
 /// the pull requests CI found closed without merging (`MAGNUS_GIVEN_UP`).
 #[allow(clippy::too_many_arguments)]
 fn publish_as(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: &str, repo: &Path, head: Option<&str>, pr: Option<(u32, &str)>) -> i32 {
+    publish_landed(key, updates, tmp, version, channel, repo, head, pr, "")
+}
+
+/// The same, with the merged pull requests CI found and the master commit
+/// each landed as (`MAGNUS_LANDED`, `number=commit`).
+#[allow(clippy::too_many_arguments)]
+fn publish_landed(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: &str, repo: &Path, head: Option<&str>, pr: Option<(u32, &str)>, landed: &str) -> i32 {
     let (dist, notes) = (tmp.join("dist"), tmp.join("notes"));
     build(&dist, version);
     std::fs::write(&notes, format!("Build {version}.\n")).unwrap();
@@ -53,6 +61,7 @@ fn publish_as(key: &Path, updates: &Path, tmp: &Path, version: &str, channel: &s
         .env_remove("MAGNUS_COMMIT")
         .env_remove("MAGNUS_PR")
         .env_remove("MAGNUS_GIVEN_UP")
+        .env("MAGNUS_LANDED", landed)
         .envs(head.map(|h| ("MAGNUS_COMMIT", h)))
         .envs(pr.map(|(n, given_up)| [("MAGNUS_PR", n.to_string()), ("MAGNUS_GIVEN_UP", given_up.to_string())]).into_iter().flatten())
         .current_dir(repo)
@@ -333,6 +342,65 @@ fn a_pull_request_closed_unmerged_or_pushed_again_stops_no_later_build() {
     git(&repo, &["merge", "-q", "--no-ff", "--no-edit", "c"]);
     assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.24.pr.3", "development", &repo, Some(&c), Some((3, "2"))), 3);
     assert_eq!(dev()["commit"], b3.as_str());
+}
+
+/// What blocked pull request #120 (2026-11-03): #119's build was in
+/// development and #119 was squash-merged, so master holds its work in a
+/// new commit but never its head, and every later build was refused as
+/// lacking it. A merged pull request's work is where it landed in master.
+#[test]
+fn a_pull_request_squash_merged_stops_no_later_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key = tmp.path().join("test.key");
+    let made = Command::new("cargo").args(["tauri", "signer", "generate", "--ci", "-p", "", "-f", "-w"]).arg(&key).output().unwrap();
+    assert!(made.status.success(), "a test release key: {}", String::from_utf8_lossy(&made.stderr));
+    let (updates, w, repo) = (tmp.path().join("updates"), tmp.path().join("work"), tmp.path().join("repo"));
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "master"]);
+    let base = commit(&repo, "base");
+    let dev = || -> Value { serde_json::from_slice(&std::fs::read(updates.join("desktop/development/latest.json")).unwrap()).unwrap() };
+    let pr = |name: &str, from: &str| -> String {
+        git(&repo, &["checkout", "-q", "-b", name, from]);
+        let head = commit(&repo, name);
+        git(&repo, &["checkout", "-q", "--detach", "master"]);
+        git(&repo, &["merge", "-q", "--no-ff", "--no-edit", name]);
+        head
+    };
+
+    // Pull request 1's build is in development; it is squash-merged.
+    let a = pr("a", &base);
+    assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.20.pr.1", "development", &repo, Some(&a), Some((1, ""))), 0);
+    git(&repo, &["checkout", "-q", "master"]);
+    git(&repo, &["merge", "-q", "--squash", "a"]);
+    git(&repo, &["commit", "-qm", "a (#1)"]);
+    let landed = git(&repo, &["rev-parse", "HEAD"]);
+
+    // Pull request 2, from master, holds 1's work where it landed: published.
+    let b = pr("b", "master");
+    let one = format!("1={landed}");
+    assert_eq!(publish_landed(&key, &updates, &w, "0.7.1-review.21.pr.2", "development", &repo, Some(&b), Some((2, "")), &one), 0, "a squash-merged pull request stopped the next");
+    assert_eq!(dev()["commit"], b.as_str());
+
+    // 2 is squash-merged too. A build without where it landed is refused,
+    // and so is one told of another pull request's landing than the build
+    // there; one from master goes out.
+    git(&repo, &["checkout", "-q", "master"]);
+    git(&repo, &["merge", "-q", "--squash", "b"]);
+    git(&repo, &["commit", "-qm", "b (#2)"]);
+    let landed = git(&repo, &["rev-parse", "HEAD"]);
+    let (two, other) = (format!("2={landed}"), format!("9={landed}"));
+    let c = pr("c", &base);
+    git(&repo, &["checkout", "-q", "--detach", &base]);
+    git(&repo, &["merge", "-q", "--no-ff", "--no-edit", "c"]);
+    assert_eq!(publish_landed(&key, &updates, &w, "0.7.1-review.22.pr.3", "development", &repo, Some(&c), Some((3, "")), &two), 3);
+    let d = pr("d", &base);
+    git(&repo, &["checkout", "-q", "--detach", &base]);
+    git(&repo, &["merge", "-q", "--no-ff", "--no-edit", "d"]);
+    assert_eq!(publish_landed(&key, &updates, &w, "0.7.1-review.23.pr.4", "development", &repo, Some(&d), Some((4, "")), &other), 3);
+    assert_eq!(dev()["commit"], b.as_str());
+    let e = pr("e", "master");
+    assert_eq!(publish_landed(&key, &updates, &w, "0.7.1-review.24.pr.5", "development", &repo, Some(&e), Some((5, "")), &two), 0);
+    assert_eq!(dev()["commit"], e.as_str());
 }
 
 fn base64_decode(s: &str) -> Vec<u8> {
