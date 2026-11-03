@@ -672,6 +672,10 @@ pub struct Brokered {
     pub idle_s: u64,
     #[serde(default = "brokered_memory")]
     pub memory_mib: u32,
+    /// Certificates (DER files) servers trust beside the public roots: an
+    /// organisation whose egress inspects TLS, or a test's stand-in.
+    #[serde(default)]
+    pub roots: Vec<PathBuf>,
 }
 
 /// Five minutes: the steps of one run call an app minutes apart at most
@@ -690,7 +694,7 @@ fn brokered_memory() -> u32 {
 
 impl Default for Brokered {
     fn default() -> Self {
-        Brokered { images: None, idle_s: brokered_idle(), memory_mib: brokered_memory() }
+        Brokered { images: None, idle_s: brokered_idle(), memory_mib: brokered_memory(), roots: vec![] }
     }
 }
 
@@ -823,6 +827,9 @@ impl Config {
             anyhow::ensure!(crate::tools::Label::parse(&c.label).is_some(), "connector {}: unknown label {}", c.name, c.label);
             anyhow::ensure!(crate::tools::Audience::parse(&c.audience).is_some(), "connector {}: unknown audience {}", c.name, c.audience);
             if c.transport == crate::brokered::BROKERED {
+                for r in &cfg.brokered.roots {
+                    std::fs::read(r).map_err(|e| anyhow::anyhow!("[brokered] roots: {}: {e}", r.display()))?;
+                }
                 crate::brokered::digest(&c.url).map_err(|e| anyhow::anyhow!("connector {}: {e}", c.name))?;
                 anyhow::ensure!(!c.hosts.is_empty(), "connector {}: a brokered connector names the provider hosts it may reach", c.name);
             }

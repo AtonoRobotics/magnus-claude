@@ -20,7 +20,7 @@
 use crate::apps::{AppTool, CallError, CallOutput, Mcp};
 use crate::config::{Brokered as Cfg, Connector, Sandbox};
 use anyhow::{anyhow, Context, Result};
-use magnus_brokered_kit::{schema, MCP_PORT, PROTOCOL, PROXY_PORT, TOKEN_META};
+use magnus_brokered_kit::{schema, MCP_PORT, PROTOCOL, PROXY_PORT, ROOTS_ENV, TOKEN_META};
 use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::HashMap;
@@ -64,12 +64,25 @@ pub fn admits(hosts: &[String], target: &str) -> bool {
 /// image as its initramfs, no drives and no network device, and vsock.
 pub fn vm_config(sb: &Sandbox, cfg: &Cfg, image: &Path, vsock: &Path) -> Value {
     json!({
-        "boot-source": { "kernel_image_path": sb.kernel_image, "initrd_path": image, "boot_args": "console=ttyS0 reboot=k panic=1 pci=off quiet loglevel=3" },
+        "boot-source": { "kernel_image_path": sb.kernel_image, "initrd_path": image, "boot_args": boot_args(cfg) },
         "drives": [],
         // One person's calls, each mostly waiting on the provider.
         "machine-config": { "vcpu_count": 1, "mem_size_mib": cfg.memory_mib },
         "vsock": { "guest_cid": 3, "uds_path": vsock }
     })
+}
+
+/// The kernel's command line, and the roots its server trusts beside the
+/// public ones: the kernel hands `magnus_roots` to `/init` as its
+/// environment (base64url DER, comma-separated; the kit's `ROOTS_ENV`).
+fn boot_args(cfg: &Cfg) -> String {
+    use base64::Engine;
+    let roots: Vec<String> = cfg.roots.iter().filter_map(|p| std::fs::read(p).ok()).map(|d| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(d)).collect();
+    let mut a = "console=ttyS0 reboot=k panic=1 pci=off quiet loglevel=3".to_string();
+    if !roots.is_empty() {
+        a.push_str(&format!(" {ROOTS_ENV}={}", roots.join(",")));
+    }
+    a
 }
 
 /// One person's instance of one connector (or, with no proxy, an instance
