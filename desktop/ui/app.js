@@ -71,6 +71,25 @@ const App = {
   seq: 0,
 };
 
+// A question before an action, asked in the app itself: a webview may
+// ignore window.confirm and answer no without showing it, so a button
+// behind one did nothing at all (the Windows app, owner 2026-11-03:
+// Disconnect in the Library). Escape, or Back, is no.
+function ask(msg, yes) {
+  return new Promise(done => {
+    const d = document.createElement("dialog");
+    d.className = "ask";
+    d.innerHTML = `<p></p><div class="row"><button data-ask="no">Back</button><button class="primary" data-ask="yes"></button></div>`;
+    $("p", d).textContent = msg;
+    $("[data-ask=yes]", d).textContent = yes;
+    d.addEventListener("click", e => { const b = e.target.closest("[data-ask]"); if (b) d.close(b.dataset.ask); });
+    d.addEventListener("close", () => { d.remove(); done(d.returnValue === "yes"); });
+    document.body.append(d);
+    d.showModal();
+    $("[data-ask=no]", d).focus();
+  });
+}
+
 function toast(msg, ms = 3200) {
   const t = document.createElement("div");
   t.className = "toast"; t.textContent = msg; t.setAttribute("role", "status");
@@ -282,7 +301,7 @@ function wireDocument() {
   document.addEventListener("click", async e => {
     const b = e.target.closest("[data-trash]");
     if (!b) return;
-    if (!confirm(`${b.textContent}? It moves to the trash, where you can restore it until it is gone for good.`)) return;
+    if (!await ask(`${b.textContent}? It moves to the trash, where you can restore it until it is gone for good.`, b.textContent)) return;
     b.disabled = true;
     try {
       await api("POST", "/v1/trash", { item: b.dataset.trash });
@@ -935,7 +954,7 @@ async function showThread(main, thread) {
       case "hush": return hush();
       case "task": { const r = await api("POST", path(id, "task"), {}); toast("Started a task."); await refresh(); return r; }
       case "delete":
-        if (!confirm("Delete this message? It leaves this chat and what Magnus reads next, and waits in the trash until it is gone for good.")) return;
+        if (!await ask("Delete this message? It leaves this chat and what Magnus reads next, and waits in the trash until it is gone for good.", "Delete")) return;
         await api("POST", path(id, "delete"), {}); return draw();
     }
   };
@@ -959,12 +978,12 @@ async function showThread(main, thread) {
       el.disabled = true;
       try {
         if (ta) {
-          if (!confirm("Cancel this task? What it already did stays done.")) { el.disabled = false; return; }
+          if (!await ask("Cancel this task? What it already did stays done.", "Cancel task")) { el.disabled = false; return; }
           await api("POST", `/v1/tasks/${enc(ta.dataset.task)}/cancel`, {}); toast("Cancelled.");
         } else {
           const id = enc(sa.dataset.scheduleId), k = sa.dataset.schedAct;
           if (k === "cancel") {
-            if (!confirm("Cancel this schedule? No more of its runs start, and a run still going stops.")) { el.disabled = false; return; }
+            if (!await ask("Cancel this schedule? No more of its runs start, and a run still going stops.", "Cancel schedule")) { el.disabled = false; return; }
             await api("DELETE", `/v1/schedules/${id}`); toast("The schedule is cancelled.");
           } else { await api("POST", `/v1/schedules/${id}/${k}`, {}); toast(k === "pause" ? "Paused." : "Resumed."); }
         }
@@ -1921,7 +1940,7 @@ function bindConnectorActs(root) {
     if (a.dataset.act === "connect-page") { e.preventDefault(); Magnus.openExternal(a.dataset.url).catch(() => {}); }
     if (a.dataset.act === "disconnect") {
       e.preventDefault();
-      if (!confirm("Disconnect? Your sign-in is ended at the app, and Magnus can no longer use it for you until you connect again.")) return;
+      if (!await ask("Disconnect? Your sign-in is ended at the app, and Magnus can no longer use it for you until you connect again.", "Disconnect")) return;
       try { disconnected(await api("DELETE", `/v1/connectors/${enc(a.dataset.app)}/connection`)); connectorsChanged(); } catch (err) { toast(err.message); }
     }
   });
@@ -2014,17 +2033,17 @@ function wirePanel() {
         case "speak": await readAloud(Panel.task.spoken); break;
         case "hush": await hush(); break;
         case "cancel":
-          if (!confirm("Cancel this task? What it already did stays done.")) return;
+          if (!await ask("Cancel this task? What it already did stays done.", "Cancel task")) return;
           await api("POST", `/v1/tasks/${enc(id)}/cancel`, {}); break;
         case "resume": await api("POST", `/v1/tasks/${enc(id)}/resume`, {}); break;
         case "stop-schedule":
-          if (!confirm("Stop this schedule? No more of its runs start. Runs already started go on, and stay in Tasks.")) return;
+          if (!await ask("Stop this schedule? No more of its runs start. Runs already started go on, and stay in Tasks.", "Stop schedule")) return;
           await api("DELETE", `/v1/schedules/${enc(id)}`); toast("The schedule is stopped."); break;
         case "resume-schedule": await api("POST", `/v1/schedules/${enc(id)}/resume`, {}); toast("Schedule resumed."); break;
         case "connect": connectApp(a.dataset.app).catch(err => toast(err.message)); return;
         case "connect-page": await Magnus.openExternal(a.dataset.url); return;
         case "disconnect":
-          if (!confirm("Disconnect? Your sign-in is ended at the app, and Magnus can no longer use it for you until you connect again.")) return;
+          if (!await ask("Disconnect? Your sign-in is ended at the app, and Magnus can no longer use it for you until you connect again.", "Disconnect")) return;
           disconnected(await api("DELETE", `/v1/connectors/${enc(a.dataset.app)}/connection`)); break;
         case "save-ins":
           await api("PUT", `/v1/projects/${enc(id)}`, { instructions: $("#pin", el).value }); delete drafts[`pin-${id}`];
@@ -2080,11 +2099,11 @@ route(/^#\/trash$/, async main => {
     try {
       if (b.dataset.act === "restore") { b.disabled = true; await api("POST", `/v1/trash/${enc(item)}/restore`, {}); toast("Restored."); }
       if (b.dataset.act === "remove") {
-        if (!confirm("Delete this for good? It cannot be restored.")) return;
+        if (!await ask("Delete this for good? It cannot be restored.", "Delete for good")) return;
         b.disabled = true; await api("DELETE", `/v1/trash/${enc(item)}`); toast("Deleted for good.");
       }
       if (b.dataset.act === "empty") {
-        if (!confirm("Delete everything in the trash for good? None of it can be restored.")) return;
+        if (!await ask("Delete everything in the trash for good? None of it can be restored.", "Delete everything")) return;
         b.disabled = true; const r = await api("POST", "/v1/trash/empty", {}); toast(`${r.removed} deleted for good.`);
       }
       await draw();
@@ -2213,7 +2232,7 @@ async function connectorsSection(main) {
     const app = b.dataset.app;
     try {
       if (b.dataset.act === "remove") {
-        if (!confirm(`Remove ${app} for everyone? Every person's sign-in to it is ended, and the worker can no longer use it.`)) return;
+        if (!await ask(`Remove ${app} for everyone? Every person's sign-in to it is ended, and the worker can no longer use it.`, "Remove")) return;
         await api("DELETE", `/v1/connectors/${enc(app)}`);
         await draw();
       }
@@ -2276,12 +2295,12 @@ function appearanceSection(el) {
 // The owner's kill switch, and what it revoked.
 async function killSwitchSection(el) {
   const draw = async () => paint(el, `<h2>Kill switch</h2>${killSwitch(await api("GET", "/v1/kill-switch"))}`);
-  el.onclick = e => {
+  el.onclick = async e => {
     const kill = e.target.closest("[data-kill]");
     if (!kill) return;
     const on = kill.dataset.kill === "on";
-    const sure = on ? confirm("Stop everything? Every action is refused, every task is suspended, every sign-in in the vault is revoked at its provider, and every key in the vault is sealed. You will sign in to providers again afterwards.")
-      : confirm("Turn the kill switch off? Suspended tasks stay suspended until you resume each one.");
+    const sure = on ? await ask("Stop everything? Every action is refused, every task is suspended, every sign-in in the vault is revoked at its provider, and every key in the vault is sealed. You will sign in to providers again afterwards.", "Stop everything")
+      : await ask("Turn the kill switch off? Suspended tasks stay suspended until you resume each one.", "Turn it off");
     if (sure) api("POST", "/v1/kill-switch", { engaged: on }).then(() => { toast(on ? "Everything is stopped." : "The kill switch is off."); draw(); refresh(); }).catch(err => toast(err.message));
   };
   App.redraw = draw;
@@ -2402,7 +2421,7 @@ async function dataSection(el) {
     try {
       if (b.dataset.act === "delete-request") {
         const what = $("#delwhat", el).value.trim();
-        if (!confirm(`Ask the owner to delete ${what || "all of your data"}?`)) return;
+        if (!await ask(`Ask the owner to delete ${what || "all of your data"}?`, "Ask the owner")) return;
         b.disabled = true; await api("POST", "/v1/deletion-requests", { what }); delete drafts.delwhat; toast("Asked. The owner has 30 days to act.");
       }
       if (b.dataset.act === "backup") { b.disabled = true; await api("POST", "/v1/backups", {}); toast("Backed up."); }

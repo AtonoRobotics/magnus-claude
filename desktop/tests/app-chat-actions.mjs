@@ -25,11 +25,7 @@ const entry = (kind, text) => `//div[@data-entry][@data-kind='${kind}'][.//div[n
 const act = (kind, text, label) => d.click(d.xpath(`${entry(kind, text)}//div[@role='toolbar']//button[normalize-space()='${label}']`));
 const count = xp => d.run(`return document.evaluate(arguments[0], document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength`, xp);
 const gone = async (what, xp) => d.until(what, async () => (await count(xp)) === 0 || null);
-const accept = async words => {
-  const asked = await d.until("the confirmation", () => d.call("GET", d.s("/alert/text")));
-  if (!asked.includes(words)) throw new Error(`the confirmation says: ${asked}`);
-  await d.call("POST", d.s("/alert/accept"), {});
-};
+const accept = d.answer;
 const ask = async text => {
   await d.type(d.css("#msg"), text);
   await d.click(d.css("#send"));

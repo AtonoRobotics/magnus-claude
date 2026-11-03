@@ -63,6 +63,14 @@ export async function open(wd, app, shots, prefix) {
   d.clear = el => on(el, id => call("POST", s(`/element/${id}/clear`), {}));
   d.text = el => on(el, id => call("GET", s(`/element/${id}/text`)));
   d.attr = (el, name) => on(el, id => call("GET", s(`/element/${id}/attribute/${name}`)));
+  // The app asks before an action in its own dialog, never the webview's
+  // (which may answer no without showing anything, as Windows' did): that
+  // it says `words`, and yes.
+  d.answer = async words => {
+    const asked = await d.until("the confirmation", () => d.run(`const q = document.querySelector("dialog.ask[open] p"); return q && q.textContent`));
+    if (!asked.includes(words)) throw new Error(`the confirmation says: ${asked}`);
+    await d.click(d.css("dialog.ask[open] [data-ask=yes]"));
+  };
   d.seen = t => d.until(`"${t}"`, () => d.run("return document.body.innerText.includes(arguments[0])", t));
   let n = 0;
   const shot = async name => {

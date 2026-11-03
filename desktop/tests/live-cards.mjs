@@ -21,7 +21,21 @@ const browser = await chromium.launch({ executablePath: env("MAGNUS_CHROMIUM"), 
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 const errors = [];
 page.on("pageerror", e => errors.push(String(e)));
-page.on("dialog", d => d.accept());
+const dialogs = [];
+// A webview may answer window.confirm no without showing it (the Windows
+// app's did, 2026-11-03): here it does, and the app's own question, in
+// its dialog, is answered yes.
+await page.exposeFunction("magnusAsked", m => dialogs.push(m));
+await page.addInitScript(() => {
+  window.confirm = () => false;
+  new MutationObserver(() => {
+    for (const q of document.querySelectorAll("dialog.ask[open]:not([data-answered])")) {
+      q.dataset.answered = "1";
+      window.magnusAsked(q.querySelector("p").textContent);
+      q.querySelector("[data-ask=yes]").click();
+    }
+  }).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ["open"] });
+});
 let n = 0;
 const shoot = name => process.env.MAGNUS_SHOTS ? page.screenshot({ path: join(process.env.MAGNUS_SHOTS, `live-cards-${String(++n).padStart(2, "0")}-${name}.png`), fullPage: true }).catch(() => {}) : null;
 const step = async (name, f) => {

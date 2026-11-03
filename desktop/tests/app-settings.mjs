@@ -18,11 +18,7 @@ const section = async name => {
   await d.click(d.xpath(`//nav[@aria-label='Settings']//a[normalize-space()='${name}']`));
   await d.xpath(`//h2[normalize-space()='${name}']`);
 };
-const confirmWith = async words => {
-  const asked = await d.until("the confirmation", () => d.call("GET", d.s("/alert/text")));
-  if (!asked.includes(words)) throw new Error(`the confirmation says: ${asked}`);
-  await d.call("POST", d.s("/alert/accept"), {});
-};
+const confirmWith = d.answer;
 
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
