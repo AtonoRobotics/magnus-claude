@@ -79,8 +79,8 @@ one commit), 2026-11-02.
 - [x] `publisher`, shown as "by …" on the card and page (`every_manifest_is_well_formed`, `connectors.mjs`)
 - [x] `category`, the Library's chips: email and chat, files, code, work, design and CAD (`every_manifest_is_well_formed`, `connectors.mjs`)
 - [x] `abilities`, plain lines for the page before connecting (`every_manifest_is_well_formed`, `connectors.mjs`)
-- [ ] `kind`: `remote`, `brokered` or `local` (only `remote` is accepted)
-- [ ] `endpoint`: remote the MCP URL (done); brokered the image digest; local the per-OS detection rules, add-on package and hash, enable method and local address
+- [ ] `kind`: `remote`, `brokered` or `local` (a `brokered` manifest is checked, `catalog::kind_problem`, and nothing runs one yet; not `local`)
+- [ ] `endpoint`: remote the MCP URL (done); brokered the image digest (checked, `a_brokered_manifest_names_its_image_and_hosts`); local the per-OS detection rules, add-on package and hash, enable method and local address
 - [ ] `auth.registration`: `preregistered`, `cimd`, `dcr`, or `none` for local (only `preregistered` and `dcr`)
 - [ ] `auth.client`: public with PKCE, or confidential through the relay; the client ID from the relay for its environment (today `catalog/registrations.toml` `kind`, the secret on the appliance)
 - [x] `auth.scopes`: exactly the scopes requested, each with its plain line (`scopes` and `asks`, `every_manifest_is_well_formed`; the request, `google.rs`)
@@ -154,11 +154,11 @@ one commit), 2026-11-02.
 ## Brokered API connectors
 
 - [ ] No third-party integration platform (Nango or similar); secrets only in the relay
-- [ ] Packaging: one server image per provider, named by digest in its manifest
+- [ ] Packaging: one server image per provider, named by digest in its manifest (built reproducibly, `brokered/build.sh`, `a_server_image_is_built_reproducibly_and_named_by_its_digest`; nothing boots one yet)
 - [ ] Isolation: one instance per user per connector, each in its own Firecracker microVM, started on first call, stopped when idle
 - [ ] Credentials: a short-lived access token injected per request; no refresh token, no state between calls, nothing on disk
 - [ ] Network: the microVM reaches only the manifest's API hosts, through an egress proxy on the appliance
-- [ ] Tools at the level a person works (find, read, create, update, share, delete), schemas validated on both sides
+- [ ] Tools at the level a person works (find, read, create, update, share, delete), schemas validated on both sides (the server's side is built, `schema::check` in the server kit; the tools are each connector's)
 - [ ] Contract tests in CI against provider test accounts before publishing
 - [ ] Switching to Remote retires the image; users keep their connection when the grant carries over, else reconnect once
 

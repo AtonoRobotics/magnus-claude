@@ -40,8 +40,17 @@ pub struct Manifest {
     pub cannot: String,
     pub letters: String,
     pub tint: String,
+    /// `remote` or `brokered`.
     pub kind: String,
+    /// Remote: the provider's MCP address. Brokered: the server image's
+    /// digest, `sha256:<hex>` (connectors spec, the manifest's fields).
     pub endpoint: String,
+    /// Brokered: the provider API hosts its microVM may reach, and the
+    /// provider's authorization server people sign in at.
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub issuer: Option<String>,
     pub audience: String,
     pub label: String,
     /// `dcr` (Magnus registers itself) or `preregistered` (Alpha Vector's
@@ -124,6 +133,31 @@ pub fn connector(m: &Manifest) -> Connector {
     }
 }
 
+/// What is wrong with a manifest's kind and where it points, if anything:
+/// a remote one names its MCP address and nothing a brokered one does; a
+/// brokered one names its image by digest, the hosts it may reach and
+/// where people sign in.
+pub fn kind_problem(m: &Manifest) -> Option<String> {
+    match m.kind.as_str() {
+        "remote" if !m.endpoint.starts_with("https://") => Some(format!("{}: a remote connector's endpoint is its https address", m.id)),
+        "remote" if !m.hosts.is_empty() || m.issuer.is_some() => Some(format!("{}: a remote connector names no hosts or issuer: its server says where to sign in", m.id)),
+        "remote" => None,
+        "brokered" => {
+            if let Err(e) = crate::brokered::digest(&m.endpoint) {
+                return Some(format!("{}: {e}", m.id));
+            }
+            if m.hosts.is_empty() || m.hosts.iter().any(|h| h.is_empty() || h.contains('/') || h.contains('*')) {
+                return Some(format!("{}: a brokered connector names each provider host its microVM may reach, exactly", m.id));
+            }
+            match &m.issuer {
+                Some(i) if i.starts_with("https://") => None,
+                _ => Some(format!("{}: a brokered connector names the https address where people sign in", m.id)),
+            }
+        }
+        k => Some(format!("{}: unknown kind {k}", m.id)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Every manifest parses, names a known kind, registration, audience,
@@ -166,5 +200,31 @@ mod tests {
             let c = super::client(p).unwrap_or_else(|| panic!("{p}"));
             assert!(!c.client_id.is_empty() && ["desktop", "confidential", "public"].contains(&c.kind.as_str()), "{p}: {c:?}");
         }
+    }
+
+    /// A brokered manifest names its image by digest and the hosts it may
+    /// reach, and points nowhere else; one that leaves either out, or names
+    /// an address, is refused.
+    #[test]
+    fn a_brokered_manifest_names_its_image_and_hosts() {
+        let base = |kind: &str, endpoint: &str, rest: &str| -> super::Manifest {
+            toml::from_str(&format!(
+                "id = \"x\"\nversion = \"1\"\nname = \"X\"\nsummary = \"s\"\npublisher = \"p\"\ncategory = \"email\"\nabilities = []\nasks = []\ncan = \"c\"\ncannot = \"c\"\nletters = \"X\"\ntint = \"#000000\"\naudience = \"private\"\nlabel = \"private+untrusted\"\nregistration = \"dcr\"\nkind = \"{kind}\"\nendpoint = \"{endpoint}\"\n{rest}"
+            ))
+            .unwrap()
+        };
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let ok = base("brokered", &digest, "hosts = [\"gmail.googleapis.com\"]\nissuer = \"https://accounts.google.com\"");
+        assert_eq!(super::kind_problem(&ok), None);
+        for (endpoint, rest) in [
+            ("https://gmailmcp.googleapis.com/mcp/v1", "hosts = [\"gmail.googleapis.com\"]\nissuer = \"https://accounts.google.com\""),
+            ("sha256:abc", "hosts = [\"gmail.googleapis.com\"]\nissuer = \"https://accounts.google.com\""),
+            (digest.as_str(), "issuer = \"https://accounts.google.com\""),
+            (digest.as_str(), "hosts = [\"*.googleapis.com\"]\nissuer = \"https://accounts.google.com\""),
+            (digest.as_str(), "hosts = [\"gmail.googleapis.com\"]"),
+        ] {
+            assert!(super::kind_problem(&base("brokered", endpoint, rest)).is_some(), "{endpoint} {rest}");
+        }
+        assert!(super::kind_problem(&base("remote", "https://a.example/mcp", "hosts = [\"a.example\"]")).is_some());
     }
 }
