@@ -76,6 +76,12 @@ impl Kernel {
             return Err(Refused::Conflict(format!("the task has already ended ({})", crate::api::status_str(run.status))));
         }
         self.emit(&format!("person:{}", who.id), Ev::Cancelled { run: run.id.clone() }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        // It may have ended on its own as the cancel was recorded: then the
+        // cancel changed nothing, and the person is told how it ended.
+        let now = self.read(|s| s.runs.get(&run.id).map(|r| r.status));
+        if let Some(st) = now.filter(|st| *st != crate::state::Status::Cancelled) {
+            return Err(Refused::Conflict(format!("the task has already ended ({})", crate::api::status_str(st))));
+        }
         self.on_stop(&run.id, true).await;
         let mut done: Vec<(bool, String)> = run
             .intents
