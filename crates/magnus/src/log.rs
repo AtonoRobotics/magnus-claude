@@ -542,6 +542,13 @@ impl Log {
         Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))).collect())
     }
 
+    /// One bundle path's writes and removals up to `seq`, oldest first.
+    pub async fn bundle_history(&self, path: &str, upto: i64) -> Result<Vec<(i64, Value)>> {
+        let sql = "SELECT seq, body FROM public.events WHERE kind IN ('bundle_written', 'bundle_removed') AND body->>'path' = $1 AND seq <= $2 ORDER BY seq";
+        let rows = self.client().await?.query(sql, &[&path, &upto]).await.context("read a bundle path's history")?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
     /// Delete the content of these events.
     pub async fn delete_content(&self, seqs: &[i64]) -> Result<u64> {
         if !self.store {

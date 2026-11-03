@@ -15,6 +15,7 @@ const ALICE: &str = "Map the CRM for the bundle.";
 const BOB: &str = "Look up Acme in the bundle.";
 const PAY: &str = "Note the team's pay in the bundle.";
 const BOB_PAY: &str = "Look up the team's pay in the bundle.";
+const BOB_REWRITES: &str = "Rewrite the finance page for everyone.";
 
 fn gen() -> Value {
     json!({ "by": "magnus/0.2.4", "at": "2026-11-02T10:00:00+00:00" })
@@ -188,9 +189,10 @@ async fn an_org_document_from_private_content_is_its_writers_alone_whatever_it_c
 }
 
 /// A document drawn from Alice's own file, removed by an admin, comes back
-/// from the log as it was written: rolled back, its removal undone, or an
-/// admin's clean version over it undone, it is still hers alone (K2), with
-/// the taint and the private sources it was written from.
+/// from the log as it was written: rolled back, its removal undone, or a
+/// clean version written after its removal undone (Bob's, with her task in
+/// the trash, or an admin's), it is still hers alone (K2), with the taint and the
+/// private sources it was written from.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with() {
     use base64::Engine;
@@ -202,6 +204,8 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
             vec![contract_unchecked("look up pay", "found or not"), tool("bundle_read", json!({ "path": "/people/finance.md" })), complete("Looked.")]
         } else if body.contains(PAY) {
             vec![contract_unchecked("note pay", "it is noted"), tool("bundle_write", json!({ "path": "/people/finance.md", "frontmatter": finance(), "body": "Carol earns 91,000 a year." })), complete("Noted.")]
+        } else if body.contains(BOB_REWRITES) {
+            vec![contract_unchecked("rewrite finance", "it is rewritten"), tool("bundle_write", json!({ "path": "/people/finance.md", "frontmatter": finance(), "body": "Finance pays the team." })), complete("Rewritten.")]
         } else {
             vec![]
         };
@@ -217,7 +221,7 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
     let task = v["task_id"].as_str().or(v["id"].as_str()).unwrap().to_string();
     let ask = alice.wait_item(&task, "approval").await;
     assert!(alice.respond(ask["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
-    alice.wait_item(&task, "review").await;
+    let review = alice.wait_item(&task, "review").await;
 
     let doc = || control(&app, "GET", "/v1/admin/knowledge/doc?path=/people/finance.md", Value::Null);
     let remove = || control(&app, "DELETE", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": "/people/finance.md" }));
@@ -239,11 +243,29 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
     };
     still_hers(0, "as written").await;
 
-    // Removed, then rolled back to its first version.
+    // Alice puts her task in the trash; the document removed, Bob's run
+    // writes a new one from nothing private, and an admin undoes that: what
+    // comes back is hers again, not Bob's.
+    assert!(alice.respond(review["id"].as_str().unwrap(), json!({ "decision": "accept" })).await.is_success());
+    let (st, v) = alice.post("/v1/trash", json!({ "item": task })).await;
+    assert!(st.is_success(), "{v}");
     assert_eq!(remove().await.0, 200);
-    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/rollback", json!({ "sub": "admin-1", "path": "/people/finance.md", "version": 1 })).await;
+    let b = bob.submit(BOB_REWRITES).await;
+    bob.wait_item(&b, "review").await;
+    let (_, d) = doc().await;
+    assert_eq!(d["writer"], "bob", "{d}");
+    let (_, a) = control(&app, "GET", "/v1/admin/knowledge/activity", Value::Null).await;
+    let bobs = a["changes"].as_array().unwrap()[0]["seq"].clone();
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/revert", json!({ "sub": "admin-1", "seqs": [bobs] })).await;
     assert_eq!(st, 200, "{v}");
-    still_hers(1, "rolled back after removal").await;
+    still_hers(1, "bob's version undone, her task in the trash").await;
+
+    // Removed, then rolled back to the version put back above (its 2:
+    // Bob's new document began again at 1).
+    assert_eq!(remove().await.0, 200);
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/rollback", json!({ "sub": "admin-1", "path": "/people/finance.md", "version": 2 })).await;
+    assert_eq!(st, 200, "{v}");
+    still_hers(2, "rolled back after removal").await;
 
     // Removed, then the removal undone.
     assert_eq!(remove().await.0, 200);
@@ -251,7 +273,7 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
     let removal = a["changes"].as_array().unwrap().iter().find(|c| c["change"] == "removed").unwrap()["seq"].clone();
     let (st, v) = control(&app, "POST", "/v1/admin/knowledge/revert", json!({ "sub": "admin-1", "seqs": [removal] })).await;
     assert_eq!(st, 200, "{v}");
-    still_hers(2, "its removal undone").await;
+    still_hers(3, "its removal undone").await;
 
     // Removed, written afresh by an admin from nothing private, and that
     // undone: what comes back is Alice's, not the admin's clean version.
@@ -262,5 +284,5 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
     let fresh = a["changes"].as_array().unwrap()[0]["seq"].clone();
     let (st, v) = control(&app, "POST", "/v1/admin/knowledge/revert", json!({ "sub": "admin-1", "seqs": [fresh] })).await;
     assert_eq!(st, 200, "{v}");
-    still_hers(3, "an admin's clean version undone").await;
+    still_hers(4, "an admin's clean version undone").await;
 }

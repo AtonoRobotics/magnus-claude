@@ -1800,16 +1800,13 @@ impl State {
             Ev::AdapterVerified { adapter_id, version, model, passed, report, .. } => {
                 self.conformance.insert(adapter_id.clone(), (version.clone(), model.clone(), *passed, report.clone()));
             }
-            Ev::BundleWritten { path, version, doc_kind: kind, scope, owner_user, actor, run, label, sources, writer: put_back, .. } => {
-                let writer = run.as_ref().and_then(|r| self.runs.get(r)).map(|r| r.person.clone());
+            Ev::BundleWritten { path, version, doc_kind: kind, scope, owner_user, actor, run, label, sources, writer: named, .. } => {
+                let writer = named.clone().or_else(|| run.as_ref().and_then(|r| self.runs.get(r)).map(|r| r.person.clone()));
                 let d = self.bundle.entry(path.clone()).or_insert_with(|| BundleDoc { path: path.clone(), kind: kind.clone(), scope: scope.clone(), owner_user: owner_user.clone(), label: *label, sources: vec![], versions: vec![], writer: None });
-                // An admin's version (no run) keeps the writer whose run
-                // read its sources, or names the one of the version it puts
-                // back (K2).
-                if run.is_some() {
+                // An admin's edit (no run, no writer named) keeps the writer
+                // whose run read its sources (K2).
+                if run.is_some() || named.is_some() {
                     d.writer = writer;
-                } else if put_back.is_some() {
-                    d.writer = put_back.clone();
                 }
                 d.kind = kind.clone();
                 d.scope = scope.clone();

@@ -158,8 +158,8 @@ impl Kernel {
     /// person, not the current version's or none if the document was
     /// removed (M1, K2).
     async fn admin_bundle_put_back(&self, sub: &str, path: &str, seq: i64) -> Result<u32, Refusal> {
-        let rows = self.log.of_kinds(&["bundle_written", "bundle_removed"], 100_000).await.map_err(failed)?;
-        let Some(b) = rows.iter().find(|r| r.0 == seq && r.3["kind"] == "bundle_written" && r.3["path"] == path).map(|r| r.3.clone()) else {
+        let history = self.log.bundle_history(path, seq).await.map_err(failed)?;
+        let Some(b) = history.last().filter(|(s, b)| *s == seq && b["kind"] == "bundle_written").map(|r| r.1.clone()) else {
             return Err((StatusCode::NOT_FOUND, "no such version".into()));
         };
         let c = self.log.contents(&[seq]).await.map_err(failed)?.remove(&seq).unwrap_or_default();
@@ -167,22 +167,40 @@ impl Kernel {
         let kind = self.admin_bundle_check(path, fm, body).await?;
         // Unreadable, it counts as both: never put back cleaner than written.
         let label = serde_json::from_value(b["label"].clone()).unwrap_or(Label { untrusted: true, private: true });
-        let read: Vec<String> = b["sources"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|s| s.starts_with("private:")).map(String::from).collect();
+        let sources: Vec<String> = b["sources"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+        let read: Vec<String> = sources.iter().filter(|s| s.starts_with("private:")).cloned().collect();
         // Whose run read them: the bundle's writer at that version, from
-        // the writes and removals of the path up to it, as the state had it.
+        // the path's writes and removals up to it, as the state had it.
         let mut writer = None;
-        let mut upto: Vec<_> = rows.iter().filter(|r| r.0 <= seq && r.3["path"] == path).collect();
-        upto.sort_by_key(|r| r.0);
-        for (_, _, _, e) in upto {
+        for (_, e) in &history {
             if e["kind"] == "bundle_removed" {
                 writer = None;
-            } else if let Some(r) = e["run"].as_str() {
-                writer = self.read(|s| s.runs.get(r).map(|r| r.person.clone()));
             } else if let Some(w) = e["writer"].as_str() {
                 writer = Some(w.to_string());
+            } else if let Some(r) = e["run"].as_str() {
+                writer = self.run_person(r).await?;
             }
         }
+        // Seen only by its writer, and that person is not known: never
+        // the current writer's instead.
+        let public = sources.iter().all(|s| s.starts_with('/') || s.starts_with("human:"));
+        if writer.is_none() && !public {
+            return Err((StatusCode::CONFLICT, "Whose run wrote this version is no longer known, so it cannot be put back.".into()));
+        }
         self.admin_put(sub, path, kind, fm, body, label, read, writer).await
+    }
+
+    /// The person whose run `run` is: from the state, or from the log once
+    /// its task is in the trash.
+    async fn run_person(&self, run: &str) -> Result<Option<String>, Refusal> {
+        if let Some(p) = self.read(|s| s.runs.get(run).map(|r| r.person.clone())) {
+            return Ok(Some(p));
+        }
+        let evs = self.log.run_events(run).await.map_err(failed)?;
+        Ok(evs.into_iter().find_map(|e| match e.ev {
+            Ev::TaskCreated { person, .. } => Some(person),
+            _ => None,
+        }))
     }
 
     /// Write an admin's version with the taint, the private content read

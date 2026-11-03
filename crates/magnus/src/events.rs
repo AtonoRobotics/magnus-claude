@@ -845,8 +845,9 @@ pub enum Ev {
         /// it follows from who may read these (K2).
         #[serde(default)]
         sources: Vec<String>,
-        /// An admin's version put back from the log: the person whose run
-        /// read its private sources, as when it was written (K2).
+        /// The person whose run read its sources (K2): an agent's version
+        /// names its run's, a version put back the one it was written
+        /// with; an admin's edit names none and keeps the document's.
         #[serde(default)]
         writer: Option<String>,
         #[serde(default)]
