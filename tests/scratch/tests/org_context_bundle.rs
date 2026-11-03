@@ -9,6 +9,7 @@
 //! the writing run read, never from the sources its document cites.
 
 use magnus_invariants::*;
+use magnus_scratch::*;
 use serde_json::{json, Value};
 
 const ALICE: &str = "Map the CRM for the bundle.";
@@ -114,19 +115,6 @@ async fn magnus_writes_the_bundle_through_the_kernel_which_checks_every_write_an
     assert!(!r.text.contains("acme"), "bob's search found Acme: {}", r.text);
     let r = result(BOB, 6)();
     assert!(!r.is_error && r.text.contains("title: Customer"), "{}", r.text);
-}
-
-/// One HTTP request over the kernel's control socket, as the admin console
-/// makes it.
-async fn control(app: &Appliance, method: &str, path: &str, body: Value) -> (u16, Value) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut s = tokio::net::UnixStream::connect(app.state_dir.join("control.sock")).await.expect("the kernel's control socket");
-    let b = body.to_string();
-    s.write_all(format!("{method} {path} HTTP/1.1\r\nHost: kernel\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len()).as_bytes()).await.unwrap();
-    let mut out = String::new();
-    s.read_to_string(&mut out).await.unwrap();
-    let (head, body) = out.split_once("\r\n\r\n").unwrap();
-    (head[9..12].parse().unwrap(), serde_json::from_str(body).unwrap_or(Value::Null))
 }
 
 /// A run that read Alice's own file writes what it said into an org

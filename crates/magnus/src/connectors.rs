@@ -1205,7 +1205,8 @@ async fn disconnect(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Re
         Ok(p) => p,
         Err(r) => return r,
     };
-    if k.connector(&name).is_none() {
+    // Turned off, an app keeps its sign-ins: each person can still end theirs.
+    if !k.all_connectors().iter().any(|(c, _)| c.name == name) {
         return err(StatusCode::NOT_FOUND, "no such app");
     }
     match k.disconnect(&name, &p.id).await {

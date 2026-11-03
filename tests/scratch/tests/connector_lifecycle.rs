@@ -105,3 +105,32 @@ async fn a_sign_in_ended_at_the_app_asks_the_person_to_sign_in_again() {
     connect(&alice, &name).await;
     assert_eq!(card(&alice, &name).await["state"], "connected");
 }
+
+/// An app the owner turned off keeps its people's sign-ins (turned on again,
+/// they work), so they can still be ended: a person's Disconnect revokes
+/// theirs at the app, and the kill switch revokes every one (B11).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_turned_off_still_has_its_sign_ins_ended_by_disconnect_and_the_kill_switch() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(steps(vec![])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (alice, carol) = (app.api("alice"), app.api("carol"));
+    let name = add(&alice, &cal.url).await;
+    connect(&alice, &name).await;
+    connect(&carol, &name).await;
+    let (st, v) = control(&app, "PATCH", &format!("/v1/admin/connectors/{name}"), json!({ "actor": "admin:admin-1", "enabled": false })).await;
+    assert_eq!(st, 200, "{v}");
+
+    // Alice ends her own sign-in to it, at the app.
+    let (st, ended) = alice.send(reqwest::Method::DELETE, &format!("/v1/connectors/{name}/connection"), None).await;
+    assert_eq!((st.as_u16(), ended["at_provider"].as_bool()), (200, Some(true)), "alice could not end her sign-in to a turned-off app: {ended}");
+
+    // The kill switch revokes Carol's at the app.
+    assert!(alice.post("/v1/kill-switch", json!({ "engaged": true })).await.0.is_success());
+    eventually("carol's sign-in to the turned-off app is revoked", PATIENCE, || async {
+        let (_, ks) = alice.get("/v1/kill-switch").await;
+        (ks["revoked"][format!("connector_{name}__carol")]["at_provider"] == true).then_some(ks)
+    })
+    .await;
+    assert!(alice.post("/v1/kill-switch", json!({ "engaged": false })).await.0.is_success());
+}
