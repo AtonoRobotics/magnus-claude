@@ -1006,6 +1006,19 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - PROGRESS.md said org context steps 2 to 7b were committed on their branches; no branch has them, and the plan has no 7b. It now says steps 2 to 11, with only step 1 built.
 - Documents and a comment only: no behaviour changes, so no test.
 
+## A stable type is changed only by an admin (2026-11-03, `stable-types`)
+
+- Found by the review of master against the specs (2026-11-02). The org context build spec, Tools, `bundle.write`: "A type document moving to stable requires admin approval, because types become Cedar entities". The kernel refused Magnus making a draft type stable, but once an admin had, Magnus's next write could keep it stable with new identity keys or relations, or put it back to draft: either changes a Cedar entity no admin approved.
+- Now Magnus's write to a stable type is refused with the reason, whatever status it asks for. Changing, deprecating or reopening a stable type is the console's (admin console spec, Knowledge › Ontology).
+- Test: `a_type_an_admin_made_stable_is_changed_by_no_run_of_magnus` (org_context_bundle.rs): an admin makes the customer type stable; Magnus's rewrite with a third identity key and its rewrite as draft are both refused, and the type stays version 1, stable, with its two keys. On master the rewrite is version 2.
+
+## How a document was checked is the kernel's record (2026-11-03, `kernel-verifications`)
+
+- Found by the review of master against the specs (2026-11-02). The org context build spec, Bundle format: each entry in `verified` is {by, at, kind, event, note}, `event` the event-log id; Outcome capture: acceptances, rejections and owner reviews are recorded by the kernel, corrections and downstream results by Magnus through `bundle.record_outcome`. But `bundle_write` took whatever `verified` Magnus wrote, so a run could record an owner's review no one gave, or drop one given; and a convention needed a non-empty `verified`, so a new one could be written only with an invented entry.
+- Now the record is kept by the kernel from version to version: Magnus's write carries it back unchanged or leaves it out (the kernel puts it back), and a write adding, changing or dropping an entry is refused with the reason. A new convention starts with an empty record. Recording outcomes (`bundle.record_outcome`, acceptances and rejections) is step 8 of the plan, still to build.
+- An admin's write in the console is unchanged: it is a person's, recorded as theirs, and stands in for the review queue until step 8.
+- Test: `a_conventions_verifications_are_the_kernels_record_and_no_write_of_magnus_makes_one` (org_context_bundle.rs): Magnus writes a new convention with no entry; its write adding Carol's review is refused; with Carol's review on the record, its rewrite with an empty list is refused and one leaving it out keeps the review. On master the first write is refused ("needs verified").
+
 ## An app is added only if people sign in to it themselves (2026-11-03, `add-by-sign-in`)
 
 - The connectors spec, Remote MCP connectors: "A server that asks for a key, token or client details instead of a sign-in is refused, and the admin is told why"; Client registration: asking for client details "is excluded because it breaks plug and play. A server that supports none of the three cannot be added". The console asked for "The organisation's key, if it takes one", the kernel stored it and called the app with it, and it took a `client_id` for an app whose sign-in registers no client.

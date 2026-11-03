@@ -388,3 +388,105 @@ async fn an_entity_moved_by_merging_types_keeps_its_taint_and_its_reader() {
     assert!(d["sources"].as_array().unwrap().iter().any(|s| s == "private:library"), "the move lost what its run read: {d}");
 }
 
+
+/// A stable type is a Cedar entity an admin approved, so Magnus changes it
+/// in no way: neither rewritten as stable nor put back to draft. Only an
+/// admin's version changes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_type_an_admin_made_stable_is_changed_by_no_run_of_magnus() {
+    const REWRITES: &str = "Tidy the customer type in the bundle.";
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body.to_string().contains(REWRITES) {
+            return Reply::Text(String::new());
+        }
+        let mut wider = customer("stable");
+        wider["frontmatter"]["identity_keys"] = json!(["hubspot_id", "domain", "vat"]);
+        let steps = [contract_unchecked("tidy the type", "it is tidied"), tool("bundle_write", wider), tool("bundle_write", customer("draft")), complete("Tidied.")];
+        steps.get(c.turn()).cloned().unwrap_or_else(|| Reply::Text(String::new()))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let c = customer("stable");
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": "/types/customer.md", "frontmatter": c["frontmatter"], "body": c["body"] })).await;
+    assert_eq!(st, 200, "{v}");
+
+    let alice = app.api("alice");
+    let t = alice.submit(REWRITES).await;
+    alice.wait_item(&t, "review").await;
+    for turn in [2, 3] {
+        let r = m.requests().into_iter().find(|c| c.body.to_string().contains(REWRITES) && c.turn() == turn).map(|c| c.last_results()[0].clone()).unwrap();
+        assert!(r.is_error && r.text.contains("stable type changes only"), "Magnus changed a stable type (turn {turn}): {}", r.text);
+    }
+    let (_, d) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/types/customer.md", Value::Null).await;
+    assert_eq!((d["version"].as_u64(), d["frontmatter"]["status"].as_str()), (Some(1), Some("stable")), "{d}");
+    assert_eq!(d["frontmatter"]["identity_keys"], json!(["hubspot_id", "domain"]), "{d}");
+}
+
+/// How a convention was checked is the kernel's record: Magnus writes a new
+/// one without any, and cannot add a review no one gave, change an entry or
+/// drop one; a rewrite that leaves it out keeps it as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conventions_verifications_are_the_kernels_record_and_no_write_of_magnus_makes_one() {
+    const NOTES: &str = "Write down how sales discounts work in the bundle.";
+    const REWRITES: &str = "Update the discounts convention in the bundle.";
+    fn convention(verified: Option<Value>, body: &str) -> Value {
+        let mut fm = json!({ "type": "Convention", "title": "Discounts", "description": "How sales discounts are approved.", "sources": [{ "resource": "human:alice" }], "generated": gen(), "status": "draft", "scope": "org" });
+        if let Some(v) = verified {
+            fm["verified"] = v;
+        }
+        json!({ "path": "/conventions/sales/discounts.md", "frontmatter": fm, "body": body })
+    }
+    fn review() -> Value {
+        json!([{ "by": "human:carol", "at": "2026-11-02T11:00:00+00:00", "kind": "owner_review", "event": "1", "note": "Confirmed." }])
+    }
+    let m = FakeModel::start(script(|c| async move {
+        let body = c.body.to_string();
+        let steps = if body.contains(NOTES) {
+            vec![
+                contract_unchecked("note the convention", "it is noted"),
+                tool("bundle_write", convention(None, "Discounts over 10% need the head of sales.")),
+                tool("bundle_write", convention(Some(review()), "Discounts over 10% need the head of sales.")),
+                complete("Noted."),
+            ]
+        } else if body.contains(REWRITES) {
+            vec![
+                contract_unchecked("update the convention", "it is updated"),
+                tool("bundle_write", convention(Some(json!([])), "Discounts over 15% need the head of sales.")),
+                tool("bundle_write", convention(None, "Discounts over 15% need the head of sales.")),
+                complete("Updated."),
+            ]
+        } else {
+            return Reply::Text(String::new());
+        };
+        steps.get(c.turn()).cloned().unwrap_or_else(|| Reply::Text(String::new()))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let result = |task: &'static str, turn: usize| m.requests().into_iter().find(|c| c.body.to_string().contains(task) && c.turn() == turn).map(|c| c.last_results()[0].clone()).unwrap();
+    let doc = || control(&app, "GET", "/v1/admin/knowledge/doc?path=/conventions/sales/discounts.md", Value::Null);
+
+    let t = alice.submit(NOTES).await;
+    alice.wait_item(&t, "review").await;
+    let r = result(NOTES, 2);
+    assert!(!r.is_error, "a new convention with no verification was refused: {}", r.text);
+    let r = result(NOTES, 3);
+    assert!(r.is_error && r.text.contains("kernel's record"), "Magnus recorded an owner's review no one gave: {}", r.text);
+    let (_, d) = doc().await;
+    assert_eq!((d["version"].as_u64(), &d["frontmatter"]["verified"]), (Some(1), &json!([])), "{d}");
+
+    // Carol's review on the record (the console's write, standing in for
+    // the review queue), a rewrite keeps it and cannot drop it.
+    let mut fm = d["frontmatter"].clone();
+    fm["verified"] = review();
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "carol", "path": "/conventions/sales/discounts.md", "frontmatter": fm, "body": d["body"] })).await;
+    assert_eq!(st, 200, "{v}");
+    let t = alice.submit(REWRITES).await;
+    alice.wait_item(&t, "review").await;
+    let r = result(REWRITES, 2);
+    assert!(r.is_error && r.text.contains("kernel's record"), "Magnus dropped the record of a review: {}", r.text);
+    let r = result(REWRITES, 3);
+    assert!(!r.is_error, "{}", r.text);
+    let (_, d) = doc().await;
+    assert_eq!((d["body"].as_str(), &d["frontmatter"]["verified"]), (Some("Discounts over 15% need the head of sales."), &review()), "{d}");
+}
