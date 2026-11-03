@@ -294,11 +294,17 @@ impl Provider {
 
     /// Check a username and password with the provider's password grant,
     /// with the code from the person's authenticator app if they gave one.
-    /// Whether the provider still has this person, turned on: Some(false)
-    /// when it has them turned off or no longer knows them.
-    pub async fn active(&self, username: &str) -> Result<bool> {
+    /// Whether the provider still has this person, turned on: false when it
+    /// has them turned off or no longer knows them. Asked of the account
+    /// they are bound to (`sub`) when they are: another account later given
+    /// their username is not them.
+    pub async fn active(&self, username: &str, sub: Option<&str>) -> Result<bool> {
         let d = self.discovery().await?;
-        Ok(self.account(d, username).await?.is_some_and(|a| a.enabled))
+        let account = match sub {
+            Some(id) => self.account_by_id(d, id).await?,
+            None => self.account(d, username).await?,
+        };
+        Ok(account.is_some_and(|a| a.enabled))
     }
 
     pub async fn password(&self, username: &str, password: &str, code: Option<&str>, app: bool) -> Result<Polled> {
@@ -374,6 +380,34 @@ impl Provider {
     /// provider has no such username. Keycloak's admin API is at the issuer
     /// with `/admin` before `/realms/`.
     async fn account(&self, d: &Discovery, username: &str) -> Result<Option<Account>> {
+        let (admin, token) = self.status_admin(d).await?;
+        let mut u = url::Url::parse(&format!("{admin}/users"))?;
+        u.query_pairs_mut().append_pair("username", username).append_pair("exact", "true");
+        let users: Vec<Value> = self.admin_http.get(u).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
+        let Some(user) = users.first() else { return Ok(None) };
+        let Some(id) = user["id"].as_str() else { return Ok(None) };
+        let creds: Vec<Value> = self.admin_http.get(format!("{admin}/users/{id}/credentials")).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
+        Ok(Some(Account::of(user, &creds)))
+    }
+
+    /// The account with this id (`sub`), as `account`; None when the
+    /// provider no longer has it.
+    async fn account_by_id(&self, d: &Discovery, id: &str) -> Result<Option<Account>> {
+        let (admin, token) = self.status_admin(d).await?;
+        let mut u = url::Url::parse(&format!("{admin}/users"))?;
+        u.path_segments_mut().map_err(|_| anyhow!("{admin} is not an address"))?.push(id);
+        let r = self.admin_http.get(u.clone()).bearer_auth(&token).send().await?;
+        if r.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let user: Value = r.error_for_status()?.json().await?;
+        u.path_segments_mut().map_err(|_| anyhow!("{admin} is not an address"))?.push("credentials");
+        let creds: Vec<Value> = self.admin_http.get(u).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
+        Ok(Some(Account::of(&user, &creds)))
+    }
+
+    /// The provider's admin API, and a token for it as the status client.
+    async fn status_admin(&self, d: &Discovery) -> Result<(String, String)> {
         let (Some(client), Some(credential)) = (&self.cfg.status_client, &self.cfg.status_credential) else {
             bail!("no status_client is set, so people who use a code can only sign in in the browser")
         };
@@ -389,13 +423,7 @@ impl Provider {
             Some(t) if status.is_success() => t.to_string(),
             _ => bail!("the status client could not sign in: {}", b["error_description"].as_str().or(b["error"].as_str()).unwrap_or(status.as_str())),
         };
-        let mut u = url::Url::parse(&format!("{admin}/users"))?;
-        u.query_pairs_mut().append_pair("username", username).append_pair("exact", "true");
-        let users: Vec<Value> = self.admin_http.get(u).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
-        let Some(user) = users.first() else { return Ok(None) };
-        let Some(id) = user["id"].as_str() else { return Ok(None) };
-        let creds: Vec<Value> = self.admin_http.get(format!("{admin}/users/{id}/credentials")).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
-        Ok(Some(Account::of(user, &creds)))
+        Ok((admin, token))
     }
 
     pub async fn start(&self, app: bool) -> Result<Started> {
@@ -520,8 +548,8 @@ impl crate::identity::Identity for Provider {
     async fn password(&self, username: &str, password: &str, code: Option<&str>, app: bool) -> Result<Polled> {
         Provider::password(self, username, password, code, app).await
     }
-    async fn active(&self, username: &str) -> Result<bool> {
-        Provider::active(self, username).await
+    async fn active(&self, username: &str, sub: Option<&str>) -> Result<bool> {
+        Provider::active(self, username, sub).await
     }
 }
 
