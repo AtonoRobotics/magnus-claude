@@ -353,6 +353,7 @@ impl Kernel {
             run: Some(run.into()),
             label,
             sources,
+            writer: None,
             frontmatter: fm.clone(),
             body: body.into(),
         };

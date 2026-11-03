@@ -186,3 +186,81 @@ async fn an_org_document_from_private_content_is_its_writers_alone_whatever_it_c
     assert_eq!(st, 200, "{d}");
     assert_eq!(d["writer"], "alice", "the admin's edit lost whose run read its sources: {d}");
 }
+
+/// A document drawn from Alice's own file, removed by an admin, comes back
+/// from the log as it was written: rolled back, its removal undone, or an
+/// admin's clean version over it undone, it is still hers alone (K2), with
+/// the taint and the private sources it was written from.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with() {
+    use base64::Engine;
+    let finance = || json!({ "type": "Area", "title": "Finance", "owner": "human:alice", "ask_channel": "#finance", "scope": "org", "sources": [{ "resource": "human:alice" }] });
+    let m = FakeModel::start(script(move |c| async move {
+        let body = c.body.to_string();
+        let t = c.turn();
+        let steps: Vec<Reply> = if body.contains(BOB_PAY) {
+            vec![contract_unchecked("look up pay", "found or not"), tool("bundle_read", json!({ "path": "/people/finance.md" })), complete("Looked.")]
+        } else if body.contains(PAY) {
+            vec![contract_unchecked("note pay", "it is noted"), tool("bundle_write", json!({ "path": "/people/finance.md", "frontmatter": finance(), "body": "Carol earns 91,000 a year." })), complete("Noted.")]
+        } else {
+            vec![]
+        };
+        steps.get(t).cloned().unwrap_or_else(|| Reply::Text(String::new()))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (alice, bob) = (app.api("alice"), app.api("bob"));
+    let (st, f) = alice.post("/v1/files", json!({ "name": "pay.txt", "media_type": "text/plain", "data_b64": base64::engine::general_purpose::STANDARD.encode("Carol earns 91,000 a year.") })).await;
+    assert_eq!(st.as_u16(), 201, "{f}");
+    let (st, v) = alice.post("/v1/tasks", json!({ "text": PAY, "files": [f["id"]] })).await;
+    assert!(st.is_success(), "{v}");
+    let task = v["task_id"].as_str().or(v["id"].as_str()).unwrap().to_string();
+    let ask = alice.wait_item(&task, "approval").await;
+    assert!(alice.respond(ask["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
+    alice.wait_item(&task, "review").await;
+
+    let doc = || control(&app, "GET", "/v1/admin/knowledge/doc?path=/people/finance.md", Value::Null);
+    let remove = || control(&app, "DELETE", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": "/people/finance.md" }));
+    // The nth time Bob looks.
+    let still_hers = |n: usize, how: &'static str| {
+        let (m, bob, doc) = (&m, &bob, &doc);
+        async move {
+            let (st, d) = doc().await;
+            assert_eq!(st, 200, "{how}: {d}");
+            assert_eq!(d["body"], "Carol earns 91,000 a year.", "{how}: {d}");
+            assert_eq!(d["writer"], "alice", "{how}: it lost whose run read it: {d}");
+            assert!(d["label"]["untrusted"] == true && d["label"]["private"] == true, "{how}: it came back clean: {d}");
+            assert!(d["sources"].as_array().unwrap().iter().any(|s| s == "private:library"), "{how}: it lost what its run read: {d}");
+            let b = bob.submit(BOB_PAY).await;
+            bob.wait_item(&b, "review").await;
+            let read = m.requests().into_iter().filter(|c| c.body.to_string().contains(BOB_PAY) && c.turn() == 2).nth(n).map(|c| c.last_results()[0].clone()).unwrap();
+            assert!(read.is_error && read.text.contains("no such document"), "{how}: bob read what alice's file said: {}", read.text);
+        }
+    };
+    still_hers(0, "as written").await;
+
+    // Removed, then rolled back to its first version.
+    assert_eq!(remove().await.0, 200);
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/rollback", json!({ "sub": "admin-1", "path": "/people/finance.md", "version": 1 })).await;
+    assert_eq!(st, 200, "{v}");
+    still_hers(1, "rolled back after removal").await;
+
+    // Removed, then the removal undone.
+    assert_eq!(remove().await.0, 200);
+    let (_, a) = control(&app, "GET", "/v1/admin/knowledge/activity", Value::Null).await;
+    let removal = a["changes"].as_array().unwrap().iter().find(|c| c["change"] == "removed").unwrap()["seq"].clone();
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/revert", json!({ "sub": "admin-1", "seqs": [removal] })).await;
+    assert_eq!(st, 200, "{v}");
+    still_hers(2, "its removal undone").await;
+
+    // Removed, written afresh by an admin from nothing private, and that
+    // undone: what comes back is Alice's, not the admin's clean version.
+    assert_eq!(remove().await.0, 200);
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": "/people/finance.md", "frontmatter": finance(), "body": "Finance pays the team." })).await;
+    assert_eq!(st, 200, "{v}");
+    let (_, a) = control(&app, "GET", "/v1/admin/knowledge/activity", Value::Null).await;
+    let fresh = a["changes"].as_array().unwrap()[0]["seq"].clone();
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/revert", json!({ "sub": "admin-1", "seqs": [fresh] })).await;
+    assert_eq!(st, 200, "{v}");
+    still_hers(3, "an admin's clean version undone").await;
+}
