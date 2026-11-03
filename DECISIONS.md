@@ -1011,3 +1011,11 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Found by the review of master against the specs (2026-11-02). The org context build spec, Tools, `bundle.write`: "A type document moving to stable requires admin approval, because types become Cedar entities". The kernel refused Magnus making a draft type stable, but once an admin had, Magnus's next write could keep it stable with new identity keys or relations, or put it back to draft: either changes a Cedar entity no admin approved.
 - Now Magnus's write to a stable type is refused with the reason, whatever status it asks for. Changing, deprecating or reopening a stable type is the console's (admin console spec, Knowledge › Ontology).
 - Test: `a_type_an_admin_made_stable_is_changed_by_no_run_of_magnus` (org_context_bundle.rs): an admin makes the customer type stable; Magnus's rewrite with a third identity key and its rewrite as draft are both refused, and the type stays version 1, stable, with its two keys. On master the rewrite is version 2.
+
+## Each vault entry opens only under its own name (2026-11-03, `vault-binding`)
+
+- The connectors spec, Custody: tokens are "encrypted at rest in the appliance's vault, under a key that never leaves the appliance, bound to one user and one connector". Every entry was encrypted under the vault's one key with nothing tying it to its name, so Bob's sign-in to an app, copied in the vault's file over Alice's, opened as Alice's and her runs would act as Bob.
+- Now each entry is encrypted with its name as associated data (XChaCha20-Poly1305), and marked as such; under any other name it does not open. Entries written before, or restored from a backup made before, are bound to their names when the vault opens.
+- "Under a key that never leaves the appliance" is still open: a backup carries the vault's key, so tokens restore with it. Keeping the key on the appliance means a restored appliance asks everyone to sign in again; that choice is the owner's.
+- A backup's restore test opens each entry as the vault would (`vault::check`), bound or from before.
+- Tests (vault.rs): `a_sign_in_moved_under_another_name_does_not_open` (on master Bob's token opens as Alice's) and `an_entry_from_before_binding_is_bound_to_its_name_on_opening`.

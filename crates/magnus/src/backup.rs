@@ -78,13 +78,7 @@ pub fn check(v: &Value) -> Result<(usize, i64)> {
     }
     anyhow::ensure!(v["through_seq"].as_i64() == Some(last), "the backup ends at {last}, not at {}", v["through_seq"]);
     let vk = B64.decode(v["vault"]["key"].as_str().unwrap_or_default())?;
-    let cipher = XChaCha20Poly1305::new_from_slice(&vk).map_err(|_| anyhow::anyhow!("the backed-up vault key is corrupt"))?;
-    let secrets: std::collections::BTreeMap<String, String> = serde_json::from_str(v["vault"]["secrets"].as_str().unwrap_or("{}"))?;
-    for (name, b64) in &secrets {
-        let blob = B64.decode(b64)?;
-        anyhow::ensure!(blob.len() > 24, "secret {name} is corrupt");
-        cipher.decrypt(XNonce::from_slice(&blob[..24]), &blob[24..]).map_err(|_| anyhow::anyhow!("secret {name} does not decrypt"))?;
-    }
+    crate::vault::check(&vk, v["vault"]["secrets"].as_str().unwrap_or("{}"))?;
     Ok((events.len(), last))
 }
 

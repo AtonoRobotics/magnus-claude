@@ -134,7 +134,7 @@ one commit), 2026-11-02.
 
 - [x] Tokens encrypted at rest in the appliance's vault (`vault.rs`, XChaCha20-Poly1305; `inv2_credentials.rs` `secrets_can_be_written_but_not_read_back`)
 - [ ] Under a key that never leaves the appliance (the backup carries the vault's key, `vault.rs` "for a backup")
-- [ ] Bound to one user and one connector (one key for the vault; bound by name, `connector_<app>__<person>`)
+- [x] Bound to one user and one connector (each entry is encrypted with its name, `connector_<app>__<person>`, as associated data, so moved under another name it does not open; `vault.rs` `a_sign_in_moved_under_another_name_does_not_open`, and entries from before are bound on opening, `an_entry_from_before_binding_is_bound_to_its_name_on_opening`)
 - [x] Tokens never enter model context or agent sandboxes; the MCP client attaches them (`inv2_credentials.rs` `credentials_are_used_but_never_seen`)
 - [ ] A provider's first-class agent identity declared in the manifest and held the same way
 
