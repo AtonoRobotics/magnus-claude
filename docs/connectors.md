@@ -18,6 +18,7 @@ one commit), 2026-11-02.
 ## Scope and requirements
 
 - [ ] Breadth: Google, Microsoft, coding and deployment services (Vercel and peers), Slack, the other common business services, and FreeCAD, Autodesk Fusion, SolidWorks and Blender (today: four Google manifests, `catalog/google-*.toml`, and Sentry's, `catalog/sentry.toml`, compiled in by `crates/magnus/src/catalog.rs` `SOURCES`)
+- [ ] Breadth: Google, Microsoft, coding and deployment services (Vercel and peers), Slack, the other common business services, and FreeCAD, Autodesk Fusion, SolidWorks and Blender (today: four Google manifests, `catalog/google-*.toml`, and Hugging Face's, `catalog/huggingface.toml`, compiled in by `crates/magnus/src/catalog.rs` `SOURCES`)
 - [ ] Plug and play: every connector is a Connect button that opens the provider's own login page and then works (the button and the page exist, `connectors.mjs`, `app-apps.mjs` against a fake app; a Google sign-in cannot finish in the desktop app, see Connect flow)
 - [x] No connector shows the user a form: no address, key, token, client ID or header fields in the app (`desktop/tests/connectors.mjs`, "asks nothing here", and the owner's Settings › Connectors)
 - [ ] A service whose provider offers no sign-in is not in the catalog (every catalog manifest signs in; an admin can no longer add a server with a key, `add-by-sign-in`, but can still add one that asks for no sign-in at all: open with the owner)
@@ -101,6 +102,7 @@ one commit), 2026-11-02.
 - [ ] Pre-registered clients for Microsoft, Slack and the others under Provider registrations (client IDs for Microsoft, GitHub, Vercel, Slack and Sentry in `catalog/registrations.toml`, no manifest uses them; Sentry's catalog connector registers Magnus itself at `mcp.sentry.dev`, which does not take sentry.io's clients)
 - [ ] Client ID Metadata Document, used when the provider advertises it, one document at pyrallon.ai naming the relay callback
 - [x] Dynamic Client Registration as the fallback (`connectors.rs`, the fake app registers Magnus; against Sentry, `sentry.rs`)
+- [x] Dynamic Client Registration as the fallback (`connectors.rs`, the fake app registers Magnus; against Hugging Face, `huggingface.rs`)
 - [ ] The order the MCP authorization spec (2026-07-28) sets: pre-registered, then CIMD, then DCR
 - [x] Asking the user to type in client details is excluded (`add_connector` refuses a `client_id`; `admin_connectors.rs`)
 - [ ] A server supporting none of the three cannot be added, and the admin is told why (an added server must offer Dynamic Client Registration, else it is refused with the reason, `admin_connectors.rs`; one offering only CIMD is refused too until CIMD is built)
@@ -326,6 +328,7 @@ one commit), 2026-11-02.
 - [ ] Contract, every commit and nightly: every tool against a provider test account; schemas; provider errors and rate limits reach the agent intact
 - [ ] Egress, every commit: a brokered image fails on any undeclared host
 - [ ] Tool drift, nightly: the live tool list matches `tools.toml`, and a new or changed tool opens a classification task for the owner (the match is `google.rs` `each_google_manifest_names_exactly_the_tools_its_live_server_lists`, run per CI build, not nightly; no task is opened; Sentry lists its tools only after a sign-in, so its manifest is unchecked until a test account exists)
+- [ ] Tool drift, nightly: the live tool list matches `tools.toml`, and a new or changed tool opens a classification task for the owner (the match is `google.rs` `each_google_manifest_names_exactly_the_tools_its_live_server_lists`, run per CI build, not nightly; no task is opened; Hugging Face's tools listed to anyone are checked by `huggingface.rs` `every_tool_hugging_face_lists_without_a_sign_in_is_classed`, those a person turns on are not)
 - [ ] Program, every commit and nightly: detection, enabling and every tool on real Windows and Linux installs per version
 - [ ] Policy, every commit: each tool allowed, refused or held as its class and the default policy require (general boundary tests only, `inv6_policy.rs`; none per connector)
 - [ ] Isolation, every commit: one person's run never reaches another's connection or token (`connectors.rs`); results stored and recalled per person; the kill switch and a turned-off account stop every call (turned-off part missing)

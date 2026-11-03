@@ -20,6 +20,7 @@ const SOURCES: &[&str] = &[
     include_str!("../../../catalog/google-drive.toml"),
     include_str!("../../../catalog/google-chat.toml"),
     include_str!("../../../catalog/sentry.toml"),
+    include_str!("../../../catalog/huggingface.toml"),
 ];
 
 #[derive(Deserialize, Clone, Debug)]
