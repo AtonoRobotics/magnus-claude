@@ -30,6 +30,10 @@
 # (MAGNUS_GIVEN_UP lists those, as CI finds them), its own work was given up
 # on purpose: the release need only hold its base, so master's work still
 # never goes back, and a closed pull request cannot stop every later one.
+# When it is one that merged (MAGNUS_LANDED lists those, as number=commit,
+# the master commit each landed as), its work is in that commit, which holds
+# it even when the head does not (a squash merge): the release must hold
+# that commit instead.
 set -eu
 
 what=$1 version=$2 updates=$3 notes=$4
@@ -100,12 +104,18 @@ if older "$dir"; then
 fi
 was=$(built_from "$dir" || true)
 was_pr=$(built_from "$dir" pr || true)
-given_up=
+given_up= landed=
 if [ -n "$was_pr" ]; then
   [ "$was_pr" = "$pr" ] && given_up=yes
   for n in $(echo "${MAGNUS_GIVEN_UP:-}" | tr ',' ' '); do [ "$n" = "$was_pr" ] && given_up=yes; done
+  for l in $(echo "${MAGNUS_LANDED:-}" | tr ',' ' '); do [ "${l%%=*}" = "$was_pr" ] && landed=${l#*=}; done
 fi
-if [ -n "$given_up" ]; then
+if [ -n "$landed" ] && [ -z "$given_up" ]; then
+  if ! git merge-base --is-ancestor "$landed" HEAD 2>/dev/null; then
+    echo "not publishing $what $version: it was built without $landed, where pull request #$was_pr, whose build $dir/latest.json holds, landed in master; bring this branch up to date with master" >&2
+    exit 3
+  fi
+elif [ -n "$given_up" ]; then
   was_base=$(built_from "$dir" base || true)
   if [ -n "$was_base" ] && ! git merge-base --is-ancestor "$was_base" HEAD 2>/dev/null; then
     echo "not publishing $what $version: it was built without master at $was_base, which $dir/latest.json stood on; bring this branch up to date with master" >&2

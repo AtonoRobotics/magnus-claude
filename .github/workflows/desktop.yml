@@ -218,7 +218,8 @@ jobs:
       # once merged, master's goes to test, the testers'.
       # The build there may be a pull request's that was closed without
       # merging: its work was given up, so this one need only hold master's
-      # (release/publish.sh, MAGNUS_GIVEN_UP).
+      # (release/publish.sh, MAGNUS_GIVEN_UP). Or it merged: its work is the
+      # master commit it landed as, even squashed (MAGNUS_LANDED).
       - name: Development build for the installed apps
         if: github.event_name == 'pull_request'
         env:
@@ -231,8 +232,11 @@ jobs:
           printf '%s\n\nDevelopment build of pull request #%s.\n' "$TITLE" "$PR" > "$RUNNER_TEMP/notes"
           there="${{ vars.MAGNUS_UPDATES_DIR }}/desktop/development/latest.json"
           prev=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("pr", ""))' "$there" 2>/dev/null || true)
-          if [ -n "$prev" ] && [ "$prev" != "$PR" ] && [ "$(gh pr view "$prev" --json state -q .state)" = CLOSED ]; then
-            export MAGNUS_GIVEN_UP=$prev
+          if [ -n "$prev" ] && [ "$prev" != "$PR" ]; then
+            case $(gh pr view "$prev" --json state -q .state) in
+            CLOSED) export MAGNUS_GIVEN_UP=$prev ;;
+            MERGED) export MAGNUS_LANDED="$prev=$(gh pr view "$prev" --json mergeCommit -q .mergeCommit.oid)" ;;
+            esac
           fi
           release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist development
       - name: Test build for the installed apps
