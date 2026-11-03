@@ -274,3 +274,43 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
     assert_eq!(st, 200, "{v}");
     still_hers(4, "an admin's clean version undone").await;
 }
+
+/// A link to a document someone cannot see leaves what they read whole,
+/// its text with it, inline or by reference; a line's other links stay
+/// (K2: "a line with some visible links keeps only those").
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hidden_documents_link_leaves_with_its_text_whatever_its_form() {
+    const READS: &str = "Read the sales page.";
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body.to_string().contains(READS) {
+            return Reply::Text(String::new());
+        }
+        let steps = [contract_unchecked("read the sales page", "it is read"), tool("bundle_read", json!({ "path": "/people/sales.md" })), complete("Read.")];
+        steps.get(c.turn()).cloned().unwrap_or_else(|| Reply::Text(String::new()))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let area = |title: &str, source: &str| json!({ "type": "Area", "title": title, "owner": "human:alice", "ask_channel": "#team", "scope": "org", "sources": [{ "resource": source }] });
+    let put = |path: &'static str, fm: Value, body: &'static str| control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": path, "frontmatter": fm, "body": body }));
+    // Drawn from a deal in the CRM and written by no one's run: no one sees it.
+    let (st, v) = put("/people/finance.md", area("Finance", "hubspot://deal/7"), "Pay reviews.").await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = put("/people/sales.md", area("Sales", "human:alice"), "Quotas follow [Carol's pay review](/people/finance.md \"pay\") and the [handbook](/people/handbook.md).\nBonuses are in [the payroll][pay].\n\n[pay]: /people/finance.md\n").await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = put("/index.md", json!({}), "# Teams\n* [Sales](/people/sales.md) and [Carol's pay review](/people/finance.md) - who sells and is paid\n* [Finance](/people/finance.md) - pay\n").await;
+    assert_eq!(st, 200, "{v}");
+
+    let bob = app.api("bob");
+    let b = bob.submit(READS).await;
+    bob.wait_item(&b, "review").await;
+    let read = m.requests().into_iter().find(|c| c.body.to_string().contains(READS) && c.turn() == 2).map(|c| c.last_results()[0].clone()).unwrap();
+    assert!(!read.is_error && read.text.contains("[handbook](/people/handbook.md)"), "{}", read.text);
+    for hidden in ["Carol", "payroll", "finance.md"] {
+        assert!(!read.text.contains(hidden), "bob's read of the sales page shows {hidden:?}: {}", read.text);
+    }
+    let (st, v) = control(&app, "GET", "/v1/admin/knowledge/assembled?person=bob", Value::Null).await;
+    assert_eq!(st, 200, "{v}");
+    let index = v["text"].as_str().unwrap();
+    assert!(index.contains("[Sales](/people/sales.md)") && !index.contains("Carol") && !index.contains("Finance"), "bob's index: {index}");
+}
+

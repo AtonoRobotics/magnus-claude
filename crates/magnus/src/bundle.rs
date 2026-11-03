@@ -11,6 +11,7 @@
 use crate::kernel::Kernel;
 use crate::tools::Label;
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 
 /// The root index's size limit, before filtering, so every person's view
 /// of it fits (K9).
@@ -81,20 +82,100 @@ fn link_ok(l: &str) -> bool {
     l.starts_with('/') || l.split_once(':').is_some_and(|(scheme, _)| !scheme.is_empty() && scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
 }
 
-/// Every Markdown link target in a body.
+/// Every Markdown link target in a body: inline, and each reference
+/// definition's.
 pub fn links(body: &str) -> Vec<String> {
     let mut out = vec![];
-    let mut rest = body;
-    while let Some(i) = rest.find("](") {
-        rest = &rest[i + 2..];
-        if let Some(j) = rest.find(')') {
-            out.push(rest[..j].split_whitespace().next().unwrap_or_default().to_string());
-            rest = &rest[j..];
-        } else {
-            break;
+    for line in body.lines() {
+        if let Some((_, t)) = definition(line) {
+            out.push(t);
         }
+        out.extend(spans(line).into_iter().filter_map(|(_, _, l)| match l {
+            Link::Inline(t) => Some(t),
+            Link::Ref(_) => None,
+        }));
     }
     out
+}
+
+/// A link written in a line: to its target, or by a reference's label.
+enum Link {
+    Inline(String),
+    Ref(String),
+}
+
+/// Each link in a line with where it is: `[text](target "title")`,
+/// `[text][label]`, `[label][]` and `[label]` (a reference only where the
+/// label is defined).
+fn spans(line: &str) -> Vec<(usize, usize, Link)> {
+    let mut out = vec![];
+    let mut at = 0;
+    while let Some(i) = line[at..].find(']').map(|i| at + i) {
+        let Some(open) = line[at..i].rfind('[').map(|o| at + o) else {
+            at = i + 1;
+            continue;
+        };
+        let rest = &line[i + 1..];
+        let (end, link) = if let Some(j) = rest.strip_prefix('(').and_then(|r| r.find(')')) {
+            let target = rest[1..j + 1].split_whitespace().next().unwrap_or_default().trim_start_matches('<').trim_end_matches('>');
+            (i + j + 3, Link::Inline(target.into()))
+        } else if let Some(j) = rest.strip_prefix('[').and_then(|r| r.find(']')) {
+            let label = if j == 0 { &line[open + 1..i] } else { &rest[1..j + 1] };
+            (i + j + 3, Link::Ref(label.to_lowercase()))
+        } else if rest.starts_with(':') {
+            at = i + 1;
+            continue;
+        } else {
+            (i + 1, Link::Ref(line[open + 1..i].to_lowercase()))
+        };
+        out.push((open, end, link));
+        at = end;
+    }
+    out
+}
+
+/// A reference definition, `[label]: target`.
+fn definition(line: &str) -> Option<(String, String)> {
+    let (label, after) = line.trim_start().strip_prefix('[')?.split_once("]:")?;
+    let target = after.split_whitespace().next()?.trim_start_matches('<').trim_end_matches('>');
+    Some((label.to_lowercase(), target.into()))
+}
+
+/// A body with every link to a bundle path `hidden` names removed, its text
+/// with it, and each definition of one; a bullet whose links are all
+/// hidden is dropped (K2).
+pub fn strip_hidden(body: &str, hidden: impl Fn(&str) -> bool) -> String {
+    let defs: HashMap<String, String> = body.lines().filter_map(definition).collect();
+    let gone = |t: &str| t.starts_with('/') && hidden(t);
+    let mut out = vec![];
+    for line in body.lines() {
+        if let Some((_, t)) = definition(line) {
+            if !gone(&t) {
+                out.push(line.to_string());
+            }
+            continue;
+        }
+        let found: Vec<(usize, usize, bool)> = spans(line)
+            .into_iter()
+            .filter_map(|(s, e, l)| match l {
+                Link::Inline(t) => Some(t),
+                Link::Ref(r) => defs.get(&r).cloned(),
+            }.filter(|t| t.starts_with('/')).map(|t| (s, e, gone(&t))))
+            .collect();
+        let bullet = line.trim_start().starts_with("* ") || line.trim_start().starts_with("- ");
+        if bullet && !found.is_empty() && found.iter().all(|f| f.2) {
+            continue;
+        }
+        let mut l = line.to_string();
+        for &(s, e, _) in found.iter().rev().filter(|f| f.2) {
+            l.replace_range(s..e, "");
+            if l[..s].ends_with(' ') && l[s..].starts_with(' ') {
+                l.remove(s);
+            }
+        }
+        out.push(l);
+    }
+    out.join("\n")
 }
 
 /// Check a document before it is stored. `type_doc` gives an entity's type
@@ -282,29 +363,10 @@ impl Kernel {
         Ok(Some((c["frontmatter"].clone(), body, d.label, d.version())))
     }
 
-    /// A body with every link to a document `person` cannot see turned into
-    /// its text; a bullet whose links are all hidden is dropped (K2).
+    /// A body with every link to a document `person` cannot see removed
+    /// (`strip_hidden`, K2).
     pub fn without_hidden_links(&self, person: &str, body: &str) -> String {
-        let hidden = |target: &str| self.read(|s| s.bundle.get(target).cloned()).is_some_and(|d| !self.bundle_visible(person, &d));
-        let mut out = vec![];
-        for line in body.lines() {
-            let targets: Vec<String> = links(line).into_iter().filter(|t| t.starts_with('/')).collect();
-            let gone: Vec<&String> = targets.iter().filter(|t| hidden(t)).collect();
-            if !targets.is_empty() && gone.len() == targets.len() && (line.trim_start().starts_with("* ") || line.trim_start().starts_with("- ")) {
-                continue;
-            }
-            let mut l = line.to_string();
-            for t in gone {
-                // [text](target) becomes text.
-                while let Some(end) = l.find(&format!("]({t})")) {
-                    let Some(start) = l[..end].rfind('[') else { break };
-                    let text = l[start + 1..end].to_string();
-                    l.replace_range(start..end + t.len() + 3, &text);
-                }
-            }
-            out.push(l);
-        }
-        out.join("\n")
+        strip_hidden(body, |target| self.read(|s| s.bundle.get(target).cloned()).is_some_and(|d| !self.bundle_visible(person, &d)))
     }
 
     /// Write a version of a document for `person`'s run: checked first, and
