@@ -1569,6 +1569,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "magnus-brokered-google"
+version = "0.2.3"
+dependencies = [
+ "magnus-brokered-kit",
+ "serde_json",
+]
+
+[[package]]
 name = "magnus-brokered-kit"
 version = "0.2.3"
 dependencies = [
@@ -1587,6 +1595,16 @@ dependencies = [
  "libc",
  "magnus-brokered-kit",
  "serde_json",
+]
+
+[[package]]
+name = "magnus-calendar"
+version = "0.2.3"
+dependencies = [
+ "magnus-brokered-google",
+ "magnus-brokered-kit",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]

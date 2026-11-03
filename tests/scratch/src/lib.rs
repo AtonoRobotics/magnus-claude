@@ -9,6 +9,7 @@ pub mod admin;
 pub mod brokered;
 pub mod catalog;
 pub mod mail;
+pub mod stand_in;
 mod keycloak;
 pub use keycloak::*;
 mod oauth_app;

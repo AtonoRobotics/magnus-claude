@@ -154,7 +154,7 @@ jobs:
         if: env.MAGNUS_TESTED != '1'
         env:
           MAGNUS_SHOTS: ${{ runner.temp }}/shots
-        run: cargo nextest run -p magnus -p magnus-brokered-kit -p magnus-gmail -p magnus-invariants -p magnus-scratch --no-fail-fast
+        run: cargo nextest run -p magnus -p magnus-brokered-kit -p magnus-brokered-google -p magnus-gmail -p magnus-calendar -p magnus-invariants -p magnus-scratch --no-fail-fast
       - name: The update test's two builds
         if: env.MAGNUS_TESTED != '1'
         run: |
