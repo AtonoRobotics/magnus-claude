@@ -429,8 +429,7 @@ impl Kernel {
     async fn check_pin(&self, c: &Connector, f: &Facts, person: &str) -> std::result::Result<(), String> {
         let secret = self.connector_secret(c, person).await.ok().flatten();
         let live = self
-            .mcp
-            .list_tools(&c.url, secret.as_ref().map(|s| s.expose()))
+            .app_tools(c, secret.as_ref().map(|s| s.expose()))
             .await
             .map_err(|e| format!("could not read {}'s tool definitions ({e})", f.app))?;
         let Some(t) = live.iter().find(|t| t.name == f.remote) else {
@@ -735,7 +734,12 @@ impl Kernel {
                 return Err(CallFailure::NotDone(format!("{person}'s account is turned off at the organisation's sign-in, so their apps answer no calls for them until they are back. Nothing was sent to {}.", f.app)));
             }
             let k = (c.idempotency == "header").then_some(key);
-            return match self.mcp.call(&c.url, bearer, &f.remote, &a.input, k).await {
+            let out = if c.transport == crate::brokered::BROKERED {
+                self.brokered.call(c, &person, bearer, &f.remote, &a.input).await
+            } else {
+                self.mcp.call(&c.url, bearer, &f.remote, &a.input, k).await
+            };
+            return match out {
                 Ok(o) => Ok((o.text, o.is_error, o.structured)),
                 Err(crate::apps::CallError::NotSent(m)) => Err(CallFailure::NotDone(m)),
                 Err(crate::apps::CallError::Unknown(m)) => Err(CallFailure::Unknown(m)),

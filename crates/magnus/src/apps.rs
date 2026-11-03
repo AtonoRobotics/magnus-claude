@@ -189,21 +189,21 @@ impl Mcp {
 
     /// Everything an app returns passes here before anyone sees it, so an app
     /// that echoes the credential it was called with leaks it nowhere.
-    fn clean(s: &str, bearer: Option<&str>) -> String {
+    pub(crate) fn clean(s: &str, bearer: Option<&str>) -> String {
         match bearer {
             Some(b) => crate::vault::redact(s, b),
             None => s.to_string(),
         }
     }
 
-    fn clean_value(v: Value, bearer: Option<&str>) -> Value {
+    pub(crate) fn clean_value(v: Value, bearer: Option<&str>) -> Value {
         match bearer {
             Some(b) => serde_json::from_str(&crate::vault::redact(&v.to_string(), b)).unwrap_or(Value::Null),
             None => v,
         }
     }
 
-    fn clean_err(e: CallError, bearer: Option<&str>) -> CallError {
+    pub(crate) fn clean_err(e: CallError, bearer: Option<&str>) -> CallError {
         match e {
             CallError::NotSent(m) => CallError::NotSent(Self::clean(&m, bearer)),
             CallError::Unknown(m) => CallError::Unknown(Self::clean(&m, bearer)),

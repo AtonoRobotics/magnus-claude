@@ -1256,6 +1256,8 @@ impl Kernel {
     // API keys and app secrets stay sealed: only their provider's console
     // can revoke them.
     k.vault.seal();
+    // Every brokered connector's microVM, with whatever call it was making.
+    k.brokered.stop(None, None).await;
     let names = match k.vault.names() {
         Ok(n) => n,
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("{e:#}") }))),

@@ -37,6 +37,10 @@ pub struct Config {
     pub web: Web,
     #[serde(default)]
     pub sandbox: Option<Sandbox>,
+    /// Brokered connectors' microVMs, booted with the sandbox's Firecracker
+    /// and kernel.
+    #[serde(default)]
+    pub brokered: Brokered,
     #[serde(default)]
     pub browser: Option<Browser>,
     /// Local speech to text for voice input (`config/install-whisper.sh`).
@@ -626,6 +630,42 @@ fn disk() -> u32 {
     2048
 }
 
+/// Brokered connectors (connectors spec, Brokered API connectors): each
+/// person's instance of one is a microVM booted from its server image.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Brokered {
+    /// Where the server images are, each named by its digest:
+    /// `<sha256 hex>.cpio`.
+    #[serde(default)]
+    pub images: Option<PathBuf>,
+    /// Seconds an instance waits unused before it is stopped ("stopped
+    /// when idle").
+    #[serde(default = "brokered_idle")]
+    pub idle_s: u64,
+    #[serde(default = "brokered_memory")]
+    pub memory_mib: u32,
+}
+
+/// Five minutes: the steps of one run call an app minutes apart at most
+/// (each waits on a model's answer), so a run keeps its instance, which
+/// boots in about a second, while a person who has stopped working holds
+/// no microVM for long.
+fn brokered_idle() -> u64 {
+    300
+}
+
+/// The image is unpacked into the microVM's memory and is a few megabytes;
+/// the rest is for what one call carries (a message with its attachments).
+fn brokered_memory() -> u32 {
+    128
+}
+
+impl Default for Brokered {
+    fn default() -> Self {
+        Brokered { images: None, idle_s: brokered_idle(), memory_mib: brokered_memory() }
+    }
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct Person {
     pub id: String,
@@ -690,6 +730,14 @@ pub struct Connector {
     /// From the catalog, not added by the owner.
     #[serde(default)]
     pub catalog: bool,
+    /// A brokered connector (`transport = "brokered"`, `url` its server
+    /// image's digest, `sha256:<hex>`): the provider API hosts its microVM
+    /// may reach, `host` (port 443) or `host:port`, and the provider's
+    /// authorization server people sign in at.
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub issuer: Option<String>,
 }
 
 /// The company knowledge base. Without an embedding server it is searched
@@ -746,6 +794,10 @@ impl Config {
             }
             anyhow::ensure!(crate::tools::Label::parse(&c.label).is_some(), "connector {}: unknown label {}", c.name, c.label);
             anyhow::ensure!(crate::tools::Audience::parse(&c.audience).is_some(), "connector {}: unknown audience {}", c.name, c.audience);
+            if c.transport == crate::brokered::BROKERED {
+                crate::brokered::digest(&c.url).map_err(|e| anyhow::anyhow!("connector {}: {e}", c.name))?;
+                anyhow::ensure!(!c.hosts.is_empty(), "connector {}: a brokered connector names the provider hosts it may reach", c.name);
+            }
         }
         Ok(cfg)
     }

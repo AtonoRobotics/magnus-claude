@@ -20,6 +20,8 @@ path = "src/bin/magnus-admin.rs"
 
 [dependencies]
 magnus-adapter-proto = { path = "../adapter-proto" }
+# The schema check and vsock ports a brokered connector's server shares with the appliance.
+magnus-brokered-kit = { path = "../../brokered/kit" }
 anyhow = "1"
 argon2 = "0.5"
 async-trait = "0.1"
