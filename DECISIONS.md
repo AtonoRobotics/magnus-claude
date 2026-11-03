@@ -954,6 +954,25 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - It now asks after the bound account by its id (`sub`, Keycloak's `/users/{id}`): deleted, it is no longer known, and the person is turned off as for an account turned off. A person not yet bound is still asked after by username.
 - Test: `a_persons_account_deleted_ends_their_session_though_another_takes_their_username` (people.rs, Keycloak): Carol signs in; her account is deleted and another made under her username; at the next check her session ends. On master it never does.
 
+## A run ends once: the first end stands (2026-11-02, `cancel-races`)
+
+- Found by the review of master against the specs (2026-11-02). Cancelling a task checks that its run has not ended, then records the cancel; a run that ended on its own in between (completed or failed) was turned into a cancelled one, and the person was told it was cancelled. The other way, a run's own end recorded after a cancel turned the cancelled run into a completed or failed one.
+- Now completed, failed and cancelled each apply only to a run that has not ended: the first stands, in the state and so on replay (nothing reopens an ended run; suspend and resume already checked this). A cancel that lost the race tells the person how the task ended ("the task has already ended (completed)") and stops nothing.
+- Left, with no test that can fail on it at will: a schedule removed or paused while a firing it was due for is starting (its words are being recalled) still starts that run. Closing it needs the firing to check again after `create_run` (and cancel the run if the schedule is gone or paused) and `cancel_schedule` to list the schedule's runs after recording its removal, not before; it goes with a way to hold a firing between the two in a test.
+- Test: `a_run_ends_once_the_first_end_stands` (state.rs): a cancel after a run completed leaves it completed with its summary and end time; a failure after a cancel leaves it cancelled. On master both are overwritten.
+
+## A sign-in waits for the person who started it (2026-11-02, `pending-sign-in`)
+
+- Found by the review of master against the specs (2026-11-02). Finishing a sign-in to an app took it from those waiting before checking whose it was, so someone else's attempt with its state (refused) ended it, and the person who started it had to start again.
+- Now a sign-in is taken only by the person who started it, for the app it was started for; anyone else's attempt is refused and leaves it waiting. An expired one is still refused, and swept when the next sign-in starts.
+- Test: `another_persons_attempt_leaves_a_sign_in_waiting_for_its_owner` (connectors.rs): Carol's attempt at Alice's sign-in is refused, and Alice then finishes it. On master Alice's finish is refused.
+
+## Policy drafts are console actions in the audit log (2026-11-02, `policy-drafts-audited`)
+
+- Found by the review of master against the specs (2026-11-02): "every console action in the append-only log with who, what, when, source and before/after". Keeping or dropping a policy draft went to the kernel's event log under the admin's name but not to the audit log.
+- Now `policy_drafted` and `policy_draft_dropped` are written to the audit log before the change, with the set's draft before and after; a draft is not in force, so neither asks for a fresh password.
+- Test: `root_sets_the_sign_in_rules_and_edits_tests_applies_and_rolls_back_the_agent_policy` (admin_security.rs, Keycloak) now drops the sales draft and finds both in the audit with their text. On master neither is there.
+
 ## The kernel numbers each document version, and a path counts on through removal (2026-11-02, `bundle-versions`)
 
 - Found by the review of master against the specs (2026-11-02; "every write is a new version"). The version was worked out from the state before the kernel's write lock was taken, so writes at once to one path took the same number; and a removal dropped the path's count, so it began again at 1 and (path, version) named two versions in the log, the older one out of reach.
