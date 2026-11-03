@@ -43,3 +43,57 @@ async fn the_admin_reads_a_persons_data_unless_the_policy_makes_it_private() {
     assert_eq!(alice.put("/v1/data-access", json!({ "private": false })).await.0.as_u16(), 204);
     assert_eq!(alice.get("/v1/people/carol/data/tasks").await.0.as_u16(), 200);
 }
+
+/// The owner's list of everyone's tasks in conversation is a read of their
+/// data like the Data tab's: with people's data the organisation's it is in
+/// the log and each person is told; with it private, other people's tasks
+/// are listed (the owner still controls them) without their words.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_list_of_everyones_tasks_in_conversation_follows_the_policy_on_peoples_data() {
+    const SAID: &str = "Bob's raise is eight percent.";
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body["system"].to_string().contains("talking with the person you work for in a chat") {
+            return fail(SAID);
+        }
+        match c.turn() {
+            0 => tool("list_tasks", json!({})),
+            _ => Reply::Text(c.last_results().first().map(|r| r.text.clone()).unwrap_or_default()),
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (alice, bob) = (app.api("alice"), app.api("bob"));
+    let task = bob.submit("Note my raise.").await;
+    bob.wait_settled(&task).await;
+    let reads = || async { app.db.admin().await.query_one("SELECT count(*) FROM public.events WHERE kind = 'person_data_read' AND body->>'person' = 'bob'", &[]).await.unwrap().get::<_, i64>(0) };
+    let listed = |n: usize| {
+        let alice = &alice;
+        async move {
+            let (st, v) = alice.post("/v1/chat", json!({ "text": format!("What is everyone working on? ({n})") })).await;
+            assert_eq!(st.as_u16(), 201, "{v}");
+            let (thread, turn) = (v["thread"].as_str().unwrap().to_string(), v["task_id"].as_str().unwrap().to_string());
+            eventually("magnus answers with the list", PATIENCE, || async {
+                let (_, t) = alice.get(&format!("/v1/chat/{thread}")).await;
+                t["entries"].as_array().into_iter().flatten().find(|e| e["kind"] == "answer" && e["task_id"] == turn.as_str()).map(|a| a["text"].as_str().unwrap_or_default().to_string())
+            })
+            .await
+        }
+    };
+
+    // The organisation's: Bob's task with its words, the read in the log and told to him.
+    let said = listed(0).await;
+    assert!(said.contains(&task) && said.contains(SAID), "{said}");
+    assert_eq!(reads().await, 1, "the owner's list of bob's tasks is not in the log");
+    let told = eventually("bob is told his tasks were read", PATIENCE, || async {
+        bob.inbox().await.into_iter().find(|i| i["details"]["reason"] == "data_read" && i["details"]["evidence"]["what"] == "tasks")
+    })
+    .await;
+    assert_eq!(told["details"]["evidence"]["by"], "alice", "{told}");
+
+    // Private: Bob's task is listed, its words are not, and nothing was read.
+    assert_eq!(alice.put("/v1/data-access", json!({ "private": true })).await.0.as_u16(), 204);
+    let said = listed(1).await;
+    assert!(said.contains(&task), "the owner can no longer find bob's task to control it: {said}");
+    assert!(!said.contains(SAID), "the owner read bob's task while people's data is private: {said}");
+    assert_eq!(reads().await, 1);
+}
