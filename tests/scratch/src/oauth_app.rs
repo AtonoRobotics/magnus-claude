@@ -49,6 +49,10 @@ pub struct AppState {
     /// Its authorization server lets no client register itself (no RFC
     /// 7591 registration endpoint).
     pub no_registration: bool,
+    /// It is the authorization server of a provider's own API, as Google's
+    /// is for Gmail's, not of an MCP server: it takes the plain OAuth 2.0
+    /// request, and one naming a resource (RFC 8707) is not for it.
+    pub provider_api: bool,
     /// It answers a signed-in request for its tools with HTTP 403, its tool
     /// list still in the body, as Google's Gmail server did for a project
     /// without its MCP service enabled.
@@ -193,7 +197,8 @@ fn issue(s: &mut AppState, scope: String) -> Value {
 async fn token(State((base, st)): S, Form(f): Form<HashMap<String, String>>) -> Response {
     let g = |k: &str| f.get(k).cloned().unwrap_or_default();
     let mut s = st.lock().unwrap();
-    if g("resource") != format!("{base}/mcp") {
+    let wanted = if s.provider_api { String::new() } else { format!("{base}/mcp") };
+    if g("resource") != wanted {
         return oauth_error(400, "invalid_target");
     }
     match g("grant_type").as_str() {
@@ -236,6 +241,19 @@ async fn revoke(State((_, st)): S, Form(f): Form<HashMap<String, String>>) -> Re
 impl FakeOAuthApp {
     pub async fn start(expires_in: i64) -> FakeOAuthApp {
         Self::start_with(expires_in, false).await
+    }
+
+    /// The authorization server of a provider's own API, for a brokered
+    /// connector (its MCP server is Magnus's, on the appliance).
+    pub async fn provider_api(expires_in: i64) -> FakeOAuthApp {
+        let a = Self::start_with(expires_in, false).await;
+        a.state.lock().unwrap().provider_api = true;
+        a
+    }
+
+    /// Whether it issued this access token, and it still works.
+    pub fn issued(&self, token: &str) -> bool {
+        self.state.lock().unwrap().access.contains(token)
     }
 
     /// One that names itself in its answer, as Google does (RFC 9207).

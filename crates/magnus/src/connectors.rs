@@ -302,15 +302,22 @@ async fn discover(app_url: &str, resource_metadata: Option<String>) -> Result<(V
     }
     let issuer = prm["authorization_servers"][0].as_str().ok_or_else(|| anyhow!("the app names no authorization server"))?.to_string();
     let scopes: Vec<String> = prm["scopes_supported"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
+    Ok((server_metadata(&issuer).await?, scopes, issuer))
+}
+
+/// An authorization server's metadata (RFC 8414, else OpenID), which must
+/// name that server as its issuer.
+async fn server_metadata(issuer: &str) -> Result<Value> {
+    let c = http();
     let mut urls = well_known(&issuer, "oauth-authorization-server")?;
     urls.extend(well_known(&issuer, "openid-configuration")?);
     urls.push(format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/')));
     let asm = first_json(&c, &urls).await.ok_or_else(|| anyhow!("{issuer} publishes no authorization server metadata"))?;
     match asm["issuer"].as_str() {
-        Some(i) if same_url(i, &issuer) => {}
+        Some(i) if same_url(i, issuer) => {}
         other => bail!("the authorization server metadata found for {issuer} names issuer {}", other.unwrap_or("none")),
     }
-    Ok((asm, scopes, issuer))
+    Ok(asm)
 }
 
 impl Kernel {
@@ -385,6 +392,7 @@ impl Kernel {
         if t.expires_at.is_some_and(|at| at - 60 <= now) {
             let Some(refresh) = t.refresh_token.clone() else { return Ok(None) };
             let mut form = vec![("grant_type", "refresh_token".to_string()), ("refresh_token", refresh), ("client_id", t.client.client_id.clone()), ("resource", t.client.resource.clone())];
+            form.retain(|(k, v)| *k != "resource" || !v.is_empty());
             if let Some(s) = &t.client.client_secret {
                 form.push(("client_secret", s.clone()));
             }
@@ -424,8 +432,20 @@ impl Kernel {
     /// address to open in the person's browser.
     pub async fn connector_sign_in(&self, c: &Connector, person: &str, redirect_uri: &str) -> Result<(String, String)> {
         loopback(redirect_uri)?;
-        let meta = asks_sign_in(&c.url).await?.unwrap_or(None);
-        let (asm, scopes, issuer) = discover(&c.url, meta).await?;
+        // A brokered connector's sign-in is the provider's own, for its
+        // API: at the authorization server its manifest names, with no
+        // resource indicator (RFC 8707 names an MCP server a token is for;
+        // the provider's API takes the plain OAuth 2.0 request).
+        let brokered = c.transport == crate::brokered::BROKERED;
+        let (asm, scopes, issuer) = match &c.issuer {
+            Some(issuer) if brokered => (server_metadata(issuer).await?, vec![], issuer.clone()),
+            None if brokered => bail!("{} names no authorization server to sign in at", c.name),
+            _ => {
+                let meta = asks_sign_in(&c.url).await?.unwrap_or(None);
+                discover(&c.url, meta).await?
+            }
+        };
+        let resource = if brokered { String::new() } else { c.url.clone() };
         let s = |k: &str| asm[k].as_str().map(String::from);
         let (Some(authorize), Some(token)) = (s("authorization_endpoint"), s("token_endpoint")) else { bail!("the app's authorization server names no authorization or token endpoint") };
         if asm["code_challenge_methods_supported"].as_array().is_some_and(|m| !m.iter().any(|x| x == "S256")) {
@@ -480,8 +500,10 @@ impl Kernel {
                 .append_pair("redirect_uri", redirect_uri)
                 .append_pair("code_challenge", &challenge(&verifier))
                 .append_pair("code_challenge_method", "S256")
-                .append_pair("state", &state)
-                .append_pair("resource", &c.url);
+                .append_pair("state", &state);
+            if !resource.is_empty() {
+                q.append_pair("resource", &resource);
+            }
             // Exactly what the app's manifest asks for, where it names it.
             let mut scopes = if c.scopes.is_empty() { scopes } else { c.scopes.clone() };
             // More access the app asked of this person's sign-in.
@@ -499,7 +521,7 @@ impl Kernel {
                 q.append_pair("access_type", "offline").append_pair("prompt", "consent");
             }
         }
-        let client = Client { token_endpoint: token, revocation_endpoint: s("revocation_endpoint"), client_id, client_secret, resource: c.url.clone() };
+        let client = Client { token_endpoint: token, revocation_endpoint: s("revocation_endpoint"), client_id, client_secret, resource };
         let mut p = pending().lock().unwrap();
         p.retain(|_, x| x.at.elapsed() < PENDING_FOR);
         let iss_required = asm["authorization_response_iss_parameter_supported"] == true;
@@ -537,6 +559,7 @@ impl Kernel {
             ("code_verifier", p.verifier.clone()),
             ("resource", c.resource.clone()),
         ];
+        form.retain(|(k, v)| *k != "resource" || !v.is_empty());
         if let Some(s) = &c.client_secret {
             form.push(("client_secret", s.clone()));
         }
@@ -642,6 +665,7 @@ impl Kernel {
         let (done, detail) = revoke(s.expose()).await;
         self.vault.remove(&name)?;
         self.live_tools.lock().await.remove(&name);
+        self.brokered.stop(Some(app), Some(person)).await;
         tracing::info!("{person} disconnected {app}: revoked {done}: {detail}");
         self.emit(&format!("person:{person}"), Ev::AppDisconnected { app: app.to_string(), person: person.to_string(), at_provider: done, detail: detail.clone() }).await?;
         Ok(Some((done, detail)))
@@ -857,6 +881,8 @@ impl Kernel {
             title: None,
             summary: None,
             catalog: false,
+            hosts: vec![],
+            issuer: None,
         };
         self.emit(actor, Ev::ConnectorAdded { connector: c }).await.map_err(failed)?;
         Ok(json!({ "name": name, "sign_in": oauth }))
@@ -1052,7 +1078,7 @@ async fn list(AxState(k): K, h: HeaderMap) -> Response {
         let (tools, problem) = if !signed_in {
             (vec![], Some(if c.auth.as_deref() == Some(OAUTH) { "sign in to this app".to_string() } else { "no credential is stored".to_string() }))
         } else {
-            match k.mcp.list_tools(&c.url, secret.as_ref().map(|s| s.expose())).await {
+            match k.app_tools(&c, secret.as_ref().map(|s| s.expose())).await {
                 Ok(ts) => (
                     ts.iter()
                         .map(|t| {

@@ -327,6 +327,10 @@ impl Kernel {
         }
         // The person's own sign-in, never anyone else's.
         let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
+        // Taken before the sign-in is: a brokered call that waits while its
+        // microVM is stopped (Disconnect, deletion, the kill switch) sees it
+        // was, and sends nothing with the token it holds.
+        let stops = f.connector.as_ref().map_or(0, |c| self.brokered.generation(&c.name, &person));
         let secret = match f.connector.as_ref().filter(|c| c.credential.is_some()) {
             Some(c) => match self.connector_secret(c, &person).await? {
                 Some(s) => Some(s),
@@ -375,7 +379,7 @@ impl Kernel {
             let hits = self.memory_hits(&a.run, a.input["query"].as_str().unwrap_or_default()).await?;
             (Ok((memory_text(&hits), false, None)), Some(memory_taint(&hits)))
         } else {
-            (self.call(a, &f, secret.as_ref().map(|s| s.expose()), &key).await, None)
+            (self.call(a, &f, secret.as_ref().map(|s| s.expose()), &key, stops).await, None)
         };
         let (label, sources) = if let Some(taint) = memory {
             taint
@@ -408,7 +412,7 @@ impl Kernel {
                 tracing::warn!("{}: outcome unknown: {m}", a.tool);
                 match self.reconcile(a, &run, &f, &key).await? {
                     Gate::Pass => {
-                        let again = self.call(a, &f, secret.as_ref().map(|s| s.expose()), &key).await;
+                        let again = self.call(a, &f, secret.as_ref().map(|s| s.expose()), &key, stops).await;
                         match again {
                             Ok((text, is_error, data)) => {
                                 let data = data.map(|d| serde_json::from_str(&clean(&d.to_string())).unwrap_or(Value::Null));
@@ -429,8 +433,7 @@ impl Kernel {
     async fn check_pin(&self, c: &Connector, f: &Facts, person: &str) -> std::result::Result<(), String> {
         let secret = self.connector_secret(c, person).await.ok().flatten();
         let live = self
-            .mcp
-            .list_tools(&c.url, secret.as_ref().map(|s| s.expose()))
+            .app_tools(c, secret.as_ref().map(|s| s.expose()))
             .await
             .map_err(|e| format!("could not read {}'s tool definitions ({e})", f.app))?;
         let Some(t) = live.iter().find(|t| t.name == f.remote) else {
@@ -727,7 +730,7 @@ impl Kernel {
         Ok(Gate::Stop(Verdict::Suspended))
     }
 
-    async fn call(self: &Arc<Self>, a: &Action, f: &Facts, bearer: Option<&str>, key: &str) -> std::result::Result<(String, bool, Option<Value>), CallFailure> {
+    async fn call(self: &Arc<Self>, a: &Action, f: &Facts, bearer: Option<&str>, key: &str, stops: u64) -> std::result::Result<(String, bool, Option<Value>), CallFailure> {
         if let Some(c) = &f.connector {
             // A person turned off has no apps until they are back.
             let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
@@ -735,7 +738,27 @@ impl Kernel {
                 return Err(CallFailure::NotDone(format!("{person}'s account is turned off at the organisation's sign-in, so their apps answer no calls for them until they are back. Nothing was sent to {}.", f.app)));
             }
             let k = (c.idempotency == "header").then_some(key);
-            return match self.mcp.call(&c.url, bearer, &f.remote, &a.input, k).await {
+            let out = if c.transport == crate::brokered::BROKERED {
+                // Checked again once the call has its microVM, and before it
+                // sends: nothing was stopped since its token was taken, the
+                // kill switch is off and the person is still signed in.
+                let fence = || -> std::result::Result<(), String> {
+                    if self.brokered.generation(&c.name, &person) != stops {
+                        return Err(format!("{}'s microVM for {person} was stopped while this call waited. Nothing was sent", f.app));
+                    }
+                    if self.read(|s| s.kill_switch) {
+                        return Err("the kill switch is engaged. Nothing was sent".into());
+                    }
+                    if !self.connected(c, &person) {
+                        return Err(format!("{person} is no longer signed in to {}. Nothing was sent", f.app));
+                    }
+                    Ok(())
+                };
+                self.brokered.call(c, &person, bearer, &f.remote, &a.input, &fence).await
+            } else {
+                self.mcp.call(&c.url, bearer, &f.remote, &a.input, k).await
+            };
+            return match out {
                 Ok(o) => Ok((o.text, o.is_error, o.structured)),
                 Err(crate::apps::CallError::NotSent(m)) => Err(CallFailure::NotDone(m)),
                 Err(crate::apps::CallError::Unknown(m)) => Err(CallFailure::Unknown(m)),

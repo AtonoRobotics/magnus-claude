@@ -397,7 +397,7 @@ impl Kernel {
         if c.credential.is_some() && secret.is_none() {
             return None;
         }
-        match self.mcp.list_tools(&c.url, secret.as_ref().map(|s| s.expose())).await {
+        match self.app_tools(c, secret.as_ref().map(|s| s.expose())).await {
             Ok(t) => {
                 self.refused_apps.lock().unwrap().remove(&key);
                 self.live_tools.lock().await.insert(key, (Instant::now(), t.clone()));

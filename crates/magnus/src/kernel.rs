@@ -38,6 +38,8 @@ pub struct Kernel {
     pub mcp: Mcp,
     pub web: Web,
     pub sandboxes: Sandboxes,
+    /// Brokered connectors' microVMs, one per person per connector.
+    pub brokered: crate::brokered::Brokered,
     pub browser: crate::browser::Browser,
     drivers: Mutex<HashSet<String>>,
     pub(crate) leases: Mutex<HashMap<String, String>>,
@@ -133,6 +135,7 @@ impl Kernel {
         let k = Arc::new(Kernel {
             web: Web::new(&cfg.web),
             sandboxes: Sandboxes::new(cfg.sandbox.clone(), &cfg.appliance.state_dir),
+            brokered: crate::brokered::Brokered::new(cfg.sandbox.clone(), cfg.brokered.clone(), &cfg.appliance.state_dir),
             browser: crate::browser::Browser::new(cfg.browser.clone(), &cfg.appliance.state_dir),
             mcp: Mcp::new(),
             adapters,

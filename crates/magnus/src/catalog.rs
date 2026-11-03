@@ -113,7 +113,7 @@ pub fn registration_name(provider: &str) -> String {
 pub fn connector(m: &Manifest) -> Connector {
     Connector {
         name: m.id.clone(),
-        transport: "mcp_http".into(),
+        transport: if m.kind == "brokered" { crate::brokered::BROKERED.into() } else { "mcp_http".into() },
         url: m.endpoint.clone(),
         credential: Some(crate::connectors::credential_name(&m.id)),
         audience: m.audience.clone(),
@@ -130,6 +130,8 @@ pub fn connector(m: &Manifest) -> Connector {
         title: Some(m.name.clone()),
         summary: Some(m.summary.clone()),
         catalog: true,
+        hosts: m.hosts.clone(),
+        issuer: m.issuer.clone(),
     }
 }
 
@@ -170,8 +172,7 @@ mod tests {
         for m in ms {
             assert!(ids.insert(m.id.clone()), "{} twice", m.id);
             assert!(!m.id.contains("__") && m.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "{}", m.id);
-            assert_eq!(m.kind, "remote", "{}", m.id);
-            assert!(m.endpoint.starts_with("https://"), "{}", m.id);
+            assert_eq!(super::kind_problem(m), None);
             assert!(["dcr", "preregistered"].contains(&m.registration.as_str()), "{}", m.id);
             assert_eq!(m.registration == "preregistered", m.provider.is_some(), "{}", m.id);
             // Where the person removes Magnus when the app cannot end a sign-in itself.
@@ -216,6 +217,8 @@ mod tests {
         let digest = format!("sha256:{}", "ab".repeat(32));
         let ok = base("brokered", &digest, "hosts = [\"gmail.googleapis.com\"]\nissuer = \"https://accounts.google.com\"");
         assert_eq!(super::kind_problem(&ok), None);
+        let c = super::connector(&ok);
+        assert_eq!((c.transport.as_str(), c.url.as_str(), c.hosts.as_slice()), ("brokered", digest.as_str(), &["gmail.googleapis.com".to_string()][..]));
         for (endpoint, rest) in [
             ("https://gmailmcp.googleapis.com/mcp/v1", "hosts = [\"gmail.googleapis.com\"]\nissuer = \"https://accounts.google.com\""),
             ("sha256:abc", "hosts = [\"gmail.googleapis.com\"]\nissuer = \"https://accounts.google.com\""),

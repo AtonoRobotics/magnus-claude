@@ -37,6 +37,10 @@ pub struct Config {
     pub web: Web,
     #[serde(default)]
     pub sandbox: Option<Sandbox>,
+    /// Brokered connectors' microVMs, booted with the sandbox's Firecracker
+    /// and kernel.
+    #[serde(default)]
+    pub brokered: Brokered,
     #[serde(default)]
     pub browser: Option<Browser>,
     /// Local speech to text for voice input (`config/install-whisper.sh`).
@@ -654,6 +658,46 @@ fn disk() -> u32 {
     2048
 }
 
+/// Brokered connectors (connectors spec, Brokered API connectors): each
+/// person's instance of one is a microVM booted from its server image.
+#[derive(Deserialize, Clone, Debug)]
+pub struct Brokered {
+    /// Where the server images are, each named by its digest:
+    /// `<sha256 hex>.cpio`.
+    #[serde(default)]
+    pub images: Option<PathBuf>,
+    /// Seconds an instance waits unused before it is stopped ("stopped
+    /// when idle").
+    #[serde(default = "brokered_idle")]
+    pub idle_s: u64,
+    #[serde(default = "brokered_memory")]
+    pub memory_mib: u32,
+    /// Certificates (DER files) servers trust beside the public roots: an
+    /// organisation whose egress inspects TLS, or a test's stand-in.
+    #[serde(default)]
+    pub roots: Vec<PathBuf>,
+}
+
+/// Five minutes: the steps of one run call an app minutes apart at most
+/// (each waits on a model's answer), so a run keeps its instance, which
+/// boots in about a second, while a person who has stopped working holds
+/// no microVM for long.
+fn brokered_idle() -> u64 {
+    300
+}
+
+/// The image is unpacked into the microVM's memory and is a few megabytes;
+/// the rest is for what one call carries (a message with its attachments).
+fn brokered_memory() -> u32 {
+    128
+}
+
+impl Default for Brokered {
+    fn default() -> Self {
+        Brokered { images: None, idle_s: brokered_idle(), memory_mib: brokered_memory(), roots: vec![] }
+    }
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct Person {
     pub id: String,
@@ -718,6 +762,14 @@ pub struct Connector {
     /// From the catalog, not added by the owner.
     #[serde(default)]
     pub catalog: bool,
+    /// A brokered connector (`transport = "brokered"`, `url` its server
+    /// image's digest, `sha256:<hex>`): the provider API hosts its microVM
+    /// may reach, `host` (port 443) or `host:port`, and the provider's
+    /// authorization server people sign in at.
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub issuer: Option<String>,
 }
 
 /// The company knowledge base. Without an embedding server it is searched
@@ -774,6 +826,17 @@ impl Config {
             }
             anyhow::ensure!(crate::tools::Label::parse(&c.label).is_some(), "connector {}: unknown label {}", c.name, c.label);
             anyhow::ensure!(crate::tools::Audience::parse(&c.audience).is_some(), "connector {}: unknown audience {}", c.name, c.audience);
+            if c.transport == crate::brokered::BROKERED {
+                for r in &cfg.brokered.roots {
+                    std::fs::read(r).map_err(|e| anyhow::anyhow!("[brokered] roots: {}: {e}", r.display()))?;
+                }
+                crate::brokered::digest(&c.url).map_err(|e| anyhow::anyhow!("connector {}: {e}", c.name))?;
+                anyhow::ensure!(!c.hosts.is_empty(), "connector {}: a brokered connector names the provider hosts it may reach", c.name);
+                // Its calls carry no idempotency key to its server, so one
+                // whose outcome is unknown cannot be sent again blindly: the
+                // person is asked (`none`).
+                anyhow::ensure!(c.idempotency != "header", "connector {}: a brokered connector's calls carry no idempotency key, so it cannot have idempotency = \"header\"; leave it out, and a call whose outcome is unknown is put to the person", c.name);
+            }
         }
         Ok(cfg)
     }
@@ -810,5 +873,31 @@ impl Person {
     /// The developer view: raw log, runs, experiments (K10, K45).
     pub fn is_developer(&self) -> bool {
         self.has_role("developer")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load(connector: &str) -> anyhow::Result<Config> {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("magnus.toml");
+        let text = format!("[appliance]\nstate_dir = \"/s\"\nlisten = \"127.0.0.1:0\"\n[database]\nurl = \"postgres://x\"\n[model]\nname = \"m\"\nadapter = \"a\"\nmax_tokens = 1\n[[connectors]]\nname = \"mail\"\naudience = \"public\"\nlabel = \"private+untrusted\"\n{connector}");
+        std::fs::write(&p, text).unwrap();
+        Config::load(&p)
+    }
+
+    /// A brokered connector's calls carry no idempotency key, so it is
+    /// never taken to deduplicate: one that says it does is refused, and
+    /// one that says nothing does not.
+    #[test]
+    fn a_brokered_connector_cannot_claim_to_deduplicate() {
+        let brokered = format!("transport = \"brokered\"\nurl = \"sha256:{}\"\nhosts = [\"api.example\"]\n", "0a".repeat(32));
+        let e = load(&format!("{brokered}idempotency = \"header\"\n")).unwrap_err();
+        assert!(format!("{e:#}").contains("carry no idempotency key"), "{e:#}");
+        assert_eq!(load(&brokered).unwrap().connectors[0].idempotency, "none");
+        // A remote app may say it honors the header.
+        assert!(load("url = \"https://a.example/mcp\"\nidempotency = \"header\"\n").is_ok());
     }
 }
