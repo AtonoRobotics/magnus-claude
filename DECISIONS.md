@@ -947,3 +947,9 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 ## Developer views and the policy on people's data (2026-11-02)
 
 - Owner, 2026-11-02, on whether making people's data private covers the developer views: "Developer and admin are currently the same. That will change eventually. Currently I am the developer. Admin grew out of that with the appliance because the appliance will have admins that the org hired and won't be me." So the developer views stay as they are while the owner is both. Once an organisation's own admins run an appliance, the developer role is no longer theirs, and what it may see of people's data is decided then.
+
+## A sign-in waits for the person who started it (2026-11-02, `pending-sign-in`)
+
+- Found by the review of master against the specs (2026-11-02). Finishing a sign-in to an app took it from those waiting before checking whose it was, so someone else's attempt with its state (refused) ended it, and the person who started it had to start again.
+- Now a sign-in is taken only by the person who started it, for the app it was started for; anyone else's attempt is refused and leaves it waiting. An expired one is still refused, and swept when the next sign-in starts.
+- Test: `another_persons_attempt_leaves_a_sign_in_waiting_for_its_owner` (connectors.rs): Carol's attempt at Alice's sign-in is refused, and Alice then finishes it. On master Alice's finish is refused.

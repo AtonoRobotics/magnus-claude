@@ -132,6 +132,26 @@ async fn the_owner_adds_an_app_each_person_signs_in_with_their_own_account_and_t
 /// A tool whose definition the app changes after the worker first saw it is
 /// disabled until the owner accepts the change (B10); the owner decides it
 /// from the inbox item, shown again on the connector in Settings.
+/// Someone else's attempt at a person's sign-in is refused and leaves it
+/// theirs to finish: it does not end it for them.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_persons_attempt_leaves_a_sign_in_waiting_for_its_owner() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(script(|_| async move { complete("done") })).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (alice, carol) = (app.api("alice"), app.api("carol"));
+    assert_eq!(alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await.0, 201);
+    // Held for the whole test, as the app holds its own, so no other test gets the port.
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = callback.local_addr().unwrap().port();
+    let (_, v) = alice.post("/v1/connectors/calendar/sign-in", json!({ "redirect_uri": format!("http://127.0.0.1:{port}/callback") })).await;
+    let (code, state) = FakeOAuthApp::browse(v["authorize_url"].as_str().unwrap()).await;
+    assert!(!carol.post("/v1/connectors/calendar/sign-in/complete", json!({ "state": state, "code": code })).await.0.is_success(), "carol took alice's sign-in");
+    assert_eq!(alice.post("/v1/connectors/calendar/sign-in/complete", json!({ "state": state, "code": code })).await.0, 204, "carol's attempt ended alice's sign-in");
+    let (_, list) = alice.get("/v1/connectors").await;
+    assert_eq!(list["connectors"][0]["signed_in"], true, "{list}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_changed_tool_definition_waits_for_the_owner() {
     let cal = FakeOAuthApp::start(3600).await;
