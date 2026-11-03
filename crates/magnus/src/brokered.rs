@@ -123,11 +123,18 @@ impl Drop for Instance {
 /// (connector, person)
 type Key = (String, String);
 
+/// Whether a call may still go ahead, and why not.
+pub type Fence<'a> = dyn Fn() -> std::result::Result<(), String> + Send + Sync + 'a;
+
 pub struct Brokered {
     sandbox: Option<Sandbox>,
     cfg: Cfg,
     root: PathBuf,
     instances: Arc<tokio::sync::Mutex<HashMap<Key, Arc<Instance>>>>,
+    /// How many times each scope of `stop` (connector, person, both or
+    /// neither) has run: a call holding a token taken before a stop that
+    /// covers it sends nothing with it.
+    stops: std::sync::Mutex<HashMap<(Option<String>, Option<String>), u64>>,
     /// Each image's tools as its server lists them: an image is known by
     /// its digest, so what it lists is too.
     listed: tokio::sync::Mutex<HashMap<String, Vec<Value>>>,
@@ -139,7 +146,7 @@ impl Brokered {
         // left is no one's now.
         let root = state_dir.join("brk");
         let _ = std::fs::remove_dir_all(&root);
-        Brokered { sandbox, cfg, root, instances: Arc::new(tokio::sync::Mutex::new(HashMap::new())), listed: tokio::sync::Mutex::new(HashMap::new()) }
+        Brokered { sandbox, cfg, root, instances: Arc::new(tokio::sync::Mutex::new(HashMap::new())), stops: Default::default(), listed: tokio::sync::Mutex::new(HashMap::new()) }
     }
 
     async fn launch(&self, c: &Connector, hosts: Option<Vec<String>>) -> Result<Instance> {
@@ -220,10 +227,21 @@ impl Brokered {
             .collect())
     }
 
-    /// The person's instance, running: the one they have, or a new one.
-    async fn instance(&self, c: &Connector, person: &str) -> Result<Arc<Instance>> {
+    /// How many stops have covered `person`'s instance of `app`: a call
+    /// takes it before its token, and sends nothing if it has changed.
+    pub fn generation(&self, app: &str, person: &str) -> u64 {
+        let s = self.stops.lock().unwrap();
+        let (a, p) = (Some(app.to_string()), Some(person.to_string()));
+        [(None, None), (a.clone(), None), (None, p.clone()), (a, p)].iter().map(|k| s.get(k).copied().unwrap_or(0)).sum()
+    }
+
+    /// The person's instance, running: the one they have, or a new one,
+    /// once `fence` says the call may still go ahead.
+    async fn instance(&self, c: &Connector, person: &str, fence: &Fence<'_>) -> Result<Arc<Instance>> {
         let key = (c.name.clone(), person.to_string());
         let mut m = self.instances.lock().await;
+        // A stop that took the lock first has run by now.
+        fence().map_err(|e| anyhow!(e))?;
         if let Some(i) = m.get(&key).filter(|i| i.alive()) {
             *i.used.lock().unwrap() = Instant::now();
             return Ok(i.clone());
@@ -260,18 +278,21 @@ impl Brokered {
         });
     }
 
-    /// Call a tool for `person` with their current access token.
-    pub async fn call(&self, c: &Connector, person: &str, bearer: Option<&str>, tool: &str, args: &Value) -> Result<CallOutput, CallError> {
+    /// Call a tool for `person` with their current access token, unless
+    /// `fence` says otherwise once the call has its microVM and again just
+    /// before it sends.
+    pub async fn call(&self, c: &Connector, person: &str, bearer: Option<&str>, tool: &str, args: &Value, fence: &Fence<'_>) -> Result<CallOutput, CallError> {
         let Some(token) = bearer else { return Err(CallError::NotSent(format!("{} has no sign-in of the person's to call with", c.name))) };
         let listing = self.listing(c).await.map_err(|e| CallError::NotSent(format!("{e:#}")))?;
         let def = listing.iter().find(|t| t["name"] == tool).ok_or_else(|| CallError::NotSent(format!("{} offers no {tool}", c.name)))?;
         if let Err(e) = schema::check(def.get("inputSchema").unwrap_or(&json!({})), args) {
             return Err(CallError::NotSent(format!("{tool}: the input does not match its schema: {e}")));
         }
-        let inst = self.instance(c, person).await.map_err(|e| CallError::NotSent(format!("{e:#}")))?;
+        let inst = self.instance(c, person, fence).await.map_err(|e| CallError::NotSent(format!("{e:#}")))?;
         inst.busy.fetch_add(1, Ordering::SeqCst);
         let out = tokio::time::timeout(CALL_WAIT, async {
             let mut s = Session::open(&inst.vsock).await?;
+            fence().map_err(CallError::NotSent)?;
             s.rpc("tools/call", json!({ "name": tool, "arguments": args, "_meta": { TOKEN_META: token } })).await
         })
         .await
@@ -300,6 +321,7 @@ impl Brokered {
     /// (with neither) all of them. How many were stopped.
     pub async fn stop(&self, app: Option<&str>, person: Option<&str>) -> usize {
         let mut m = self.instances.lock().await;
+        *self.stops.lock().unwrap().entry((app.map(String::from), person.map(String::from))).or_default() += 1;
         let gone: Vec<Key> = m.keys().filter(|(a, p)| app.is_none_or(|x| x == a) && person.is_none_or(|x| x == p)).cloned().collect();
         for k in &gone {
             if let Some(i) = m.remove(k) {
@@ -425,6 +447,45 @@ impl crate::kernel::Kernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call that has its token and waits for the instances while a stop
+    /// covering it takes them first (the kill switch, Disconnect, deletion)
+    /// boots nothing and sends nothing once the stop has run. Here the
+    /// lock is held, the stop waits on it first and the call after, as the
+    /// lock's queue is first come, first served; this appliance has no
+    /// sandbox, so a call that went on to boot would say so.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_call_waiting_while_its_microvm_is_stopped_boots_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let b = Arc::new(Brokered::new(None, Cfg::default(), d.path()));
+        let hex = "0a".repeat(32);
+        let c: Connector = toml::from_str(&format!("name = \"mail\"\ntransport = \"brokered\"\nurl = \"sha256:{hex}\"\naudience = \"private\"\nlabel = \"private+untrusted\"\nhosts = [\"api.example\"]")).unwrap();
+        b.listed.lock().await.insert(hex, vec![json!({ "name": "fetch", "inputSchema": { "type": "object" } })]);
+        // Another person's microVM is booting.
+        let booting = b.instances.lock().await;
+        // Alice's call took her token (and the count of stops) first.
+        let stops = b.generation("mail", "alice");
+        let (b1, b2) = (b.clone(), b.clone());
+        let stop = tokio::spawn(async move { b1.stop(Some("mail"), Some("alice")).await });
+        tokio::task::yield_now().await;
+        let call = tokio::spawn(async move {
+            let fence = || if b2.generation("mail", "alice") == stops { Ok(()) } else { Err("stopped while this call waited".to_string()) };
+            b2.call(&c, "alice", Some("tok"), "fetch", &json!({}), &fence).await
+        });
+        tokio::task::yield_now().await;
+        drop(booting);
+        stop.await.unwrap();
+        match call.await.unwrap() {
+            Err(CallError::NotSent(e)) => assert!(e.contains("stopped while this call waited") && !e.contains("[sandbox]"), "{e}"),
+            other => panic!("{:?}", other.err()),
+        }
+        assert!(b.instances.lock().await.is_empty());
+        // Another person's calls are not fenced by her stop.
+        assert_eq!(b.generation("mail", "bob"), 0);
+        assert_eq!(b.generation("mail", "alice"), 1);
+        b.stop(None, None).await;
+        assert_eq!((b.generation("mail", "bob"), b.generation("drive", "alice"), b.generation("mail", "alice")), (1, 1, 2));
+    }
 
     #[test]
     fn the_proxy_admits_only_the_manifests_hosts_exactly() {
