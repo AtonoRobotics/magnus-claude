@@ -21,6 +21,7 @@ const SOURCES: &[&str] = &[
     include_str!("../../../catalog/google-chat.toml"),
     include_str!("../../../catalog/sentry.toml"),
     include_str!("../../../catalog/huggingface.toml"),
+    include_str!("../../../catalog/gitlab.toml"),
 ];
 
 #[derive(Deserialize, Clone, Debug)]
@@ -182,7 +183,7 @@ mod tests {
             assert!(crate::tools::Audience::parse(&m.audience).is_some(), "{}", m.id);
             assert!(crate::tools::Label::parse(&m.label).is_some(), "{}", m.id);
             for (t, risk) in &m.tools {
-                assert!(["read", "reversible_write", "irreversible", "financial"].contains(&risk.as_str()), "{}: {t} is {risk}", m.id);
+                assert!(["read", "reversible_write", "irreversible", "financial", "prohibited"].contains(&risk.as_str()), "{}: {t} is {risk}", m.id);
             }
             // What the Library shows: a category chip, abilities, a plain line
             // for every scope asked for, and never a protocol word.
