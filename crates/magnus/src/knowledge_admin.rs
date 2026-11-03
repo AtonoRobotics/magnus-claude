@@ -213,10 +213,10 @@ impl Kernel {
                 sources.push(s);
             }
         }
-        let version = self.read(|s| s.bundle.get(path).map(|d| d.version())).unwrap_or(0) + 1;
         let ev = Ev::BundleWritten {
             path: path.into(),
-            version,
+            // Numbered by `emit`, under the write lock.
+            version: 0,
             doc_kind: kind.into(),
             scope: "org".into(),
             owner_user: None,
@@ -228,9 +228,9 @@ impl Kernel {
             frontmatter: fm.clone(),
             body: body.into(),
         };
-        self.emit(&format!("admin:{sub}"), ev).await.map_err(failed)?;
+        let e = self.emit(&format!("admin:{sub}"), ev).await.map_err(failed)?;
         // The writer stays the person whose run read its sources (K2).
-        Ok(version)
+        Ok(e.ev.bundle_version())
     }
 
     /// Remove an org document. A type in use (it has entities, or another
@@ -274,7 +274,13 @@ impl Kernel {
             if self.read(|s| s.bundle.contains_key(&new_path)) {
                 return Err((StatusCode::CONFLICT, format!("{new_path} is there already: rename one of them first")));
             }
-            self.admin_bundle_write(sub, &new_path, &fm, doc["body"].as_str().unwrap_or_default()).await?;
+            // It moves with what it was written from: its taint, the
+            // private content its run read and whose run that was (K2).
+            let Some(was) = self.read(|s| s.bundle.get(&old).cloned()) else { return Err((StatusCode::CONFLICT, format!("{old} changed during the merge; try again"))) };
+            let body = doc["body"].as_str().unwrap_or_default();
+            let kind = self.admin_bundle_check(&new_path, &fm, body).await?;
+            let read: Vec<String> = was.sources.iter().filter(|s| s.starts_with("private:")).cloned().collect();
+            self.admin_put(sub, &new_path, kind, &fm, body, was.label, read, was.writer.clone()).await?;
             self.emit(&format!("admin:{sub}"), Ev::BundleRemoved { path: old }).await.map_err(failed)?;
             moved += 1;
         }
@@ -361,8 +367,7 @@ impl Kernel {
     }
 
     /// The root index as one person's agent receives it: links to what they
-    /// cannot see turned into text, bullets that would show nothing left out
-    /// (K2).
+    /// cannot see removed, bullets that would show nothing left out (K2).
     pub async fn admin_assembled(&self, person: &str) -> Result<Value, Refusal> {
         let Some(d) = self.read(|s| s.bundle.get("/index.md").cloned()) else { return Ok(json!({ "person": person, "text": null })) };
         let c = self.log.contents(&[d.seq()]).await.map_err(failed)?.remove(&d.seq()).unwrap_or_default();

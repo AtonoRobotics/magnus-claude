@@ -750,6 +750,10 @@ pub struct State {
     pub playbook: BTreeMap<String, PlaybookItem>,
     /// The org context bundle, by path.
     pub bundle: BTreeMap<String, BundleDoc>,
+    /// The last version number each path was written with, kept through a
+    /// removal: a path written again counts on, so (path, version) names
+    /// one version in the log.
+    pub bundle_last: HashMap<String, u32>,
     /// Every policy a layer ever had, oldest first.
     pub policy_history: Vec<PolicyVersion>,
     /// Run modules an admin turned on or off for the organisation.
@@ -1201,6 +1205,7 @@ impl State {
             Ev::PersonDataRead { .. } => {}
             Ev::PersonErased { person } => {
                 let runs: HashSet<String> = self.runs.values().filter(|r| &r.person == person).map(|r| r.id.clone()).collect();
+                let tasks: HashSet<String> = self.tasks.values().filter(|t| &t.person == person).map(|t| t.task_id.clone()).collect();
                 self.tasks.retain(|_, t| &t.person != person);
                 self.runs.retain(|_, r| &r.person != person);
                 self.items.retain(|_, i| &i.person != person && i.run.as_ref().is_none_or(|r| !runs.contains(r)));
@@ -1212,6 +1217,10 @@ impl State {
                 self.trash.retain(|_, t| &t.person != person);
                 self.preferences.remove(person);
                 self.hidden.remove(person);
+                // Their branched threads (the entries as shown then) and
+                // what their tasks had attached go too.
+                self.branches.retain(|_, b| &b.person != person);
+                self.attachments.retain(|t, _| !tasks.contains(t));
                 self.subjects.remove(person);
                 self.last_sign_in.remove(person);
                 // The rights they held go with them: whoever is next known by
@@ -1821,6 +1830,8 @@ impl State {
                 d.label = *label;
                 d.sources = sources.clone();
                 d.versions.push((*version, e.seq, e.at, actor.clone()));
+                let last = self.bundle_last.entry(path.clone()).or_default();
+                *last = (*last).max(*version);
             }
             Ev::BundleRemoved { path } => {
                 self.bundle.remove(path);
@@ -1967,5 +1978,23 @@ mod tests {
         s.apply(&ev(6, "kernel", json!({ "kind": "failed", "run": "r2", "reason": "stopped", "by": "kernel" })));
         assert_eq!(s.runs["r2"].status, super::Status::Cancelled, "the run's own end after a cancel made it failed");
         assert_eq!(s.runs["r2"].summary, None);
+    }
+
+    /// A person erased leaves nothing of theirs in the state: not the
+    /// conversation a branch of theirs starts with, nor what their tasks
+    /// had attached; someone else's stay.
+    #[test]
+    fn a_person_erased_leaves_no_branch_or_attachment_of_theirs() {
+        let mut s = State::default();
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        for (seq, p) in [(1, "bob"), (2, "alice")] {
+            let file = json!([{ "id": format!("f-{p}"), "name": format!("{p}-salary.pdf") }]);
+            s.apply(&ev(seq, &format!("person:{p}"), json!({ "kind": "task_created", "task": format!("t-{p}"), "run": format!("r-{p}"), "person": p, "text": "Read this.", "attachments": file, "config": config })));
+            s.apply(&ev(seq + 10, &format!("person:{p}"), json!({ "kind": "thread_branched", "person": p, "thread": format!("b-{p}"), "from": format!("t-{p}"), "upto": "e1", "entries": [{ "id": "e1", "text": format!("{p} earns 91,000") }], "title": "Pay" })));
+        }
+        s.apply(&ev(30, "admin:root", json!({ "kind": "person_erased", "person": "bob" })));
+        assert!(!s.branches.contains_key("b-bob"), "bob's branch kept his words");
+        assert!(!s.attachments.contains_key("t-bob"), "bob's task kept what it had attached");
+        assert!(s.branches.contains_key("b-alice") && s.attachments.contains_key("t-alice"), "alice's went with bob's");
     }
 }
