@@ -274,3 +274,48 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
     assert_eq!(st, 200, "{v}");
     still_hers(4, "an admin's clean version undone").await;
 }
+
+/// An entity moved by merging its type into another keeps what it was
+/// written from: its taint, the private content its run read and whose run
+/// that was, so the move shows it to no one new and hides it from no one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entity_moved_by_merging_types_keeps_its_taint_and_its_reader() {
+    use base64::Engine;
+    const NOTES: &str = "Note Acme from my file in the bundle.";
+    let ty = |title: &str| json!({ "type": "Entity Type", "title": title, "description": "Who buys.", "generated": { "by": "human:admin-1", "at": "2026-11-02T12:00:00+00:00" }, "status": "draft", "system_of_record": "/sources/hubspot.md", "identity_keys": ["domain"], "relations": [], "cedar_entity": title, "scope": "org" });
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body.to_string().contains(NOTES) {
+            return Reply::Text(String::new());
+        }
+        let acme = json!({ "path": "/entities/customer/acme.md", "frontmatter": { "type": "Customer", "title": "Acme", "resource": "/sources/hubspot.md", "sources": [{ "resource": "/sources/hubspot.md" }], "generated": gen(), "identity": { "domain": "acme.example" }, "relations": [], "scope": "org" }, "body": "Acme is renegotiating." });
+        let steps = [contract_unchecked("note acme", "it is noted"), tool("bundle_write", acme), complete("Noted.")];
+        steps.get(c.turn()).cloned().unwrap_or_else(|| Reply::Text(String::new()))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    for (path, title) in [("/types/customer.md", "Customer"), ("/types/client.md", "Client")] {
+        let (st, v) = control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": path, "frontmatter": ty(title), "body": "Who buys." })).await;
+        assert_eq!(st, 200, "{v}");
+    }
+    let alice = app.api("alice");
+    let (st, f) = alice.post("/v1/files", json!({ "name": "acme.txt", "media_type": "text/plain", "data_b64": base64::engine::general_purpose::STANDARD.encode("Acme is renegotiating.") })).await;
+    assert_eq!(st.as_u16(), 201, "{f}");
+    let (st, v) = alice.post("/v1/tasks", json!({ "text": NOTES, "files": [f["id"]] })).await;
+    assert!(st.is_success(), "{v}");
+    let task = v["task_id"].as_str().or(v["id"].as_str()).unwrap().to_string();
+    let ask = alice.wait_item(&task, "approval").await;
+    assert!(alice.respond(ask["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
+    alice.wait_item(&task, "review").await;
+    let (st, before) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/entities/customer/acme.md", Value::Null).await;
+    assert_eq!(st, 200, "{before}");
+    assert_eq!(before["writer"], "alice", "{before}");
+
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/merge", json!({ "sub": "admin-1", "from": "/types/customer.md", "into": "/types/client.md" })).await;
+    assert_eq!((st, v["entities_moved"].as_u64()), (200, Some(1)), "{v}");
+    let (st, d) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/entities/client/acme.md", Value::Null).await;
+    assert_eq!((st, d["frontmatter"]["type"].as_str()), (200, Some("Client")), "{d}");
+    assert_eq!(d["label"], before["label"], "the move changed its taint: {d}");
+    assert_eq!(d["writer"], "alice", "the move lost whose run read it: {d}");
+    assert!(d["sources"].as_array().unwrap().iter().any(|s| s == "private:library"), "the move lost what its run read: {d}");
+}
+
