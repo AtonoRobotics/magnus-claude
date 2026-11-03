@@ -58,21 +58,29 @@ pub async fn validate(Json(b): Json<Value>) -> Response {
     Json(json!({ "ok": problems.is_empty(), "problems": problems })).into_response()
 }
 
-/// Keep a draft. It is not in force; the log records whose it is.
+/// The set's draft as it is now, for the audit's before.
+async fn draft_now(c: &Console, l: &str) -> Value {
+    sets_now(c).await.ok().and_then(|s| s.into_iter().find(|x| x["layer"] == l)).map(|x| x["draft"].clone()).unwrap_or(Value::Null)
+}
+
+/// Keep a draft. It is not in force; the audit log records whose it is and
+/// what it replaced, as for every console action.
 pub async fn draft(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
     let Some(l) = layer(&id) else { return bad_id() };
     let Some(cedar) = b["cedar"].as_str() else { return refuse(StatusCode::BAD_REQUEST, "invalid", "Give the draft's text.") };
-    match c.kernel.call(Method::POST, "/v1/admin/policy/draft", Some(&json!({ "actor": actor(&a), "layer": l, "cedar": cedar }))).await {
+    let before = draft_now(&c, &l).await;
+    match recorded(&c, &a, "policy_drafted", &id_of(&l), Some(json!({ "cedar": before })), Some(json!({ "cedar": cedar })), c.kernel.call(Method::POST, "/v1/admin/policy/draft", Some(&json!({ "actor": actor(&a), "layer": l, "cedar": cedar })))).await {
         Ok(v) => Json(v).into_response(),
-        Err(e) => failed(e),
+        Err(r) => r,
     }
 }
 
 pub async fn drop_draft(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Path(id): Path<String>) -> Response {
     let Some(l) = layer(&id) else { return bad_id() };
-    match c.kernel.call(Method::POST, "/v1/admin/policy/draft", Some(&json!({ "actor": actor(&a), "layer": l, "cedar": null }))).await {
+    let before = draft_now(&c, &l).await;
+    match recorded(&c, &a, "policy_draft_dropped", &id_of(&l), Some(json!({ "cedar": before })), None, c.kernel.call(Method::POST, "/v1/admin/policy/draft", Some(&json!({ "actor": actor(&a), "layer": l, "cedar": null })))).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => failed(e),
+        Err(r) => r,
     }
 }
 

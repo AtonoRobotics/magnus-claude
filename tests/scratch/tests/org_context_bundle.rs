@@ -248,10 +248,10 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
     assert_eq!(st, 200, "{v}");
     still_hers(1, "bob's version undone, her task in the trash").await;
 
-    // Removed, then rolled back to the version put back above (its 2:
-    // Bob's new document began again at 1).
+    // Removed, then rolled back to the version put back above (its 3:
+    // Alice's was 1, Bob's 2).
     assert_eq!(remove().await.0, 200);
-    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/rollback", json!({ "sub": "admin-1", "path": "/people/finance.md", "version": 2 })).await;
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/rollback", json!({ "sub": "admin-1", "path": "/people/finance.md", "version": 3 })).await;
     assert_eq!(st, 200, "{v}");
     still_hers(2, "rolled back after removal").await;
 
@@ -274,3 +274,117 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
     assert_eq!(st, 200, "{v}");
     still_hers(4, "an admin's clean version undone").await;
 }
+
+/// Each version of a document has its own number: writes at once never
+/// share one, and a document removed and written again counts on, so each
+/// earlier version is still reached by its number.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_version_of_a_document_has_its_own_number_through_removal_and_writes_at_once() {
+    let m = FakeModel::start(script(|_| async move { complete("done") })).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let area = json!({ "type": "Area", "title": "Support", "owner": "human:alice", "ask_channel": "#support", "scope": "org", "sources": [{ "resource": "human:alice" }] });
+    let write = |n: u64| control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": "/people/support.md", "frontmatter": area, "body": format!("Support answers within {n} hours.") }));
+    let (st, v) = write(1).await;
+    assert_eq!((st, &v["version"]), (200, &json!(1)), "{v}");
+    let (st, v) = control(&app, "DELETE", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": "/people/support.md" })).await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = write(2).await;
+    assert_eq!((st, &v["version"]), (200, &json!(2)), "written again after its removal, it numbered from 1: {v}");
+    let (st, one) = control(&app, "GET", "/v1/admin/knowledge/version?path=/people/support.md&version=1", Value::Null).await;
+    assert_eq!(st, 200, "{one}");
+    assert!(one["body"].as_str().is_some_and(|b| b.contains("within 1 hours")), "version 1 is not the first written: {one}");
+
+    let at_once = futures::future::join_all((3..11).map(write)).await;
+    let mut versions: Vec<u64> = at_once.iter().map(|(st, v)| {
+        assert_eq!(*st, 200, "{v}");
+        v["version"].as_u64().unwrap()
+    }).collect();
+    versions.sort();
+    assert_eq!(versions, (3..11).collect::<Vec<u64>>(), "writes at once shared a number");
+    let (_, d) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/people/support.md", Value::Null).await;
+    assert_eq!(d["versions"].as_array().map(|v| v.len()), Some(9), "{d}");
+}
+
+/// A link to a document someone cannot see leaves what they read whole,
+/// its text with it, inline or by reference; a line's other links stay
+/// (K2: "a line with some visible links keeps only those").
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hidden_documents_link_leaves_with_its_text_whatever_its_form() {
+    const READS: &str = "Read the sales page.";
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body.to_string().contains(READS) {
+            return Reply::Text(String::new());
+        }
+        let steps = [contract_unchecked("read the sales page", "it is read"), tool("bundle_read", json!({ "path": "/people/sales.md" })), complete("Read.")];
+        steps.get(c.turn()).cloned().unwrap_or_else(|| Reply::Text(String::new()))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let area = |title: &str, source: &str| json!({ "type": "Area", "title": title, "owner": "human:alice", "ask_channel": "#team", "scope": "org", "sources": [{ "resource": source }] });
+    let put = |path: &'static str, fm: Value, body: &'static str| control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": path, "frontmatter": fm, "body": body }));
+    // Drawn from a deal in the CRM and written by no one's run: no one sees it.
+    let (st, v) = put("/people/finance.md", area("Finance", "hubspot://deal/7"), "Pay reviews.").await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = put("/people/sales.md", area("Sales", "human:alice"), "Quotas follow [Carol's pay review](/people/finance.md \"pay\") and the [handbook](/people/handbook.md).\nBonuses are in [the payroll][pay].\n\n[pay]: /people/finance.md\n").await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = put("/index.md", json!({}), "# Teams\n* [Sales](/people/sales.md) and [Carol's pay review](/people/finance.md) - who sells and is paid\n* [Finance](/people/finance.md) - pay\n").await;
+    assert_eq!(st, 200, "{v}");
+
+    let bob = app.api("bob");
+    let b = bob.submit(READS).await;
+    bob.wait_item(&b, "review").await;
+    let read = m.requests().into_iter().find(|c| c.body.to_string().contains(READS) && c.turn() == 2).map(|c| c.last_results()[0].clone()).unwrap();
+    assert!(!read.is_error && read.text.contains("[handbook](/people/handbook.md)"), "{}", read.text);
+    for hidden in ["Carol", "payroll", "finance.md"] {
+        assert!(!read.text.contains(hidden), "bob's read of the sales page shows {hidden:?}: {}", read.text);
+    }
+    let (st, v) = control(&app, "GET", "/v1/admin/knowledge/assembled?person=bob", Value::Null).await;
+    assert_eq!(st, 200, "{v}");
+    let index = v["text"].as_str().unwrap();
+    assert!(index.contains("[Sales](/people/sales.md)") && !index.contains("Carol") && !index.contains("Finance"), "bob's index: {index}");
+}
+
+/// An entity moved by merging its type into another keeps what it was
+/// written from: its taint, the private content its run read and whose run
+/// that was, so the move shows it to no one new and hides it from no one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entity_moved_by_merging_types_keeps_its_taint_and_its_reader() {
+    use base64::Engine;
+    const NOTES: &str = "Note Acme from my file in the bundle.";
+    let ty = |title: &str| json!({ "type": "Entity Type", "title": title, "description": "Who buys.", "generated": { "by": "human:admin-1", "at": "2026-11-02T12:00:00+00:00" }, "status": "draft", "system_of_record": "/sources/hubspot.md", "identity_keys": ["domain"], "relations": [], "cedar_entity": title, "scope": "org" });
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body.to_string().contains(NOTES) {
+            return Reply::Text(String::new());
+        }
+        let acme = json!({ "path": "/entities/customer/acme.md", "frontmatter": { "type": "Customer", "title": "Acme", "resource": "/sources/hubspot.md", "sources": [{ "resource": "/sources/hubspot.md" }], "generated": gen(), "identity": { "domain": "acme.example" }, "relations": [], "scope": "org" }, "body": "Acme is renegotiating." });
+        let steps = [contract_unchecked("note acme", "it is noted"), tool("bundle_write", acme), complete("Noted.")];
+        steps.get(c.turn()).cloned().unwrap_or_else(|| Reply::Text(String::new()))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    for (path, title) in [("/types/customer.md", "Customer"), ("/types/client.md", "Client")] {
+        let (st, v) = control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": path, "frontmatter": ty(title), "body": "Who buys." })).await;
+        assert_eq!(st, 200, "{v}");
+    }
+    let alice = app.api("alice");
+    let (st, f) = alice.post("/v1/files", json!({ "name": "acme.txt", "media_type": "text/plain", "data_b64": base64::engine::general_purpose::STANDARD.encode("Acme is renegotiating.") })).await;
+    assert_eq!(st.as_u16(), 201, "{f}");
+    let (st, v) = alice.post("/v1/tasks", json!({ "text": NOTES, "files": [f["id"]] })).await;
+    assert!(st.is_success(), "{v}");
+    let task = v["task_id"].as_str().or(v["id"].as_str()).unwrap().to_string();
+    let ask = alice.wait_item(&task, "approval").await;
+    assert!(alice.respond(ask["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
+    alice.wait_item(&task, "review").await;
+    let (st, before) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/entities/customer/acme.md", Value::Null).await;
+    assert_eq!(st, 200, "{before}");
+    assert_eq!(before["writer"], "alice", "{before}");
+
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/merge", json!({ "sub": "admin-1", "from": "/types/customer.md", "into": "/types/client.md" })).await;
+    assert_eq!((st, v["entities_moved"].as_u64()), (200, Some(1)), "{v}");
+    let (st, d) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/entities/client/acme.md", Value::Null).await;
+    assert_eq!((st, d["frontmatter"]["type"].as_str()), (200, Some("Client")), "{d}");
+    assert_eq!(d["label"], before["label"], "the move changed its taint: {d}");
+    assert_eq!(d["writer"], "alice", "the move lost whose run read it: {d}");
+    assert!(d["sources"].as_array().unwrap().iter().any(|s| s == "private:library"), "the move lost what its run read: {d}");
+}
+
