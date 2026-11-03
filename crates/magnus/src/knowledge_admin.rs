@@ -139,7 +139,14 @@ impl Kernel {
             _ => None,
         };
         crate::bundle::validate(path, fm, body, |_| tdoc.clone()).map_err(bad)?;
-        let sources: Vec<String> = fm["sources"].as_array().into_iter().flatten().filter_map(|x| x["resource"].as_str().map(String::from)).collect();
+        let mut sources: Vec<String> = fm["sources"].as_array().into_iter().flatten().filter_map(|x| x["resource"].as_str().map(String::from)).collect();
+        // The private content its writer's run read stays among its
+        // sources: an admin's edit does not widen who may see it.
+        for s in existing.iter().flat_map(|d| d.sources.iter()).filter(|s| s.starts_with("private:")) {
+            if !sources.contains(s) {
+                sources.push(s.clone());
+            }
+        }
         let label = existing.as_ref().map(|d| d.label).unwrap_or(Label::PRINCIPAL);
         let version = existing.as_ref().map(|d| d.version()).unwrap_or(0) + 1;
         let ev = Ev::BundleWritten {

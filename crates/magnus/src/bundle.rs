@@ -243,13 +243,23 @@ pub fn render(fm: &Value, body: &str) -> String {
     format!("---\n{yaml}---\n\n{body}")
 }
 
+/// The source the kernel records for private content a run read from
+/// `app` (its files, memory, an app; empty: privacy carried in from where
+/// the run started), so a document it writes is never drawn "only from the
+/// bundle or people's answers".
+pub fn read_source(app: &str) -> String {
+    format!("private:{}", if app.is_empty() { "unnamed" } else { app })
+}
+
 impl Kernel {
     /// Whether `person` may see a document (K2): their own, or an org
     /// document whose every source they can read. Until the kernel asks
     /// each source (K3, step 4), an org document drawn from items in the
-    /// org's systems is seen only by the person whose run wrote it, under
-    /// whose grant the items were read; one drawn only from the bundle, or
-    /// from people's answers, by everyone.
+    /// org's systems, or written by a run that read private content (the
+    /// sources the kernel adds, whatever the document cites), is seen only
+    /// by the person whose run wrote it, under whose grant the items were
+    /// read; one drawn only from the bundle, or from people's answers, by
+    /// everyone.
     pub fn bundle_visible(&self, person: &str, d: &crate::state::BundleDoc) -> bool {
         if d.scope == "user" {
             return d.owner_user.as_deref() == Some(person);
@@ -323,8 +333,15 @@ impl Kernel {
         if kind == "type" && fm["status"] == "stable" && !was_stable {
             return Err(format!("{path}: a type becomes stable only with an admin's approval in the console; write it as draft"));
         }
-        let label = self.read(|s| s.runs.get(run).map(|r| Label { untrusted: r.untrusted, private: r.private })).unwrap_or(Label::PRINCIPAL);
-        let sources: Vec<String> = fm["sources"].as_array().into_iter().flatten().filter_map(|x| x["resource"].as_str().map(String::from)).collect();
+        let (label, read) = self.read(|s| s.runs.get(run).map(|r| (Label { untrusted: r.untrusted, private: r.private }, r.private_from.clone()))).unwrap_or_default();
+        let mut sources: Vec<String> = fm["sources"].as_array().into_iter().flatten().filter_map(|x| x["resource"].as_str().map(String::from)).collect();
+        // What the run read, whatever the document cites: each place whose
+        // private content it read is a source the kernel names itself (K2).
+        for s in read.iter().map(|app| read_source(app)) {
+            if !sources.contains(&s) {
+                sources.push(s);
+            }
+        }
         let version = current.unwrap_or(0) + 1;
         let ev = crate::events::Ev::BundleWritten {
             path: path.into(),
