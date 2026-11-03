@@ -261,7 +261,8 @@ impl Kernel {
         people.extend(self.read(|s| s.schedules.values().filter(|x| x.next_due().is_some()).map(|x| x.person.clone()).collect::<Vec<_>>()));
         let mut ended = 0;
         for person in people {
-            match id.active(&person).await {
+            let sub = self.read(|s| s.subjects.get(&person).cloned());
+            match id.active(&person, sub.as_deref()).await {
                 Ok(true) => {}
                 Ok(false) => {
                     let label = id.label();
