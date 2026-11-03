@@ -100,4 +100,28 @@ impl Store {
         }
         let _ = std::fs::remove_file(self.token_file(url));
     }
+
+    fn device_file(&self, url: &str) -> PathBuf {
+        use sha2::Digest;
+        self.dir.join(format!("device-{}", &hex::encode(sha2::Sha256::digest(url.as_bytes()))[..16]))
+    }
+
+    /// The certificate and key for a public address. The key is in a file
+    /// only this user can read, not in the settings and not in the page.
+    pub fn device(&self, url: &str) -> Option<(String, String)> {
+        let b = std::fs::read(self.device_file(url)).ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&b).ok()?;
+        let certificate = v["certificate"].as_str()?.to_string();
+        let private_key = v["private_key"].as_str()?.to_string();
+        if certificate.is_empty() || private_key.is_empty() { None } else { Some((certificate, private_key)) }
+    }
+
+    pub fn set_device(&self, url: &str, certificate: &str, private_key: &str) -> Result<(), String> {
+        let v = serde_json::json!({ "certificate": certificate, "private_key": private_key });
+        write_private(&self.device_file(url), &serde_json::to_vec(&v).unwrap()).map_err(|e| format!("save the device certificate: {e}"))
+    }
+
+    pub fn clear_device(&self, url: &str) {
+        let _ = std::fs::remove_file(self.device_file(url));
+    }
 }

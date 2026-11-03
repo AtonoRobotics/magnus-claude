@@ -57,6 +57,10 @@ pub struct Config {
     pub connectors: Vec<Connector>,
     #[serde(default)]
     pub sign_in: SignIn,
+    /// Client certificates for the public hostname. None: the appliance
+    /// does not pair devices, and the tunnel is not asked to present one.
+    #[serde(default)]
+    pub client_certs: Option<ClientCerts>,
     #[serde(default)]
     pub observability: Observability,
 }
@@ -306,6 +310,30 @@ fn lockout_minutes() -> u32 {
 }
 fn min_password_length() -> usize {
     10
+}
+
+/// Cloudflare's managed CA issues one certificate per paired computer.
+/// The token in the vault is zone-scoped and can write client certificates;
+/// it is not an all-accounts token.
+#[derive(Deserialize, Clone, Debug)]
+pub struct ClientCerts {
+    /// The public hostname, without a scheme: `magnus.pyrallon.ai`.
+    pub hostname: String,
+    /// The zone id of that hostname. Not a secret; it is in the dashboard.
+    pub zone_id: String,
+    /// The vault secret whose text is the Cloudflare API token.
+    #[serde(default = "client_cert_credential")]
+    pub credential: String,
+    /// How long a certificate is valid. Cloudflare accepts 1 to 3650 days.
+    #[serde(default = "client_cert_days")]
+    pub days: u32,
+}
+
+fn client_cert_credential() -> String {
+    "cloudflare_mtls".into()
+}
+fn client_cert_days() -> u32 {
+    365
 }
 
 #[derive(Deserialize, Clone, Debug)]

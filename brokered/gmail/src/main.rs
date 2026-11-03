@@ -12,31 +12,10 @@
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
-use magnus_brokered_kit::{exchange, serve, tunnel, Failure, Response, Tool};
+use magnus_brokered_kit::{exchange, https, serve, Failure, Response, Tool};
 use serde_json::{json, Value};
-use std::sync::{Arc, OnceLock};
 
 const HOST: &str = "gmail.googleapis.com";
-
-/// The public roots, and any the appliance names on the kernel command line
-/// (`magnus_roots`, base64url DER certificates separated by commas; the
-/// kernel hands a `key=value` it does not know to `/init` as its
-/// environment). Only a test's stand-in for Gmail is named there.
-fn tls() -> Arc<rustls::ClientConfig> {
-    static C: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    C.get_or_init(|| {
-        let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
-        for der in std::env::var("magnus_roots").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
-            if let Ok(d) = URL_SAFE_NO_PAD.decode(der) {
-                let _ = roots.add(rustls::pki_types::CertificateDer::from(d));
-            }
-        }
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let c = rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().expect("TLS versions").with_root_certificates(roots).with_no_client_auth();
-        Arc::new(c)
-    })
-    .clone()
-}
 
 /// The scope every tool here works with (Gmail API, each method's
 /// Authorization scopes: `gmail.modify` is among those of every one).
@@ -47,12 +26,8 @@ const SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 /// changed something and has no clear answer has an unknown outcome.
 fn gmail(method: &str, path: &str, token: &str, body: Option<&Value>) -> Result<Value, Failure> {
     let wrote = method != "GET";
-    let conn = rustls::ClientConnection::new(tls(), HOST.try_into().expect("a server name")).map_err(|e| e.to_string())?;
-    let mut s = rustls::StreamOwned::new(conn, tunnel(&format!("{HOST}:443"))?);
-    // Gmail is known to be Gmail before anything is sent.
-    while s.conn.is_handshaking() {
-        s.conn.complete_io(&mut s.sock).map_err(|e| format!("could not reach Gmail securely: {e}. Nothing was changed."))?;
-    }
+    // Gmail is known to be Gmail before anything is sent (the kit's way out).
+    let s = https(&format!("{HOST}:443")).map_err(|e| format!("{e}. Nothing was changed."))?;
     let r = exchange(s, method, HOST, &format!("/gmail/v1/users/me{path}"), token, body).map_err(|e| if wrote { Failure::Unknown(format!("{e}: whether Gmail did this is unknown")) } else { Failure::NotDone(e) })?;
     if r.status >= 400 {
         return Err(explain(&r, wrote));

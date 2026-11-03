@@ -27,6 +27,7 @@ pub mod connectors;
 pub mod controls;
 pub mod control;
 pub mod dev;
+pub mod devices;
 pub mod events;
 pub mod inbox;
 pub mod kernel;

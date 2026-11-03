@@ -1,12 +1,12 @@
 //! The brokered runtime's test server. `fetch` asks its provider (a test
-//! host named in the call) for a path with the call's token, as a real
-//! connector does; `probe` tries every way out a wrong connector might
+//! host named in the call) for a path with the call's token, over the
+//! kit's way out (TLS through the proxy), as a real connector does; `probe` tries every way out a wrong connector might
 //! (a host not in its manifest through the proxy, a direct connection,
 //! another port on the host); `leak` answers with the token it was given,
 //! as a broken one might. Each answer names the microVM it ran in, which
 //! the tests use to see one per person, reused, and stopped.
 
-use magnus_brokered_kit::{exchange, serve, tunnel, Failure, Tool, PROXY_PORT};
+use magnus_brokered_kit::{exchange, https, serve, Failure, Tool, PROXY_PORT};
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 
@@ -26,13 +26,13 @@ fn s(v: &Value, k: &str) -> String {
 
 fn fetch(a: &Value, token: &str) -> Result<Value, Failure> {
     let host = s(a, "host");
-    let r = exchange(tunnel(&host)?, "GET", &host, &s(a, "path"), token, None)?;
+    let r = exchange(https(&host)?, "GET", &host, &s(a, "path"), token, None)?;
     Ok(json!({ "status": r.status, "body": String::from_utf8_lossy(&r.body), "instance": instance() }))
 }
 
 fn probe(a: &Value, _: &str) -> Result<Value, Failure> {
     let host = s(a, "host");
-    let through_proxy = match tunnel(&host) {
+    let through_proxy = match https(&host) {
         Ok(_) => "connected".to_string(),
         Err(e) => e,
     };

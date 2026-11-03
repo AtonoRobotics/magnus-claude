@@ -1572,8 +1572,12 @@ dependencies = [
 name = "magnus-brokered-kit"
 version = "0.2.3"
 dependencies = [
+ "base64 0.22.1",
  "libc",
+ "rcgen",
+ "rustls",
  "serde_json",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1591,10 +1595,8 @@ version = "0.2.3"
 dependencies = [
  "base64 0.22.1",
  "magnus-brokered-kit",
- "rustls",
  "serde_json",
  "toml",
- "webpki-roots",
 ]
 
 [[package]]

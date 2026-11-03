@@ -20,7 +20,7 @@
 use crate::apps::{AppTool, CallError, CallOutput, Mcp};
 use crate::config::{Brokered as Cfg, Connector, Sandbox};
 use anyhow::{anyhow, Context, Result};
-use magnus_brokered_kit::{schema, MCP_PORT, OUTCOME_META, PROTOCOL, PROXY_PORT, SCOPES_META, TOKEN_META};
+use magnus_brokered_kit::{schema, MCP_PORT, OUTCOME_META, PROTOCOL, PROXY_PORT, ROOTS_ENV, SCOPES_META, TOKEN_META};
 use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::HashMap;
@@ -84,13 +84,13 @@ fn images(cfg: &Cfg, install: Option<&Path>) -> Option<PathBuf> {
 
 /// The kernel's command line, and the roots its server trusts beside the
 /// public ones: the kernel hands `magnus_roots` to `/init` as its
-/// environment (base64url DER, comma-separated).
+/// environment (base64url DER, comma-separated; the kit's `ROOTS_ENV`).
 fn boot_args(cfg: &Cfg) -> String {
     use base64::Engine;
     let roots: Vec<String> = cfg.roots.iter().filter_map(|p| std::fs::read(p).ok()).map(|d| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(d)).collect();
     let mut a = "console=ttyS0 reboot=k panic=1 pci=off quiet loglevel=3".to_string();
     if !roots.is_empty() {
-        a.push_str(&format!(" magnus_roots={}", roots.join(",")));
+        a.push_str(&format!(" {ROOTS_ENV}={}", roots.join(",")));
     }
     a
 }

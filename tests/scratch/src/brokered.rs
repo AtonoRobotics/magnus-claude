@@ -3,7 +3,6 @@
 //! standing in for the provider's API (the provider's real API needs a
 //! person's account at it; the contract tests run against one).
 
-use axum::{extract::State, http::HeaderMap, http::Uri, Router};
 use magnus_invariants::appliance::workspace_root;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -77,28 +76,125 @@ pub fn running(state_dir: &std::path::Path) -> usize {
     std::fs::read_dir(state_dir.join("brk")).map(|d| d.count()).unwrap_or(0)
 }
 
-/// A local host standing in for a provider's API: every request it is
-/// sent, as (path, Authorization header), answered with a greeting.
+/// A CA of the test's own: its certificate, DER, in a file
+/// (`[brokered] roots`), and an acceptor with a certificate from it for
+/// `name`.
+pub struct TestCa {
+    pub root: std::path::PathBuf,
+    cert: rcgen::Certificate,
+    key: rcgen::KeyPair,
+    _dir: tempfile::TempDir,
+}
+
+impl TestCa {
+    pub fn new(cn: &str) -> TestCa {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        p.distinguished_name.push(rcgen::DnType::CommonName, cn);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = p.self_signed(&key).unwrap();
+        let root = dir.path().join("root.der");
+        std::fs::write(&root, cert.der()).unwrap();
+        TestCa { root, cert, key, _dir: dir }
+    }
+
+    /// TLS for a host named `name` (a DNS name or an IP address).
+    pub fn acceptor(&self, name: &str) -> tokio_rustls::TlsAcceptor {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec![name.to_string()]).unwrap().signed_by(&key, &self.cert, &self.key).unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let tls = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()))
+            .unwrap();
+        tokio_rustls::TlsAcceptor::from(Arc::new(tls))
+    }
+}
+
+/// `cfg`'s servers trust `ca`'s certificates too.
+pub fn trust(cfg: &mut toml::Table, ca: &TestCa) {
+    let b = cfg.entry("brokered").or_insert_with(|| toml::Table::new().into()).as_table_mut().unwrap();
+    let roots = b.entry("roots").or_insert_with(|| toml::Value::Array(vec![])).as_array_mut().unwrap();
+    roots.push(ca.root.display().to_string().into());
+}
+
+/// A local host standing in for a provider's API, over HTTPS with a
+/// certificate for `127.0.0.1` from its own CA: every request it is sent,
+/// as (path, Authorization header), answered with a greeting; and every
+/// byte that reached it before TLS, as it came.
 #[derive(Clone)]
 pub struct ProviderApi {
     /// `127.0.0.1:<port>`, as a manifest's hosts name it.
     pub host: String,
     pub seen: Arc<Mutex<Vec<(String, String)>>>,
+    pub raw: Arc<Mutex<Vec<u8>>>,
+    pub ca: Arc<TestCa>,
 }
 
 impl ProviderApi {
     pub async fn start() -> ProviderApi {
-        async fn answer(State(seen): State<Arc<Mutex<Vec<(String, String)>>>>, uri: Uri, h: HeaderMap) -> &'static str {
-            let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
-            seen.lock().unwrap().push((uri.path().to_string(), auth));
-            "hello from the provider"
+        Self::serve(true).await
+    }
+
+    /// One that answers HTTP in the clear, as a wrong host might.
+    pub async fn in_the_clear() -> ProviderApi {
+        Self::serve(false).await
+    }
+
+    async fn serve(tls: bool) -> ProviderApi {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn answer(mut s: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin, seen: &Mutex<Vec<(String, String)>>, raw: Option<&Mutex<Vec<u8>>>) {
+            let mut got = vec![];
+            let mut b = [0u8; 4096];
+            while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = match s.read(&mut b).await {
+                    Ok(n) if n > 0 => n,
+                    _ => return,
+                };
+                got.extend_from_slice(&b[..n]);
+                if let Some(r) = raw {
+                    r.lock().unwrap().extend_from_slice(&b[..n]);
+                }
+                // What is not HTTP is answered as an HTTP server does.
+                if !got[0].is_ascii_uppercase() {
+                    let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    return;
+                }
+            }
+            let head = String::from_utf8_lossy(&got).to_string();
+            let path = head.split_whitespace().nth(1).unwrap_or_default().to_string();
+            let auth = head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("authorization")).map(|(_, v)| v.trim().to_string())).unwrap_or_default();
+            seen.lock().unwrap().push((path, auth));
+            let body = "hello from the provider";
+            let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+            let _ = s.shutdown().await;
         }
-        let seen = Arc::new(Mutex::new(vec![]));
+        let ca = Arc::new(TestCa::new("A CA standing in for a provider's (test)"));
+        let acceptor = ca.acceptor("127.0.0.1");
+        let (seen, raw): (Arc<Mutex<Vec<(String, String)>>>, Arc<Mutex<Vec<u8>>>) = Default::default();
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let host = l.local_addr().unwrap().to_string();
-        let app = Router::new().fallback(answer).with_state(seen.clone());
-        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-        ProviderApi { host, seen }
+        let (s2, r2) = (seen.clone(), raw.clone());
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = l.accept().await {
+                let (acceptor, seen, raw) = (acceptor.clone(), s2.clone(), r2.clone());
+                tokio::spawn(async move {
+                    if !tls {
+                        return answer(tcp, &seen, Some(&raw)).await;
+                    }
+                    let mut first = [0u8; 4096];
+                    let n = tcp.peek(&mut first).await.unwrap_or(0);
+                    raw.lock().unwrap().extend_from_slice(&first[..n]);
+                    if let Ok(s) = acceptor.accept(tcp).await {
+                        answer(s, &seen, None).await;
+                    }
+                });
+            }
+        });
+        ProviderApi { host, seen, raw, ca }
     }
 }
 
@@ -146,7 +242,7 @@ pub struct StandInGmail {
     pub seen: Arc<Mutex<Vec<GmailRequest>>>,
     /// The next answer, instead of Gmail's usual one: status, headers, body.
     pub next: Arc<Mutex<Option<(u16, String, String)>>>,
-    _dir: tempfile::TempDir,
+    _ca: TestCa,
 }
 
 impl StandInGmail {
@@ -157,24 +253,8 @@ impl StandInGmail {
     /// One whose mailbox holds `drafts` drafts already (`d1`, ...), as if
     /// the person had written them.
     pub async fn with_drafts(drafts: usize) -> StandInGmail {
-        let dir = tempfile::tempdir().unwrap();
-        let mut p = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        p.distinguished_name.push(rcgen::DnType::CommonName, "A CA standing in for Google's (test)");
-        let ca_key = rcgen::KeyPair::generate().unwrap();
-        let ca = p.self_signed(&ca_key).unwrap();
-        let key = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["gmail.googleapis.com".to_string()]).unwrap().signed_by(&key, &ca, &ca_key).unwrap();
-        let root = dir.path().join("root.der");
-        std::fs::write(&root, ca.der()).unwrap();
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let tls = rustls::ServerConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert.der().clone()], rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()))
-            .unwrap();
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+        let ca = TestCa::new("A CA standing in for Google's (test)");
+        let (acceptor, root) = (ca.acceptor("gmail.googleapis.com"), ca.root.clone());
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap().to_string();
         let seen: Arc<Mutex<Vec<GmailRequest>>> = Arc::default();
@@ -196,7 +276,7 @@ impl StandInGmail {
                 });
             }
         });
-        StandInGmail { addr, root, seen, next, _dir: dir }
+        StandInGmail { addr, root, seen, next, _ca: ca }
     }
 
     pub fn requests(&self) -> Vec<GmailRequest> {

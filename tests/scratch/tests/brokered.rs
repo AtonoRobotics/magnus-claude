@@ -1,8 +1,9 @@
 //! Brokered connectors run on the appliance (connectors spec, Brokered API
 //! connectors), each person's instance in its own Firecracker microVM
 //! booted from the server image its manifest names by digest: the test
-//! server (`brokered/test-server`), built from this checkout. A local host
-//! stands in for the provider's API, and FakeOAuthApp for the provider's
+//! server (`brokered/test-server`), built from this checkout. A local HTTPS
+//! host, with a certificate from the test's own CA, stands in for the
+//! provider's API, and FakeOAuthApp for the provider's
 //! authorization server (the real ones need an account there; the contract
 //! tests use one).
 
@@ -75,7 +76,11 @@ async fn each_person_has_their_own_microvm_called_with_their_current_token_reach
     let image = image("magnus-brokered-test");
     // Longer than the steps of one run are apart, on a busy test machine.
     let idle_s = 20;
-    reconfigure(&mut app, |cfg| configure(cfg, &image, idle_s, "testapp", std::slice::from_ref(&api.host), &provider.base, TOOLS)).await;
+    reconfigure(&mut app, |cfg| {
+        configure(cfg, &image, idle_s, "testapp", std::slice::from_ref(&api.host), &provider.base, TOOLS);
+        trust(cfg, &api.ca);
+    })
+    .await;
     let (alice, carol) = (app.api("alice"), app.api("carol"));
     sign_in(&alice).await;
     sign_in(&carol).await;
@@ -85,8 +90,10 @@ async fn each_person_has_their_own_microvm_called_with_their_current_token_reach
     run(&carol, "Check my inbox").await;
     assert!(running(&app.state_dir) >= 1, "carol's microVM");
 
-    // Each call reached the provider with the person's own token, the one
-    // current then: never a refresh token, never one call's for another.
+    // Each call reached the provider over TLS with the person's own token,
+    // the one current then: never a refresh token, never one call's for
+    // another.
+    assert!(!String::from_utf8_lossy(&api.raw.lock().unwrap()).contains("Bearer"), "a token went out in the clear");
     let seen = api.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 4, "{seen:?}");
     let tokens: Vec<String> = seen.iter().map(|(path, auth)| {
@@ -129,6 +136,49 @@ async fn each_person_has_their_own_microvm_called_with_their_current_token_reach
     assert_ne!(instance(&rd[1]), instance(&ra[1]), "the stopped microVM answered again");
 }
 
+/// A connector reaches its provider only over TLS whose certificate it has
+/// checked: a manifest host that answers in the clear, or with a
+/// certificate from a CA the appliance does not trust, is sent nothing, its
+/// token least of all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connector_sends_its_token_only_over_tls_it_has_checked() {
+    let (clear, untrusted) = (ProviderApi::in_the_clear().await, ProviderApi::start().await);
+    let (h1, h2) = (clear.host.clone(), untrusted.host.clone());
+    let m = FakeModel::start(script(move |c| {
+        let (h1, h2) = (h1.clone(), h2.clone());
+        async move {
+            match c.turn() {
+                0 => contract_unchecked("read the inbox", "the inbox is read"),
+                1 => tool("testapp__fetch", json!({ "host": h1, "path": "/inbox" })),
+                2 => tool("testapp__fetch", json!({ "host": h2, "path": "/inbox" })),
+                _ => complete("done"),
+            }
+        }
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let provider = FakeOAuthApp::provider_api(3600).await;
+    let image = image("magnus-brokered-test");
+    // The appliance trusts a CA, but not the one `untrusted` was given.
+    let other = TestCa::new("Another test CA");
+    reconfigure(&mut app, |cfg| {
+        configure(cfg, &image, 3600, "testapp", &[clear.host.clone(), untrusted.host.clone()], &provider.base, TOOLS);
+        trust(cfg, &other);
+    })
+    .await;
+    let alice = app.api("alice");
+    sign_in(&alice).await;
+    run(&alice, "Read my inbox").await;
+    let r = results(&m, "Read my inbox");
+    for (i, host) in [(1, &clear), (2, &untrusted)] {
+        assert!(r[i].contains("could not reach 127.0.0.1 securely"), "{r:?}");
+        assert!(host.seen.lock().unwrap().is_empty(), "a request reached {}", host.host);
+        assert!(!String::from_utf8_lossy(&host.raw.lock().unwrap()).contains("Bearer"), "a token went out in the clear");
+    }
+    // Something did reach each: the TLS hello, and nothing after it.
+    assert!(!clear.raw.lock().unwrap().is_empty() && !untrusted.raw.lock().unwrap().is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn disconnecting_erasing_and_the_kill_switch_stop_the_persons_microvm() {
     let api = ProviderApi::start().await;
@@ -151,7 +201,11 @@ async fn disconnecting_erasing_and_the_kill_switch_stop_the_persons_microvm() {
     let provider = FakeOAuthApp::provider_api(3600).await;
     let image = image("magnus-brokered-test");
     // Never idle here: what stops them is what is tested.
-    reconfigure(&mut app, |cfg| configure(cfg, &image, 3600, "testapp", std::slice::from_ref(&api.host), &provider.base, TOOLS)).await;
+    reconfigure(&mut app, |cfg| {
+        configure(cfg, &image, 3600, "testapp", std::slice::from_ref(&api.host), &provider.base, TOOLS);
+        trust(cfg, &api.ca);
+    })
+    .await;
     let (st, v) = kc.app_sign_in(&app, "carol").await;
     assert_eq!(st, 200, "{v}");
     let mut carol = app.api("carol");
