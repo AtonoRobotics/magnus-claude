@@ -248,10 +248,10 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
     assert_eq!(st, 200, "{v}");
     still_hers(1, "bob's version undone, her task in the trash").await;
 
-    // Removed, then rolled back to the version put back above (its 2:
-    // Bob's new document began again at 1).
+    // Removed, then rolled back to the version put back above (its 3:
+    // Alice's was 1, Bob's 2).
     assert_eq!(remove().await.0, 200);
-    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/rollback", json!({ "sub": "admin-1", "path": "/people/finance.md", "version": 2 })).await;
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/rollback", json!({ "sub": "admin-1", "path": "/people/finance.md", "version": 3 })).await;
     assert_eq!(st, 200, "{v}");
     still_hers(2, "rolled back after removal").await;
 
@@ -273,4 +273,34 @@ async fn a_version_put_back_keeps_the_taint_and_the_reader_it_was_written_with()
     let (st, v) = control(&app, "POST", "/v1/admin/knowledge/revert", json!({ "sub": "admin-1", "seqs": [fresh] })).await;
     assert_eq!(st, 200, "{v}");
     still_hers(4, "an admin's clean version undone").await;
+}
+
+/// Each version of a document has its own number: writes at once never
+/// share one, and a document removed and written again counts on, so each
+/// earlier version is still reached by its number.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_version_of_a_document_has_its_own_number_through_removal_and_writes_at_once() {
+    let m = FakeModel::start(script(|_| async move { complete("done") })).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let area = json!({ "type": "Area", "title": "Support", "owner": "human:alice", "ask_channel": "#support", "scope": "org", "sources": [{ "resource": "human:alice" }] });
+    let write = |n: u64| control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": "/people/support.md", "frontmatter": area, "body": format!("Support answers within {n} hours.") }));
+    let (st, v) = write(1).await;
+    assert_eq!((st, &v["version"]), (200, &json!(1)), "{v}");
+    let (st, v) = control(&app, "DELETE", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": "/people/support.md" })).await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = write(2).await;
+    assert_eq!((st, &v["version"]), (200, &json!(2)), "written again after its removal, it numbered from 1: {v}");
+    let (st, one) = control(&app, "GET", "/v1/admin/knowledge/version?path=/people/support.md&version=1", Value::Null).await;
+    assert_eq!(st, 200, "{one}");
+    assert!(one["body"].as_str().is_some_and(|b| b.contains("within 1 hours")), "version 1 is not the first written: {one}");
+
+    let at_once = futures::future::join_all((3..11).map(write)).await;
+    let mut versions: Vec<u64> = at_once.iter().map(|(st, v)| {
+        assert_eq!(*st, 200, "{v}");
+        v["version"].as_u64().unwrap()
+    }).collect();
+    versions.sort();
+    assert_eq!(versions, (3..11).collect::<Vec<u64>>(), "writes at once shared a number");
+    let (_, d) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/people/support.md", Value::Null).await;
+    assert_eq!(d["versions"].as_array().map(|v| v.len()), Some(9), "{d}");
 }
