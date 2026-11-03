@@ -85,59 +85,96 @@ fn link_ok(l: &str) -> bool {
 /// Every Markdown link target in a body: inline, and each reference
 /// definition's.
 pub fn links(body: &str) -> Vec<String> {
-    let mut out = vec![];
-    for line in body.lines() {
-        if let Some((_, t)) = definition(line) {
-            out.push(t);
-        }
-        out.extend(spans(line).into_iter().filter_map(|(_, _, l)| match l {
-            Link::Inline(t) => Some(t),
-            Link::Ref(_) => None,
-        }));
-    }
+    let mut out: Vec<String> = body.lines().filter_map(definition).map(|(_, t)| t).collect();
+    out.extend(spans(body).into_iter().filter_map(|(_, _, l)| match l {
+        Link::Inline(t) => Some(t),
+        Link::Ref(_) => None,
+    }));
     out
 }
 
-/// A link written in a line: to its target, or by a reference's label.
+/// A link written in a body: to its target, or by a reference's label.
 enum Link {
     Inline(String),
     Ref(String),
 }
 
-/// Each link in a line with where it is: `[text](target "title")`,
+/// Each link in a body with where it is: `[text](target "title")`,
 /// `[text][label]`, `[label][]` and `[label]` (a reference only where the
-/// label is defined).
-fn spans(line: &str) -> Vec<(usize, usize, Link)> {
+/// label is defined). Brackets nest, so a label's own brackets do not end
+/// it, and a destination may begin on the next line.
+fn spans(body: &str) -> Vec<(usize, usize, Link)> {
+    let b = body.as_bytes();
     let mut out = vec![];
-    let mut at = 0;
-    while let Some(i) = line[at..].find(']').map(|i| at + i) {
-        let Some(open) = line[at..i].rfind('[').map(|o| at + o) else {
-            at = i + 1;
-            continue;
-        };
-        let rest = &line[i + 1..];
-        let (end, link) = if let Some(j) = rest.strip_prefix('(').and_then(|r| r.find(')')) {
-            let target = rest[1..j + 1].split_whitespace().next().unwrap_or_default().trim_start_matches('<').trim_end_matches('>');
-            (i + j + 3, Link::Inline(target.into()))
-        } else if let Some(j) = rest.strip_prefix('[').and_then(|r| r.find(']')) {
-            let label = if j == 0 { &line[open + 1..i] } else { &rest[1..j + 1] };
-            (i + j + 3, Link::Ref(label.to_lowercase()))
-        } else if rest.starts_with(':') {
-            at = i + 1;
-            continue;
-        } else {
-            (i + 1, Link::Ref(line[open + 1..i].to_lowercase()))
-        };
-        out.push((open, end, link));
-        at = end;
+    let mut open: Vec<usize> = vec![];
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'[' => open.push(i),
+            b']' => {
+                if let Some(start) = open.pop() {
+                    let label = &body[start + 1..i];
+                    match b.get(i + 1) {
+                        Some(b'(') => {
+                            if let Some(close) = closing(b, i + 1) {
+                                let target = body[i + 2..close].split_whitespace().next().unwrap_or_default().trim_start_matches('<').trim_end_matches('>');
+                                out.push((start, close + 1, Link::Inline(target.into())));
+                                i = close + 1;
+                                continue;
+                            }
+                        }
+                        Some(b'[') => {
+                            if let Some(j) = body[i + 2..].find(']').filter(|&j| !body[i + 2..i + 2 + j].contains('[')) {
+                                let r = &body[i + 2..i + 2 + j];
+                                out.push((start, i + 3 + j, Link::Ref(if r.is_empty() { label } else { r }.to_lowercase())));
+                                i += 3 + j;
+                                continue;
+                            }
+                        }
+                        Some(b':') => {}
+                        _ => out.push((start, i + 1, Link::Ref(label.to_lowercase()))),
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
     }
     out
 }
 
-/// A reference definition, `[label]: target`.
+/// The `)` that closes the `(` at `at`, parentheses nesting.
+fn closing(b: &[u8], at: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (k, &c) in b.iter().enumerate().skip(at) {
+        match c {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A reference definition, `[label]: target`: the line starts with it,
+/// and the label holds no brackets.
 fn definition(line: &str) -> Option<(String, String)> {
-    let (label, after) = line.trim_start().strip_prefix('[')?.split_once("]:")?;
-    let target = after.split_whitespace().next()?.trim_start_matches('<').trim_end_matches('>');
+    let rest = line.trim_start().strip_prefix('[')?;
+    let end = rest.find(']')?;
+    let label = &rest[..end];
+    if label.is_empty() || label.contains('[') {
+        return None;
+    }
+    let target = rest[end + 1..].strip_prefix(':')?.split_whitespace().next()?.trim_start_matches('<').trim_end_matches('>');
     Some((label.to_lowercase(), target.into()))
 }
 
@@ -147,35 +184,39 @@ fn definition(line: &str) -> Option<(String, String)> {
 pub fn strip_hidden(body: &str, hidden: impl Fn(&str) -> bool) -> String {
     let defs: HashMap<String, String> = body.lines().filter_map(definition).collect();
     let gone = |t: &str| t.starts_with('/') && hidden(t);
-    let mut out = vec![];
-    for line in body.lines() {
-        if let Some((_, t)) = definition(line) {
-            if !gone(&t) {
-                out.push(line.to_string());
-            }
-            continue;
-        }
-        let found: Vec<(usize, usize, bool)> = spans(line)
-            .into_iter()
-            .filter_map(|(s, e, l)| match l {
-                Link::Inline(t) => Some(t),
-                Link::Ref(r) => defs.get(&r).cloned(),
-            }.filter(|t| t.starts_with('/')).map(|t| (s, e, gone(&t))))
-            .collect();
+    // Each link to a bundle path: where it is, and whether it is hidden.
+    let found: Vec<(usize, usize, bool)> = spans(body)
+        .into_iter()
+        .filter_map(|(s, e, l)| match l {
+            Link::Inline(t) => Some(t),
+            Link::Ref(r) => defs.get(&r).cloned(),
+        }.filter(|t| t.starts_with('/')).map(|t| (s, e, gone(&t))))
+        .collect();
+    let mut cut: Vec<(usize, usize)> = found.iter().filter(|f| f.2).map(|f| (f.0, f.1)).collect();
+    let mut at = 0;
+    for line in body.split_inclusive('\n') {
+        let (s, e) = (at, at + line.len());
+        at = e;
+        let here: Vec<_> = found.iter().filter(|f| f.0 >= s && f.0 < e).collect();
         let bullet = line.trim_start().starts_with("* ") || line.trim_start().starts_with("- ");
-        if bullet && !found.is_empty() && found.iter().all(|f| f.2) {
+        if definition(line).is_some_and(|(_, t)| gone(&t)) || (bullet && !here.is_empty() && here.iter().all(|f| f.2)) {
+            cut.push((s, here.iter().map(|f| f.1).fold(e, usize::max)));
+        }
+    }
+    cut.sort();
+    let (mut out, mut from) = (String::new(), 0);
+    for (s, e) in cut {
+        if e <= from {
             continue;
         }
-        let mut l = line.to_string();
-        for &(s, e, _) in found.iter().rev().filter(|f| f.2) {
-            l.replace_range(s..e, "");
-            if l[..s].ends_with(' ') && l[s..].starts_with(' ') {
-                l.remove(s);
-            }
+        out.push_str(&body[from..s.max(from)]);
+        from = e;
+        if out.ends_with(' ') && body[from..].starts_with(' ') {
+            from += 1;
         }
-        out.push(l);
     }
-    out.join("\n")
+    out.push_str(&body[from..]);
+    out
 }
 
 /// Check a document before it is stored. `type_doc` gives an entity's type
@@ -551,5 +592,20 @@ mod tests {
         for bad in ["alice", "human:", "robot:x", "magnus/", "/0.2", "magnus 0.2/x"] {
             assert!(!actor_ok(bad), "{bad}");
         }
+    }
+
+    /// A hidden link is found whatever its label holds, wherever its
+    /// destination begins, and a line is a reference definition only when
+    /// it starts with one.
+    #[test]
+    fn a_hidden_link_leaves_whatever_its_label_or_line_holds() {
+        let hidden = |t: &str| t == "/people/finance.md";
+        assert_eq!(strip_hidden("Pay: [Carol [finance]](/people/finance.md).", hidden), "Pay: .");
+        let l = strip_hidden("[Carol](/people/finance.md) and [owner]: human:alice", hidden);
+        assert!(!l.contains("Carol") && !l.contains("finance"), "{l}");
+        assert_eq!(strip_hidden("See [pay](\n/people/finance.md) now.", hidden), "See now.");
+        assert_eq!(strip_hidden("Bonuses are in [the payroll][pay].\n\n[pay]: /people/finance.md\n", hidden), "Bonuses are in .\n\n");
+        assert_eq!(links("[relative](\nrelative.md)"), vec!["relative.md"]);
+        assert!(validate("/people/x.md", &json!({ "type": "Area", "title": "X", "owner": "human:a", "ask_channel": "#x", "scope": "org" }), "[relative](\nrelative.md)", customer_type).is_err());
     }
 }
