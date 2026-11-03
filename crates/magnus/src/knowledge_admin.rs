@@ -213,10 +213,10 @@ impl Kernel {
                 sources.push(s);
             }
         }
-        let version = self.read(|s| s.bundle.get(path).map(|d| d.version())).unwrap_or(0) + 1;
         let ev = Ev::BundleWritten {
             path: path.into(),
-            version,
+            // Numbered by `emit`, under the write lock.
+            version: 0,
             doc_kind: kind.into(),
             scope: "org".into(),
             owner_user: None,
@@ -228,9 +228,9 @@ impl Kernel {
             frontmatter: fm.clone(),
             body: body.into(),
         };
-        self.emit(&format!("admin:{sub}"), ev).await.map_err(failed)?;
+        let e = self.emit(&format!("admin:{sub}"), ev).await.map_err(failed)?;
         // The writer stays the person whose run read its sources (K2).
-        Ok(version)
+        Ok(e.ev.bundle_version())
     }
 
     /// Remove an org document. A type in use (it has entities, or another

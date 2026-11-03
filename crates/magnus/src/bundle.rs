@@ -376,7 +376,7 @@ impl Kernel {
         if user.as_deref().is_some_and(|u| u != person) {
             return Err(format!("{path}: another person's document"));
         }
-        let (current, existing) = self.read(|s| (s.bundle.get(path).map(|d| d.version()), s.bundle.get(path).cloned()));
+        let existing = self.read(|s| s.bundle.get(path).cloned());
         if existing.as_ref().is_some_and(|d| !self.bundle_visible(person, d)) {
             return Err(format!("{path}: a document you cannot see"));
         }
@@ -404,10 +404,10 @@ impl Kernel {
                 sources.push(s);
             }
         }
-        let version = current.unwrap_or(0) + 1;
         let ev = crate::events::Ev::BundleWritten {
             path: path.into(),
-            version,
+            // Numbered by `emit`, under the write lock.
+            version: 0,
             doc_kind: kind.into(),
             scope: if user.is_some() { "user".into() } else { "org".into() },
             owner_user: user,
@@ -419,8 +419,8 @@ impl Kernel {
             frontmatter: fm.clone(),
             body: body.into(),
         };
-        self.emit("kernel", ev).await.map_err(|e| format!("{e:#}"))?;
-        Ok(version)
+        let e = self.emit("kernel", ev).await.map_err(|e| format!("{e:#}"))?;
+        Ok(e.ev.bundle_version())
     }
 
     /// Documents `person` can see whose path, title, description or body
