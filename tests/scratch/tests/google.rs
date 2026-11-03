@@ -11,7 +11,7 @@ use magnus_invariants::*;
 use serde_json::{json, Value};
 
 const SERVERS: [(&str, &str, &str); 4] = [
-    ("google-gmail", "Gmail", "https://www.googleapis.com/auth/gmail.readonly"),
+    ("google-gmail", "Gmail", "https://www.googleapis.com/auth/gmail.modify"),
     ("google-calendar", "Google Calendar", "https://www.googleapis.com/auth/calendar.events"),
     ("google-drive", "Google Drive", "https://www.googleapis.com/auth/drive.readonly"),
     ("google-chat", "Google Chat", "https://www.googleapis.com/auth/chat.messages.readonly"),
@@ -79,14 +79,16 @@ async fn google_s_connectors_are_in_every_library_already_set_up_and_sign_in_at_
     }
 }
 
-/// Tool drift (connectors spec, Required tests): each Google manifest names
-/// exactly the tools its live server lists, so none is hidden for want of a
-/// class and none is classed that does not exist. The servers list their
-/// tools without a sign-in.
+/// Tool drift (connectors spec, Required tests): each remote Google
+/// manifest names exactly the tools its live server lists, so none is
+/// hidden for want of a class and none is classed that does not exist. The
+/// servers list their tools without a sign-in. Gmail is brokered: its
+/// image's tools are checked against its manifest where the image is built
+/// (`every_tool_is_classed_in_the_manifest`).
 #[tokio::test(flavor = "multi_thread")]
 async fn each_google_manifest_names_exactly_the_tools_its_live_server_lists() {
     let http = reqwest::Client::new();
-    for name in ["google-gmail", "google-calendar", "google-drive", "google-chat"] {
+    for name in ["google-calendar", "google-drive", "google-chat"] {
         let path = magnus_invariants::appliance::workspace_root().join(format!("catalog/{name}.toml"));
         let m: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let endpoint = m["endpoint"].as_str().unwrap();
@@ -122,7 +124,7 @@ async fn a_person_s_card_for_gmail_says_what_magnus_can_do_in_plain_words() {
     let (st, c) = app.api("carol").get("/v1/connectors/google-gmail").await;
     assert!(st.is_success(), "{c}");
     assert_eq!((c["title"].as_str(), c["state"].as_str()), (Some("Gmail"), Some("available")), "{c}");
-    assert_eq!(c["summary"], "Magnus can search and read your email, write drafts for you to send, and file, label or trash messages.", "{c}");
+    assert_eq!(c["summary"], "Magnus can search and read your email, write drafts and send one when you allow it, and file, label or trash messages.", "{c}");
     let allows: Vec<String> = c["allows"].as_array().unwrap().iter().map(|l| l.as_str().unwrap().to_string()).collect();
     assert!(allows[0].starts_with("Reads: ") && allows[0].contains("search threads"), "{allows:?}");
     assert!(allows.iter().any(|l| l.starts_with("Changes that can be undone: ") && l.contains("create draft")), "{allows:?}");
