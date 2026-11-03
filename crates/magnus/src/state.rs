@@ -1676,8 +1676,11 @@ impl State {
                     }
                 }
             }
+            // A run ends once: the first of these stands, so a cancel that
+            // loses the race to the run's own end changes nothing, nor does
+            // the run's end after a cancel.
             Ev::Completed { run, summary, view, spoken } => {
-                if let Some(r) = self.runs.get_mut(run) {
+                if let Some(r) = self.runs.get_mut(run).filter(|r| !r.status.terminal()) {
                     r.status = Status::Completed;
                     r.summary = Some(summary.clone());
                     r.outcome_view = view.clone();
@@ -1688,7 +1691,7 @@ impl State {
                 }
             }
             Ev::Failed { run, reason, .. } => {
-                if let Some(r) = self.runs.get_mut(run) {
+                if let Some(r) = self.runs.get_mut(run).filter(|r| !r.status.terminal()) {
                     r.status = Status::Failed;
                     r.summary = Some(reason.clone());
                     r.reason = None;
@@ -1697,7 +1700,7 @@ impl State {
                 }
             }
             Ev::Cancelled { run } => {
-                if let Some(r) = self.runs.get_mut(run) {
+                if let Some(r) = self.runs.get_mut(run).filter(|r| !r.status.terminal()) {
                     r.status = Status::Cancelled;
                     r.reason = None;
                     r.ended_at = Some(e.at);
@@ -1943,5 +1946,26 @@ mod tests {
         s.apply(&ev(4, "person:alice", json!({ "kind": "item_resolved", "id": "i1", "decision": "dismiss" })));
         assert_eq!(s.runs["r1"].waiting_item, None, "the run still waits on a card put away");
         assert_eq!(s.runs["r1"].reason.as_deref(), Some("budget"), "dismissing it resumed nothing");
+    }
+
+    /// A run ends once: the first of completed, failed and cancelled stands.
+    /// A cancel that loses the race to the run's own end does not turn a
+    /// finished task into a cancelled one, nor its end into a cancel.
+    #[test]
+    fn a_run_ends_once_the_first_end_stands() {
+        let mut s = State::default();
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        for (seq, t) in [(1, "1"), (2, "2")] {
+            s.apply(&ev(seq, "person:alice", json!({ "kind": "task_created", "task": format!("t{t}"), "run": format!("r{t}"), "person": "alice", "text": "Say hi.", "config": config })));
+        }
+        s.apply(&ev(3, "kernel", json!({ "kind": "completed", "run": "r1", "summary": "Said hi." })));
+        let ended = s.runs["r1"].ended_at;
+        s.apply(&ev(4, "person:alice", json!({ "kind": "cancelled", "run": "r1" })));
+        assert_eq!(s.runs["r1"].status, super::Status::Completed, "a cancel after the run completed made it cancelled");
+        assert_eq!((s.runs["r1"].summary.as_deref(), s.runs["r1"].ended_at), (Some("Said hi."), ended));
+        s.apply(&ev(5, "person:alice", json!({ "kind": "cancelled", "run": "r2" })));
+        s.apply(&ev(6, "kernel", json!({ "kind": "failed", "run": "r2", "reason": "stopped", "by": "kernel" })));
+        assert_eq!(s.runs["r2"].status, super::Status::Cancelled, "the run's own end after a cancel made it failed");
+        assert_eq!(s.runs["r2"].summary, None);
     }
 }
