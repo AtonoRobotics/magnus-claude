@@ -1005,3 +1005,9 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Correction to the Modules entry above ("owner's ruling 22 keeps 'module' for these"): question 22 is open, not ruled. Install and remove still answer 409, as the owner's call rather than a ruling, in the tracker and in `admin/ops.rs`.
 - PROGRESS.md said org context steps 2 to 7b were committed on their branches; no branch has them, and the plan has no 7b. It now says steps 2 to 11, with only step 1 built.
 - Documents and a comment only: no behaviour changes, so no test.
+
+## A stable type is changed only by an admin (2026-11-03, `stable-types`)
+
+- Found by the review of master against the specs (2026-11-02). The org context build spec, Tools, `bundle.write`: "A type document moving to stable requires admin approval, because types become Cedar entities". The kernel refused Magnus making a draft type stable, but once an admin had, Magnus's next write could keep it stable with new identity keys or relations, or put it back to draft: either changes a Cedar entity no admin approved.
+- Now Magnus's write to a stable type is refused with the reason, whatever status it asks for. Changing, deprecating or reopening a stable type is the console's (admin console spec, Knowledge › Ontology).
+- Test: `a_type_an_admin_made_stable_is_changed_by_no_run_of_magnus` (org_context_bundle.rs): an admin makes the customer type stable; Magnus's rewrite with a third identity key and its rewrite as draft are both refused, and the type stays version 1, stable, with its two keys. On master the rewrite is version 2.

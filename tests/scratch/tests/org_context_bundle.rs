@@ -388,3 +388,36 @@ async fn an_entity_moved_by_merging_types_keeps_its_taint_and_its_reader() {
     assert!(d["sources"].as_array().unwrap().iter().any(|s| s == "private:library"), "the move lost what its run read: {d}");
 }
 
+
+/// A stable type is a Cedar entity an admin approved, so Magnus changes it
+/// in no way: neither rewritten as stable nor put back to draft. Only an
+/// admin's version changes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_type_an_admin_made_stable_is_changed_by_no_run_of_magnus() {
+    const REWRITES: &str = "Tidy the customer type in the bundle.";
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body.to_string().contains(REWRITES) {
+            return Reply::Text(String::new());
+        }
+        let mut wider = customer("stable");
+        wider["frontmatter"]["identity_keys"] = json!(["hubspot_id", "domain", "vat"]);
+        let steps = [contract_unchecked("tidy the type", "it is tidied"), tool("bundle_write", wider), tool("bundle_write", customer("draft")), complete("Tidied.")];
+        steps.get(c.turn()).cloned().unwrap_or_else(|| Reply::Text(String::new()))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let c = customer("stable");
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": "/types/customer.md", "frontmatter": c["frontmatter"], "body": c["body"] })).await;
+    assert_eq!(st, 200, "{v}");
+
+    let alice = app.api("alice");
+    let t = alice.submit(REWRITES).await;
+    alice.wait_item(&t, "review").await;
+    for turn in [2, 3] {
+        let r = m.requests().into_iter().find(|c| c.body.to_string().contains(REWRITES) && c.turn() == turn).map(|c| c.last_results()[0].clone()).unwrap();
+        assert!(r.is_error && r.text.contains("stable type changes only"), "Magnus changed a stable type (turn {turn}): {}", r.text);
+    }
+    let (_, d) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/types/customer.md", Value::Null).await;
+    assert_eq!((d["version"].as_u64(), d["frontmatter"]["status"].as_str()), (Some(1), Some("stable")), "{d}");
+    assert_eq!(d["frontmatter"]["identity_keys"], json!(["hubspot_id", "domain"]), "{d}");
+}
