@@ -76,14 +76,15 @@ impl Vault {
         let key = std::fs::read(&key_path).context("read vault key")?;
         anyhow::ensure!(key.len() == 32, "vault key is corrupt");
         let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| anyhow::anyhow!("vault key"))?;
-        let v = Vault { dir, cipher, lock: Mutex::new(()), sealed: Default::default() };
-        v.bind_unbound()?;
-        Ok(v)
+        Ok(Vault { dir, cipher, lock: Mutex::new(()), sealed: Default::default() })
     }
 
     /// Entries written before each was bound to its name (or restored from
-    /// a backup of then), sealed again bound to it.
-    fn bind_unbound(&self) -> Result<()> {
+    /// a backup of then), sealed again bound to it. Only the kernel that
+    /// owns the appliance does this: opening the vault changes nothing, so
+    /// a new release's check before an update leaves the running one's
+    /// vault as it is.
+    pub fn bind_unbound(&self) -> Result<()> {
         let _g = self.lock.lock().unwrap();
         let mut all = self.read_all()?;
         let unbound: Vec<String> = all.iter().filter(|(_, v)| !v.starts_with(BOUND)).map(|(n, _)| n.clone()).collect();
@@ -95,6 +96,31 @@ impl Vault {
             anyhow::ensure!(blob.len() > 24, "vault entry {n} is corrupt");
             let pt = self.cipher.decrypt(XNonce::from_slice(&blob[..24]), &blob[24..]).map_err(|_| anyhow::anyhow!("vault entry {n} does not decrypt"))?;
             all.insert(n.clone(), self.seal_as(&n, &pt)?);
+        }
+        write_private(&self.path(), &serde_json::to_vec(&all)?)
+    }
+
+    /// Every entry sealed again as releases before binding read it, for
+    /// going back to an earlier release: the release gone back to binds
+    /// them again when it starts, if it knows how. The vault stays sealed
+    /// until then, so nothing is stored bound in between.
+    pub fn unbind_all(&self) -> Result<()> {
+        let _g = self.lock.lock().unwrap();
+        self.sealed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut all = self.read_all()?;
+        for (n, v) in all.iter_mut() {
+            let Some(b64) = v.strip_prefix(BOUND) else { continue };
+            let blob = base64::engine::general_purpose::STANDARD.decode(b64)?;
+            anyhow::ensure!(blob.len() > 24, "vault entry {n} is corrupt");
+            let pt = self
+                .cipher
+                .decrypt(XNonce::from_slice(&blob[..24]), Payload { msg: &blob[24..], aad: n.as_bytes() })
+                .map_err(|_| anyhow::anyhow!("vault entry {n} does not decrypt"))?;
+            let mut nonce = [0u8; 24];
+            rand::rngs::OsRng.fill_bytes(&mut nonce);
+            let mut out = nonce.to_vec();
+            out.extend(self.cipher.encrypt(XNonce::from_slice(&nonce), pt.as_slice()).map_err(|_| anyhow::anyhow!("encrypt"))?);
+            *v = base64::engine::general_purpose::STANDARD.encode(out);
         }
         write_private(&self.path(), &serde_json::to_vec(&all)?)
     }
@@ -272,19 +298,48 @@ mod tests {
         assert_eq!(v.get("connector_calendar__bob").unwrap().unwrap().expose(), "bob-token");
     }
 
-    #[test]
-    fn an_entry_from_before_binding_is_bound_to_its_name_on_opening() {
-        let dir = tempfile::tempdir().unwrap();
-        let v = Vault::open(dir.path()).unwrap();
-        // As written before entries were bound: no associated data, no mark.
+    /// An entry as releases before binding wrote it: no associated data, no mark.
+    fn legacy(v: &Vault, value: &[u8]) -> String {
         let mut nonce = [0u8; 24];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
         let mut blob = nonce.to_vec();
-        blob.extend(v.cipher.encrypt(XNonce::from_slice(&nonce), b"old-token".as_slice()).unwrap());
-        let all = BTreeMap::from([("connector_calendar__alice".to_string(), base64::engine::general_purpose::STANDARD.encode(blob))]);
-        write_private(&dir.path().join("vault/secrets.json"), &serde_json::to_vec(&all).unwrap()).unwrap();
+        blob.extend(v.cipher.encrypt(XNonce::from_slice(&nonce), value).unwrap());
+        base64::engine::general_purpose::STANDARD.encode(blob)
+    }
+
+    /// How releases before binding read an entry.
+    fn read_as_before(v: &Vault, stored: &str) -> Option<String> {
+        let blob = base64::engine::general_purpose::STANDARD.decode(stored).ok()?;
+        v.cipher.decrypt(XNonce::from_slice(&blob[..24]), &blob[24..]).ok().and_then(|p| String::from_utf8(p).ok())
+    }
+
+    #[test]
+    fn an_entry_from_before_binding_is_bound_only_when_the_kernel_takes_the_vault() {
+        let dir = tempfile::tempdir().unwrap();
         let v = Vault::open(dir.path()).unwrap();
-        assert_eq!(v.get("connector_calendar__alice").unwrap().unwrap().expose(), "old-token");
-        assert!(stored(dir.path())["connector_calendar__alice"].starts_with(BOUND), "the old entry was not bound on opening");
+        let all = BTreeMap::from([("connector_calendar__alice".to_string(), legacy(&v, b"old-token"))]);
+        write_private(&dir.path().join("vault/secrets.json"), &serde_json::to_vec(&all).unwrap()).unwrap();
+        // A new release's check before an update opens the running release's vault.
+        let checked = Vault::open(dir.path()).unwrap();
+        assert_eq!(checked.names().unwrap(), vec!["connector_calendar__alice".to_string()]);
+        assert_eq!(read_as_before(&v, &stored(dir.path())["connector_calendar__alice"]).as_deref(), Some("old-token"), "opening the vault changed it under the running release");
+        let owned = Vault::open(dir.path()).unwrap();
+        owned.bind_unbound().unwrap();
+        assert_eq!(owned.get("connector_calendar__alice").unwrap().unwrap().expose(), "old-token");
+        assert!(stored(dir.path())["connector_calendar__alice"].starts_with(BOUND), "the old entry was not bound when the kernel took the vault");
+    }
+
+    #[test]
+    fn going_back_a_release_leaves_the_vault_as_the_earlier_release_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = Vault::open(dir.path()).unwrap();
+        v.put("connector_calendar__alice", "alice-token").unwrap();
+        v.unbind_all().unwrap();
+        assert_eq!(read_as_before(&v, &stored(dir.path())["connector_calendar__alice"]).as_deref(), Some("alice-token"));
+        assert!(v.put("connector_calendar__bob", "bob-token").is_err(), "a sign-in was stored bound after the vault was unbound for the earlier release");
+        // The release gone back to, when it binds, binds them again.
+        let again = Vault::open(dir.path()).unwrap();
+        again.bind_unbound().unwrap();
+        assert_eq!(again.get("connector_calendar__alice").unwrap().unwrap().expose(), "alice-token");
     }
 }

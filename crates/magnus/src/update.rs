@@ -210,6 +210,9 @@ pub fn roll_back_now(cfg: &Config, p: &Value, reason: &str) -> Result<()> {
     let dir = install_dir()?;
     let prev = sibling(&dir, ".prev");
     anyhow::ensure!(prev.is_dir(), "no earlier release to go back to");
+    // The release gone back to may be one from before the vault's entries
+    // were bound to their names: it reads them as it wrote them.
+    crate::vault::Vault::open(&cfg.appliance.state_dir)?.unbind_all()?;
     let failed = sibling(&dir, ".failed");
     swap(&dir, &prev, &failed)?;
     // The failed release stays as the one a rollback would reach.
@@ -336,6 +339,10 @@ impl Kernel {
         }
         let dir = install_dir()?;
         let r = started_as().and_then(|how| {
+            if rollback {
+                // As roll_back_now: the earlier release reads the vault as it wrote it.
+                self.vault.unbind_all()?;
+            }
             write_pending(&self.cfg, &json!({ "from": from, "to": to, "rollback": rollback, "owner": rollback, "reason": if rollback { "the owner went back one release" } else { "" }, "started_as": how }))?;
             put(&dir)?;
             Ok(how)
@@ -344,6 +351,7 @@ impl Kernel {
             Ok(how) => how,
             Err(e) => {
                 let _ = std::fs::remove_file(pending_path(&self.cfg));
+                self.rebind_after_failed_switch(rollback)?;
                 let reason = format!("{e:#}");
                 self.emit("kernel", Ev::UpdateFailed { to: to.into(), reason: reason.clone() }).await?;
                 self.resume_updated().await?;
@@ -355,10 +363,23 @@ impl Kernel {
         // Still this release, running: put its programs back, and say so.
         let _ = std::fs::remove_file(pending_path(&self.cfg));
         let undone = swap_with_prev(&dir);
+        self.rebind_after_failed_switch(rollback)?;
         let reason = format!("{e:#}{}", undone.err().map(|u| format!("; putting this release back failed too: {u:#}")).unwrap_or_default());
         self.emit("kernel", Ev::UpdateFailed { to: to.into(), reason: reason.clone() }).await?;
         self.resume_updated().await?;
         Ok(json!({ "status": "failed", "version": from, "latest": to, "reason": reason }))
+    }
+
+    /// Going back failed, so this release keeps running: its vault is bound
+    /// again, and open unless the kill switch is engaged.
+    fn rebind_after_failed_switch(&self, rollback: bool) -> Result<()> {
+        if rollback {
+            self.vault.bind_unbound()?;
+            if !self.read(|s| s.kill_switch) {
+                self.vault.unseal();
+            }
+        }
+        Ok(())
     }
 
     /// Every running task waits for the switch.
