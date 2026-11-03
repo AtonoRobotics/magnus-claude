@@ -118,6 +118,7 @@ impl Kernel {
             state.apply(&e);
         }
         let vault = Arc::new(Vault::open(&cfg.appliance.state_dir)?);
+        vault.bind_unbound()?;
         if state.kill_switch {
             vault.seal();
         }
