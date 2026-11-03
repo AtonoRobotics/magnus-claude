@@ -46,8 +46,9 @@ pub async fn add(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, 
     if url.is_empty() {
         return refuse(StatusCode::BAD_REQUEST, "invalid", "Give the app's address.");
     }
+    // A key or client details go on to the kernel, which refuses them with why.
     let mut body = json!({
-        "url": url, "audience": b["audience"], "label": b["label"], "token": b["token"],
+        "url": url, "audience": b["audience"], "label": b["label"], "token": b["token"], "client_id": b["client_id"],
         "access_groups": b["access_groups"], "actor": actor(&a),
     });
     if body["access_groups"].is_null() {

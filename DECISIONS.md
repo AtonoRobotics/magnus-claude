@@ -1005,3 +1005,12 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Correction to the Modules entry above ("owner's ruling 22 keeps 'module' for these"): question 22 is open, not ruled. Install and remove still answer 409, as the owner's call rather than a ruling, in the tracker and in `admin/ops.rs`.
 - PROGRESS.md said org context steps 2 to 7b were committed on their branches; no branch has them, and the plan has no 7b. It now says steps 2 to 11, with only step 1 built.
 - Documents and a comment only: no behaviour changes, so no test.
+
+## An app is added only if people sign in to it themselves (2026-11-03, `add-by-sign-in`)
+
+- The connectors spec, Remote MCP connectors: "A server that asks for a key, token or client details instead of a sign-in is refused, and the admin is told why"; Client registration: asking for client details "is excluded because it breaks plug and play. A server that supports none of the three cannot be added". The console asked for "The organisation's key, if it takes one", the kernel stored it and called the app with it, and it took a `client_id` for an app whose sign-in registers no client.
+- Now `add_connector` (the console's add and the owner's in the app) refuses a key, token or client ID; a server that answers 401 without saying where to sign in (it wants a key); and a server whose sign-in lets no client register itself, since Alpha Vector's own clients are for the catalog's providers. Each refusal says why. The console's form no longer has the key field. Client ID Metadata Documents come with their own pull request, so a server offering only that is refused until then.
+- A server that asks for no sign-in at all is still added and called without a credential: the spec keeps such a service out of the catalog but says nothing of one an admin adds. Open with the owner.
+- Apps added with a key before this keep working, and their key can still be rotated or revoked; none can be added.
+- `admin_connectors.rs` added an app with the organisation's key and rotated it: the behaviour the spec refuses. It now asserts each refusal, adds an app people sign in to, and rotates Google's secret instead.
+- Test: `the_console_sets_rotates_and_revokes_the_organisations_credentials_and_never_shows_one` (admin_connectors.rs, real Keycloak): a key, a client ID, a server answering 401 with no sign-in and one with no client registration are refused with their reasons, and none is listed; the app added by address signs people in themselves. On master the key is taken (201).
