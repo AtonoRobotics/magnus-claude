@@ -29,7 +29,8 @@ pub fn app_version() -> String {
 
 struct App {
     store: store::Store,
-    client: Mutex<Option<(String, Option<String>, reqwest::Client)>>,
+    /// Address, how the client was built (`pin:…` or `device:…`), and the client.
+    client: Mutex<Option<(String, String, reqwest::Client)>>,
     live: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     speech: speech::Speech,
     /// The loopback address an app sign-in comes back to, open for one sign-in.
@@ -37,22 +38,31 @@ struct App {
 }
 
 impl App {
-    /// The appliance's address and a client bound to its pinned certificate.
+    /// The appliance's address and a client for it: the pinned certificate
+    /// on a private address, or the public roots and this computer's device
+    /// certificate on magnus.pyrallon.ai.
     fn conn(&self) -> Res<(String, reqwest::Client)> {
+        use sha2::Digest;
         let cfg = self.store.config();
         let url = cfg.appliance.ok_or("not connected to an appliance")?;
-        let pin = cfg.pins.get(&url).cloned();
-        if url.starts_with("https://") && pin.is_none() {
+        let public = pin::is_public_appliance(&url);
+        let device = if public { Some(self.store.device(&url).ok_or("this computer is not paired with the appliance yet")?) } else { None };
+        let pinned = if public { None } else { cfg.pins.get(&url).cloned() };
+        if !public && url.starts_with("https://") && pinned.is_none() {
             return Err("the appliance's certificate is not trusted yet".into());
         }
+        let mode = match &device {
+            Some((cert, _)) => format!("device:{}", hex::encode(sha2::Sha256::digest(cert.as_bytes()))),
+            None => format!("pin:{}", pinned.as_deref().unwrap_or("")),
+        };
         let mut c = self.client.lock().unwrap();
-        if let Some((u, p, client)) = c.as_ref() {
-            if *u == url && *p == pin {
-                return Ok((url, client.clone()));
+        if let Some((u, m, client)) = c.as_ref() {
+            if *u == url && *m == mode {
+                return Ok((url.clone(), client.clone()));
             }
         }
-        let client = pin::client(pin.as_deref())?;
-        *c = Some((url.clone(), pin, client.clone()));
+        let client = if let Some((cert, key)) = &device { pin::public_client(cert, key)? } else { pin::client(pinned.as_deref())? };
+        *c = Some((url.clone(), mode, client.clone()));
         Ok((url, client))
     }
 
@@ -91,8 +101,20 @@ async fn restore(app: State<'_, App>) -> Res<Value> {
     match c.get(format!("{url}/v1/me")).bearer_auth(&token).send().await {
         Ok(r) if r.status().is_success() => Ok(json!({ "person": body_of(r).await.1, "appliance": url })),
         Ok(r) if r.status().as_u16() == 401 => {
+            let (s, b) = body_of(r).await;
+            let msg = message(&b, s);
+            if msg.contains("not paired") {
+                app.store.clear_device(&url);
+                return Ok(json!({ "note": msg }));
+            }
             app.store.clear_token(&url);
             Ok(json!({ "note": "Your session ended. Sign in again." }))
+        }
+        Ok(r) if r.status().as_u16() == 403 && pin::is_public_appliance(&url) => {
+            let _ = body_of(r).await;
+            app.store.clear_device(&url);
+            app.store.clear_token(&url);
+            Ok(json!({ "note": "This computer is no longer paired with the appliance. Pair it again from the private address." }))
         }
         // The appliance no longer accepts this version; the updater still can reach it.
         Ok(r) if r.status().as_u16() == 426 => Ok(json!({ "update_required": body_of(r).await.1, "appliance": url })),
@@ -107,6 +129,23 @@ async fn restore(app: State<'_, App>) -> Res<Value> {
 #[tauri::command]
 async fn connect(app: State<'_, App>, url: String) -> Res<Value> {
     let url = normalize(&url)?;
+    if pin::is_public_appliance(&url) {
+        let Some((cert, key)) = app.store.device(&url) else { return Ok(json!({ "status": "needs_device", "url": url })) };
+        let c = pin::public_client(&cert, &key)?;
+        let r = c.get(format!("{url}/v1/health")).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
+        let (status, body) = body_of(r).await;
+        // 401 is the origin refusing a fingerprint; 403 is Cloudflare blocking
+        // a missing or revoked certificate before the origin sees it.
+        if (status == 401 && message(&body, status).contains("not paired")) || status == 403 {
+            app.store.clear_device(&url);
+            return Ok(json!({ "status": "needs_device", "url": url }));
+        }
+        if body.get("ok").is_some() && body.get("version").is_some() {
+            app.store.set_appliance(&url)?;
+            return Ok(json!({ "status": "trusted", "url": url }));
+        }
+        return Err(format!("Cannot reach {url}: {}", message(&body, status)));
+    }
     if url.starts_with("http://") {
         let c = pin::client(None)?;
         c.get(format!("{url}/v1/health")).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
@@ -134,6 +173,46 @@ async fn trust(app: State<'_, App>, url: String, fingerprint: String) -> Res<()>
         return Err("The certificate changed while you were checking it. Start again.".into());
     }
     app.store.set_pin(&url, &fingerprint)
+}
+
+/// Pair this computer with the appliance's public name. The key is made
+/// here and stored here; the appliance returns only the certificate.
+#[tauri::command]
+async fn pair_device(app: State<'_, App>, public_url: String) -> Res<Value> {
+    let public_url = normalize(&public_url)?;
+    if !pin::is_public_appliance(&public_url) {
+        return Err("pair the public address of the appliance".into());
+    }
+    if app.store.device(&public_url).is_some() {
+        return Ok(json!({ "already": true, "public_url": public_url }));
+    }
+    let (url, c, token) = app.session()?;
+    let (key, csr) = pin::begin_device()?;
+    let r = c
+        .post(format!("{url}/v1/devices"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": machine_name(), "csr": csr }))
+        .send()
+        .await
+        .map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
+    let (status, body) = body_of(r).await;
+    if status >= 400 {
+        return Err(message(&body, status));
+    }
+    let certificate = body["certificate"].as_str().ok_or("the appliance sent no certificate")?;
+    app.store.set_device(&public_url, certificate, &key)?;
+    Ok(json!({ "device": body["device"], "fingerprint": body["fingerprint"], "public_url": public_url }))
+}
+
+fn machine_name() -> String {
+    #[cfg(unix)]
+    if let Ok(s) = std::fs::read_to_string("/etc/hostname") {
+        let s = s.trim();
+        if !s.is_empty() && s.chars().count() <= 80 {
+            return s.to_string();
+        }
+    }
+    std::env::var("COMPUTERNAME").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "computer".into())
 }
 
 #[tauri::command]
@@ -181,7 +260,7 @@ async fn sign_out(app: State<'_, App>) -> Res<()> {
 
 /// Only the appliance's API, and never the calls that hand out a session.
 fn allowed(path: &str) -> Res<()> {
-    if !path.starts_with("/v1/") || path.contains("..") || path.contains('#') || path.starts_with("/v1/sign-in") || path.starts_with("/v1/sign-out") {
+    if !path.starts_with("/v1/") || path.contains("..") || path.contains('#') || path.starts_with("/v1/sign-in") || path.starts_with("/v1/sign-out") || path.starts_with("/v1/devices") {
         return Err(format!("{path} is not an appliance call this app makes"));
     }
     Ok(())
@@ -455,7 +534,7 @@ pub fn run() {
             Ok(())
         })
         .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default(), loopback: Mutex::new(None) })
-        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, provider_sign_in, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait, app_info, update::update_state, update::update_look, update::update_install, update::whats_new, look::set_material, look::system_look])
+        .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, pair_device, provider_sign_in, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait, app_info, update::update_state, update::update_look, update::update_install, update::whats_new, look::set_material, look::system_look])
         .run(tauri::generate_context!())
         .expect("start the Magnus app");
 }
@@ -466,7 +545,7 @@ mod tests {
 
     #[test]
     fn the_page_cannot_reach_beyond_the_api_or_take_a_session() {
-        for bad in ["/v1/sign-in", "/v1/sign-in/device", "/v1/sign-in/device/signin_1", "/v1/sign-out", "/v1/../etc", "https://evil.example/v1/x", "/other", "/v1/x#y"] {
+        for bad in ["/v1/sign-in", "/v1/sign-in/device", "/v1/sign-in/device/signin_1", "/v1/sign-out", "/v1/devices", "/v1/devices/dev_1", "/v1/../etc", "https://evil.example/v1/x", "/other", "/v1/x#y"] {
             assert!(allowed(bad).is_err(), "{bad} was allowed");
         }
         assert!(allowed("/v1/inbox").is_ok());
@@ -485,5 +564,19 @@ mod tests {
         assert_eq!(normalize("https://10.0.0.5:7443/some/path").unwrap(), "https://10.0.0.5:7443");
         assert_eq!(normalize("http://127.0.0.1:7700/").unwrap(), "http://127.0.0.1:7700");
         assert!(normalize("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn the_public_name_is_not_pinned_and_the_device_key_stays_here() {
+        assert!(pin::is_public_appliance("https://magnus.pyrallon.ai"));
+        assert!(pin::is_public_appliance("https://Magnus.Pyrallon.ai/v1/me"));
+        assert!(!pin::is_public_appliance("https://10.1.1.5:7700"));
+        assert!(!pin::is_public_appliance("https://magnus.local:7700"));
+        assert!(!pin::is_public_appliance("https://strix.tailnet.ts.net"));
+        assert!(!pin::is_public_appliance("http://magnus.pyrallon.ai"));
+        let (key, csr) = pin::begin_device().unwrap();
+        assert!(key.contains("PRIVATE KEY"));
+        assert!(csr.contains("BEGIN CERTIFICATE REQUEST"));
+        assert!(!csr.contains("PRIVATE KEY"), "the request sent to the appliance carried the key");
     }
 }

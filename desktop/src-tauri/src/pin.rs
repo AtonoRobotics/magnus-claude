@@ -100,6 +100,55 @@ pub async fn look(url: &str) -> Result<String, String> {
     }
 }
 
+/// The public appliance. Its certificate is Cloudflare's, which the public
+/// roots already trust, so it is not pinned. Every other address keeps the
+/// pin: a LAN address, a `.local` name, an IP, Tailscale.
+pub fn is_public_appliance(url: &str) -> bool {
+    let Ok(u) = url::Url::parse(url) else { return false };
+    u.scheme() == "https" && u.host_str().is_some_and(|h| h.eq_ignore_ascii_case("magnus.pyrallon.ai"))
+}
+
+/// A key and a certificate request, made here. The key is not in the request.
+pub fn begin_device() -> Result<(String, String), String> {
+    let key = rcgen::KeyPair::generate().map_err(|e| e.to_string())?;
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
+    params.distinguished_name.push(rcgen::DnType::CommonName, "magnus-device");
+    let csr = params.serialize_request(&key).map_err(|e| e.to_string())?;
+    Ok((key.serialize_pem(), csr.pem().map_err(|e| e.to_string())?))
+}
+
+fn identity(cert_pem: &str, key_pem: &str) -> Result<(Vec<CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>), String> {
+    let mut certs = std::io::Cursor::new(cert_pem.as_bytes());
+    let certs = rustls_pemfile::certs(&mut certs).collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    if certs.is_empty() {
+        return Err("the device certificate is empty".into());
+    }
+    let mut key = std::io::Cursor::new(key_pem.as_bytes());
+    let key = rustls_pemfile::private_key(&mut key).map_err(|e| e.to_string())?.ok_or("the device key is empty")?;
+    Ok((certs, key))
+}
+
+/// TLS that trusts the public roots and presents this computer's device
+/// certificate. Used only for `magnus.pyrallon.ai`.
+pub fn public_client(cert_pem: &str, key_pem: &str) -> Result<reqwest::Client, String> {
+    let provider = Arc::new(ring::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let (certs, key) = identity(cert_pem, key_pem)?;
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certs, key)
+        .map_err(|e| e.to_string())?;
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(&crate::app_version()) {
+        headers.insert("x-magnus-app", v);
+    }
+    reqwest::Client::builder().default_headers(headers).use_preconfigured_tls(tls).connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())
+}
+
 /// The innermost cause of a request error, which is the one a person can act on.
 pub fn describe(e: &reqwest::Error) -> String {
     let mut msg = e.to_string();
