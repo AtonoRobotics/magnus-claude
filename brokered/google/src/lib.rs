@@ -23,13 +23,13 @@ impl Api {
     /// what the refusal means.
     pub fn call(&self, method: &str, path: &str, token: &str, body: Option<&Value>) -> Result<Value, Failure> {
         let data = body.map(|b| b.to_string());
-        self.json(self.request(method, &format!("{}{path}", self.base), token, data.as_deref().map(|d| ("application/json", d.as_bytes())), method != "GET")?)
+        self.json(&self.request(method, &format!("{}{path}", self.base), token, data.as_deref().map(|d| ("application/json", d.as_bytes())), method != "GET")?, method != "GET")
     }
 
     /// A POST that only asks (Calendar's `freeBusy`): with no answer,
     /// nothing was done.
     pub fn ask(&self, path: &str, token: &str, body: &Value) -> Result<Value, Failure> {
-        self.json(self.request("POST", &format!("{}{path}", self.base), token, Some(("application/json", body.to_string().as_bytes())), false)?)
+        self.json(&self.request("POST", &format!("{}{path}", self.base), token, Some(("application/json", body.to_string().as_bytes())), false)?, false)
     }
 
     /// A GET whose answer is not JSON (a file's bytes), as it came.
@@ -40,7 +40,7 @@ impl Api {
     /// A write with a body of its own type, at a path of the host's (Drive's
     /// uploads are under `/upload`, beside its API).
     pub fn upload(&self, method: &str, path: &str, token: &str, kind: &str, data: &[u8]) -> Result<Value, Failure> {
-        self.json(self.request(method, path, token, Some((kind, data)), true)?)
+        self.json(&self.request(method, path, token, Some((kind, data)), true)?, true)
     }
 
     fn request(&self, method: &str, path: &str, token: &str, body: Option<(&str, &[u8])>, wrote: bool) -> Result<Vec<u8>, Failure> {
@@ -53,12 +53,18 @@ impl Api {
         Ok(r.body)
     }
 
-    fn json(&self, body: Vec<u8>) -> Result<Value, Failure> {
-        let text = String::from_utf8_lossy(&body).to_string();
+    /// An answer of success as JSON (`{}` for none). One that is not JSON
+    /// says nothing of what was done, so after a write it is an unknown
+    /// outcome: tried again, it could do the write twice.
+    pub fn json(&self, body: &[u8], wrote: bool) -> Result<Value, Failure> {
+        let text = String::from_utf8_lossy(body).to_string();
         if text.trim().is_empty() {
             return Ok(Value::Object(Default::default()));
         }
-        serde_json::from_str(&text).map_err(|_| Failure::NotDone(format!("{}'s answer was not JSON: {}", self.name, clip(&text))))
+        serde_json::from_str(&text).map_err(|_| {
+            let what = format!("{}'s answer was not JSON: {}", self.name, clip(&text));
+            if wrote { Failure::Unknown(format!("{what}; whether it did this is unknown")) } else { Failure::NotDone(what) }
+        })
     }
 
     /// What a refusal means.

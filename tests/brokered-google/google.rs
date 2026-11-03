@@ -42,3 +42,14 @@ fn a_query_carries_only_what_has_a_value() {
     assert_eq!(query(&[("q", Some("a b&c".into())), ("pageToken", None), ("maxResults", Some(String::new()))]), "?q=a%20b%26c");
     assert_eq!(enc("en.usa#holiday@group.v.calendar.google.com"), "en.usa%23holiday%40group.v.calendar.google.com");
 }
+
+/// An answer of success that is not JSON says nothing of what was done:
+/// after a write it is an unknown outcome, never one that could be tried
+/// again as if nothing happened (review of #126).
+#[test]
+fn an_answer_that_is_not_json_after_a_write_is_an_unknown_outcome() {
+    assert!(matches!(API.json(b"<html>Accepted</html>", true), Err(Failure::Unknown(t)) if t.contains("whether it did this is unknown")));
+    assert!(matches!(API.json(b"<html>Accepted</html>", false), Err(Failure::NotDone(t)) if t.contains("was not JSON")));
+    assert_eq!(API.json(b" ", true).unwrap(), serde_json::json!({}));
+    assert_eq!(API.json(b"{\"id\":\"e1\"}", true).unwrap(), serde_json::json!({ "id": "e1" }));
+}
