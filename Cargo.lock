@@ -1568,6 +1568,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "magnus-brokered-kit"
+version = "0.2.3"
+dependencies = [
+ "libc",
+ "serde_json",
+]
+
+[[package]]
+name = "magnus-brokered-test"
+version = "0.2.3"
+dependencies = [
+ "libc",
+ "magnus-brokered-kit",
+ "serde_json",
+]
+
+[[package]]
 name = "magnus-guest"
 version = "0.2.3"
 dependencies = [
