@@ -148,6 +148,32 @@ impl Kernel {
         Ok(json!({ "id": id, "every_minutes": every_minutes, "daily_at": daily_at, "until": until, "max_runs": max_runs }))
     }
 
+    /// A list `who` asked for, with other people's rows in it as the policy
+    /// on people's data allows (owner's ruling 14): their words (what each
+    /// run said it did) left out while it is private, the rest kept so the
+    /// owner and admins still control them; otherwise the read is recorded
+    /// and each person told, as a read of their tasks.
+    async fn as_policy_allows(&self, who: &Person, mut rows: Vec<Value>) -> Result<Vec<Value>, Refused> {
+        let others: std::collections::BTreeSet<String> = rows.iter().filter_map(|r| r["person"].as_str()).filter(|p| *p != who.id).map(String::from).collect();
+        if others.is_empty() {
+            return Ok(rows);
+        }
+        if self.read(|s| s.data_private) {
+            for r in rows.iter_mut().filter(|r| r["person"] != who.id.as_str()) {
+                if let Some(o) = r.as_object_mut() {
+                    o.remove("summary");
+                }
+                if let Some(o) = r["latest"].as_object_mut() {
+                    o.remove("summary");
+                }
+            }
+        } else {
+            let others: Vec<String> = others.into_iter().collect();
+            self.record_data_read(&format!("person:{}", who.id), &who.name, &others, "tasks", None).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        }
+        Ok(rows)
+    }
+
     /// One of the control tools Magnus calls in a conversation, for the
     /// person the conversation is with: what the tool says back, and whether
     /// it is an error.
@@ -155,8 +181,8 @@ impl Kernel {
         let Some(who) = self.person(person) else { return ("no such person".into(), true, None) };
         let id = input["id"].as_str().unwrap_or_default();
         let r: Result<Value, Refused> = match tool {
-            "list_tasks" => Ok(json!({ "tasks": self.tasks_for(&who, 30) })),
-            "list_schedules" => Ok(json!({ "schedules": self.schedules_for(&who) })),
+            "list_tasks" => self.as_policy_allows(&who, self.tasks_for(&who, 30)).await.map(|v| json!({ "tasks": v })),
+            "list_schedules" => self.as_policy_allows(&who, self.schedules_for(&who)).await.map(|v| json!({ "schedules": v })),
             "cancel_task" => self.cancel_task(&who, id).await,
             "pause_schedule" => self.pause_schedule(&who, id).await.map(|_| json!({ "paused": id })),
             "resume_schedule" => self.resume_schedule(&who, id).await.map(|_| json!({ "resumed": id })),

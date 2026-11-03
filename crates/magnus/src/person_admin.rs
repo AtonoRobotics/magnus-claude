@@ -127,15 +127,25 @@ impl Kernel {
             _ => return Err(none()),
         };
         if !own {
-            let said = match item {
-                None => format!("{by} read your {what}"),
-                Some(_) => format!("{by} opened one of your {what}"),
-            };
-            let read = Ev::PersonDataRead { person: target.id.clone(), what: what.to_string(), item: item.map(String::from) };
-            let notice = self.notice_to(None, None, target.id.clone(), said, json!({ "reason": "data_read", "evidence": { "by": reader.strip_prefix("person:").unwrap_or(reader), "what": what, "item": item } }));
-            self.emit_all(vec![(reader, read), ("kernel", notice)]).await.map_err(failed)?;
+            self.record_data_read(reader, by, &[target.id.clone()], what, item).await.map_err(failed)?;
         }
         Ok(json!({ "person": target.id, what: v }))
+    }
+
+    /// `reader` (`by` is their name) read these people's data: each read is
+    /// in the log, and each person told (owner's ruling 14).
+    pub async fn record_data_read(&self, reader: &str, by: &str, people: &[String], what: &str, item: Option<&str>) -> anyhow::Result<()> {
+        let said = match item {
+            None => format!("{by} read your {what}"),
+            Some(_) => format!("{by} opened one of your {what}"),
+        };
+        let mut evs = vec![];
+        for person in people {
+            evs.push((reader, Ev::PersonDataRead { person: person.clone(), what: what.to_string(), item: item.map(String::from) }));
+            evs.push(("kernel", self.notice_to(None, None, person.clone(), said.clone(), json!({ "reason": "data_read", "evidence": { "by": reader.strip_prefix("person:").unwrap_or(reader), "what": what, "item": item } }))));
+        }
+        self.emit_all(evs).await?;
+        Ok(())
     }
 
     /// Delete a person's data, as `actor`. Their runs stop, their schedules
