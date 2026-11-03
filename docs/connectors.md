@@ -28,14 +28,14 @@ one commit), 2026-11-02.
 - [x] Connector results are the organisation's data by default, private where the data-access policy says (ruling 14; `data_access.rs` `the_admin_reads_a_persons_data_unless_the_policy_makes_it_private`)
 - [x] Org control: admins decide which connectors their users may use: on or off for the organisation (`admin_connectors.rs`), and allowed or blocked per group (`library-groups`; `library_groups.rs`)
 - [ ] Done: every launch-catalog connector meets all six on Windows and Linux, against an appliance reached through pyrallon.ai
-- [ ] Done: Magnus, asked about any catalog service, says whether it can work with it and offers that connector's card (no catalog tools for the agent)
+- [x] Done: Magnus, asked about any catalog service, says whether it can work with it and offers that connector's card (`find_apps`, `app_details`, `offer_app`; `agent_apps.rs` `magnus_finds_an_unconnected_app_by_what_is_wanted_and_offers_its_card_with_why`, `magnus_cannot_offer_an_app_outside_the_persons_library`)
 
 ## What the user sees
 
 - [x] Every catalog connector already listed and configured when the user opens Magnus; nobody sets one up (`google.rs` `google_s_connectors_are_in_every_library_already_set_up_and_sign_in_at_google`; only once Alpha Vector's Google secret is provisioned: until then the cards say "Not ready on this appliance yet")
 - [x] Browse: the Library shows the whole catalog as cards (`connectors.mjs`)
 - [x] Browse: the user searches (`connectors.mjs`, by name and by what is wanted)
-- [ ] Browse: or asks Magnus (no catalog tools)
+- [x] Browse: or asks Magnus (`find_apps`; `agent_apps.rs` `magnus_finds_an_unconnected_app_by_what_is_wanted_and_offers_its_card_with_why`)
 - [ ] Connect: click Connect, sign in on the provider's page, approve, the card turns Connected (works against a fake app, `app-apps.mjs`; never shown for a real provider, and Google's completion is refused, see Connect flow)
 - [x] Never asked, in the app: no client ID, secret, address, key, token, redirect URI or scope (`connectors.mjs`)
 - [ ] Never asked, in the admin console: today the console asks an admin for Google's client secret (Security › Connectors and credentials, `desktop/admin/admin.js` `connectorPanel` credential form) and for "The organisation's key" when adding an app (`addConnector`)
@@ -55,7 +55,7 @@ one commit), 2026-11-02.
 - [x] Ruling: a signed manifest's tool classes count as the owner's classification; an unclassified tool cannot run (compiled-in manifests stand in for signed ones; `inv1_boundary.rs` `tools_the_owner_has_not_classified_cannot_run`)
 - [x] Ruling: a layer below the organisation only narrows (`inv8_layers.rs`)
 - [x] Ruling: a person's data, connector results included, is the organisation's by default; a data-access policy can make it private (`data_access.rs`)
-- [ ] Ruling: turning a person's identity-provider account off pauses their connections and schedules (schedules pause, `people.rs` `a_person_turned_off_in_keycloak_loses_their_sessions_and_their_schedules_pause`; connections are not refused)
+- [x] Ruling: turning a person's identity-provider account off pauses their connections and schedules (connections, `turned_off_apps.rs` `a_person_turned_off_has_no_apps_until_they_are_back`; schedules, `people.rs` `a_person_turned_off_in_keycloak_loses_their_sessions_and_their_schedules_pause`)
 - [x] Ruling: the kill switch revokes every connection (`kill_switch.rs` `the_kill_switch_revokes_sign_ins_seals_the_vault_and_releasing_resumes_nothing`, `connectors.rs`)
 
 ## Connector kinds
@@ -108,7 +108,7 @@ one commit), 2026-11-02.
 ### Connect flow
 
 - [x] The user clicks Connect in the Library (`connectors.mjs`, `app-apps.mjs`)
-- [ ] Or on a card the agent placed in chat
+- [ ] Or on a card the agent placed in chat (the card and its Connect are drawn in the conversation, `chat-app-card.mjs`; clicking it through to a sign-in is not driven)
 - [x] The appliance keeps the PKCE verifier (`connectors.rs`; `google.rs` checks S256)
 - [ ] It signs a `state` naming the appliance, user, connector, a nonce and an expiry (a random `state` kept in memory, `connectors.rs` `pending`; lost on restart)
 - [ ] The redirect URI is the relay callback (today a loopback address on the person's computer, RFC 8252)
@@ -271,10 +271,8 @@ one commit), 2026-11-02.
 - [x] Refresh: access tokens refreshed before they expire, directly for public clients (`connectors.rs`: 30-second tokens, every use refreshes; `connectors_review.rs` `a_refresh_without_expires_in_keeps_the_token_refreshing`)
 - [ ] Refresh through the relay for confidential clients
 - [x] A rotated refresh token replaces the old in one vault write (`connectors.rs` `connector_secret`, one refresh at a time; `connectors.rs` test)
-- [ ] Re-sign-in: a refresh rejected as invalid marks the connection Needs attention and raises the card (drawn; no test; the card is not raised into the person's work)
 - [x] Revoked at the provider: the next call fails and the connection moves to Needs attention (`connector_lifecycle.rs` `a_sign_in_ended_at_the_app_asks_the_person_to_sign_in_again`)
 - [x] Re-sign-in: a refresh rejected as invalid marks the connection Needs attention and raises the card (`agent_apps.rs` `a_sign_in_the_app_refused_is_offered_again_as_a_card_and_its_tools_wait`: the index says so, the tools wait, the card offers sign in again)
-- [ ] Revoked at the provider: the next call fails and the connection moves to Needs attention (no test)
 - [x] Disconnect deletes the person's tokens, and only theirs (`connectors.rs` test, "Alice ends her own sign-in")
 - [x] Disconnect first calls the provider's revocation endpoint, then deletes the tokens; both ends of a connection are in the log (`connector_lifecycle.rs` `disconnect_revokes_at_the_app_first_and_both_ends_of_a_connection_are_in_the_log`)
 - [ ] Disconnect through the relay for confidential clients
