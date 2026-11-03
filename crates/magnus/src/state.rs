@@ -683,6 +683,9 @@ pub struct State {
     pub signed_in_before: HashSet<String>,
     /// When each person last signed in here (the console's Users list).
     pub last_sign_in: HashMap<String, DateTime<Utc>>,
+    /// People turned off at the identity provider or by an admin, until
+    /// they sign in again: their apps answer no calls for them.
+    pub turned_off: std::collections::BTreeSet<String>,
     /// The latest backup's restore check: file, whether it restored, detail, when.
     pub last_backup: Option<(String, bool, String, DateTime<Utc>)>,
     /// An appliance update in progress: from, to, and whether it is a rollback.
@@ -1203,6 +1206,7 @@ impl State {
                 self.items.retain(|_, i| &i.person != person && i.run.as_ref().is_none_or(|r| !runs.contains(r)));
                 self.schedules.retain(|_, x| &x.person != person);
                 self.memory.retain(|m| &m.person != person);
+                self.turned_off.remove(person);
                 self.files.retain(|_, f| &f.person != person);
                 self.projects.retain(|_, x| &x.person != person);
                 self.trash.retain(|_, t| &t.person != person);
@@ -1231,8 +1235,13 @@ impl State {
             Ev::SignedIn { person, .. } => {
                 self.signed_in_before.insert(person.clone());
                 self.last_sign_in.insert(person.clone(), e.at);
+                // Signed in again: the provider has them back.
+                self.turned_off.remove(person);
             }
             Ev::SignedOut { .. } => {}
+            Ev::PersonTurnedOff { person, .. } => {
+                self.turned_off.insert(person.clone());
+            }
             Ev::ScheduleSet { id, person, every_minutes, daily_at, budget, card, label, until, max_runs, .. } => {
                 self.schedules.insert(
                     id.clone(),

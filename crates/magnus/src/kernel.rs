@@ -279,6 +279,11 @@ impl Kernel {
     /// the log, `told` for the person. How many sessions ended.
     pub async fn turn_off(&self, person: &str, why: &str, told: &str) -> usize {
         let mut ended = 0;
+        // Their apps answer no calls for them from now; the sign-ins stay in
+        // the vault, unused, for when they are back (connectors spec, Isolation).
+        if !self.read(|s| s.turned_off.contains(person)) {
+            self.tell(vec![("kernel", Ev::PersonTurnedOff { person: person.to_string(), why: why.to_string() })]).await;
+        }
         match self.accounts.end_all(person) {
             Ok(sessions) => {
                 if !sessions.is_empty() {
