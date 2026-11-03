@@ -23,6 +23,7 @@ const SOURCES: &[&str] = &[
     include_str!("../../../catalog/huggingface.toml"),
     include_str!("../../../catalog/gitlab.toml"),
     include_str!("../../../catalog/supabase.toml"),
+    include_str!("../../../catalog/cloudflare.toml"),
 ];
 
 #[derive(Deserialize, Clone, Debug)]
