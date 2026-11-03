@@ -89,3 +89,18 @@ fn free_times_fall_between_busy_ones() {
     assert_eq!(free(at("09:00"), at("12:00"), 30, busy.clone(), 1).len(), 1);
     assert!(free(at("09:00"), at("10:00"), 30, busy, 3).is_empty());
 }
+
+/// Free and busy times are read from every calendar, and a calendar or a
+/// group Google could not check is named as not checked, groups apart
+/// from calendars (review of #126).
+#[test]
+fn a_group_google_could_not_list_is_named_as_not_checked() {
+    let r = json!({
+        "calendars": { "primary": { "busy": [{ "start": "2026-11-05T13:00:00Z", "end": "2026-11-05T14:00:00Z" }] }, "gone@example.com": { "errors": [{ "domain": "calendar", "reason": "notFound" }] } },
+        "groups": { "team@example.com": { "errors": [{ "domain": "calendar", "reason": "groupTooBig" }] }, "ok@example.com": { "calendars": ["primary"] } },
+    });
+    let (busy, mut unknown) = busy_times(&r);
+    unknown.sort();
+    assert_eq!(busy, [(epoch("2026-11-05T13:00:00Z").unwrap(), epoch("2026-11-05T14:00:00Z").unwrap())]);
+    assert_eq!(unknown, ["gone@example.com", "team@example.com"]);
+}

@@ -38,11 +38,21 @@ impl Api {
         if r.status >= 400 {
             return Err(self.explain(&r, wrote));
         }
-        let text = String::from_utf8_lossy(&r.body).to_string();
+        self.json(&r.body, wrote)
+    }
+
+    /// An answer of success as JSON (`{}` for none). One that is not JSON
+    /// says nothing of what was done, so after a write it is an unknown
+    /// outcome: tried again, it could do the write twice.
+    pub fn json(&self, body: &[u8], wrote: bool) -> Result<Value, Failure> {
+        let text = String::from_utf8_lossy(body).to_string();
         if text.trim().is_empty() {
             return Ok(Value::Object(Default::default()));
         }
-        serde_json::from_str(&text).map_err(|_| Failure::NotDone(format!("{name}'s answer was not JSON: {}", clip(&text))))
+        serde_json::from_str(&text).map_err(|_| {
+            let what = format!("{}'s answer was not JSON: {}", self.name, clip(&text));
+            if wrote { Failure::Unknown(format!("{what}; whether it did this is unknown")) } else { Failure::NotDone(what) }
+        })
     }
 
     /// What a refusal means.

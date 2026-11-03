@@ -77,10 +77,22 @@ fn event_body(a: &Value) -> Value {
     b
 }
 
+/// The most pages of calendars one call reads (250 each: 5,000 calendars).
+const PAGES: usize = 20;
+
+/// Every calendar the person has, page after page, up to `PAGES`; whether
+/// there were more is said.
 fn list_calendars(_: &Value, t: &str) -> Result<Value, Failure> {
-    let r = API.call("GET", "/users/me/calendarList", t, None)?;
-    let cals: Vec<Value> = r["items"].as_array().into_iter().flatten().map(|c| json!({ "calendar_id": c["id"], "name": c["summaryOverride"].as_str().or(c["summary"].as_str()), "primary": c["primary"] == true, "access": c["accessRole"], "time_zone": c["timeZone"] })).collect();
-    Ok(json!({ "calendars": cals }))
+    let (mut cals, mut next): (Vec<Value>, Option<String>) = (vec![], None);
+    for _ in 0..PAGES {
+        let r = API.call("GET", &format!("/users/me/calendarList{}", query(&[("maxResults", Some("250".into())), ("pageToken", next.take())])), t, None)?;
+        cals.extend(r["items"].as_array().into_iter().flatten().map(|c| json!({ "calendar_id": c["id"], "name": c["summaryOverride"].as_str().or(c["summary"].as_str()), "primary": c["primary"] == true, "access": c["accessRole"], "time_zone": c["timeZone"] })));
+        next = r["nextPageToken"].as_str().map(String::from);
+        if next.is_none() {
+            break;
+        }
+    }
+    Ok(json!({ "calendars": cals, "more": next.is_some() }))
 }
 
 fn events(a: &Value, t: &str, q: Option<String>) -> Result<Value, Failure> {
@@ -196,20 +208,29 @@ fn free(from: i64, to: i64, minutes: i64, mut busy: Vec<(i64, i64)>, max: usize)
     out
 }
 
+/// When each calendar asked about is busy, and which could not be checked:
+/// a calendar with errors, or a group whose members Google could not list
+/// (`groupTooBig`, `notFound`), reported apart from the calendars.
+fn busy_times(r: &Value) -> (Vec<(i64, i64)>, Vec<String>) {
+    let (mut busy, mut unknown) = (vec![], vec![]);
+    let failed = |x: &Value| x["errors"].as_array().is_some_and(|e| !e.is_empty());
+    for (id, c) in r["calendars"].as_object().into_iter().flatten() {
+        if failed(c) {
+            unknown.push(id.clone());
+        }
+        busy.extend(c["busy"].as_array().into_iter().flatten().filter_map(|b| Some((epoch(b["start"].as_str()?)?, epoch(b["end"].as_str()?)?))));
+    }
+    unknown.extend(r["groups"].as_object().into_iter().flatten().filter(|(_, g)| failed(g)).map(|(id, _)| id.clone()));
+    (busy, unknown)
+}
+
 fn suggest_time(a: &Value, t: &str) -> Result<Value, Failure> {
     let (from, to) = (s(a, "start_time"), s(a, "end_time"));
     let (Some(f), Some(e)) = (epoch(&from), epoch(&to)) else { return Err("start_time and end_time are RFC 3339 times, such as 2026-11-04T09:00:00-08:00".to_string().into()) };
     let mut who = list(a, "attendees");
     who.insert(0, "primary".into());
     let body = json!({ "timeMin": from, "timeMax": to, "items": who.iter().map(|id| json!({ "id": id })).collect::<Vec<_>>() });
-    let r = API.ask("/freeBusy", t, &body)?;
-    let (mut busy, mut unknown) = (vec![], vec![]);
-    for (id, c) in r["calendars"].as_object().into_iter().flatten() {
-        if c["errors"].as_array().is_some_and(|x| !x.is_empty()) {
-            unknown.push(id.clone());
-        }
-        busy.extend(c["busy"].as_array().into_iter().flatten().filter_map(|b| Some((epoch(b["start"].as_str()?)?, epoch(b["end"].as_str()?)?))));
-    }
+    let (busy, unknown) = busy_times(&API.ask("/freeBusy", t, &body)?);
     let max = a["max_suggestions"].as_u64().unwrap_or(3).clamp(1, 10) as usize;
     let slots = free(f, e, a["duration_minutes"].as_i64().unwrap_or(30).max(5), busy, max);
     Ok(json!({ "suggestions": slots.iter().map(|(s, e)| json!({ "start": rfc3339(*s), "end": rfc3339(*e) })).collect::<Vec<_>>(), "not_checked": unknown }))
@@ -237,7 +258,7 @@ fn tools() -> Vec<Tool> {
     change["event_id"] = st.clone();
     let tool = |name, description, input, output, run| Tool { name, description, input, output, run };
     vec![
-        tool("list_calendars", "List the person's calendars: their own and those shared with them.", obj(json!({}), &[]), obj(json!({ "calendars": { "type": "array" } }), &["calendars"]), list_calendars),
+        tool("list_calendars", "List every one of the person's calendars: their own and those shared with them.", obj(json!({}), &[]), obj(json!({ "calendars": { "type": "array" }, "more": yes }), &["calendars"]), list_calendars),
         tool("list_events", "List the events on a calendar (the person's own unless named) between two times, RFC 3339, in order.", obj(range, &[]), events.clone(), list_events),
         tool("search_events", "Find events whose words match, on a calendar (the person's own unless named), between two times if given.", obj(search, &["query"]), events, search_events),
         tool("get_event", "Read one event: when, where, who is invited and how each answered.", one.clone(), ev.clone(), get_event),

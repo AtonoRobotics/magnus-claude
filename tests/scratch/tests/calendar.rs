@@ -18,7 +18,9 @@ const WRITES: [&str; 4] = ["create_event", "update_event", "delete_event", "resp
 
 /// What Calendar answers, for the requests the tests make: one event on
 /// the person's calendar, to which Bob invited her; an event added comes
-/// back as sent; Bob is busy from ten to eleven, and she from one to two.
+/// back as sent; Bob is busy from ten to eleven, and she from one to two,
+/// and Google could not list the team's members; her calendars come in two
+/// pages.
 fn calendar(r: &Request, _: &[Request]) -> (u16, String, String) {
     let invite = json!({ "id": "e1", "summary": "Plan review", "start": { "dateTime": "2026-11-05T09:00:00Z" }, "end": { "dateTime": "2026-11-05T09:30:00Z" }, "organizer": { "email": "bob@example.com" },
         "attendees": [{ "email": "bob@example.com", "organizer": true, "responseStatus": "accepted" }, { "email": "alice@example.com", "self": true, "responseStatus": "needsAction" }] });
@@ -32,7 +34,10 @@ fn calendar(r: &Request, _: &[Request]) -> (u16, String, String) {
         }
         ("POST", "/freeBusy") => ok(json!({ "calendars": {
             "primary": { "busy": [{ "start": "2026-11-05T13:00:00Z", "end": "2026-11-05T14:00:00Z" }] },
-            "bob@example.com": { "busy": [{ "start": "2026-11-05T10:00:00Z", "end": "2026-11-05T11:00:00Z" }] } } })),
+            "bob@example.com": { "busy": [{ "start": "2026-11-05T10:00:00Z", "end": "2026-11-05T11:00:00Z" }] } },
+            "groups": { "team@example.com": { "errors": [{ "domain": "calendar", "reason": "groupTooBig" }] } } })),
+        ("GET", "/users/me/calendarList") if r.path.contains("pageToken=p2") => ok(json!({ "items": [{ "id": "team@group.calendar.google.com", "summary": "Team", "accessRole": "reader" }] })),
+        ("GET", "/users/me/calendarList") => ok(json!({ "items": [{ "id": "alice@example.com", "summary": "Alice", "primary": true, "accessRole": "owner" }], "nextPageToken": "p2" })),
         _ => not_found(),
     }
 }
@@ -72,6 +77,32 @@ async fn calendar_adds_an_event_only_once_the_person_approves_it_reaching_only_g
     only_the_api(&app, &api, &provider, BASE);
 }
 
+/// Every calendar comes back, page after page (review of #126).
+#[tokio::test(flavor = "multi_thread")]
+async fn calendar_lists_every_calendar_across_pages() {
+    let api = StandIn::start(HOST, calendar).await;
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("which calendars do I have", "they are listed"),
+            1 => tool("calendar__list_calendars", json!({})),
+            _ => complete("yours and the team's"),
+        }
+    }))
+    .await;
+    let (app, provider, _image) = signed_in(&m, &api, "google-calendar", "magnus-calendar", "calendar").await;
+    let alice = app.api("alice");
+    let task = alice.submit("Which calendars do I have?").await;
+    let review = alice.wait_item(&task, "review").await;
+    assert!(alice.respond(review["id"].as_str().unwrap(), json!({ "decision": "accept" })).await.is_success());
+    assert_eq!(alice.wait_settled(&task).await["status"], "completed");
+    let get = ("GET".to_string(), "/users/me/calendarList".to_string());
+    assert_eq!(api.calls(BASE), [get.clone(), get]);
+    assert!(api.requests()[1].path.contains("pageToken=p2"), "{:?}", api.requests()[1]);
+    let said = told(&m, "Which calendars do I have?");
+    assert!(said.contains("alice@example.com") && said.contains("team@group.calendar.google.com") && said.contains("\\\"more\\\":false"), "not every calendar reached Magnus: {said}");
+    only_the_api(&app, &api, &provider, BASE);
+}
+
 /// A time that works is found from when each person is busy, and finding
 /// it asks nothing: it changes nothing.
 #[tokio::test(flavor = "multi_thread")]
@@ -80,7 +111,7 @@ async fn calendar_finds_a_time_when_everyone_is_free() {
     let m = FakeModel::start(script(|c| async move {
         match c.turn() {
             0 => contract_unchecked("find an hour Bob and I are both free on Thursday", "a time is found"),
-            1 => tool("calendar__suggest_time", json!({ "start_time": "2026-11-05T10:00:00Z", "end_time": "2026-11-05T15:00:00Z", "duration_minutes": 60, "attendees": ["bob@example.com"], "max_suggestions": 3 })),
+            1 => tool("calendar__suggest_time", json!({ "start_time": "2026-11-05T10:00:00Z", "end_time": "2026-11-05T15:00:00Z", "duration_minutes": 60, "attendees": ["bob@example.com", "team@example.com"], "max_suggestions": 3 })),
             _ => complete("Thursday at eleven, noon or two"),
         }
     }))
@@ -94,12 +125,15 @@ async fn calendar_finds_a_time_when_everyone_is_free() {
     assert_eq!(alice.wait_settled(&task).await["status"], "completed");
     assert_eq!(api.calls(BASE), [("POST".to_string(), "/freeBusy".to_string())]);
     let asked_for: Value = serde_json::from_str(&api.requests()[0].body).unwrap();
-    assert_eq!(asked_for["items"], json!([{ "id": "primary" }, { "id": "bob@example.com" }]));
+    assert_eq!(asked_for["items"], json!([{ "id": "primary" }, { "id": "bob@example.com" }, { "id": "team@example.com" }]));
     let said = told(&m, "Find an hour Bob and I are both free");
     // Bob is busy from ten, she from one: free at eleven, noon and two.
     let slot = |s: &str, e: &str| format!("{{\\\"end\\\":\\\"2026-11-05T{e}:00:00Z\\\",\\\"start\\\":\\\"2026-11-05T{s}:00:00Z\\\"}}");
     let want = format!("\\\"suggestions\\\":[{},{},{}]", slot("11", "12"), slot("12", "13"), slot("14", "15"));
     assert!(said.contains(&want), "the free times did not reach Magnus as {want}: {said}");
+    // The team's members could not be listed, so their times are not known
+    // (review of #126).
+    assert!(said.contains("\\\"not_checked\\\":[\\\"team@example.com\\\"]"), "the team was not said to be unchecked: {said}");
     only_the_api(&app, &api, &provider, BASE);
 }
 
