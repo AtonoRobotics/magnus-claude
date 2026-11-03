@@ -1261,8 +1261,9 @@ impl Kernel {
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("{e:#}") }))),
     };
     let mut revoking = vec![];
-    // Every person's own sign-in to every app people sign in to.
-    let signed_in: Vec<String> = k.connectors().into_iter().filter(|c| c.auth.as_deref() == Some(crate::connectors::OAUTH)).map(|c| c.name).collect();
+    // Every person's own sign-in to every app people sign in to, turned on
+    // or off: an app turned off keeps its sign-ins.
+    let signed_in: Vec<String> = k.all_connectors().into_iter().map(|(c, _)| c).filter(|c| c.auth.as_deref() == Some(crate::connectors::OAUTH)).map(|c| c.name).collect();
     for n in &names {
         if let Some(adapter) = k.adapters.oauth_owner_of(n).await {
             revoking.push((n.clone(), adapter));
