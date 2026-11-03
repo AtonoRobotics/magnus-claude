@@ -510,7 +510,16 @@ impl Kernel {
     /// Finish a sign-in with the code the browser brought back.
     /// Only the person who started it can finish it.
     pub async fn connector_sign_in_complete(&self, app: &str, person: &str, state: &str, code: &str, iss: Option<&str>) -> Result<()> {
-        let p = pending().lock().unwrap().remove(state).filter(|p| p.app == app && p.person == person && p.at.elapsed() < PENDING_FOR).ok_or_else(|| anyhow!("this sign-in expired or is unknown; start again"))?;
+        // Taken only by the person who started it: anyone else's attempt
+        // leaves it waiting for them.
+        let p = {
+            let mut m = pending().lock().unwrap();
+            match m.get(state) {
+                Some(p) if p.app == app && p.person == person => m.remove(state),
+                _ => None,
+            }
+        };
+        let p = p.filter(|p| p.at.elapsed() < PENDING_FOR).ok_or_else(|| anyhow!("this sign-in expired or is unknown; start again"))?;
         // The answer must come from the server the sign-in went to (RFC
         // 9207): otherwise the code and verifier would go to this one's token
         // endpoint for another server's code (a mix-up).

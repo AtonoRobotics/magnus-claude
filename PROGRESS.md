@@ -2,6 +2,7 @@
 
 ## Now (2026-10-29)
 
+- **A sign-in waits for the person who started it (connectors spec, Remote MCP connectors; branch `pending-sign-in`).** Someone else trying to finish a person's sign-in to an app was refused, but their attempt ended that sign-in, so its owner had to start again. Now the attempt is refused and the sign-in stays theirs to finish. Next from the same review: policy drafts are written to the audit log.
 - **A run ends once (behavior spec, Tasks and schedules in conversation; branch `cancel-races`).** A cancel that lost the race to a task's own end turned it into a cancelled task, and a run's end after a cancel overwrote the cancel. The first end now stands. Left: a schedule removed while its firing is starting. Next from the same review: cancel tools are irreversible.
 - **The provider's check asks after the bound account (owner's ruling 12; branch `active-by-account`).** With a person's account deleted at the provider and another made under their username, the check found the new one and kept the old one's sessions. It now asks after the account they are bound to. Next from the same review: cancel races.
 - **A person deleted keeps no rights and takes only their own sign-ins (admin console spec, Users; branch `erase-all`).** Deleting someone left the roles the owner gave them, so the next account known by their name started with them, and it revoked sign-ins of anyone whose name ended in theirs. Both are fixed. Next from the same review: the provider's check asks by the bound account, not the username.
