@@ -456,9 +456,13 @@ impl Kernel {
         }
         let fm = &fm;
         validate(path, fm, body, |_| tdoc.clone())?;
-        // A type becomes a Cedar entity: only an admin makes one stable.
+        // A type becomes a Cedar entity: only an admin makes one stable, and
+        // once stable only an admin changes it, to stay or to go back.
         let was_stable = kind == "type" && before.as_ref().is_some_and(|b| b["status"] == "stable");
-        if kind == "type" && fm["status"] == "stable" && !was_stable {
+        if was_stable {
+            return Err(format!("{path}: a stable type changes only with an admin's approval in the console; it stays as it is"));
+        }
+        if kind == "type" && fm["status"] == "stable" {
             return Err(format!("{path}: a type becomes stable only with an admin's approval in the console; write it as draft"));
         }
         let (label, read, writer) = self.read(|s| s.runs.get(run).map(|r| (Label { untrusted: r.untrusted, private: r.private }, r.private_from.clone(), Some(r.person.clone())))).unwrap_or_default();
