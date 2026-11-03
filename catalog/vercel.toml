@@ -1,0 +1,24 @@
+id = "vercel"
+version = "1.0.0"
+name = "Vercel"
+summary = "Magnus can see who you are on Vercel and list your projects."
+publisher = "Vercel"
+category = "work"
+abilities = ["See which account is connected", "List your projects"]
+asks = ["Know which account is signed in", "See the email address of that account", "See the name on that account", "Stay signed in between visits"]
+can = "See your account and list projects"
+cannot = "Deploy, change a project, or delete anything"
+letters = "Ve"
+tint = "#000000"
+kind = "rest"
+endpoint = "https://api.vercel.com"
+audience = "private"
+label = "untrusted"
+registration = "preregistered"
+provider = "vercel"
+remove_access = "https://vercel.com/account/settings/tokens"
+scopes = ["openid", "email", "profile", "offline_access"]
+
+[tools]
+whoami = "read"
+list_projects = "read"

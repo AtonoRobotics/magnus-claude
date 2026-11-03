@@ -1,0 +1,24 @@
+id = "gitlab"
+version = "1.0.0"
+name = "GitLab"
+summary = "Magnus can see who you are on GitLab and list projects you belong to."
+publisher = "GitLab"
+category = "code"
+abilities = ["See which account is connected", "List projects you belong to"]
+asks = ["See who you are on GitLab", "Read projects you belong to"]
+can = "See your account and list projects"
+cannot = "Change a project, open a merge request, or delete anything"
+letters = "Gl"
+tint = "#E24329"
+kind = "rest"
+endpoint = "https://gitlab.com/api/v4"
+audience = "private"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "gitlab"
+remove_access = "https://gitlab.com/-/user_settings/applications"
+scopes = ["read_user", "read_api"]
+
+[tools]
+whoami = "read"
+list_projects = "read"

@@ -10,13 +10,13 @@ summary = "Magnus can read your calendars and events, find times that work, and 
 publisher = "Google"
 category = "email"
 abilities = ["Tell you what is on your calendar", "Find a time that works", "Add, move or cancel events, and answer invitations, when you allow it"]
-asks = ["See the list of your calendars", "See and change events on your calendars", "See when you are free or busy"]
+asks = ["Know which account is signed in", "See the email address of that account", "See the name on that account", "See and change your calendars, events and when you are free"]
 can = "Read your calendars and events, find times, and add, change, cancel or answer events when you allow it"
 cannot = "Share your calendars or change who can see them"
 letters = "Ca"
 tint = "#2F5BD3"
-kind = "remote"
-endpoint = "https://calendarmcp.googleapis.com/mcp/v1"
+kind = "google"
+endpoint = "https://www.googleapis.com/calendar/v3"
 # Events and replies reach their attendees, who may be anyone.
 audience = "public"
 label = "private+untrusted"
@@ -24,9 +24,9 @@ registration = "preregistered"
 provider = "google"
 # Where a person removes Magnus at Google when Disconnect could not revoke it.
 remove_access = "https://myaccount.google.com/connections"
-scopes = ["https://www.googleapis.com/auth/calendar.calendarlist.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar.events.freebusy"]
+scopes = ["openid", "email", "profile", "https://www.googleapis.com/auth/calendar"]
 
-# Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).
+# The tools the appliance calls on Calendar's API (checked by google.rs).
 [tools]
 list_calendars = "read"
 list_events = "read"

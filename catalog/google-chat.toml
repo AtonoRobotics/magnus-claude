@@ -10,13 +10,13 @@ summary = "Magnus can read and search your Chat conversations and send messages 
 publisher = "Google"
 category = "email"
 abilities = ["Find a conversation or a decision when you ask about it", "Catch you up on spaces you have been away from", "Send messages for you, when you allow it"]
-asks = ["See your spaces and conversations", "See who is in your spaces", "Read your messages", "Send messages as you"]
+asks = ["Know which account is signed in", "See the email address of that account", "See the name on that account", "See your spaces and conversations", "See who is in your spaces", "Read your messages", "Send messages as you"]
 can = "Read and search your conversations, and send messages when you allow it"
 cannot = "Delete messages, or add or remove people"
 letters = "Ch"
 tint = "#1A7F64"
-kind = "remote"
-endpoint = "https://chatmcp.googleapis.com/mcp/v1"
+kind = "google"
+endpoint = "https://chat.googleapis.com/v1"
 # Messages reach a conversation's members, who may be outside the organisation.
 audience = "public"
 label = "private+untrusted"
@@ -24,9 +24,9 @@ registration = "preregistered"
 provider = "google"
 # Where a person removes Magnus at Google when Disconnect could not revoke it.
 remove_access = "https://myaccount.google.com/connections"
-scopes = ["https://www.googleapis.com/auth/chat.spaces.readonly", "https://www.googleapis.com/auth/chat.memberships.readonly", "https://www.googleapis.com/auth/chat.messages.readonly", "https://www.googleapis.com/auth/chat.messages.create"]
+scopes = ["openid", "email", "profile", "https://www.googleapis.com/auth/chat.spaces.readonly", "https://www.googleapis.com/auth/chat.memberships.readonly", "https://www.googleapis.com/auth/chat.messages.readonly", "https://www.googleapis.com/auth/chat.messages.create"]
 
-# Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).
+# The tools the appliance calls on Chat's API (checked by google.rs).
 [tools]
 list_messages = "read"
 search_messages = "read"

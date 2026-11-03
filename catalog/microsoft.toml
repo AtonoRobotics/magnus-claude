@@ -1,0 +1,25 @@
+id = "microsoft"
+version = "1.0.0"
+name = "Microsoft 365"
+summary = "Magnus can read your recent mail, your calendar and the files at the top of your drive."
+publisher = "Microsoft"
+category = "work"
+abilities = ["List recent mail", "Say what is on your calendar", "List files at the top of your drive"]
+asks = ["Know which account is signed in", "See the name on that account", "See the email address of that account", "Stay signed in between visits", "See your profile", "Read your mail", "Read your calendar", "Read your files"]
+can = "Read recent mail, calendar events and files"
+cannot = "Send mail, change an event, or delete a file"
+letters = "Ms"
+tint = "#0F6CBD"
+kind = "rest"
+endpoint = "https://graph.microsoft.com/v1.0"
+audience = "private"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "microsoft"
+remove_access = "https://myaccount.microsoft.com/permissions"
+scopes = ["openid", "profile", "email", "offline_access", "User.Read", "Mail.Read", "Calendars.Read", "Files.Read"]
+
+[tools]
+list_mail = "read"
+list_events = "read"
+list_files = "read"

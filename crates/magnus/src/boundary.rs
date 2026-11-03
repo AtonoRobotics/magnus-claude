@@ -332,7 +332,7 @@ impl Kernel {
                 Some(s) => Some(s),
                 None => {
                     let why = if self.lapsed(c, &person) {
-                        format!("{} no longer accepts the sign-in of the person this task is for: offer_app puts its card in front of them to sign in again", f.app)
+                        format!("{}'s sign-in has expired or was revoked, so nothing was sent. offer_app puts its card in front of the person to sign in again", f.app)
                     } else {
                         format!("{} is not connected for the person this task is for (or their sign-in expired): they sign in again in the Library, or offer_app puts its card in front of them", f.app)
                     };
@@ -739,6 +739,15 @@ impl Kernel {
                 Ok(o) => Ok((o.text, o.is_error, o.structured)),
                 Err(crate::apps::CallError::NotSent(m)) => Err(CallFailure::NotDone(m)),
                 Err(crate::apps::CallError::Unknown(m)) => Err(CallFailure::Unknown(m)),
+                // The sign-in itself was rejected. It is marked lapsed so the
+                // next call asks the person to sign in again, and this call
+                // already says so. Nothing was sent that changed anything.
+                Err(crate::apps::CallError::Reauth(m)) => {
+                    if let Err(e) = self.mark_lapsed(&c.name, &person) {
+                        tracing::warn!("could not record that {}'s sign-in lapsed: {e:#}", f.app);
+                    }
+                    Err(CallFailure::NotDone(m))
+                }
                 // The app wants more access for this (connectors spec,
                 // Remote MCP connectors: a scope challenge becomes a card
                 // asking for it). Nothing happened at the app.

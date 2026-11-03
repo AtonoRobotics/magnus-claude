@@ -8,13 +8,15 @@
 //! a person's sign-in at Google.
 
 use magnus_invariants::*;
-use serde_json::{json, Value};
+use serde_json::json;
 
-const SERVERS: [(&str, &str, &str); 4] = [
-    ("google-gmail", "Gmail", "https://www.googleapis.com/auth/gmail.readonly"),
-    ("google-calendar", "Google Calendar", "https://www.googleapis.com/auth/calendar.events"),
-    ("google-drive", "Google Drive", "https://www.googleapis.com/auth/drive.readonly"),
+const SERVERS: [(&str, &str, &str); 6] = [
+    ("google-gmail", "Gmail", "https://mail.google.com/"),
+    ("google-calendar", "Google Calendar", "https://www.googleapis.com/auth/calendar"),
+    ("google-drive", "Google Drive", "https://www.googleapis.com/auth/drive"),
     ("google-chat", "Google Chat", "https://www.googleapis.com/auth/chat.messages.readonly"),
+    ("google-docs", "Google Docs", "https://www.googleapis.com/auth/documents"),
+    ("google-sheets", "Google Sheets", "https://www.googleapis.com/auth/spreadsheets"),
 ];
 
 fn client() -> (String, String) {
@@ -79,33 +81,21 @@ async fn google_s_connectors_are_in_every_library_already_set_up_and_sign_in_at_
     }
 }
 
-/// Tool drift (connectors spec, Required tests): each Google manifest names
-/// exactly the tools its live server lists, so none is hidden for want of a
-/// class and none is classed that does not exist. The servers list their
-/// tools without a sign-in.
+/// Each Google manifest names exactly the tools the appliance calls on
+/// that product's REST API, and none of those addresses is a Workspace
+/// MCP preview server.
 #[tokio::test(flavor = "multi_thread")]
-async fn each_google_manifest_names_exactly_the_tools_its_live_server_lists() {
-    let http = reqwest::Client::new();
-    for name in ["google-gmail", "google-calendar", "google-drive", "google-chat"] {
+async fn each_google_manifest_names_exactly_the_tools_its_rest_api_calls() {
+    for name in ["google-gmail", "google-calendar", "google-drive", "google-chat", "google-docs", "google-sheets"] {
         let path = magnus_invariants::appliance::workspace_root().join(format!("catalog/{name}.toml"));
         let m: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let endpoint = m["endpoint"].as_str().unwrap();
+        assert!(!endpoint.contains("mcp"), "{name} still points at a preview server: {endpoint}");
         let mut named: Vec<String> = m["tools"].as_table().unwrap().keys().cloned().collect();
-        let v: Value = http
-            .post(endpoint)
-            .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", "2025-06-18")
-            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }))
-            .send()
-            .await
-            .unwrap_or_else(|e| panic!("{endpoint}: {e}"))
-            .json()
-            .await
-            .unwrap_or_else(|e| panic!("{endpoint}: {e}"));
-        let mut live: Vec<String> = v["result"]["tools"].as_array().unwrap_or_else(|| panic!("{endpoint}: {v}")).iter().filter_map(|t| t["name"].as_str().map(String::from)).collect();
+        let mut live: Vec<String> = magnus::google::list_tools(endpoint).unwrap_or_else(|| panic!("{endpoint} is not a Google API")).into_iter().map(|t| t.name).collect();
         named.sort();
         live.sort();
-        assert_eq!(named, live, "{name}: the manifest's tools differ from what {endpoint} lists now");
+        assert_eq!(named, live, "{name}: the manifest's tools differ from the REST tools");
     }
 }
 
@@ -122,7 +112,7 @@ async fn a_person_s_card_for_gmail_says_what_magnus_can_do_in_plain_words() {
     let (st, c) = app.api("carol").get("/v1/connectors/google-gmail").await;
     assert!(st.is_success(), "{c}");
     assert_eq!((c["title"].as_str(), c["state"].as_str()), (Some("Gmail"), Some("available")), "{c}");
-    assert_eq!(c["summary"], "Magnus can search and read your email, write drafts for you to send, and file, label or trash messages.", "{c}");
+    assert_eq!(c["summary"], "Magnus can search and read your email, write and send drafts, and file, label or trash messages.", "{c}");
     let allows: Vec<String> = c["allows"].as_array().unwrap().iter().map(|l| l.as_str().unwrap().to_string()).collect();
     assert!(allows[0].starts_with("Reads: ") && allows[0].contains("search threads"), "{allows:?}");
     assert!(allows.iter().any(|l| l.starts_with("Changes that can be undone: ") && l.contains("create draft")), "{allows:?}");

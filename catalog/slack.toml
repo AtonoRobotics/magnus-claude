@@ -1,0 +1,24 @@
+id = "slack"
+version = "1.0.0"
+name = "Slack"
+summary = "Magnus can see who you are on Slack and list the conversations you are in."
+publisher = "Slack"
+category = "email"
+abilities = ["See which account is connected", "List conversations you are in"]
+asks = ["See who you are", "See the workspace", "See public conversations", "See private conversations you are in", "See direct messages"]
+can = "See your account and list conversations"
+cannot = "Send, edit or delete a message"
+letters = "Sl"
+tint = "#4A154B"
+kind = "rest"
+endpoint = "https://slack.com/api"
+audience = "private"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "slack"
+remove_access = "https://api.slack.com/apps"
+scopes = ["users:read", "team:read", "channels:read", "groups:read", "im:read"]
+
+[tools]
+whoami = "read"
+list_conversations = "read"

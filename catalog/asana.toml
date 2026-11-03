@@ -1,0 +1,23 @@
+id = "asana"
+version = "1.0.0"
+name = "Asana"
+summary = "Magnus can see who you are on Asana."
+publisher = "Asana"
+category = "work"
+abilities = ["See which account is connected"]
+asks = []
+can = "See your account"
+cannot = "Change a task, a project, or who is assigned"
+letters = "As"
+tint = "#F06A6A"
+kind = "rest"
+endpoint = "https://app.asana.com/api/1.0"
+audience = "private"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "asana"
+remove_access = "https://app.asana.com/0/my-apps"
+scopes = []
+
+[tools]
+whoami = "read"

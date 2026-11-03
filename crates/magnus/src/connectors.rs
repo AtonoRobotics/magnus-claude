@@ -355,7 +355,7 @@ impl Kernel {
     pub fn provider_ready(&self, c: &Connector) -> bool {
         match c.registration.as_deref() {
             None => true,
-            Some(p) => crate::catalog::client(p).is_some_and(|cl| !cl.needs_secret() || self.read(|s| s.registrations.contains(p))),
+            Some(p) => crate::catalog::client(p).is_some_and(|cl| !cl.needs_secret() || self.registration_value(p, "client_secret").is_some()),
         }
     }
 
@@ -384,18 +384,26 @@ impl Kernel {
         let now = chrono::Utc::now().timestamp();
         if t.expires_at.is_some_and(|at| at - 60 <= now) {
             let Some(refresh) = t.refresh_token.clone() else { return Ok(None) };
-            let mut form = vec![("grant_type", "refresh_token".to_string()), ("refresh_token", refresh), ("client_id", t.client.client_id.clone()), ("resource", t.client.resource.clone())];
+            let mut form = vec![("grant_type", "refresh_token".to_string()), ("refresh_token", refresh), ("client_id", t.client.client_id.clone())];
+            if !crate::google::omit_resource(&t.client.token_endpoint) && !t.client.resource.is_empty() {
+                form.push(("resource", t.client.resource.clone()));
+            }
             if let Some(s) = &t.client.client_secret {
                 form.push(("client_secret", s.clone()));
             }
-            let r = http().post(&t.client.token_endpoint).form(&form).send().await;
+            let r = http().post(&t.client.token_endpoint).header("accept", "application/json").form(&form).send().await;
             let v: Value = match r {
                 Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
                 Ok(r) => {
-                    tracing::warn!("refresh for {}: HTTP {}", c.name, r.status());
+                    let status = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    let code = serde_json::from_str::<Value>(&body).ok().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_default();
+                    tracing::warn!("refresh for {}: HTTP {status} {code}", c.name);
                     // Refused (not a failure to reach it): the sign-in no
-                    // longer works until the person signs in again.
-                    if r.status().is_client_error() {
+                    // longer works until the person signs in again. A
+                    // testing-mode Google refresh token dies after 7 days
+                    // as invalid_grant, the same shape as a revoked grant.
+                    if crate::rest::refresh_died(status) {
                         t.lapsed = true;
                         self.vault.put(name, &serde_json::to_string(&t)?)?;
                     }
@@ -424,8 +432,20 @@ impl Kernel {
     /// address to open in the person's browser.
     pub async fn connector_sign_in(&self, c: &Connector, person: &str, redirect_uri: &str) -> Result<(String, String)> {
         loopback(redirect_uri)?;
-        let meta = asks_sign_in(&c.url).await?.unwrap_or(None);
-        let (asm, scopes, issuer) = discover(&c.url, meta).await?;
+        // Google and the other catalog providers sign in at the provider's
+        // own authorization server. Their tool calls go to the provider's
+        // ordinary API, so there is no MCP server to discover a sign-in from.
+        let provider = c.registration.as_deref().unwrap_or("");
+        let tenant = self.registration_value(provider, "tenant").unwrap_or_else(|| self.catalog_tenant(provider));
+        let (asm, scopes, issuer) = if crate::google::handles(&c.url) {
+            (crate::google::oauth_metadata(), Vec::new(), crate::google::ISSUER.to_string())
+        } else if let Some(meta) = crate::providers::oauth(&c.url, &tenant) {
+            let issuer = meta["issuer"].as_str().unwrap_or_default().to_string();
+            (meta, Vec::new(), issuer)
+        } else {
+            let meta = asks_sign_in(&c.url).await?.unwrap_or(None);
+            discover(&c.url, meta).await?
+        };
         let s = |k: &str| asm[k].as_str().map(String::from);
         let (Some(authorize), Some(token)) = (s("authorization_endpoint"), s("token_endpoint")) else { bail!("the app's authorization server names no authorization or token endpoint") };
         if asm["code_challenge_methods_supported"].as_array().is_some_and(|m| !m.iter().any(|x| x == "S256")) {
@@ -438,15 +458,16 @@ impl Kernel {
         let registered: Option<(String, Option<String>)> = match &c.registration {
             Some(provider) => {
                 let client = crate::catalog::client(provider).ok_or_else(|| anyhow!("{} cannot be connected on this appliance yet", shown))?;
-                let secret = match client.needs_secret() {
-                    true => {
-                        let raw = self.vault.get(&crate::catalog::registration_name(provider))?.ok_or_else(|| anyhow!("{} cannot be connected on this appliance yet: Alpha Vector has not finished setting it up here", shown))?;
-                        let v: Value = serde_json::from_str(raw.expose()).context("stored registration")?;
-                        Some(v["client_secret"].as_str().ok_or_else(|| anyhow!("{} cannot be connected on this appliance yet", shown))?.to_string())
-                    }
-                    false => None,
-                };
-                Some((client.client_id.clone(), secret))
+                let stored = self.vault.get(&crate::catalog::registration_name(provider))?.and_then(|raw| serde_json::from_str::<Value>(raw.expose()).ok());
+                let id = stored.as_ref().and_then(|v| v["client_id"].as_str()).filter(|s| !s.is_empty()).unwrap_or(client.client_id.as_str());
+                if id.is_empty() {
+                    bail!("{shown} cannot be connected on this appliance yet: its client id has not been provisioned");
+                }
+                let secret = stored.as_ref().and_then(|v| v["client_secret"].as_str()).filter(|s| !s.is_empty()).map(String::from);
+                if client.needs_secret() && secret.is_none() {
+                    bail!("{shown} cannot be connected on this appliance yet: Alpha Vector has not finished setting it up here");
+                }
+                Some((id.to_string(), secret))
             }
             None => None,
         };
@@ -480,8 +501,12 @@ impl Kernel {
                 .append_pair("redirect_uri", redirect_uri)
                 .append_pair("code_challenge", &challenge(&verifier))
                 .append_pair("code_challenge_method", "S256")
-                .append_pair("state", &state)
-                .append_pair("resource", &c.url);
+                .append_pair("state", &state);
+            // An MCP server is told which resource the token is for. A
+            // provider's own API has no such parameter, and some reject it.
+            if !crate::google::handles(&c.url) && !crate::providers::handles(&c.url) {
+                q.append_pair("resource", &c.url);
+            }
             // Exactly what the app's manifest asks for, where it names it.
             let mut scopes = if c.scopes.is_empty() { scopes } else { c.scopes.clone() };
             // More access the app asked of this person's sign-in.
@@ -491,7 +516,9 @@ impl Kernel {
                 }
             }
             if !scopes.is_empty() {
-                q.append_pair("scope", &scopes.join(" "));
+                // Slack asks for a person's own access with user_scope.
+                let key = asm["scope_parameter"].as_str().unwrap_or("scope");
+                q.append_pair(key, &scopes.join(" "));
             }
             // A refresh token that lasts (Google gives one only when asked
             // for offline access).
@@ -535,25 +562,34 @@ impl Kernel {
             ("redirect_uri", p.redirect_uri.clone()),
             ("client_id", c.client_id.clone()),
             ("code_verifier", p.verifier.clone()),
-            ("resource", c.resource.clone()),
         ];
+        if !crate::google::omit_resource(&c.token_endpoint) && !c.resource.is_empty() {
+            form.push(("resource", c.resource.clone()));
+        }
         if let Some(s) = &c.client_secret {
             form.push(("client_secret", s.clone()));
         }
-        let r = http().post(&c.token_endpoint).form(&form).send().await?;
+        let r = http().post(&c.token_endpoint).header("accept", "application/json").form(&form).send().await?;
         if !r.status().is_success() {
             bail!("the app's authorization server refused the sign-in: HTTP {}", r.status());
         }
         let v: Value = r.json().await?;
-        let access = v["access_token"].as_str().ok_or_else(|| anyhow!("the sign-in returned no access token"))?;
+        if v["ok"] == false {
+            bail!("the app's authorization server refused the sign-in: {}", v["error"].as_str().unwrap_or("refused"));
+        }
+        let access = v["access_token"].as_str().or(v["authed_user"]["access_token"].as_str()).ok_or_else(|| anyhow!("the sign-in returned no access token"))?;
+        let mut account = account_of(&v);
+        if account.is_none() && crate::google::omit_resource(&c.token_endpoint) && c.token_endpoint.contains("googleapis.com") {
+            account = crate::google::account_from_people(&http(), access).await;
+        }
         let t = Tokens {
             access_token: access.into(),
-            refresh_token: v["refresh_token"].as_str().map(String::from),
+            refresh_token: v["refresh_token"].as_str().or(v["authed_user"]["refresh_token"].as_str()).map(String::from),
             expires_at: v["expires_in"].as_i64().map(|s| chrono::Utc::now().timestamp() + s),
             lifetime: v["expires_in"].as_i64(),
             client: p.client,
             connected_at: Some(chrono::Utc::now().timestamp()),
-            account: account_of(&v),
+            account,
             lapsed: false,
             wants: vec![],
         };
@@ -939,19 +975,71 @@ impl Kernel {
         }
     }
 
-    /// The organisation's client secret with a provider (Google's, for its
-    /// apps), until the relay holds it (connectors spec rev 46).
+    /// The organisation's client secret with a provider, until the relay
+    /// holds it (connectors spec rev 46). A deployment may also give the
+    /// client id and, for Microsoft, the tenant: they override the catalog
+    /// when set. An organisation API token (Cloudflare's) is kept beside
+    /// them and is never used as a person's sign-in.
     pub async fn set_registration(&self, actor: &str, provider: &str, secret: &str) -> Result<Value, Refusal> {
-        if crate::catalog::client(provider).is_none_or(|c| !c.needs_secret()) {
-            return Err(refusal(StatusCode::NOT_FOUND, "no catalog provider takes a secret by that name"));
+        self.set_registration_with(actor, provider, secret, None, None, None, None).await
+    }
+
+    pub async fn set_registration_with(&self, actor: &str, provider: &str, secret: &str, client_id: Option<&str>, tenant: Option<&str>, api_token: Option<&str>, account_id: Option<&str>) -> Result<Value, Refusal> {
+        if crate::catalog::client(provider).is_none() {
+            return Err(refusal(StatusCode::NOT_FOUND, "no catalog provider by that name"));
         }
         let secret = secret.trim();
-        if secret.is_empty() {
+        let api_token = api_token.map(str::trim).filter(|s| !s.is_empty());
+        if secret.is_empty() && api_token.is_none() {
             return Err(refusal(StatusCode::BAD_REQUEST, "give the provider's client secret"));
         }
-        self.vault.put(&crate::catalog::registration_name(provider), &json!({ "client_secret": secret }).to_string()).map_err(failed)?;
+        let mut body = self.vault.get(&crate::catalog::registration_name(provider)).ok().flatten().and_then(|raw| serde_json::from_str::<Value>(raw.expose()).ok()).unwrap_or_else(|| json!({}));
+        if !secret.is_empty() {
+            body["client_secret"] = json!(secret);
+        }
+        if let Some(id) = client_id.map(str::trim).filter(|s| !s.is_empty()) {
+            body["client_id"] = json!(id);
+        }
+        if let Some(t) = tenant.map(str::trim).filter(|s| !s.is_empty()) {
+            body["tenant"] = json!(t);
+        }
+        if let Some(t) = api_token {
+            body["api_token"] = json!(t);
+        }
+        if let Some(a) = account_id.map(str::trim).filter(|s| !s.is_empty()) {
+            body["account_id"] = json!(a);
+        }
+        self.vault.put(&crate::catalog::registration_name(provider), &body.to_string()).map_err(failed)?;
         self.emit(actor, Ev::RegistrationSet { provider: provider.to_string(), set: true }).await.map_err(failed)?;
         Ok(json!({ "set": true }))
+    }
+
+    /// One field of a provider's provisioned registration, if it is set.
+    fn registration_value(&self, provider: &str, field: &str) -> Option<String> {
+        if provider.is_empty() {
+            return None;
+        }
+        self.vault.get(&crate::catalog::registration_name(provider)).ok().flatten().and_then(|raw| serde_json::from_str::<Value>(raw.expose()).ok()).and_then(|v| v[field].as_str().filter(|s| !s.is_empty()).map(String::from))
+    }
+
+    /// Microsoft's directory for the authorize address: the tenant the
+    /// deployment provisioned, else the catalog's authority (`organizations`
+    /// for a multi-tenant app), else its tenant id.
+    fn catalog_tenant(&self, provider: &str) -> String {
+        crate::catalog::client(provider).and_then(|c| c.authority.clone().or(c.tenant.clone())).unwrap_or_default()
+    }
+
+    /// The provider refused a call because the sign-in no longer works.
+    /// The card turns to Needs attention; the next call does not try it.
+    pub fn mark_lapsed(&self, app: &str, person: &str) -> Result<()> {
+        let name = connection_name(app, person);
+        let Some(raw) = self.vault.get(&name)? else { return Ok(()) };
+        let mut t: Tokens = serde_json::from_str(raw.expose()).context("stored sign-in")?;
+        if !t.lapsed {
+            t.lapsed = true;
+            self.vault.put(&name, &serde_json::to_string(&t)?)?;
+        }
+        Ok(())
     }
 
     /// Revoke the organisation's credential for an app, and every person's
@@ -1008,7 +1096,19 @@ async fn set_registration(AxState(k): K, h: HeaderMap, Path(provider): Path<Stri
         Ok(p) => p,
         Err(r) => return r,
     };
-    answer(k.set_registration(&format!("person:{}", p.id), &provider, b["client_secret"].as_str().unwrap_or_default()).await, StatusCode::NO_CONTENT)
+    answer(
+        k.set_registration_with(
+            &format!("person:{}", p.id),
+            &provider,
+            b["client_secret"].as_str().unwrap_or_default(),
+            b["client_id"].as_str(),
+            b["tenant"].as_str(),
+            b["api_token"].as_str(),
+            b["account_id"].as_str(),
+        )
+        .await,
+        StatusCode::NO_CONTENT,
+    )
 }
 
 macro_rules! owner {

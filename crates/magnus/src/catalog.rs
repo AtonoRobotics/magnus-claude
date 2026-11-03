@@ -19,6 +19,18 @@ const SOURCES: &[&str] = &[
     include_str!("../../../catalog/google-calendar.toml"),
     include_str!("../../../catalog/google-drive.toml"),
     include_str!("../../../catalog/google-chat.toml"),
+    include_str!("../../../catalog/google-docs.toml"),
+    include_str!("../../../catalog/google-sheets.toml"),
+    include_str!("../../../catalog/microsoft.toml"),
+    include_str!("../../../catalog/github.toml"),
+    include_str!("../../../catalog/vercel.toml"),
+    include_str!("../../../catalog/slack.toml"),
+    include_str!("../../../catalog/sentry.toml"),
+    include_str!("../../../catalog/asana.toml"),
+    include_str!("../../../catalog/gitlab.toml"),
+    include_str!("../../../catalog/huggingface.toml"),
+    include_str!("../../../catalog/supabase.toml"),
+    include_str!("../../../catalog/cloudflare.toml"),
 ];
 
 #[derive(Deserialize, Clone, Debug)]
@@ -80,6 +92,16 @@ pub struct Client {
     /// `desktop` or `confidential` (a secret at the token exchange), or
     /// `public` (none).
     pub kind: String,
+    /// Microsoft's home tenant, when the app is registered in one.
+    #[serde(default)]
+    pub tenant: Option<String>,
+    /// The directory people sign in through, when it is not the home tenant
+    /// (`organizations` for a multi-tenant app).
+    #[serde(default)]
+    pub authority: Option<String>,
+    /// The client id is provisioned with the secret (it is not in this file).
+    #[serde(default)]
+    pub deployment_id: bool,
 }
 
 impl Client {
@@ -104,7 +126,7 @@ pub fn registration_name(provider: &str) -> String {
 pub fn connector(m: &Manifest) -> Connector {
     Connector {
         name: m.id.clone(),
-        transport: "mcp_http".into(),
+        transport: if m.kind == "remote" { "mcp_http".into() } else { m.kind.clone() },
         url: m.endpoint.clone(),
         credential: Some(crate::connectors::credential_name(&m.id)),
         audience: m.audience.clone(),
@@ -136,8 +158,8 @@ mod tests {
         for m in ms {
             assert!(ids.insert(m.id.clone()), "{} twice", m.id);
             assert!(!m.id.contains("__") && m.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "{}", m.id);
-            assert_eq!(m.kind, "remote", "{}", m.id);
-            assert!(m.endpoint.starts_with("https://"), "{}", m.id);
+            assert!(["remote", "google", "rest"].contains(&m.kind.as_str()), "{}", m.id);
+            assert!(m.endpoint.starts_with("https://") && !m.endpoint.contains("mcp.googleapis.com") && !m.endpoint.contains("/mcp/"), "{} calls {}", m.id, m.endpoint);
             assert!(["dcr", "preregistered"].contains(&m.registration.as_str()), "{}", m.id);
             assert_eq!(m.registration == "preregistered", m.provider.is_some(), "{}", m.id);
             // Where the person removes Magnus when the app cannot end a sign-in itself.
@@ -162,9 +184,9 @@ mod tests {
                 assert!(super::client(p).is_some(), "{}: no client for {p} in catalog/registrations.toml", m.id);
             }
         }
-        for p in ["google", "microsoft", "github", "vercel", "slack", "sentry"] {
+        for p in ["google", "microsoft", "github", "vercel", "slack", "sentry", "asana", "cloudflare", "gitlab", "huggingface", "supabase", "shopify"] {
             let c = super::client(p).unwrap_or_else(|| panic!("{p}"));
-            assert!(!c.client_id.is_empty() && ["desktop", "confidential", "public"].contains(&c.kind.as_str()), "{p}: {c:?}");
+            assert!((!c.client_id.is_empty() || c.deployment_id) && ["desktop", "confidential", "public"].contains(&c.kind.as_str()), "{p}: {c:?}");
         }
     }
 }

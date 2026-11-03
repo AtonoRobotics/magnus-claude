@@ -10,13 +10,13 @@ summary = "Magnus can find and read your files, and create or copy files for you
 publisher = "Google"
 category = "files"
 abilities = ["Find a file when you describe it", "Read documents, sheets and other files", "Create new files, or copies of yours"]
-asks = ["See and download your files", "Create files, and change the ones it made"]
+asks = ["Know which account is signed in", "See the email address of that account", "See the name on that account", "See, download and change your files"]
 can = "Find, read and download your files, and create new files or copies"
-cannot = "Change or delete files it did not make, or share them"
+cannot = "Share files, or delete them"
 letters = "Dr"
 tint = "#1E7F5C"
-kind = "remote"
-endpoint = "https://drivemcp.googleapis.com/mcp/v1"
+kind = "google"
+endpoint = "https://www.googleapis.com/drive/v3"
 # Its tools create and copy files in the person's own Drive (it cannot share).
 audience = "private"
 label = "private+untrusted"
@@ -24,9 +24,9 @@ registration = "preregistered"
 provider = "google"
 # Where a person removes Magnus at Google when Disconnect could not revoke it.
 remove_access = "https://myaccount.google.com/connections"
-scopes = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file"]
+scopes = ["openid", "email", "profile", "https://www.googleapis.com/auth/drive"]
 
-# Exactly the tools the live server lists (checked by tests/scratch/tests/google.rs).
+# The tools the appliance calls on Drive's API (checked by google.rs).
 [tools]
 search_files = "read"
 list_recent_files = "read"

@@ -60,7 +60,7 @@ one commit), 2026-11-02.
 
 ## Connector kinds
 
-- [x] Remote MCP: the provider's hosted server, Magnus the client (`catalog.rs`, `apps.rs`; `google.rs` `each_google_manifest_names_exactly_the_tools_its_live_server_lists`)
+- [x] Remote MCP for an app the organisation adds by address (`catalog.rs`, `apps.rs`). Google, Microsoft 365, GitHub, Slack, Vercel, Sentry, Asana, GitLab, Hugging Face, Supabase and Cloudflare call that provider's own HTTP API instead (`google.rs`, `providers.rs`); Google's Workspace MCP preview is not used.
 - [ ] Brokered API: an Alpha Vector MCP server over the provider's API, in its own sandbox on the appliance
 - [ ] Local: an MCP server in or beside a desktop program, bridged by the desktop app
 - [ ] All three reach the agent the same way, as MCP tools on the appliance, in one library (only remote exists; `every_manifest_is_well_formed` asserts `kind == "remote"`)
@@ -98,7 +98,7 @@ one commit), 2026-11-02.
 ### Client registration
 
 - [x] Pre-registered: Alpha Vector's own client for the provider (Google: `google.rs`)
-- [ ] Pre-registered clients for Microsoft, Slack and the others under Provider registrations (client IDs for Microsoft, GitHub, Vercel, Slack and Sentry in `catalog/registrations.toml`, no manifest uses them)
+- [ ] Pre-registered clients for Microsoft, Slack and the others under Provider registrations (client IDs for Microsoft, GitHub, Vercel, Slack and Sentry are in `catalog/registrations.toml` and their manifests use them; Asana, Cloudflare, GitLab, Hugging Face, Supabase and Shopify take their client id from the deployment secret)
 - [ ] Client ID Metadata Document, used when the provider advertises it, one document at pyrallon.ai naming the relay callback
 - [x] Dynamic Client Registration as the fallback (`connectors.rs`, the fake app registers Magnus)
 - [ ] The order the MCP authorization spec (2026-07-28) sets: pre-registered, then CIMD, then DCR
@@ -348,14 +348,14 @@ one commit), 2026-11-02.
 
 ## Provider registrations
 
-- [ ] Google: a verified OAuth client for the Workspace MCP servers (client ID in `catalog/registrations.toml`, a Desktop client; its secret provisioned to strix-alpha by CI, HTTP 204 on 2026-11-02); a configured Chat app for the Chat server; Gmail restricted-scope verification and a CASA assessment, yearly; until then 100 users and weekly re-sign-in in Testing
-- [ ] Slack: an app listed in the Slack Marketplace (a client ID exists, "Magnus (Veyra workspace)", confidential; no secret provisioned, no manifest)
-- [ ] Microsoft: a multi-tenant Entra app with publisher verification and the Graph permissions (a public client ID exists; no manifest, no brokered servers)
-- [ ] GitHub: a GitHub App or OAuth App for the remote server (an OAuth app client ID exists, confidential; no secret, no manifest); org owners approve it for restricted orgs
-- [ ] Vercel: a place on Vercel's allowlist of approved MCP clients (a public client ID exists, "Magnus by Alpha Vector"; no manifest)
+- [ ] Google: the Desktop OAuth client already in `catalog/registrations.toml` (its secret provisioned from `GOOGLE_CLIENT_SECRET`); calls the public Gmail, Drive, Calendar, Docs, Sheets and Chat APIs, not the Workspace MCP preview. Still open: Chat scopes on the consent screen, restricted-scope verification and a CASA assessment before production; until then 100 users and a testing-mode sign-in that lasts 7 days
+- [ ] Slack: an app listed in the Slack Marketplace (a client ID exists, "Magnus (Veyra workspace)", confidential; secret name `SLACK_CLIENT_SECRET`; manifest `slack` reads conversations). The callback must accept `http://127.0.0.1:<port>/callback` (`docs/oauth-redirects.md`)
+- [ ] Microsoft: a multi-tenant Entra app (client ID in the catalog, secret name `MICROSOFT_CLIENT_SECRET`, tenant `MICROSOFT_TENANT_ID`); manifest `microsoft` reads mail, events and files through Graph. Publisher verification is still open
+- [ ] GitHub: the OAuth app whose id is in the catalog (secret name `GH_OAUTH_CLIENT_SECRET`); manifest `github` reads the user and repositories. Register callback `http://127.0.0.1/callback` so any port matches. Org owners still approve it for restricted orgs
+- [ ] Vercel: Sign in with Vercel (public client id in the catalog; `VERCEL_CLIENT_ID` / `VERCEL_CLIENT_SECRET` override it). Manifest `vercel` reads the user and projects. The callback has to match exactly, so a finished sign-in waits on loopback-any-port or the relay
 - [ ] Atlassian: the relay callback on Atlassian's supported client domains
 - [ ] Asana: a registered client ID and secret for the V2 server
-- [ ] Sentry (in the launch catalog; a client ID exists, "not yet published", confidential)
+- [ ] Sentry (client ID in the catalog, secret name `SENTRY_CLIENT_SECRET`; manifest `sentry` lists projects; the app is not yet published)
 - [ ] The public material at pyrallon.ai: homepage, privacy policy, terms, support contact, and Google's demo videos
 - [ ] Providers accepting Client ID Metadata Documents (Autodesk's cloud Fusion servers) need no registration (CIMD not built)
 
@@ -366,14 +366,14 @@ The mockup draws Gmail, Google Drive, Google Calendar, Outlook Mail, Slack,
 Notion, GitHub, Vercel, Jira, Figma, Autodesk Fusion Data, Blender and
 FreeCAD.
 
-Google (Remote, Google Workspace MCP servers)
-- [ ] Gmail (manifest `google-gmail`, live tools matched; sign-in cannot complete from the desktop app)
-- [ ] Drive (manifest `google-drive`; same)
-- [ ] Docs
-- [ ] Sheets
+Google (the provider's own APIs; not the Workspace MCP preview)
+- [ ] Gmail (manifest `google-gmail`; list, read and send-draft covered by a mocked REST test; a person still has to sign in again on the appliance)
+- [ ] Drive (manifest `google-drive`; search and read covered)
+- [ ] Docs (manifest `google-docs`; read covered)
+- [ ] Sheets (manifest `google-sheets`; read covered)
 - [ ] Slides
-- [ ] Calendar (manifest `google-calendar`; same)
-- [ ] Chat (manifest `google-chat`; same; Google's Chat app not configured)
+- [ ] Calendar (manifest `google-calendar`; list events covered)
+- [ ] Chat (manifest `google-chat`; calls the Chat API; its scopes are not on the consent screen yet)
 - [ ] Contacts
 
 Microsoft (Brokered over Microsoft Graph)

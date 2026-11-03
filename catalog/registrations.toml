@@ -15,10 +15,12 @@ kind = "desktop"
 
 [microsoft]
 client_id = "60d920e7-11d2-422c-bf02-f630fa667e6f"
-# Multi-tenant: people from any organisation sign in through "organizations".
+# Multi-tenant: people from any organisation sign in through "organizations",
+# unless a deployment sets MICROSOFT_TENANT_ID (that tenant is used instead).
 tenant = "f1524b07-679e-443c-838b-594fb9e8576a"
 authority = "organizations"
-kind = "public"
+# The deployment's MICROSOFT_CLIENT_SECRET is sent at the token exchange.
+kind = "confidential"
 
 [github]
 client_id = "Ov23li1N51zzH3xdWmnZ"
@@ -40,3 +42,37 @@ name = "Magnus (Veyra workspace)"
 client_id = "197a5cfaccce1a5380164b4262ebb5515220a718e95759a4297d47e9cf45ea3"
 kind = "confidential"
 name = "Magnus (Alpha Vector organisation, not yet published)"
+
+# These client ids are not in the repository. The deployment provisions
+# them with the secret (ASANA_CLIENT_ID and the rest). Shopify is registered
+# here so its secret can be kept, and has no connector until a shop is known.
+
+[asana]
+client_id = ""
+kind = "confidential"
+deployment_id = true
+
+[cloudflare]
+client_id = ""
+kind = "confidential"
+deployment_id = true
+
+[gitlab]
+client_id = ""
+kind = "confidential"
+deployment_id = true
+
+[huggingface]
+client_id = ""
+kind = "confidential"
+deployment_id = true
+
+[supabase]
+client_id = ""
+kind = "confidential"
+deployment_id = true
+
+[shopify]
+client_id = ""
+kind = "confidential"
+deployment_id = true

@@ -32,8 +32,9 @@
 # `admin` for the appliance's owners (config/keycloak-client.py, as root,
 # which reads the realm administrator's file), and the console as a systemd
 # user service beside the appliance, restarted on the programs installed.
-# When GOOGLE_CLIENT_SECRET is set, Google's client secret goes into the
-# appliance's vault through its owner-only API; it is never printed.
+# When a provider's client secret is set (GOOGLE_CLIENT_SECRET and the
+# others named in the workflow), it goes into the appliance's vault
+# through its owner-only API; nothing here prints a secret.
 #
 # It prints what a person needs to reach the console: its address and the
 # CA's certificate (public). It prints no secret.
@@ -155,16 +156,61 @@ if systemctl list-unit-files avahi-daemon.service >/dev/null 2>&1; then
   sudo -n systemctl enable --now avahi-daemon.service >/dev/null 2>&1 || true
 fi
 
-# Google's client secret, into the appliance's vault through its owner-only
-# API, when the repository's secret is set.
-if [ -n "${GOOGLE_CLIENT_SECRET:-}" ]; then
-  token=$(python3 -I -c 'import sys, tomllib; print(next(p["token"] for p in tomllib.load(open(sys.argv[1], "rb"))["people"] if "owner" in p.get("roles", []) and p.get("token")))' "$config")
-  code=$(python3 -I -c 'import json, os; print(json.dumps({"client_secret": os.environ["GOOGLE_CLIENT_SECRET"]}))' |
-    curl -sS -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' --data-binary @- "http://$listen/v1/registrations/google")
-  echo "Google's client secret into the appliance's vault: HTTP $code"
-else
-  echo "GOOGLE_CLIENT_SECRET is not set in the repository: Google's connectors cannot finish signing in yet"
-fi
+# Each provider's client secret (and client id, when the repository has
+# one) into the appliance's vault. Names are the repository's secret
+# names. Nothing here prints a secret. Cloudflare's API token is stored
+# beside its OAuth client and is not a person's sign-in.
+token=$(python3 -I -c 'import sys, tomllib; print(next(p["token"] for p in tomllib.load(open(sys.argv[1], "rb"))["people"] if "owner" in p.get("roles", []) and p.get("token")))' "$config")
+MAGNUS_REGISTRATION_TOKEN=$token MAGNUS_REGISTRATION_URL="http://$listen" python3 -I - <<'PY'
+import json, os, urllib.request
+rows = [
+    ("google", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", None),
+    ("microsoft", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET", "MICROSOFT_TENANT_ID"),
+    ("github", "GH_OAUTH_CLIENT_ID", "GH_OAUTH_CLIENT_SECRET", None),
+    ("vercel", "VERCEL_CLIENT_ID", "VERCEL_CLIENT_SECRET", None),
+    ("slack", "SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET", None),
+    ("sentry", "SENTRY_CLIENT_ID", "SENTRY_CLIENT_SECRET", None),
+    ("asana", "ASANA_CLIENT_ID", "ASANA_CLIENT_SECRET", None),
+    ("cloudflare", "CLOUDFLARE_CLIENT_ID", "CLOUDFLARE_CLIENT_SECRET", None),
+    ("gitlab", "GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET", None),
+    ("huggingface", "HUGGINGFACE_CLIENT_ID", "HUGGINGFACE_CLIENT_SECRET", None),
+    ("supabase", "SUPABASE_CLIENT_ID", "SUPABASE_CLIENT_SECRET", None),
+    ("shopify", "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET", None),
+]
+token = os.environ["MAGNUS_REGISTRATION_TOKEN"]
+base = os.environ["MAGNUS_REGISTRATION_URL"]
+for provider, id_var, secret_var, tenant_var in rows:
+    secret = os.environ.get(secret_var, "")
+    client_id = os.environ.get(id_var, "")
+    tenant = os.environ.get(tenant_var, "") if tenant_var else ""
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "") if provider == "cloudflare" else ""
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "") if provider == "cloudflare" else ""
+    if not secret and not client_id and not tenant and not api_token:
+        print(f"{secret_var} is not set: {provider} is not provisioned")
+        continue
+    body = {}
+    if secret:
+        body["client_secret"] = secret
+    if client_id:
+        body["client_id"] = client_id
+    if tenant:
+        body["tenant"] = tenant
+    if api_token:
+        body["api_token"] = api_token
+    if account_id:
+        body["account_id"] = account_id
+    req = urllib.request.Request(
+        f"{base}/v1/registrations/{provider}",
+        data=json.dumps(body).encode(),
+        method="PUT",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print(f"{provider} registration into the vault: HTTP {r.status}")
+    except urllib.error.HTTPError as e:
+        print(f"{provider} registration into the vault: HTTP {e.code}")
+PY
 
 # What a person needs to reach it.
 echo "The admin console, at any of these on the organisation's network or the tailnet:"

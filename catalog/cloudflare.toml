@@ -1,0 +1,24 @@
+id = "cloudflare"
+version = "1.0.0"
+name = "Cloudflare"
+summary = "Magnus can see who you are on Cloudflare and list the zones you can see."
+publisher = "Cloudflare"
+category = "work"
+abilities = ["See which account is connected", "List zones you can see"]
+asks = ["See your user", "See accounts you can open", "See zones you can open"]
+can = "See your account and list zones"
+cannot = "Change DNS, a worker, or a zone"
+letters = "Cf"
+tint = "#F38020"
+kind = "rest"
+endpoint = "https://api.cloudflare.com/client/v4"
+audience = "private"
+label = "untrusted"
+registration = "preregistered"
+provider = "cloudflare"
+remove_access = "https://dash.cloudflare.com/profile/api-tokens"
+scopes = ["user.read", "account.read", "zone.read"]
+
+[tools]
+whoami = "read"
+list_zones = "read"

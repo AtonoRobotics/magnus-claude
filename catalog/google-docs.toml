@@ -1,0 +1,23 @@
+id = "google-docs"
+version = "1.0.0"
+name = "Google Docs"
+summary = "Magnus can read a document when you point at it."
+publisher = "Google"
+category = "files"
+abilities = ["Read a document", "Quote a passage back to you"]
+asks = ["Know which account is signed in", "See the email address of that account", "See the name on that account", "Read your documents"]
+can = "Read your documents"
+cannot = "Change or delete a document"
+letters = "Do"
+tint = "#1A73E8"
+kind = "google"
+endpoint = "https://docs.googleapis.com/v1"
+audience = "private"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "google"
+remove_access = "https://myaccount.google.com/connections"
+scopes = ["openid", "email", "profile", "https://www.googleapis.com/auth/documents"]
+
+[tools]
+read_doc = "read"

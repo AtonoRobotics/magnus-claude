@@ -1,0 +1,23 @@
+id = "huggingface"
+version = "1.0.0"
+name = "Hugging Face"
+summary = "Magnus can see who you are on Hugging Face."
+publisher = "Hugging Face"
+category = "code"
+abilities = ["See which account is connected"]
+asks = ["Know which account is signed in", "See the name on that account", "See the email address of that account"]
+can = "See your account"
+cannot = "Change a model, a dataset, or a space"
+letters = "Hf"
+tint = "#FFD21E"
+kind = "rest"
+endpoint = "https://huggingface.co/api"
+audience = "private"
+label = "untrusted"
+registration = "preregistered"
+provider = "huggingface"
+remove_access = "https://huggingface.co/settings/connected-applications"
+scopes = ["openid", "profile", "email"]
+
+[tools]
+whoami = "read"

@@ -1,0 +1,24 @@
+id = "google-sheets"
+version = "1.0.0"
+name = "Google Sheets"
+summary = "Magnus can read the values in your spreadsheets."
+publisher = "Google"
+category = "files"
+abilities = ["Read the cells in a sheet", "See a spreadsheet's sheets and title"]
+asks = ["Know which account is signed in", "See the email address of that account", "See the name on that account", "Read your spreadsheets"]
+can = "Read values and the layout of your spreadsheets"
+cannot = "Change or delete a spreadsheet"
+letters = "Sh"
+tint = "#188038"
+kind = "google"
+endpoint = "https://sheets.googleapis.com/v4"
+audience = "private"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "google"
+remove_access = "https://myaccount.google.com/connections"
+scopes = ["openid", "email", "profile", "https://www.googleapis.com/auth/spreadsheets"]
+
+[tools]
+get_spreadsheet = "read"
+get_values = "read"

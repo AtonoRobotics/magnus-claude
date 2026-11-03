@@ -88,6 +88,8 @@ Alternative: an **OAuth App** (https://docs.github.com/en/apps/oauth-apps/buildi
 
 ## 2. Google Workspace (Gmail, Calendar, Drive)
 
+The owner declined the Developer Preview (2026-11-03). Magnus does not call the hosted MCP servers below. It calls the public REST APIs. See `docs/oauth-redirects.md` and DECISIONS.md, "Google and the other providers call their own APIs".
+
 ### Server
 - **Official:** Google's remote Workspace MCP servers. Each product has its own endpoint (https://developers.google.com/workspace/guides/configure-mcp-servers):
   - Gmail `https://gmailmcp.googleapis.com/mcp/v1`

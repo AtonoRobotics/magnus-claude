@@ -1,0 +1,23 @@
+id = "supabase"
+version = "1.0.0"
+name = "Supabase"
+summary = "Magnus can list the Supabase projects on the account you connect."
+publisher = "Supabase"
+category = "work"
+abilities = ["List your projects"]
+asks = []
+can = "List your projects"
+cannot = "Change a project, read a database, or delete anything"
+letters = "Sb"
+tint = "#3ECF8E"
+kind = "rest"
+endpoint = "https://api.supabase.com/v1"
+audience = "private"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "supabase"
+remove_access = "https://supabase.com/dashboard/account/tokens"
+scopes = []
+
+[tools]
+list_projects = "read"

@@ -1,0 +1,23 @@
+id = "sentry"
+version = "1.0.0"
+name = "Sentry"
+summary = "Magnus can list the Sentry projects you can see."
+publisher = "Sentry"
+category = "work"
+abilities = ["List projects you can see"]
+asks = ["See your organisations", "See your projects", "See errors in those projects"]
+can = "List projects"
+cannot = "Change a project, resolve an error, or delete anything"
+letters = "Se"
+tint = "#6C5FC7"
+kind = "rest"
+endpoint = "https://sentry.io/api/0"
+audience = "private"
+label = "untrusted"
+registration = "preregistered"
+provider = "sentry"
+remove_access = "https://sentry.io/settings/account/api/authorizations/"
+scopes = ["org:read", "project:read", "event:read"]
+
+[tools]
+list_projects = "read"

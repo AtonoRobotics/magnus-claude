@@ -32,6 +32,9 @@ pub enum CallError {
     /// (HTTP 403, `insufficient_scope`, MCP authorization's step-up): the
     /// scopes it names. Nothing happened at the app.
     NeedsScope(Vec<String>),
+    /// The provider rejected the sign-in itself (expired, revoked, or
+    /// missing access). The person signs in again. Nothing happened.
+    Reauth(String),
 }
 
 /// The scopes a 403 asks for, when it is MCP's step-up challenge:
@@ -187,10 +190,17 @@ impl Mcp {
             CallError::NotSent(m) => CallError::NotSent(Self::clean(&m, bearer)),
             CallError::Unknown(m) => CallError::Unknown(Self::clean(&m, bearer)),
             CallError::NeedsScope(s) => CallError::NeedsScope(s),
+            CallError::Reauth(m) => CallError::Reauth(Self::clean(&m, bearer)),
         }
     }
 
     pub async fn list_tools(&self, url: &str, bearer: Option<&str>) -> Result<Vec<AppTool>> {
+        // Google's and the other catalog providers' tools are the REST
+        // APIs compiled in here. Their definitions do not come from a
+        // hosted MCP server, preview or otherwise.
+        if let Some(tools) = crate::google::list_tools(url).or_else(|| crate::providers::list_tools(url)) {
+            return Ok(tools);
+        }
         let tools = self.list_tools_raw(url, bearer).await.map_err(|e| anyhow!("{}", Self::clean(&e.to_string(), bearer)))?;
         Ok(tools
             .into_iter()
@@ -221,6 +231,18 @@ impl Mcp {
     }
 
     pub async fn call(&self, url: &str, bearer: Option<&str>, tool: &str, args: &Value, key: Option<&str>) -> Result<CallOutput, CallError> {
+        if crate::google::handles(url) {
+            return match crate::google::call(&self.http, url, bearer, tool, args).await {
+                Ok(o) => Ok(o),
+                Err(e) => Err(Self::clean_err(e, bearer)),
+            };
+        }
+        if crate::providers::handles(url) {
+            return match crate::providers::call(&self.http, url, bearer, tool, args).await {
+                Ok(o) => Ok(o),
+                Err(e) => Err(Self::clean_err(e, bearer)),
+            };
+        }
         match self.call_raw(url, bearer, tool, args, key).await {
             Ok(o) => Ok(CallOutput {
                 text: Self::clean(&o.text, bearer),

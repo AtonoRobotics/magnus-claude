@@ -1,0 +1,24 @@
+id = "github"
+version = "1.0.0"
+name = "GitHub"
+summary = "Magnus can see who you are on GitHub and list the repositories you can open."
+publisher = "GitHub"
+category = "code"
+abilities = ["See which account is connected", "List repositories you can open"]
+asks = ["See who you are on GitHub", "See repositories you can open, including private ones"]
+can = "See your account and list repositories"
+cannot = "Change a repository, open a pull request, or delete anything"
+letters = "Gh"
+tint = "#24292F"
+kind = "rest"
+endpoint = "https://api.github.com"
+audience = "private"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "github"
+remove_access = "https://github.com/settings/applications"
+scopes = ["read:user", "repo"]
+
+[tools]
+whoami = "read"
+list_repos = "read"

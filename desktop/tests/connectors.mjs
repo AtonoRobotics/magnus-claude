@@ -54,13 +54,16 @@ await step("the Library is the catalog: Google's apps under Popular, each a card
   await page.getByRole("link", { name: "Library", exact: true }).click();
   await page.getByRole("heading", { name: "Library", level: 1 }).waitFor({ timeout: T });
   const popular = page.locator(".lsect[data-section=popular]");
-  for (const name of ["google-gmail", "google-calendar", "google-drive", "google-chat"]) await popular.locator(`[data-connector=${name}]`).getByRole("button", { name: /^Connect / }).waitFor({ timeout: T });
+  for (const name of ["google-gmail", "google-calendar", "google-drive", "google-chat", "google-docs", "google-sheets"]) await popular.locator(`[data-connector=${name}]`).getByRole("button", { name: /^Connect / }).waitFor({ timeout: T });
   const gmail = popular.locator("[data-connector=google-gmail]");
   await gmail.getByRole("img", { name: "Reviewed by Alpha Vector" }).waitFor({ timeout: T });
   await gmail.getByText("by Google", { exact: true }).waitFor({ timeout: T });
   const said = (await page.locator("#lib-sections").allInnerTexts()).join(" ");
   if (PROTOCOL.test(said)) throw new Error(`a card shows a protocol word: ${said}`);
-  for (const t of ["Gmail", "Google Calendar", "Google Drive", "Google Chat", "Magnus can search and read your email", "4 connectors"]) if (!said.includes(t)) throw new Error(`the Library does not say "${t}": ${said}`);
+  for (const t of ["Gmail", "Google Calendar", "Google Drive", "Google Chat", "Google Docs", "Google Sheets", "Magnus can search and read your email"]) if (!said.includes(t)) throw new Error(`the Library does not say "${t}": ${said}`);
+  const cards = await popular.locator("[data-connector]").count();
+  const count = (await popular.locator(".lsect-n").innerText()).trim();
+  if (count !== `${cards} connectors`) throw new Error(`the section says "${count}" for ${cards} cards`);
   // Yours: nothing connected yet.
   await page.getByRole("button", { name: "Yours", exact: true }).click();
   await page.getByText("Nothing connected yet.", { exact: false }).waitFor({ timeout: T });
