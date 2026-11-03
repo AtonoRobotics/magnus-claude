@@ -928,3 +928,14 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Both now take every app, on or off. An app removed altogether has had every sign-in revoked already (`remove_connector`), so nothing is left behind there.
 - The inbox's app cards still list only apps that are on: they are what a person can use.
 - Test: `an_app_turned_off_still_has_its_sign_ins_ended_by_disconnect_and_the_kill_switch` (connector_lifecycle.rs): Alice and Carol sign in to an app, the owner turns it off over the kernel's control socket; Alice's Disconnect revokes hers at the app, and the kill switch revokes Carol's there. On master Disconnect says "no such app" (404); with that fixed alone, Carol's sign-in is never revoked.
+
+## A person deleted keeps no rights and takes only their own sign-ins (2026-11-02, `erase-all`)
+
+- Found by the review of master against the specs (2026-11-02). Deleting a person (`erase_person`) left the roles the owner gave them in Settings, and the rights their provider last gave them, in the appliance's state. Whoever was next known by their name, a new account at the provider, started with them: an admin deleted came back an admin. It also revoked every sign-in in the vault whose name ended in `__<person>`, so deleting `bob` revoked `ops__bob`'s too.
+- Now the deletion clears both rights maps (`roles_set`, `provider_rights`), and revokes exactly the person's own sign-ins: a sign-in is `connector_<app>__<person>`, and an app's name holds no `__` (its tools are `<app>__<tool>`), so what follows the first `__` is whose it is.
+- Left for its own pull request: a deleted person's branched conversations (their entries as shown then) and their tasks' attachment lists stay in the state until the appliance restarts.
+- Test: `a_person_deleted_keeps_no_roles_and_takes_only_their_own_sign_ins` (person_erasure.rs, Keycloak): the owner makes Bob an admin; Bob and `ops__bob` each sign in to an app; root deletes Bob over the control socket. Bob's roles are the config's again, not admin, one sign-in was revoked, and `ops__bob`'s is still connected. On master it revoked two; with that fixed alone, Bob is still an admin.
+
+## Developer views and the policy on people's data (2026-11-02)
+
+- Owner, 2026-11-02, on whether making people's data private covers the developer views: "Developer and admin are currently the same. That will change eventually. Currently I am the developer. Admin grew out of that with the appliance because the appliance will have admins that the org hired and won't be me." So the developer views stay as they are while the owner is both. Once an organisation's own admins run an appliance, the developer role is no longer theirs, and what it may see of people's data is decided then.

@@ -1214,6 +1214,10 @@ impl State {
                 self.hidden.remove(person);
                 self.subjects.remove(person);
                 self.last_sign_in.remove(person);
+                // The rights they held go with them: whoever is next known by
+                // their name starts from the organisation's config.
+                self.roles_set.remove(person);
+                self.provider_rights.remove(person);
             }
             Ev::RolesSet { person, roles } => {
                 self.roles_set.insert(person.clone(), roles.clone());
