@@ -22,7 +22,20 @@ const page = await browser.newPage({ viewport: { width: win.width, height: win.h
 const errors = [];
 const dialogs = [];
 page.on("pageerror", e => errors.push(String(e)));
-page.on("dialog", d => { dialogs.push(d.message()); d.accept(); });
+// A webview may answer window.confirm no without showing it (the Windows
+// app's did, 2026-11-03): here it does, and the app's own question, in
+// its dialog, is answered yes.
+await page.exposeFunction("magnusAsked", m => dialogs.push(m));
+await page.addInitScript(() => {
+  window.confirm = () => false;
+  new MutationObserver(() => {
+    for (const q of document.querySelectorAll("dialog.ask[open]:not([data-answered])")) {
+      q.dataset.answered = "1";
+      window.magnusAsked(q.querySelector("p").textContent);
+      q.querySelector("[data-ask=yes]").click();
+    }
+  }).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ["open"] });
+});
 const T = 60_000;
 let n = 0;
 const step = async (name, f) => {

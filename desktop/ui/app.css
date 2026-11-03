@@ -328,6 +328,10 @@ iframe.composed { width: 100%; border: 0; display: block; background: transparen
 /* Toasts say what happened; they never cover what can be clicked: they sit
    at the top, in the middle, and let clicks through. */
 #toasts { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 30; pointer-events: none; }
+dialog.ask { max-width: 440px; padding: 20px 22px 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: var(--fg); box-shadow: var(--shadow); }
+dialog.ask::backdrop { background: rgba(0,0,0,.28); }
+dialog.ask p { margin: 0 0 16px; line-height: 1.45; }
+dialog.ask .row { justify-content: flex-end; gap: 8px; }
 .toast { background: var(--fg); color: var(--main); padding: 10px 16px; border-radius: 12px; font-weight: 550; max-width: 420px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
 .empty { color: var(--muted); padding: 24px 0; }
 .stack { display: flex; height: 14px; border-radius: 3px; overflow: hidden; background: var(--line); }
