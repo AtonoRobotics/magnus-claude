@@ -11,8 +11,8 @@ publisher = "Google"
 category = "email"
 abilities = ["Find an email or a thread when you ask about it", "Summarize long threads and catch you up", "Write drafts, replies and forwards, and send one when you allow it", "Label, file or trash messages"]
 asks = ["Read, write, send and label your email"]
-can = "Read your email, write drafts and send one you allow, and label, file or trash messages"
-cannot = "Send email you have not allowed, or delete email for good other than a draft you allow it to"
+can = "Read, write, send, reply to and forward your email (it asks you before each send), and label, file or trash messages"
+cannot = "Delete an email for good"
 letters = "Gm"
 tint = "#B3261E"
 # Brokered (owner, 2026-11-03: Google's hosted Gmail server cannot send
