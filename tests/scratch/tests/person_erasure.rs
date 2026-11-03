@@ -33,14 +33,17 @@ async fn a_person_deleted_keeps_no_roles_and_takes_only_their_own_sign_ins() {
     // The owner makes Bob an admin; Bob and ops__bob each sign in to an app.
     assert_eq!(alice.put("/v1/people/bob/roles", json!({ "roles": ["admin"] })).await.0.as_u16(), 204);
     assert_eq!(roles(&alice, "bob").await["roles"], json!(["admin"]));
-    let cal = FakeOAuthApp::start(3600).await;
-    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
-    assert!(st.is_success(), "{v}");
-    for api in [&bob, &ops] {
-        let (st, v) = api.post("/v1/connectors/calendar/sign-in", json!({ "redirect_uri": "http://127.0.0.1:9/callback" })).await;
+    // Bob also signs in to an app whose name ends in `_`, as names may.
+    let (cal, notes) = (FakeOAuthApp::start(3600).await, FakeOAuthApp::start(3600).await);
+    for (name, url) in [("calendar", &cal.url), ("notes_", &notes.url)] {
+        let (st, v) = alice.post("/v1/connectors", json!({ "name": name, "url": url, "audience": "private", "label": "private" })).await;
+        assert!(st.is_success(), "{v}");
+    }
+    for (api, name) in [(&bob, "calendar"), (&ops, "calendar"), (&bob, "notes_")] {
+        let (st, v) = api.post(&format!("/v1/connectors/{name}/sign-in"), json!({ "redirect_uri": "http://127.0.0.1:9/callback" })).await;
         assert!(st.is_success(), "{v}");
         let (code, state) = FakeOAuthApp::browse(v["authorize_url"].as_str().unwrap()).await;
-        assert_eq!(api.post("/v1/connectors/calendar/sign-in/complete", json!({ "state": state, "code": code })).await.0, 204);
+        assert_eq!(api.post(&format!("/v1/connectors/{name}/sign-in/complete"), json!({ "state": state, "code": code })).await.0, 204);
     }
 
     // Root deletes Bob, as the console names him: by his Keycloak account.
@@ -48,7 +51,8 @@ async fn a_person_deleted_keeps_no_roles_and_takes_only_their_own_sign_ins() {
     let sub = people["people"].as_object().unwrap().keys().next().expect("bob's account is bound").clone();
     let (st, v) = control(&app, "POST", &format!("/v1/people/{sub}/erase"), json!({ "actor": "admin:root" })).await;
     assert_eq!(st, 200, "{v}");
-    assert_eq!(v["sign_ins_revoked"], 1, "{v}");
+    assert_eq!(v["sign_ins_revoked"], 2, "bob's two sign-ins, and only his: {v}");
+    assert!(!notes.state.lock().unwrap().revoked.is_empty(), "bob's sign-in to notes_ was not revoked at the app");
 
     // Bob keeps no role the owner gave him: whoever is next known as Bob
     // starts from the organisation's config, not as an admin.

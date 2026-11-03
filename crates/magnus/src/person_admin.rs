@@ -172,9 +172,10 @@ impl Kernel {
             self.emit_all(evs).await.map_err(failed)?;
         }
         // Their own sign-ins to the organisation's apps, revoked at each app:
-        // `connector_<app>__<person>`, an app's name holding no `__`, so the
-        // rest is exactly whose it is (not anyone's whose name ends in theirs).
-        let mine: Vec<String> = self.vault.names().map_err(failed)?.into_iter().filter(|n| n.strip_prefix("connector_").and_then(|r| r.split_once("__")).is_some_and(|(_, p)| p == person)).collect();
+        // `connector_<app>__<person>`, where an app's name holds no `__` (it
+        // may end in `_`), so not anyone's whose name ends in theirs.
+        let tail = format!("__{person}");
+        let mine: Vec<String> = self.vault.names().map_err(failed)?.into_iter().filter(|n| n.strip_prefix("connector_").and_then(|r| r.strip_suffix(&tail)).is_some_and(|app| !app.is_empty() && !app.contains("__"))).collect();
         let mut sign_ins = 0;
         for name in mine {
             if let Some(s) = self.vault.remove(&name).map_err(failed)? {
