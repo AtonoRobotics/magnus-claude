@@ -26,6 +26,31 @@ pub const PROTOCOL: &str = "2025-06-18";
 /// The most a proxy's answer to CONNECT may be (its status line and headers).
 const HEAD_MAX: usize = 8192;
 
+/// Where a failed call's result says what it means for what happened at the
+/// provider (`unknown` or `needs_scope`; nothing said, nothing happened).
+pub const OUTCOME_META: &str = "io.magnus/outcome";
+/// With `needs_scope`, the scopes the provider wants.
+pub const SCOPES_META: &str = "io.magnus/scopes";
+
+/// Why a call has no answer, in words for the agent, and what happened at
+/// the provider.
+#[derive(Debug, PartialEq)]
+pub enum Failure {
+    /// Nothing happened there.
+    NotDone(String),
+    /// The request may have reached it; what it did is unknown.
+    Unknown(String),
+    /// It refused for want of access the sign-in does not hold: the scopes
+    /// it wants. Nothing happened there.
+    NeedsScope(String, Vec<String>),
+}
+
+impl From<String> for Failure {
+    fn from(s: String) -> Self {
+        Failure::NotDone(s)
+    }
+}
+
 /// One tool: its schemas and what it does with its input and the call's
 /// access token.
 pub struct Tool {
@@ -33,7 +58,7 @@ pub struct Tool {
     pub description: &'static str,
     pub input: Value,
     pub output: Value,
-    pub run: fn(&Value, &str) -> Result<Value, String>,
+    pub run: fn(&Value, &str) -> Result<Value, Failure>,
 }
 
 /// The answer to one message, or none for a notification.
@@ -67,8 +92,15 @@ fn call(params: &Value, tools: &[Tool]) -> Value {
             Ok(()) => json!({ "content": [{ "type": "text", "text": v.to_string() }], "structuredContent": v, "isError": false }),
             Err(e) => failed(format!("{name}: the answer does not match its schema: {e}")),
         },
-        Err(e) => failed(e),
+        Err(Failure::NotDone(e)) => failed(e),
+        Err(Failure::Unknown(e)) => with_meta(failed(e), json!({ OUTCOME_META: "unknown" })),
+        Err(Failure::NeedsScope(e, scopes)) => with_meta(failed(e), json!({ OUTCOME_META: "needs_scope", SCOPES_META: scopes })),
     }
+}
+
+fn with_meta(mut v: Value, meta: Value) -> Value {
+    v["_meta"] = meta;
+    v
 }
 
 /// One session: answer each line until the appliance closes it.
@@ -197,11 +229,13 @@ fn dechunk(mut b: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    fn echo(args: &Value, token: &str) -> Result<Value, String> {
+    fn echo(args: &Value, token: &str) -> Result<Value, Failure> {
         match args["say"].as_str() {
             Some("wrong") => Ok(json!({ "said": 1 })),
+            Some("lost") => Err(Failure::Unknown("lost on the way".into())),
+            Some("more") => Err(Failure::NeedsScope("wants more".into(), vec!["s2".into()])),
             Some(s) => Ok(json!({ "said": format!("{s} with {}", token.len()) })),
-            None => Err("nothing to say".into()),
+            None => Err("nothing to say".to_string().into()),
         }
     }
 
@@ -246,8 +280,10 @@ mod tests {
             call(6, json!({ "say": "wrong" }), Some("tok")),
             call(7, json!({}), Some("tok")),
             json!({ "jsonrpc": "2.0", "id": 8, "method": "resources/list" }),
+            call(9, json!({ "say": "lost" }), Some("tok")),
+            call(10, json!({ "say": "more" }), Some("tok")),
         ]);
-        assert_eq!(a.iter().map(|m| m["id"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(a.iter().map(|m| m["id"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         assert_eq!(a[0]["result"]["protocolVersion"], PROTOCOL);
         let t = &a[1]["result"]["tools"][0];
         assert_eq!((t["name"].as_str(), t["inputSchema"]["type"].as_str(), t["outputSchema"]["required"][0].as_str()), (Some("echo"), Some("object"), Some("said")));
@@ -259,6 +295,12 @@ mod tests {
             assert!(m["result"].get("structuredContent").is_none(), "{m}");
         }
         assert_eq!(a[7]["error"]["code"], -32601);
+        // What happened at the provider goes with a failure: nothing, unless
+        // it says otherwise.
+        assert!(a[6]["result"].get("_meta").is_none());
+        assert_eq!(a[8]["result"]["_meta"], json!({ OUTCOME_META: "unknown" }));
+        assert_eq!(a[9]["result"]["_meta"], json!({ OUTCOME_META: "needs_scope", SCOPES_META: ["s2"] }));
+        assert_eq!((a[8]["result"]["isError"].as_bool(), a[9]["result"]["isError"].as_bool()), (Some(true), Some(true)));
     }
 
     /// One request carries the token and the body, and the answer's status,

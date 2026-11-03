@@ -122,3 +122,129 @@ impl Elsewhere {
         Elsewhere { host, reached }
     }
 }
+
+/// One request Gmail's stand-in was sent: the name the client asked for in
+/// its TLS hello, the method, path, `Host`, `Authorization` and body.
+#[derive(Clone, Debug)]
+pub struct GmailRequest {
+    pub sni: String,
+    pub method: String,
+    pub path: String,
+    pub host: String,
+    pub auth: String,
+    pub body: String,
+}
+
+/// A local HTTPS host standing in for `gmail.googleapis.com` (the real one
+/// needs a person's Google account; the contract test uses one), with a
+/// certificate for that name from a CA of the test's own. It keeps drafts
+/// and records each request; one answer may be set ahead.
+pub struct StandInGmail {
+    pub addr: String,
+    /// The CA's certificate, DER, in a file: `[brokered] roots`.
+    pub root: std::path::PathBuf,
+    pub seen: Arc<Mutex<Vec<GmailRequest>>>,
+    /// The next answer, instead of Gmail's usual one: status, headers, body.
+    pub next: Arc<Mutex<Option<(u16, String, String)>>>,
+    _dir: tempfile::TempDir,
+}
+
+impl StandInGmail {
+    pub async fn start() -> StandInGmail {
+        Self::with_drafts(0).await
+    }
+
+    /// One whose mailbox holds `drafts` drafts already (`d1`, ...), as if
+    /// the person had written them.
+    pub async fn with_drafts(drafts: usize) -> StandInGmail {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        p.distinguished_name.push(rcgen::DnType::CommonName, "A CA standing in for Google's (test)");
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca = p.self_signed(&ca_key).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["gmail.googleapis.com".to_string()]).unwrap().signed_by(&key, &ca, &ca_key).unwrap();
+        let root = dir.path().join("root.der");
+        std::fs::write(&root, ca.der()).unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let tls = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()))
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let seen: Arc<Mutex<Vec<GmailRequest>>> = Arc::default();
+        let next: Arc<Mutex<Option<(u16, String, String)>>> = Arc::default();
+        let (s2, n2) = (seen.clone(), next.clone());
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = l.accept().await {
+                let (acceptor, seen, next) = (acceptor.clone(), s2.clone(), n2.clone());
+                tokio::spawn(async move {
+                    let Ok(mut s) = acceptor.accept(tcp).await else { return };
+                    let sni = s.get_ref().1.server_name().unwrap_or_default().to_string();
+                    let Some(r) = read_request(&mut s, sni).await else { return };
+                    let (status, head, body) = next.lock().unwrap().take().unwrap_or_else(|| gmail_answer(&r, &seen.lock().unwrap(), drafts));
+                    seen.lock().unwrap().push(r);
+                    let out = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{head}\r\n{body}", body.len());
+                    use tokio::io::AsyncWriteExt;
+                    let _ = s.write_all(out.as_bytes()).await;
+                    let _ = s.shutdown().await;
+                });
+            }
+        });
+        StandInGmail { addr, root, seen, next, _dir: dir }
+    }
+
+    pub fn requests(&self) -> Vec<GmailRequest> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+async fn read_request(s: &mut (impl tokio::io::AsyncRead + Unpin), sni: String) -> Option<GmailRequest> {
+    use tokio::io::AsyncReadExt;
+    let mut raw = vec![];
+    let mut b = [0u8; 4096];
+    let split = loop {
+        let n = s.read(&mut b).await.ok().filter(|n| *n > 0)?;
+        raw.extend_from_slice(&b[..n]);
+        if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+    };
+    let head = String::from_utf8_lossy(&raw[..split]).to_string();
+    let header = |name: &str| head.lines().skip(1).find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_string())).unwrap_or_default();
+    let len: usize = header("content-length").parse().unwrap_or(0);
+    while raw.len() < split + 4 + len {
+        let n = s.read(&mut b).await.ok().filter(|n| *n > 0)?;
+        raw.extend_from_slice(&b[..n]);
+    }
+    let mut first = head.lines().next().unwrap_or_default().split_whitespace();
+    let (method, path) = (first.next().unwrap_or_default().to_string(), first.next().unwrap_or_default().to_string());
+    Some(GmailRequest { sni, method, path, host: header("host"), auth: header("authorization"), body: String::from_utf8_lossy(&raw[split + 4..split + 4 + len]).to_string() })
+}
+
+/// What Gmail answers, for the requests the tests make: one thread in the
+/// inbox, drafts made `d1`, `d2`, ... (after those there already) and sent
+/// only if made.
+fn gmail_answer(r: &GmailRequest, before: &[GmailRequest], drafts: usize) -> (u16, String, String) {
+    let base = "/gmail/v1/users/me";
+    let path = r.path.strip_prefix(base).unwrap_or("");
+    let made = drafts + before.iter().filter(|x| x.method == "POST" && x.path == format!("{base}/drafts")).count();
+    let ok = |v: serde_json::Value| (200, String::new(), v.to_string());
+    match (r.method.as_str(), path.split('?').next().unwrap_or("")) {
+        ("GET", "/threads") => ok(serde_json::json!({ "threads": [{ "id": "t1", "snippet": "Can you send me the plan for Friday?" }] })),
+        ("POST", "/drafts") => ok(serde_json::json!({ "id": format!("d{}", made + 1), "message": { "id": format!("dm{}", made + 1), "threadId": "t1", "labelIds": ["DRAFT"] } })),
+        ("POST", "/drafts/send") => {
+            let id = serde_json::from_str::<serde_json::Value>(&r.body).unwrap_or_default()["id"].as_str().unwrap_or_default().to_string();
+            match id.strip_prefix('d').and_then(|n| n.parse::<usize>().ok()) {
+                Some(n) if (1..=made).contains(&n) => ok(serde_json::json!({ "id": format!("s{n}"), "threadId": "t1", "labelIds": ["SENT"] })),
+                _ => (404, String::new(), serde_json::json!({ "error": { "code": 404, "message": "Requested entity was not found." } }).to_string()),
+            }
+        }
+        _ => (404, String::new(), serde_json::json!({ "error": { "code": 404, "message": "Requested entity was not found." } }).to_string()),
+    }
+}

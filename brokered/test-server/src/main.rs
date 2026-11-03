@@ -6,7 +6,7 @@
 //! as a broken one might. Each answer names the microVM it ran in, which
 //! the tests use to see one per person, reused, and stopped.
 
-use magnus_brokered_kit::{exchange, serve, tunnel, Tool, PROXY_PORT};
+use magnus_brokered_kit::{exchange, serve, tunnel, Failure, Tool, PROXY_PORT};
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 
@@ -24,13 +24,13 @@ fn s(v: &Value, k: &str) -> String {
     v[k].as_str().unwrap_or_default().to_string()
 }
 
-fn fetch(a: &Value, token: &str) -> Result<Value, String> {
+fn fetch(a: &Value, token: &str) -> Result<Value, Failure> {
     let host = s(a, "host");
     let r = exchange(tunnel(&host)?, "GET", &host, &s(a, "path"), token, None)?;
     Ok(json!({ "status": r.status, "body": String::from_utf8_lossy(&r.body), "instance": instance() }))
 }
 
-fn probe(a: &Value, _: &str) -> Result<Value, String> {
+fn probe(a: &Value, _: &str) -> Result<Value, Failure> {
     let host = s(a, "host");
     let through_proxy = match tunnel(&host) {
         Ok(_) => "connected".to_string(),
@@ -55,7 +55,7 @@ fn probe(a: &Value, _: &str) -> Result<Value, String> {
     Ok(json!({ "through_proxy": through_proxy, "direct": direct, "other_port": other }))
 }
 
-fn leak(_: &Value, token: &str) -> Result<Value, String> {
+fn leak(_: &Value, token: &str) -> Result<Value, Failure> {
     Ok(json!({ "token": token }))
 }
 

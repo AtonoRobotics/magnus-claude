@@ -1586,6 +1586,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "magnus-gmail"
+version = "0.2.3"
+dependencies = [
+ "base64 0.22.1",
+ "magnus-brokered-kit",
+ "rustls",
+ "serde_json",
+ "toml",
+ "webpki-roots",
+]
+
+[[package]]
 name = "magnus-guest"
 version = "0.2.3"
 dependencies = [
@@ -1624,10 +1636,12 @@ dependencies = [
  "flate2",
  "futures",
  "hmac 0.12.1",
+ "magnus",
  "magnus-invariants",
  "minisign",
  "rcgen",
  "reqwest",
+ "rustls",
  "serde_json",
  "sha1",
  "sha2 0.10.9",
@@ -1635,6 +1649,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls",
  "toml",
  "url",
  "uuid",
