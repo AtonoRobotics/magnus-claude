@@ -27,6 +27,11 @@ pub struct Session {
     /// What signed in: "app" or "browser".
     #[serde(default)]
     pub client: String,
+    /// The paired device this session was opened on, when it came through
+    /// the tunnel or was bound at pairing. Absent on a session that is
+    /// older than device certificates, and on a LAN session not yet paired.
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 pub enum SignInError {
@@ -223,7 +228,8 @@ impl Accounts {
     }
 
     /// Open a session for a person whose identity is already established.
-    pub fn open_session(&self, person: &str, client: &str) -> Result<(Session, String)> {
+    /// `device` is the paired computer, when this sign-in presented one.
+    pub fn open_session(&self, person: &str, client: &str, device: Option<&str>) -> Result<(Session, String)> {
         let now = Utc::now();
         let mut raw = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut raw);
@@ -234,6 +240,7 @@ impl Accounts {
             created: now,
             expires: now + Duration::days(self.cfg.session_days as i64),
             client: client.to_string(),
+            device: device.map(str::to_string),
         };
         let mut s = self.sessions.lock().unwrap();
         s.insert(token_hash(&token), session.clone());
@@ -267,6 +274,31 @@ impl Accounts {
         Ok(gone)
     }
 
+    /// Remember which paired computer a session belongs to. Pairing does
+    /// this for the sign-in that asked for the certificate, which is on the
+    /// LAN and so was not bound on its own.
+    pub fn bind_session_device(&self, token: &str, device: &str) -> Result<()> {
+        let mut s = self.sessions.lock().unwrap();
+        if let Some(session) = s.get_mut(&token_hash(token)) {
+            session.device = Some(device.to_string());
+            self.save(&s)?;
+        }
+        Ok(())
+    }
+
+    /// End every session bound to a device, and return their ids. Revoking
+    /// the device's certificate does this, so a stolen computer's saved
+    /// sign-in stops working with the certificate.
+    pub fn end_device(&self, device: &str) -> Result<Vec<Session>> {
+        let mut s = self.sessions.lock().unwrap();
+        let ended: Vec<Session> = s.values().filter(|x| x.device.as_deref() == Some(device)).cloned().collect();
+        if !ended.is_empty() {
+            s.retain(|_, x| x.device.as_deref() != Some(device));
+            self.save(&s)?;
+        }
+        Ok(ended)
+    }
+
     pub fn sign_out(&self, token: &str) -> Result<Option<Session>> {
         let mut s = self.sessions.lock().unwrap();
         let gone = s.remove(&token_hash(token));
@@ -274,5 +306,35 @@ impl Accounts {
             self.save(&s)?;
         }
         Ok(gone)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SignIn;
+
+    fn open(dir: &std::path::Path) -> Accounts {
+        Accounts::open(
+            dir,
+            SignIn { session_days: 1, max_failures: 5, lockout_minutes: 15, min_password_length: 10, oidc: None },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn revoking_a_device_ends_its_sessions_and_an_old_session_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = open(dir.path());
+        let (_, token) = accounts.open_session("ada", "app", None).unwrap();
+        accounts.bind_session_device(&token, "dev_this").unwrap();
+        let (_, other) = accounts.open_session("ada", "app", Some("dev_other")).unwrap();
+        let ended = accounts.end_device("dev_this").unwrap();
+        assert_eq!(ended.len(), 1);
+        assert!(accounts.session(&token).is_none(), "the revoked device's session was still live");
+        assert_eq!(accounts.session(&other).unwrap().device.as_deref(), Some("dev_other"));
+        let old = r#"{"h":{"id":"sess_old","person":"ada","created":"2030-01-01T00:00:00Z","expires":"2030-02-01T00:00:00Z","client":"app"}}"#;
+        let map: BTreeMap<String, Session> = serde_json::from_str(old).unwrap();
+        assert!(map["h"].device.is_none(), "a session from before device certificates did not load");
     }
 }

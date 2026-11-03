@@ -370,6 +370,20 @@ pub enum Ev {
         person: String,
         session: String,
     },
+    /// A computer was paired and Cloudflare signed its certificate. The
+    /// certificate and its key are not here; the key never was.
+    DevicePaired {
+        person: String,
+        device: String,
+        name: String,
+    },
+    /// A paired computer was revoked: its certificate no longer opens the
+    /// public name, and its sessions were ended. `by` is who revoked it.
+    DeviceRevoked {
+        person: String,
+        device: String,
+        by: String,
+    },
     /// The identity provider, or an admin, turned a person off: their apps
     /// answer no calls for them until they sign in again.
     PersonTurnedOff {
