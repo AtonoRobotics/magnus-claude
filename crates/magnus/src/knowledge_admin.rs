@@ -361,8 +361,7 @@ impl Kernel {
     }
 
     /// The root index as one person's agent receives it: links to what they
-    /// cannot see turned into text, bullets that would show nothing left out
-    /// (K2).
+    /// cannot see removed, bullets that would show nothing left out (K2).
     pub async fn admin_assembled(&self, person: &str) -> Result<Value, Refusal> {
         let Some(d) = self.read(|s| s.bundle.get("/index.md").cloned()) else { return Ok(json!({ "person": person, "text": null })) };
         let c = self.log.contents(&[d.seq()]).await.map_err(failed)?.remove(&d.seq()).unwrap_or_default();
