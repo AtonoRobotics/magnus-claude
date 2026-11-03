@@ -56,7 +56,7 @@ async fn a_person_turned_off_has_no_apps_until_they_are_back() {
     eventually("carol's session ended", PATIENCE, || async { (carol.get("/v1/me").await.0 == 401).then_some(()) }).await;
 
     // Approved now, the call is refused here and never reaches the app.
-    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve:once" })).await.is_success());
+    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
     let refused = eventually("the call refused", PATIENCE, || async {
         m.requests().iter().map(|c| c.text()).find(|t| t.contains("account is turned off"))
     })
@@ -73,6 +73,6 @@ async fn a_person_turned_off_has_no_apps_until_they_are_back() {
     assert_eq!(c["state"], "connected", "{c}");
     let task = carol.submit("What is on my calendar now?").await;
     let item = carol.wait_item(&task, "approval").await;
-    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve:once" })).await.is_success());
+    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
     eventually("the call made", PATIENCE, || async { (cal.calls("list_events") == 1).then_some(()) }).await;
 }
