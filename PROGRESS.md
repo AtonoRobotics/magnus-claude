@@ -1,5 +1,8 @@
 # Progress
 
+## Approved contract changes keep their taint (2026-11-04)
+
+An approved contract change cleared the taint its checks are judged by, so a tainted run could have a `web_fetch` carrying private data run at completion without asking. It now keeps the run's taint; such a check goes to the person's review instead (`state.rs`, test in `contract_freeze.rs`).
 ## Sign-in follows no redirects (2026-11-04)
 
 The sign-in HTTP clients followed redirects, so a token endpoint answering 307 would have had the password resent to wherever it pointed, plain http included. They now follow none (`oidc.rs`).
