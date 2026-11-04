@@ -24,6 +24,9 @@ const API: Api = Api { host: "www.googleapis.com", base: "/drive/v3", name: "Goo
 
 const FIELDS: &str = "id,name,mimeType,modifiedTime,size,parents,webViewLink,trashed,shared,description,owners(emailAddress)";
 const FOLDER: &str = "application/vnd.google-apps.folder";
+/// The most pages of a file's permissions one call follows (100 a page),
+/// the same cap as Calendar's list_calendars.
+const PAGES: usize = 20;
 /// The most of a file read or downloaded in one call.
 const MOST: usize = 10 << 20;
 
@@ -98,10 +101,27 @@ fn get_file_metadata(a: &Value, t: &str) -> Result<Value, Failure> {
     Ok(file(&meta(&file_id(a)?, t)?))
 }
 
+/// Everyone with access, following Drive's pages (100 a page) up to
+/// `PAGES` of them; `more` says when it stopped short, so a list cut off
+/// never reads as complete.
 fn get_file_permissions(a: &Value, t: &str) -> Result<Value, Failure> {
-    let r = API.call("GET", &format!("/files/{}/permissions?fields={}&supportsAllDrives=true", file_id(a)?, enc("permissions(id,type,role,emailAddress,domain,displayName)")), t, None)?;
-    let people: Vec<Value> = r["permissions"].as_array().into_iter().flatten().map(|p| json!({ "permission_id": p["id"], "type": p["type"], "role": p["role"], "email": p["emailAddress"], "domain": p["domain"], "name": p["displayName"] })).collect();
-    Ok(json!({ "permissions": people }))
+    let id = file_id(a)?;
+    let (mut people, mut next) = (vec![], None);
+    for _ in 0..PAGES {
+        let pairs = [
+            ("fields", Some("nextPageToken,permissions(id,type,role,emailAddress,domain,displayName)".to_string())),
+            ("pageSize", Some("100".to_string())),
+            ("pageToken", next.take()),
+            ("supportsAllDrives", Some("true".to_string())),
+        ];
+        let r = API.call("GET", &format!("/files/{id}/permissions{}", query(&pairs)), t, None)?;
+        people.extend(r["permissions"].as_array().into_iter().flatten().map(|p| json!({ "permission_id": p["id"], "type": p["type"], "role": p["role"], "email": p["emailAddress"], "domain": p["domain"], "name": p["displayName"] })));
+        next = r["nextPageToken"].as_str().map(String::from);
+        if next.is_none() {
+            break;
+        }
+    }
+    Ok(json!({ "permissions": people, "more": next.is_some() }))
 }
 
 /// How a Google file is read as text: a document or slides as plain text,
@@ -317,7 +337,7 @@ fn tools() -> Vec<Tool> {
         tool("search_files", "Find files: by words in them or their name (text), by Drive's query syntax (query, such as name contains 'plan'), in a folder; none in the trash unless asked.", obj(json!({ "text": st, "query": st, "folder_id": st, "include_trashed": yes, "max_results": n, "page_token": st }), &[]), many.clone(), search_files),
         tool("list_recent_files", "List the files changed most recently.", obj(json!({ "max_results": n, "page_token": st }), &[]), many, list_recent_files),
         tool("get_file_metadata", "Read a file's name, type, size, folder, owners and link.", one.clone(), f.clone(), get_file_metadata),
-        tool("get_file_permissions", "List who can open a file and how.", one.clone(), obj(json!({ "permissions": { "type": "array" } }), &["permissions"]), get_file_permissions),
+        tool("get_file_permissions", "List who can open a file and how.", one.clone(), obj(json!({ "permissions": { "type": "array" }, "more": yes }), &["permissions", "more"]), get_file_permissions),
         tool("read_file_content", "Read a file as text: a document or slides as plain text, a sheet as CSV, a text file as it is.", one.clone(), obj(json!({ "file_id": st, "name": st, "mime_type": st, "text": st, "truncated": yes }), &["text"]), read_file_content),
         tool("download_file_content", "Download a file's bytes, base64; a Google file is exported (as PDF unless export_mime_type is given).", obj(json!({ "file_id": st, "export_mime_type": st }), &["file_id"]), obj(json!({ "file_id": st, "name": st, "mime_type": st, "size": n, "base64": st }), &["base64"]), download_file_content),
         tool("create_file", "Make a file in the person's Drive, from text or base64, optionally as a Google document, sheet or slides.", obj(body.clone(), &["name"]), f.clone(), create_file),

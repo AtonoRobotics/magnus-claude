@@ -21,7 +21,7 @@ tint = "#1E7F5C"
 # `brokered/build.sh`; each person's runs in a microVM of its own that
 # reaches only Google's API host, and people sign in at Google.
 kind = "brokered"
-endpoint = "sha256:5c598b23dd42f6c55acb26d738109f564a1b6819ee58e9f2b965f4d0c638fffb"
+endpoint = "sha256:a363ab439b4d2b94674b2bb5c9fe013864fe99fa89158ed49b33a9f2152e8b32"
 hosts = ["www.googleapis.com"]
 issuer = "https://accounts.google.com"
 # A file it shares reaches anyone the person shares it with. What comes

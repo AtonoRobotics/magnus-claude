@@ -133,11 +133,12 @@ pub fn only_the_api(app: &Appliance, api: &StandIn, provider: &FakeOAuthApp, bas
 }
 
 /// The open approval for `task`, once there is one, and which of `tools`
-/// it asks about.
+/// it asks about (the longest name it holds, so `unshare_file` is not
+/// taken for `share_file`).
 pub async fn asked(p: &Api, task: &str, tools: &[&str]) -> (Value, String) {
     let ask = p.wait_item(task, "approval").await;
     let t = ask.to_string();
-    let tool = tools.iter().find(|x| t.contains(*x)).unwrap_or_else(|| panic!("{ask}"));
+    let tool = tools.iter().filter(|x| t.contains(*x)).max_by_key(|x| x.len()).unwrap_or_else(|| panic!("{ask}"));
     (ask, tool.to_string())
 }
 

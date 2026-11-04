@@ -14,11 +14,11 @@ use serde_json::{json, Value};
 
 const HOST: &str = "www.googleapis.com";
 const BASE: &str = "/drive/v3";
-const WRITES: [&str; 3] = ["create_file", "share_file", "delete_file"];
+const WRITES: [&str; 4] = ["create_file", "share_file", "unshare_file", "delete_file"];
 
 /// What Drive answers, for the requests the tests make: one document, the
-/// plan, whose text says Q3's revenue; a file made, a share and a delete
-/// each come back done.
+/// plan, whose text says Q3's revenue, shared in two pages of permissions;
+/// a file made, a share, an unshare and a delete each come back done.
 fn drive(r: &Request, _: &[Request]) -> (u16, String, String) {
     let plan = json!({ "id": "f1", "name": "Q3 plan", "mimeType": "application/vnd.google-apps.document", "parents": ["root"], "owners": [{ "emailAddress": "alice@example.com" }] });
     let path = r.path.split('?').next().unwrap_or("");
@@ -29,6 +29,10 @@ fn drive(r: &Request, _: &[Request]) -> (u16, String, String) {
         ("POST", "/upload/drive/v3/files") => ok(json!({ "id": "f2", "name": "Q3 summary", "mimeType": "text/plain", "parents": ["root"] })),
         ("POST", "/drive/v3/files/f1/permissions") => ok(json!({ "id": "p1", "type": "user", "role": "reader", "emailAddress": "bob@example.com" })),
         ("DELETE", "/drive/v3/files/f1") => (204, String::new(), String::new()),
+        // Who can open the plan, in two pages: Alice, then Bob.
+        ("GET", "/drive/v3/files/f1/permissions") if r.path.contains("pageToken=next") => ok(json!({ "permissions": [{ "id": "p2", "type": "user", "role": "reader", "emailAddress": "bob@example.com" }] })),
+        ("GET", "/drive/v3/files/f1/permissions") => ok(json!({ "permissions": [{ "id": "p1", "type": "user", "role": "owner", "emailAddress": "alice@example.com" }], "nextPageToken": "next" })),
+        ("DELETE", "/drive/v3/files/f1/permissions/p2") => (204, String::new(), String::new()),
         _ => not_found(),
     }
 }
@@ -101,6 +105,41 @@ async fn having_read_a_document_drive_asks_before_making_a_file_and_uploads_it_w
     assert_eq!(up.body, "--magnus-part\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{\"name\":\"Q3 summary\"}\r\n--magnus-part\r\nContent-Type: text/plain\r\n\r\nQ3: 41.7M.\r\n--magnus-part--\r\n");
     only_the_api(&app, &api, &provider, "/");
     assert!(api.requests().iter().all(|r| r.path.starts_with(BASE) || r.path.starts_with("/upload/drive/v3/")), "{:?}", api.calls(BASE));
+}
+
+/// Who can open a file comes back whole when Drive answers in pages: the
+/// tool follows them, so a share only a later page lists can be removed.
+#[tokio::test(flavor = "multi_thread")]
+async fn drive_lists_everyone_a_file_is_shared_with_across_pages() {
+    let api = StandIn::start(HOST, drive).await;
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("stop sharing the Q3 plan with Bob", "Bob can no longer open it"),
+            1 => tool("drive__get_file_permissions", json!({ "file_id": "f1" })),
+            2 => tool("drive__unshare_file", json!({ "file_id": "f1", "permission_id": "p2" })),
+            _ => complete("Bob can no longer open it"),
+        }
+    }))
+    .await;
+    let (app, provider, _image) = signed_in(&m, &api, "google-drive", "magnus-drive", "drive").await;
+    let alice = app.api("alice");
+
+    let task = alice.submit("Stop sharing the Q3 plan with Bob.").await;
+    let (ask, tool) = asked(&alice, &task, &WRITES).await;
+    assert_eq!(tool, "unshare_file");
+    let sent = api.requests();
+    let pages: Vec<&str> = sent.iter().map(|r| r.path.as_str()).filter(|p| p.starts_with("/drive/v3/files/f1/permissions")).collect();
+    assert_eq!(pages.len(), 2, "{pages:?}");
+    assert!(pages[1].contains("pageToken=next"), "{pages:?}");
+    let said = told(&m, "Stop sharing the Q3 plan with Bob.");
+    assert!(said.contains("alice@example.com") && said.contains("bob@example.com"), "both pages' permissions did not reach Magnus: {said}");
+    approve(&alice, &ask).await;
+
+    let review = alice.wait_item(&task, "review").await;
+    assert!(alice.respond(review["id"].as_str().unwrap(), json!({ "decision": "accept" })).await.is_success());
+    assert_eq!(alice.wait_settled(&task).await["status"], "completed");
+    assert_eq!(api.calls(BASE).last().unwrap(), &("DELETE".to_string(), "/files/f1/permissions/p2".to_string()));
+    only_the_api(&app, &api, &provider, BASE);
 }
 
 /// Google's refusals reach the boundary as what they mean: a sign-in
