@@ -776,6 +776,18 @@ pub struct Connector {
     pub hosts: Vec<String>,
     #[serde(default)]
     pub issuer: Option<String>,
+    /// The sign-in sends PKCE (S256). Off only for a confidential client
+    /// whose provider rejects a code challenge until the app opts in, and
+    /// whose opt-in cannot be undone.
+    #[serde(default = "pkce_on")]
+    pub pkce: bool,
+    /// The one redirect the provider registered. The desktop listens on it.
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+}
+
+fn pkce_on() -> bool {
+    true
 }
 
 /// The company knowledge base. Without an embedding server it is searched

@@ -51,7 +51,7 @@ const appBridge = tauri && {
   async download(path, name) { return this.invoke("download", { path, name }); },
   async openExternal(url) { return this.invoke("open_url", { url }); },
   // App sign-ins come back to a loopback address on this computer.
-  async loopbackOpen() { return this.invoke("loopback_open"); },
+  async loopbackOpen(redirect) { return this.invoke("loopback_open", { redirect: redirect || null }); },
   async loopbackWait() { return this.invoke("loopback_wait"); },
   async dataUrl(path, mediaType) { const b64 = await this.invoke("fetch_bytes", { path }); return `data:${mediaType};base64,${b64}`; },
   // The app's own updates, served by the appliance and signed with the release key.
