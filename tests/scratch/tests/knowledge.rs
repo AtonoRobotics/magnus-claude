@@ -371,3 +371,52 @@ async fn a_knowledge_entry_s_text_is_read_from_the_content_store_not_kept() {
     assert!(carol.post(&format!("/v1/trash/{id}/restore"), json!({})).await.0.is_success());
     assert!(!search(&carol, "parking").await.iter().any(|x| x["id"] == id.as_str()), "an entry with no content was indexed");
 }
+
+/// An entry saved while the embedding server was down is indexed by its
+/// words alone; once the server is back, a search by meaning still finds
+/// it by its words, before the next start embeds it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entry_saved_while_the_embedder_was_down_is_still_found() {
+    use axum::{http::StatusCode, routing::post, Json, Router};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut k = start().await;
+    let carol = k.app.api("carol");
+    let down = std::sync::Arc::new(AtomicBool::new(false));
+    let d = down.clone();
+    let app = Router::new().route(
+        "/v1/embeddings",
+        post(move |Json(b): Json<Value>| {
+            let d = d.clone();
+            async move {
+                if d.load(Ordering::SeqCst) {
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                }
+                let text = b["input"][0].as_str().unwrap_or_default().to_lowercase();
+                let mut v = vec![0.0f64; 16];
+                v[0] = 0.1;
+                for w in text.split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() > 2) {
+                    v[1 + (w.bytes().fold(7u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)) % 15) as usize] += 1.0;
+                }
+                Ok(Json(json!({ "object": "list", "model": b["model"], "data": [{ "object": "embedding", "index": 0, "embedding": v }] })))
+            }
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let path = k.app.dir.path().join("magnus.toml");
+    let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    cfg.insert("knowledge".into(), toml::Value::Table(toml::toml! { [embeddings] url = url model = "fake-embed" }));
+    std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+    k.app.restart().await;
+
+    let (_, other) = carol.post("/v1/knowledge", json!({ "title": "Office hours", "text": "The office opens at eight.", "everyone": true })).await;
+    down.store(true, Ordering::SeqCst);
+    let (st, shed) = carol.post("/v1/knowledge", json!({ "title": "Bike shed", "text": "The bike shed key hangs at reception.", "everyone": true })).await;
+    assert_eq!(st, 201, "{shed}");
+    down.store(false, Ordering::SeqCst);
+
+    let hits = search(&carol, "bike shed key").await;
+    assert!(hits.iter().any(|h| h["id"] == shed["id"]), "an entry saved while the embedder was down was not found: {hits:?}");
+    assert!(search(&carol, "when does the office open").await.iter().any(|h| h["id"] == other["id"]), "search by meaning stopped working");
+}
