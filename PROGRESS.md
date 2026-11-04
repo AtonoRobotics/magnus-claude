@@ -1,5 +1,9 @@
 # Progress
 
+## CI throughput fixes (2026-11-04, branch `ci-throughput-fixes`)
+
+Pull requests stopped landing after the pull request process changed: agent sessions merged master into every open branch and reran failed runs, each merge restarted a 150-minute run, a hung browser sign-in held a runner to its time limit, and two full suites ran on one machine at once. The rules check now says not to merge master in for being behind, only for a conflict. A pull request runs only the tests its paths reach (`release/ci-select.sh`); master runs everything. Every test has a time limit (`.config/nextest.toml`), the sign-in and update-test waits are bounded, and each run clears test realms and mail sinks left for three hours (`release/ci-clean.sh`). The quick checks run on build-box-2 (`magnus-light`); the release and injection checks on build-box. The merge queue could not be turned on: the repository is private and owned by a person (DECISIONS.md, "CI throughput on the shared runner").
+
 ## Approved contract changes keep their taint (2026-11-04)
 
 An approved contract change cleared the taint its checks are judged by, so a tainted run could have a `web_fetch` carrying private data run at completion without asking. It now keeps the run's taint; such a check goes to the person's review instead (`state.rs`, test in `contract_freeze.rs`).
