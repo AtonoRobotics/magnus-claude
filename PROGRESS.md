@@ -1,5 +1,9 @@
 # Progress
 
+## No secret in an app's address (2026-11-04)
+
+Adding an app now refuses an address with a user, password, query or fragment, before contacting it, so a token in the address is neither sent, logged nor listed (`connectors.rs`, test in `connectors.rs`).
+
 ## Chat replacement validation (2026-11-04)
 
 PR #134 is open under the replacement workflow. Review found that a space manager could delete another member's message despite the catalog's own-message promise. Deletion now verifies the account through Google UserInfo and matches the message's human sender before sending DELETE. The manifest adds only `openid` and the identity endpoint for that check; missing identity or mismatched ownership refuses deletion. Post-review validation: 6 Chat unit tests, 60 kernel unit tests, 5 Chat VM integration tests, 4 Calendar integration tests and 4 Google library/sign-in tests pass; the live invalid-token contract check also passes (authenticated operations remain unrun).

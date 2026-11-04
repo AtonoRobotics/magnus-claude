@@ -1030,6 +1030,7 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Apps added with a key before this keep working, and their key can still be rotated or revoked; none can be added.
 - `admin_connectors.rs` added an app with the organisation's key and rotated it: the behaviour the spec refuses. It now asserts each refusal, adds an app people sign in to, and rotates Google's secret instead.
 - Test: `the_console_sets_rotates_and_revokes_the_organisations_credentials_and_never_shows_one` (admin_connectors.rs, real Keycloak): a key, a client ID, a server answering 401 with no sign-in and one with no client registration are refused with their reasons, and none is listed; the app added by address signs people in themselves. On master the key is taken (201).
+- An app's address with a user, password, query or fragment is refused before the app is asked anything (review, 2026-11-04). Reason: a key or token could ride in the address, where the key field's refusal never saw it: the address was fetched, recorded in `ConnectorAdded`, listed by the API, and written into connection errors. Apps added before this keep their address. Test: `an_app_address_holding_a_secret_is_refused` (connectors.rs).
 
 ## Each vault entry opens only under its own name (2026-11-03, `vault-binding`)
 
