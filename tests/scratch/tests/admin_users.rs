@@ -49,6 +49,9 @@ impl Setup {
     }
 
     /// Alice's console session and its CSRF token, stepped up if asked.
+    /// The tests' step-up windows (60 seconds) are long enough for the
+    /// browser to hand the session back (that has taken 23 seconds after
+    /// the password on a loaded machine).
     async fn alice(&self, step_up: bool) -> (String, String) {
         let sid = sign_in(&self.url, self.c.addr, "Alice", "admin", step_up).await.unwrap_or_else(|e| panic!("{e}"));
         let me: Value = with_cookie(self.b.get(self.api("/session")), &sid).send().await.unwrap().json().await.unwrap();
@@ -83,7 +86,7 @@ impl Setup {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_admin_invites_someone_who_chooses_their_password_from_the_providers_email() {
-    let s = Setup::start(15, &[]).await;
+    let s = Setup::start(60, &[]).await;
     let inbox = Inbox::start().await;
     s.kc.set_smtp(inbox.addr).await;
     let alice = s.alice(false).await;
@@ -127,7 +130,7 @@ async fn an_admin_invites_someone_who_chooses_their_password_from_the_providers_
 
     // Inviting an admin needs a fresh password: refused once the sign-in's
     // own step-up has lapsed, done with a fresh one.
-    tokio::time::sleep(std::time::Duration::from_secs(16)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
     let eve = json!({ "email": "eve@acme.test", "name": "Eve Ito", "role": "admin" });
     let (st, v) = s.send(reqwest::Method::POST, "/users", &alice, Some(eve.clone())).await;
     assert_eq!((st, v["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("step_up_required")), "{v}");
@@ -159,7 +162,7 @@ async fn an_admin_invites_someone_who_chooses_their_password_from_the_providers_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_last_admin_stays_and_a_person_turned_off_loses_every_session_and_schedule() {
-    let s = Setup::start(20, &["Bob"]).await;
+    let s = Setup::start(60, &["Bob"]).await;
 
     // Bob signs in to the app and sets up a schedule.
     let (st, v) = s.kc.app_sign_in(&s.app, "Bob").await;
@@ -228,7 +231,7 @@ async fn the_last_admin_stays_and_a_person_turned_off_loses_every_session_and_sc
     assert_eq!(r.status().as_u16(), 401, "the ended session still works");
 
     // Once the step-up lapses, a role change says so and changes nothing.
-    tokio::time::sleep(std::time::Duration::from_secs(21)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
     let (st, v) = s.send(reqwest::Method::PATCH, &format!("/users/{b_id}"), &alice, Some(json!({ "role": "admin" }))).await;
     assert_eq!((st, v["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("step_up_required")), "{v}");
     assert_eq!(s.user(&alice, "bob@example.test").await.unwrap()["role"], "member");
