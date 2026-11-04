@@ -1,5 +1,9 @@
 # Progress
 
+## Inline content moved to the content store (2026-11-04)
+
+An appliance that ran before `migrate` made the content store still had those events' content in the log, where trash and erasure cannot delete it. `migrate` now moves it to the content store, one event per statement, and the walls' fill then names each row's person (`log::move_inline_content`). Test: `migrate_moves_content_written_into_the_log_to_the_content_store` (log_review.rs).
+
 ## Sign-in follows no redirects (2026-11-04)
 
 The sign-in HTTP clients followed redirects, so a token endpoint answering 307 would have had the password resent to wherever it pointed, plain http included. They now follow none (`oidc.rs`).
