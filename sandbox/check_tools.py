@@ -31,9 +31,12 @@ PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # Variables that change where programs or modules come from, or switch off
 # the check environment.
 SEARCH = {
-    "PATH", "HOME", "IFS", "CDPATH", "ENV", "BASH_ENV", "SHELLOPTS", "MAGNUS_CHECK",
-    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "NODE_PATH", "NODE_OPTIONS",
+    "PATH", "HOME", "IFS", "CDPATH", "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "MAGNUS_CHECK",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GCONV_PATH", "NODE_PATH", "NODE_OPTIONS",
     "PERL5LIB", "PERL5OPT", "RUBYLIB", "RUBYOPT",
+    # Expanded by the shell, command substitutions included, as it traces
+    # (-x) or before a prompt.
+    "PS4", "PROMPT_COMMAND",
 }
 BUILTINS = {"cd", "test", "[", "echo", "printf", "true", "false", "exit", ":", "set", "unset", "shift", "wait", "read", "pwd", "umask", "export", "return"}
 REFUSED = {
@@ -45,8 +48,26 @@ REFUSED = {
     "case": "is not supported in a check; use test or a python3 -c snippet",
 }
 KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}"}
-# Wrappers that run the program named after their own options.
-WRAPPERS = {"env", "timeout", "time", "nice", "nohup", "stdbuf", "ionice", "command", "exec", "xvfb-run"}
+# Wrappers that run the program named after their own options, with those
+# options: short ones that take no value, short ones that take one (attached
+# or the next word), and the long ones of each kind. Any other option leaves
+# what the wrapper runs unknown, so the check is self-checked.
+WRAPPERS = {
+    "env": ("0v", "uCS", {"--null", "--debug", "--ignore-environment", "--ignore-signal", "--default-signal", "--block-signal", "--list-signal-handling"}, {"--unset", "--chdir", "--split-string"}),
+    "timeout": ("v", "sk", {"--preserve-status", "--foreground", "--verbose"}, {"--signal", "--kill-after"}),
+    "nice": ("", "n", set(), {"--adjustment"}),
+    "nohup": ("", "", set(), set()),
+    "stdbuf": ("", "ioe", set(), {"--input", "--output", "--error"}),
+    "ionice": ("t", "cnp", {"--ignore"}, {"--class", "--classdata", "--pid"}),
+    "time": ("pav", "of", {"--portability", "--append", "--verbose", "--quiet"}, {"--output", "--format"}),
+    "command": ("pvV", "", set(), set()),
+    "exec": ("l", "a", set(), set()),
+    "xvfb-run": ("al", "efnpsw", {"--auto-servernum", "--listen-tcp"}, {"--error-file", "--auth-file", "--server-num", "--xauth-protocol", "--server-args", "--wait"}),
+}
+# The short option with which a wrapper starts its program with an empty
+# environment, which drops the check environment (PYTHONSAFEPATH,
+# MAGNUS_CHECK, PATH).
+CLEARS = {"env": "i", "exec": "c"}
 SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n", ";;", "|&"}
 REDIRECTS = {"<", ">", ">>", "<<", "<<<", ">&", "<&", ">|", "&>", "&>>", "<>"}
 PYTHON = re.compile(r"^python(\d+(\.\d+)?)?$")
@@ -58,7 +79,7 @@ READERS = {
     "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "diff", "cmp", "comm", "ls", "stat", "file",
     "sha1sum", "sha256sum", "sha512sum", "md5sum", "cksum", "uniq", "cut", "tr", "paste", "join", "fold",
     "nl", "od", "rev", "tac", "strings", "iconv", "basename", "dirname", "realpath", "readlink", "du", "df",
-    "date", "seq", "expr", "tee", "true", "false", "echo", "printf", "test", "[", "env", "pwd", "id", "uname",
+    "date", "seq", "expr", "tee", "true", "false", "echo", "printf", "test", "[", "pwd", "id", "uname",
     "pdftotext", "pdfinfo", "pdffonts", "pdftoppm", "pdfseparate", "qpdf", "unzip", "zipinfo", "zcat",
     "gzip", "gunzip", "xz", "unxz", "xzcat", "bzip2", "bunzip2", "bzcat", "tesseract", "sleep",
 }
@@ -100,10 +121,49 @@ def shown(s):
     return s.replace(SUBSTITUTED, "$(...)").replace(EXPANDED, "$")
 
 
+def comment_at(cmd, i):
+    """Whether the `#` at i starts a comment: the shell starts one only at
+    the beginning of a word (`x#y` is one word). After an operator (`;#`)
+    it does too, but reading that `#` as part of the command is the safe
+    side: the text after it is still checked."""
+    return cmd[i] == "#" and (i == 0 or cmd[i - 1] in " \t\r\n")
+
+
+def closing(cmd, i):
+    """The index just past the `)` that closes the substitution whose body
+    starts at i, read as the shell reads it: parentheses in quotes, after a
+    backslash or in a comment do not count."""
+    depth, quote = 1, None
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif comment_at(cmd, i):
+            nl = cmd.find("\n", i)
+            i = len(cmd) if nl < 0 else nl
+            continue
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    raise ValueError("a substitution is not closed")
+
+
 def substitutions(cmd):
-    """Pull out $(...) and `...`, outside single quotes; return the command
-    with each replaced by a marked word and every other $ outside single
-    quotes marked, and the inner commands."""
+    """Pull out $(...), `...` and bash's <(...) and >(...), outside single
+    quotes, and drop comments; return the command with each substitution
+    replaced by a marked word and every other $ outside single quotes
+    marked, and the inner commands. A backslash keeps the next character
+    from opening or closing anything, as in the shell."""
     out, inner, i, quote = [], [], 0, None
     while i < len(cmd):
         c = cmd[i]
@@ -113,22 +173,34 @@ def substitutions(cmd):
             out.append(c)
             i += 1
             continue
+        if c == "\\":
+            out.append(cmd[i : i + 2])
+            i += 2
+            continue
+        if quote is None and comment_at(cmd, i):
+            nl = cmd.find("\n", i)
+            i = len(cmd) if nl < 0 else nl
+            continue
+        if quote is None and cmd.startswith("$'", i):
+            # Its escapes (\' among them) are bash's alone: what the shell
+            # reads as quoted cannot be told from what it runs.
+            raise ValueError("ANSI-C quoting ($'...') is not supported in a check")
         if c == "'" and quote is None:
             quote = "'"
         elif c == '"':
             quote = None if quote == '"' else '"'
-        if cmd.startswith("$(", i) and not cmd.startswith("$((", i):
-            depth, j = 1, i + 2
-            while j < len(cmd) and depth:
-                depth += {"(": 1, ")": -1}.get(cmd[j], 0)
-                j += 1
+        if (cmd.startswith("$(", i) and not cmd.startswith("$((", i)) or (quote is None and cmd.startswith(("<(", ">("), i)):
+            j = closing(cmd, i + 2)
             inner.append(cmd[i + 2 : j - 1])
             out.append(SUBSTITUTED)
             i = j
             continue
         if c == "`":
-            j = cmd.find("`", i + 1)
-            j = len(cmd) if j < 0 else j
+            j = i + 1
+            while j < len(cmd) and cmd[j] != "`":
+                j += 2 if cmd[j] == "\\" else 1
+            if j >= len(cmd):
+                raise ValueError("a `...` substitution is not closed")
             inner.append(cmd[i + 1 : j])
             out.append(SUBSTITUTED)
             i = j + 1
@@ -138,11 +210,47 @@ def substitutions(cmd):
     return "".join(out), inner
 
 
+# Assignments inside an arithmetic expansion ($((...)), $[...]) or a
+# parameter expansion (${NAME:=...}, and the arithmetic in ${a[i]} and
+# ${x:offset}): the shell sets the variable as it expands the word.
+ARITH_ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)|(?:\+\+|--)\s*([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\+|--)")
+DEFAULT_ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):?=")
+# Where bash reads text as arithmetic or as a variable's name, a command
+# substitution in that text runs, even one written in single quotes
+# (x='a[$(cmd)]'; : $((x))).
+EVALUATES = re.compile(r"\$\(\(|\$\[|\$\{!|\$\{[A-Za-z_][A-Za-z0-9_]*[\[:]|\b(?:test|\[|printf|wait)\s+-[vp]\b|\b(?:read|unset)\b")
+QUOTED_SUBSTITUTION = re.compile(r"'[^']*(?:\$\(|`)[^']*'")
+
+
+def expansion_bodies(cmd):
+    """The text inside each $((...)), $[...] and ${...}."""
+    for m in re.finditer(r"\$(\(\(|\[|\{)", cmd):
+        opens, closes = {"((": ("(", ")"), "[": ("[", "]"), "{": ("{", "}")}[m.group(1)]
+        depth, j = 1, m.end()
+        while j < len(cmd) and depth:
+            depth += {opens: 1, closes: -1}.get(cmd[j], 0)
+            j += 1
+        yield m.group(1), cmd[m.end() : j]
+
+
+def expansion_assignments(cmd, found):
+    for kind, body in expansion_bodies(cmd):
+        names = [n for m in ARITH_ASSIGN.finditer(body) for n in m.groups() if n]
+        if kind == "{" and DEFAULT_ASSIGN.match(body):
+            names.append(DEFAULT_ASSIGN.match(body).group(1))
+        for name in names:
+            search_var(name, found)
+    if EVALUATES.search(cmd) and QUOTED_SUBSTITUTION.search(cmd):
+        found.runs.append("it holds a quoted command substitution where bash evaluates text as arithmetic or as a variable's name, which runs it")
+
+
 def simple_commands(cmd):
     lex = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&\n")
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
-    lex.commenters = "#"
+    # Comments were dropped by substitutions(), where the shell drops them;
+    # shlex would also start one inside a word.
+    lex.commenters = ""
     words, current, skip_next = [], [], False
     for tok in lex:
         if skip_next:
@@ -171,7 +279,9 @@ def assignment(word):
 def image_program(name):
     """Where `name` runs from, if the image has it."""
     if "/" in name:
-        p = os.path.realpath(name if name.startswith("/") else os.path.join("/workspace", name))
+        if not name.startswith("/"):
+            return None
+        p = os.path.realpath(name)
         if p.startswith(("/workspace", "/tmp", "/home", "/root", "/dev/shm")):
             return None
         return p if os.path.isfile(p) and os.access(p, os.X_OK) else None
@@ -195,22 +305,103 @@ class Found:
 
 def check(cmd, depth=0, found=None):
     found = found or Found()
-    flat, inner = substitutions(cmd)
-    for sub in inner:
-        check(sub, depth + 1, found)
     try:
+        flat, inner = substitutions(cmd)
         commands = simple_commands(flat)
     except ValueError as e:
         found.problems.append(f"the command cannot be parsed ({e})")
         return found
+    expansion_assignments(cmd, found)
+    for sub in inner:
+        check(sub, depth + 1, found)
     for words in commands:
         check_simple(words, depth, found)
     return found
 
 
-def search_var(name, found):
+def search_var(name, found, does="sets"):
     if name in SEARCH or name.startswith("PYTHON"):
-        found.problems.append(f"it sets {name}, which changes where the check's tools come from")
+        found.problems.append(f"it {does} {name}, which changes where the check's tools come from")
+
+
+def long_name(word, names):
+    """The long option of `names` that `word` gives: GNU tools take any
+    unambiguous abbreviation (--com for --compress-program). None when it
+    abbreviates none of them, or more than one."""
+    key = word.split("=", 1)[0]
+    if not key.startswith("--") or len(key) < 3:
+        return None
+    if key in names:
+        return key
+    hits = [n for n in names if n.startswith(key)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def option_value(args, j, k):
+    """The value of the short option at args[j][k]: the rest of the word, or
+    the next word. Returns it and how many words the option took."""
+    if k + 1 < len(args[j]):
+        return args[j][k + 1 :], 1
+    return (args[j + 1] if j + 1 < len(args) else ""), 2
+
+
+def wrapper_options(w, words, i, found):
+    """Skip the wrapper's own options (and timeout's duration); return the
+    index of what it runs, or None when that cannot be known."""
+    flags, valued, long_flags, long_valued = WRAPPERS[w]
+    clears = CLEARS.get(w)
+    while i < len(words):
+        a = words[i]
+        if a == "--":
+            i += 1
+            break
+        if w == "env" and (a == "-" or long_name(a, long_flags | long_valued) == "--ignore-environment"):
+            found.problems.append(f"`env {a}` starts its program without the check environment")
+            return None
+        if a.startswith("--"):
+            name = long_name(a, long_flags | long_valued)
+            if name is None:
+                found.runs.append(f"`{w} {a}` is an option the check cannot resolve, so what it runs is not known")
+                return None
+            took = 1
+            if name in long_valued:
+                value, took = (a.split("=", 1)[1], 1) if "=" in a else ((words[i + 1] if i + 1 < len(words) else ""), 2)
+                if not wrapper_value(w, name, value, found):
+                    return None
+            i += took
+            continue
+        if a.startswith("-") and len(a) > 1:
+            took = 1
+            for k in range(1, len(a)):
+                o = a[k]
+                if o == clears:
+                    found.problems.append(f"`{w} -{o}` starts its program without the check environment")
+                    return None
+                if o in valued:
+                    value, took = option_value(words, i, k)
+                    if not wrapper_value(w, "-" + o, value, found):
+                        return None
+                    break
+                if o not in flags:
+                    found.runs.append(f"`{w} {a}` is an option the check cannot resolve, so what it runs is not known")
+                    return None
+            i += took
+            continue
+        break
+    if w == "timeout" and i < len(words):
+        i += 1
+    return i
+
+
+def wrapper_value(w, option, value, found):
+    """Look at the value a wrapper's option takes; False when what the
+    wrapper runs can no longer be known."""
+    if w == "env" and option in ("-u", "--unset"):
+        search_var(value, found, "unsets")
+    elif w == "env" and option in ("-S", "--split-string"):
+        found.runs.append(f"`env {option}` builds the command it runs from a string")
+        return False
+    return True
 
 
 def built(text, what, found):
@@ -226,6 +417,9 @@ def check_simple(words, depth, found):
     while i < len(words) and words[i] in KEYWORDS:
         i += 1
     if i < len(words) and words[i] == "for":
+        # The loop sets its variable to each value in turn.
+        if i + 1 < len(words):
+            search_var(words[i + 1], found)
         return
     # Leading assignments, then wrappers with their options and assignments.
     while i < len(words):
@@ -235,18 +429,14 @@ def check_simple(words, depth, found):
             search_var(name, found)
             i += 1
             continue
-        if w in WRAPPERS:
-            if not image_program(w) and w not in ("command", "exec", "time"):
+        # A wrapper named by its path in the image is the same wrapper.
+        wb = os.path.basename(w)
+        if wb in WRAPPERS and (w == wb or image_program(w)):
+            if not image_program(w) and wb not in ("command", "exec", "time"):
                 found.problems.append(f"`{w}` is not in the sandbox image")
-            i += 1
-            first = True
-            while i < len(words) and (words[i].startswith("-") or assignment(words[i]) or (w in ("timeout", "nice") and first and re.match(r"^[0-9.]+[smhd]?$", words[i]))):
-                name = assignment(words[i])
-                if name:
-                    search_var(name, found)
-                if not words[i].startswith("-"):
-                    first = False
-                i += 1
+            i = wrapper_options(wb, words, i + 1, found)
+            if i is None:
+                return
             continue
         break
     if i >= len(words):
@@ -263,6 +453,22 @@ def check_simple(words, depth, found):
             search_var(assignment(a) or a, found)
         return
     if prog in BUILTINS:
+        # Builtins that set or unset the variables they name.
+        if prog in ("unset", "read", "wait"):
+            for a in args:
+                if not a.startswith("-"):
+                    search_var(a, found, "unsets" if prog == "unset" else "sets")
+        elif prog == "printf":
+            for j, a in enumerate(args):
+                if a == "-v" and j + 1 < len(args):
+                    search_var(args[j + 1], found)
+                elif a.startswith("-v"):
+                    search_var(a[2:], found)
+                elif not a.startswith("-"):
+                    break
+        return
+    if "/" in prog and not prog.startswith("/"):
+        found.problems.append(f"`{prog}` names its program by a path from the directory the check is in; name an image program, or run a workspace file with its interpreter, such as `sh {prog}` or `python3 {prog}`")
         return
     if not image_program(prog):
         if "/" in prog:
@@ -285,7 +491,7 @@ def check_simple(words, depth, found):
         if set(args) & {"-exec", "-execdir", "-ok", "-okdir"}:
             found.runs.append("`find -exec` runs other programs")
     elif base == "sort":
-        if any(a.startswith("--compress-program") for a in args):
+        if any(long_name(a, {"--compress-program"}) for a in args):
             found.runs.append("`sort --compress-program` runs another program")
     elif base not in READERS:
         found.runs.append(f"`{base}` is not one of the image's programs known only to read what they are given, so it may run workspace code")
@@ -311,43 +517,73 @@ def check_shell(base, args, depth, found):
     found.runs.append(f"`{base}` runs the commands it reads from its input")
 
 
+# python3 -X options known to leave where modules and their bytecode are
+# found alone. pycache_prefix moves where bytecode is read from.
+SAFE_X = {
+    "utf8", "dev", "faulthandler", "importtime", "tracemalloc", "int_max_str_digits", "warn_default_encoding",
+    "no_debug_ranges", "frozen_modules", "showrefcount", "perf", "cpu_count",
+}
+
+
 def check_python(args, found):
+    """Read python3's options as it does: short options cluster (-bE), and
+    -c, -m, -W and -X take the rest of the word or the next word."""
     j = 0
     while j < len(args):
         a = args[j]
-        if a.startswith("-") and not a.startswith("--") and len(a) > 1 and a[1] not in "mcWX" and set(a[1:]) & {"E", "S"}:
-            found.problems.append(f"`python3 {a}` turns off the check environment")
-            return
-        if a == "-c" or a.startswith("-c"):
-            code = args[j + 1] if a == "-c" and j + 1 < len(args) else a[2:]
-            if not built(code, "python3 -c code", found):
-                check_code(code, found)
-            return
-        if a == "-m" or (a.startswith("-m") and len(a) > 2):
-            mod = args[j + 1] if a == "-m" and j + 1 < len(args) else a[2:]
-            if not mod:
-                found.problems.append("`python3 -m` names no module")
-            elif EXPANDED in mod:
-                found.problems.append(f"`python3 -m {shown(mod)}` names its module only when the check runs")
-            elif not image_module(mod):
-                found.runs.append(f"`python3 -m {mod}` runs a module from the workspace")
-            elif mod not in DATA_MODULES:
-                found.runs.append(f"`python3 -m {mod}` runs code from the workspace")
-            return
-        if a in ("-W", "-X"):
-            # A warning filter imports the module that names its category.
-            if a == "-W" and j + 1 < len(args) and "." in args[j + 1]:
-                found.runs.append(f"`python3 -W {shown(args[j + 1])}` imports the module its category names")
-            j += 2
-            continue
         if a == "-":
             break
-        if a.startswith("-"):
-            j += 1
+        if a == "--":
+            if j + 1 < len(args):
+                found.runs.append(f"`python3 {shown(args[j + 1])}` runs a workspace script")
+                return
+            break
+        if a.startswith("--"):
+            j += 2 if a == "--check-hash-based-pycs" else 1
             continue
-        found.runs.append(f"`python3 {shown(a)}` runs a workspace script")
-        return
+        if not a.startswith("-"):
+            found.runs.append(f"`python3 {shown(a)}` runs a workspace script")
+            return
+        took = 1
+        for k in range(1, len(a)):
+            o = a[k]
+            if o in "ES":
+                found.problems.append(f"`python3 {a}` turns off the check environment")
+                return
+            if o not in "cmWX":
+                continue
+            value, took = option_value(args, j, k)
+            if o == "c":
+                if not built(value, "python3 -c code", found):
+                    check_code(value, found)
+                return
+            if o == "m":
+                check_module(value, found)
+                return
+            if o == "W" and "." in value:
+                # A warning filter imports the module that names its category.
+                found.runs.append(f"`python3 -W {shown(value)}` imports the module its category names")
+            if o == "X":
+                key = value.split("=", 1)[0]
+                if key == "pycache_prefix":
+                    found.problems.append("`python3 -X pycache_prefix` changes where the check's modules are read from")
+                    return
+                if key not in SAFE_X:
+                    found.runs.append(f"`python3 -X {shown(key)}` is not an option known to leave where modules come from alone")
+            break
+        j += took
     found.runs.append("`python3` runs the code it reads from its input")
+
+
+def check_module(mod, found):
+    if not mod:
+        found.problems.append("`python3 -m` names no module")
+    elif EXPANDED in mod:
+        found.problems.append(f"`python3 -m {shown(mod)}` names its module only when the check runs")
+    elif not image_module(mod):
+        found.runs.append(f"`python3 -m {mod}` runs a module from the workspace")
+    elif mod not in DATA_MODULES:
+        found.runs.append(f"`python3 -m {mod}` runs code from the workspace")
 
 
 def check_code(code, found):
@@ -412,24 +648,49 @@ def safe_module(name, found):
         found.runs.append(f"its python3 -c code imports {name}, which is not known to only read data")
 
 
+AWK_FILES = {"--file", "--include", "--load", "--exec"}
+AWK_LONG = AWK_FILES | {"--source", "--field-separator", "--assign"}
+
+
 def check_awk(base, args, found):
     """awk program text can run commands (system, pipes) and load code
-    (@include, @load, -f, -i, -l)."""
-    j = 0
+    (@include, @load, -f, -i, -l, -E, mawk's -W exec). Every argument is
+    looked at, options clustered (-bf) or after the program included: an
+    option the check cannot place makes it self-checked."""
+    texts, program, j = [], None, 0
     while j < len(args):
         a = args[j]
-        if a in ("-F", "-v"):
-            j += 2
-            continue
-        if a.startswith("--file") or a.startswith("--include") or a.startswith("--load") or a.startswith("--exec") or (a.startswith("-") and not a.startswith("--") and set(a[1:2]) & set("fEil")):
-            found.runs.append(f"`{base} {a}` runs a program file from the workspace")
+        took = 1
+        if a.startswith("--") and a != "--":
+            name = long_name(a, AWK_LONG)
+            if name in AWK_FILES:
+                found.runs.append(f"`{base} {a}` runs a program file from the workspace")
+                return
+            if name in ("--source", "--field-separator", "--assign"):
+                value, took = (a.split("=", 1)[1], 1) if "=" in a else ((args[j + 1] if j + 1 < len(args) else ""), 2)
+                if name == "--source":
+                    texts.append(value)
+        elif a.startswith("-") and len(a) > 1 and a != "--":
+            for k in range(1, len(a)):
+                o = a[k]
+                if o in "fEilW":
+                    found.runs.append(f"`{base} {a}` runs a program file from the workspace")
+                    return
+                if o in "Fve":
+                    value, took = option_value(args, j, k)
+                    if o == "e":
+                        texts.append(value)
+                    break
+        elif program is None and not texts:
+            program = args[j + 1] if a == "--" and j + 1 < len(args) else a
+            took = 2 if a == "--" else 1
+        j += took
+    for t in texts + ([program] if program is not None else []):
+        if built(t, f"{base} program", found):
             return
-        if a.startswith("-"):
-            j += 1
-            continue
-        if not built(a, f"{base} program", found) and re.search(r"system|\||@|getline", a):
+        if re.search(r"system|\||@|getline", t):
             found.runs.append(f"its {base} program can run commands or load code")
-        return
+            return
 
 
 # sed scripts known to only print or delete lines: addresses, then p, d, q,
@@ -437,26 +698,59 @@ def check_awk(base, args, found):
 SED_SAFE = re.compile(r"^\s*(?:(?:\d+|\$)(?:\s*,\s*(?:\d+|\$))?|/[^/\n]*/)?\s*!?\s*(?:[pdqn=]|s/(?:[^/\\]|\\.)*/(?:[^/\\]|\\.)*/[gpiI0-9]*)\s*$")
 
 
+SED_LONG = {
+    "--expression", "--file", "--sandbox", "--line-length", "--in-place", "--quiet", "--silent", "--debug",
+    "--posix", "--regexp-extended", "--separate", "--unbuffered", "--null-data", "--zero-terminated",
+    "--follow-symlinks", "--binary", "--help", "--version",
+}
+
+
 def check_sed(args, found):
     """GNU sed runs commands with its e command and s///e; --sandbox turns
-    that off."""
-    scripts, j, sandboxed = [], 0, "--sandbox" in args
+    that off. Its options may come after the files and cluster (-ne), and
+    the first operand is the script only when no -e gives one."""
+    scripts, operands, j, sandboxed = [], [], 0, False
     while j < len(args):
         a = args[j]
-        if a in ("-f",) or a.startswith("--file") or (a.startswith("-") and not a.startswith("--") and "f" in a[1:]):
-            found.runs.append("`sed -f` runs a program file from the workspace")
-            return
-        if a == "-e" or a == "--expression":
-            if j + 1 < len(args):
-                scripts.append(args[j + 1])
-            j += 2
-            continue
-        if a.startswith("--expression="):
-            scripts.append(a.split("=", 1)[1])
-        elif not a.startswith("-") and not scripts:
-            scripts.append(a)
+        took = 1
+        if a == "--":
+            operands.extend(args[j + 1 :])
             break
-        j += 1
+        if a.startswith("--"):
+            name = long_name(a, SED_LONG)
+            if name is None:
+                found.runs.append(f"`sed {a}` is an option the check cannot resolve")
+                return
+            if name == "--file":
+                found.runs.append("`sed --file` runs a program file from the workspace")
+                return
+            if name == "--sandbox":
+                sandboxed = True
+            elif name in ("--expression", "--line-length"):
+                value, took = (a.split("=", 1)[1], 1) if "=" in a else ((args[j + 1] if j + 1 < len(args) else ""), 2)
+                if name == "--expression":
+                    scripts.append(value)
+        elif a.startswith("-") and len(a) > 1:
+            for k in range(1, len(a)):
+                o = a[k]
+                if o == "f":
+                    found.runs.append("`sed -f` runs a program file from the workspace")
+                    return
+                if o in "el":
+                    value, took = option_value(args, j, k)
+                    if o == "e":
+                        scripts.append(value)
+                    break
+                if o == "i":
+                    break  # the rest of the word is its suffix
+                if o not in "nrEsuzb":
+                    found.runs.append(f"`sed {a}` is an option the check cannot resolve")
+                    return
+        else:
+            operands.append(a)
+        j += took
+    if not scripts and operands:
+        scripts.append(operands[0])
     for s in scripts:
         if built(s, "sed script", found):
             return
@@ -466,22 +760,30 @@ def check_sed(args, found):
 
 
 def check_jq(args, found):
-    """jq runs no commands, but can load its program or modules from files."""
-    j = 0
+    """jq runs no commands, but can load its program or modules from files.
+    Its options may come anywhere, after the program too, and it reads a
+    short option in any cluster (-nf is -n -f); long ones are exact."""
+    program, j = None, 0
     while j < len(args):
         a = args[j]
-        if a in ("-f", "--from-file", "-L") or a.startswith("--library-path") or a.startswith("-L"):
-            found.runs.append(f"`jq {a}` loads its program from the workspace")
+        if a.startswith("-") and len(a) > 1 and not a.startswith("--"):
+            if set(a[1:]) & set("fL"):
+                found.runs.append(f"`jq {a}` loads its program or modules from the workspace")
+                return
+        elif a in ("--from-file", "--library-path") or a.startswith("--library-path="):
+            found.runs.append(f"`jq {a}` loads its program or modules from the workspace")
             return
-        if a in ("--arg", "--argjson", "--slurpfile", "--rawfile"):
+        elif a in ("--arg", "--argjson", "--slurpfile", "--rawfile"):
             j += 3
             continue
-        if a.startswith("-"):
-            j += 1
+        elif a == "--indent":
+            j += 2
             continue
-        if not built(a, "jq program", found) and re.search(r"\b(import|include)\b", a):
-            found.runs.append("its jq program loads a module from the workspace")
-        return
+        elif not a.startswith("--") and program is None:
+            program = a
+        j += 1
+    if program is not None and not built(program, "jq program", found) and re.search(r"\b(import|include)\b", program):
+        found.runs.append("its jq program loads a module from the workspace")
 
 
 if __name__ == "__main__":
