@@ -18,7 +18,7 @@ one commit), 2026-11-02.
 ## Scope and requirements
 
 - [ ] Breadth: Google, Microsoft, coding and deployment services (Vercel and peers), Slack, the other common business services, and FreeCAD, Autodesk Fusion, SolidWorks and Blender (today: four Google manifests, `catalog/google-*.toml`, and Sentry's, Hugging Face's, GitLab's, Supabase's (read only) and Cloudflare's, `catalog/<id>.toml`, compiled in by `crates/magnus/src/catalog.rs` `SOURCES`)
-- [ ] Plug and play: every connector is a Connect button that opens the provider's own login page and then works (the button and the page exist, `connectors.mjs`, `app-apps.mjs` against a fake app; a Google sign-in cannot finish in the desktop app, see Connect flow)
+- [ ] Plug and play: every connector is a Connect button that opens the provider's own login page and then works (the button and the page exist, `connectors.mjs`, `app-apps.mjs` against a fake app; a Google sign-in from the desktop app carries `iss` back, see Connect flow, and has not been completed against Google's own token endpoint)
 - [x] No connector shows the user a form: no address, key, token, client ID or header fields in the app (`desktop/tests/connectors.mjs`, "asks nothing here", and the owner's Settings › Connectors)
 - [ ] A service whose provider offers no sign-in is not in the catalog (every catalog manifest signs in; an admin can no longer add a server with a key, `add-by-sign-in`, but can still add one that asks for no sign-in at all: open with the owner)
 - [ ] Desktop programs detected and enabled with one consent (no detection, no bridge)
@@ -36,12 +36,12 @@ one commit), 2026-11-02.
 - [x] Browse: the Library shows the whole catalog as cards (`connectors.mjs`)
 - [x] Browse: the user searches (`connectors.mjs`, by name and by what is wanted)
 - [ ] Browse: or asks Magnus (no catalog tools)
-- [ ] Connect: click Connect, sign in on the provider's page, approve, the card turns Connected (works against a fake app, `app-apps.mjs`; never shown for a real provider, and Google's completion is refused, see Connect flow)
+- [ ] Connect: click Connect, sign in on the provider's page, approve, the card turns Connected (works against a fake app, `app-apps.mjs`; never shown for a real provider. Google's completion was refused because the desktop app dropped `iss`; it now carries it back, see Connect flow, and is still untested against Google's token endpoint)
 - [x] Never asked, in the app: no client ID, secret, address, key, token, redirect URI or scope (`connectors.mjs`)
 - [ ] Never asked, in the admin console: the console still asks an admin for Google's client secret (Security › Connectors and credentials, `desktop/admin/admin.js` `connectorPanel` credential form) until the relay holds it; adding an app asks for no key (`add-by-sign-in`, `admin_connectors.rs`)
 - [ ] Where the org's credentials live: Alpha Vector's client IDs and secrets in the relay's secret store, nowhere in the app, console or manifests, the appliance getting client IDs from the relay (today: client IDs in `catalog/registrations.toml`, compiled in; Google's secret in the appliance's vault, put there by `release/admin-on-appliance.sh` from the repository secret)
 - [x] The connector form asking for a client ID, client secret and web address is deleted from the app, not hidden (#67; `connectors.mjs`, the owner's Settings › Connectors ask for nothing)
-- [ ] Acceptance: on a fresh install a user connects Gmail, Slack, GitHub and Vercel with only clicks and the providers' login pages (no Slack, GitHub or Vercel manifest; Gmail's completion fails in the desktop app)
+- [ ] Acceptance: on a fresh install a user connects Gmail, Slack, GitHub and Vercel with only clicks and the providers' login pages (no Slack, GitHub or Vercel manifest; Gmail's desktop completion dropped `iss` and was refused, which the app now returns, and no test exchanges a code with Google)
 - [x] Acceptance: an automated UI test fails if the connect path renders any text input inside Magnus (`connectors.mjs` `typed()`, in the browser; the desktop path is not checked for inputs)
 
 ## Decisions this spec builds on
@@ -367,7 +367,7 @@ Notion, GitHub, Vercel, Jira, Figma, Autodesk Fusion Data, Blender and
 FreeCAD.
 
 Google (Remote, Google Workspace MCP servers)
-- [ ] Gmail (brokered, manifest `google-gmail`: the image built from `brokered/gmail`, tools matched by `every_tool_is_classed_in_the_manifest`, sending only a draft the person approves, `gmail.rs`; sign-in cannot complete from the desktop app)
+- [ ] Gmail (brokered, manifest `google-gmail`: the image built from `brokered/gmail`, tools matched by `every_tool_is_classed_in_the_manifest`, sending only a draft the person approves, `gmail.rs`; the desktop app returns Google's `iss`, and no test exchanges a code with Google)
 - [ ] Drive (manifest `google-drive`; same)
 - [ ] Docs
 - [ ] Sheets
