@@ -30,6 +30,20 @@ fn a_disabled_chat_account_keeps_googles_actionable_error() {
 }
 
 #[test]
+fn ownership_requires_the_current_account_and_a_human_sender() {
+    let person = json!({ "sub": "123" });
+    let own = json!({ "sender": { "name": "users/123", "type": "HUMAN" } });
+    assert!(owns_message(&person, &own));
+    assert!(!owns_message(&json!({ "sub": "456" }), &own));
+    for unknown in [json!({}), json!({ "sub": "" }), json!({ "sub": null })] {
+        assert!(!owns_message(&unknown, &own));
+    }
+    for unknown in [json!({}), json!({ "sender": { "name": "users/123" } }), json!({ "sender": { "name": "users/123", "type": "BOT" } })] {
+        assert!(!owns_message(&person, &unknown));
+    }
+}
+
+#[test]
 fn every_tool_names_its_schemas() {
     let ts = tools();
     assert_eq!(ts.len(), 8);

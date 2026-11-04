@@ -17,6 +17,9 @@ use serde_json::{json, Value};
 /// and deleting messages (`chat.messages`). The manifest asks for that
 /// and the two to list spaces and members.
 const API: Api = Api { host: "chat.googleapis.com", base: "/v1", name: "Google Chat", scope: "https://www.googleapis.com/auth/chat.messages" };
+// Google's published UserInfo endpoint identifies the account behind the
+// current access token. A caller-supplied user ID cannot establish ownership.
+const IDENTITY: Api = Api { host: "openidconnect.googleapis.com", base: "/v1", name: "Google account", scope: "openid" };
 
 /// The most pages of messages a search reads (100 each).
 const PAGES: usize = 5;
@@ -134,8 +137,20 @@ fn update_message(a: &Value, t: &str) -> Result<Value, Failure> {
 }
 
 fn delete_message(a: &Value, t: &str) -> Result<Value, Failure> {
-    API.call("DELETE", &format!("/{}", name(a, "message_id", true)?), t, None)?;
+    let path = format!("/{}", name(a, "message_id", true)?);
+    let person = IDENTITY.call("GET", "/userinfo", t, None)?;
+    let current = API.call("GET", &path, t, None)?;
+    if !owns_message(&person, &current) {
+        return Err(Failure::NotDone("Magnus can only delete messages sent by the signed-in person. Ownership could not be verified. Nothing was deleted.".into()));
+    }
+    API.call("DELETE", &path, t, None)?;
     Ok(json!({ "deleted": true }))
+}
+
+fn owns_message(person: &Value, current: &Value) -> bool {
+    person["sub"].as_str().filter(|id| !id.is_empty() && !id.contains('/')).is_some_and(|id| {
+        current["sender"]["type"] == "HUMAN" && current["sender"]["name"].as_str() == Some(format!("users/{id}").as_str())
+    })
 }
 
 /// An object schema: its properties, which are required, and nothing else.
