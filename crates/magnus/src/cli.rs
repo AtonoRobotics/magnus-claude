@@ -91,6 +91,57 @@ async fn serve(args: &[String]) -> Result<()> {
     r
 }
 
+/// Whether `configured` is the address `bound` already listens on. Port 0
+/// is the harness asking for whatever the socket was given.
+pub(crate) fn use_inherited_listen(configured: &str, bound: &str) -> bool {
+    configured == bound || configured.ends_with(":0")
+}
+
+fn set_cloexec(fd: i32, on: bool) {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return;
+    }
+    let flags = if on { flags | libc::FD_CLOEXEC } else { flags & !libc::FD_CLOEXEC };
+    unsafe { libc::fcntl(fd, libc::F_SETFD, flags) };
+}
+
+/// The listening socket a test harness passed as `MAGNUS_LISTEN_FD`, when
+/// this process should serve on it. The numbered fd stays open and
+/// close-on-exec, so a later exec (an update, a rollback) still has it and
+/// child processes do not; the listener returned is a duplicate. A
+/// configured address that is neither port 0 nor this socket is bound by
+/// the caller (a release under test that must fail to listen).
+pub(crate) fn take_listen_fd(configured: &str) -> Result<Option<tokio::net::TcpListener>> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let Ok(raw) = std::env::var("MAGNUS_LISTEN_FD") else { return Ok(None) };
+    let fd: i32 = raw.parse().with_context(|| format!("MAGNUS_LISTEN_FD={raw}"))?;
+    set_cloexec(fd, true);
+    let dup = unsafe { libc::dup(fd) };
+    if dup < 0 {
+        return Err(std::io::Error::last_os_error()).context("duplicate MAGNUS_LISTEN_FD");
+    }
+    // SAFETY: `dup` is a new fd from libc::dup of the harness socket, not
+    // owned by anything else in this process. Closing it closes only the copy.
+    let stdl = unsafe { std::net::TcpListener::from_raw_fd(dup) };
+    stdl.set_nonblocking(true).context("listen socket nonblocking")?;
+    set_cloexec(stdl.as_raw_fd(), true);
+    let bound = stdl.local_addr().context("inherited listen address")?.to_string();
+    if !use_inherited_listen(configured, &bound) {
+        drop(stdl);
+        return Ok(None);
+    }
+    Ok(Some(tokio::net::TcpListener::from_std(stdl).context("inherited listen socket")?))
+}
+
+/// Clear close-on-exec on the harness socket so the process that replaces
+/// this one (an update or a rollback) inherits it. The variable stays set.
+pub(crate) fn release_listen_socket_for_exec() {
+    let Ok(raw) = std::env::var("MAGNUS_LISTEN_FD") else { return };
+    let Ok(fd) = raw.parse::<i32>() else { return };
+    set_cloexec(fd, false);
+}
+
 async fn run(cfg: Config) -> Result<()> {
     use crate::api::{router, Transport};
     use std::net::SocketAddr;
@@ -102,8 +153,14 @@ async fn run(cfg: Config) -> Result<()> {
         }
         None => None,
     };
+    // Before anything this process spawns: the inherited socket must not be
+    // handed to an adapter, and the harness is already holding its own copy.
+    let inherited = take_listen_fd(&listen)?;
     let k = crate::kernel::Kernel::boot(cfg).await?;
-    let plain = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("listen on {listen}"))?;
+    let plain = match inherited {
+        Some(l) => l,
+        None => tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("listen on {listen}"))?,
+    };
     // The bound address, which differs from `listen` when it names port 0.
     let bound = plain.local_addr()?;
     let tls = match tls {
@@ -143,6 +200,19 @@ async fn run(cfg: Config) -> Result<()> {
         None => plain.await?,
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_inherited_socket_is_used_only_for_the_address_it_already_is() {
+        assert!(super::use_inherited_listen("127.0.0.1:0", "127.0.0.1:40059"));
+        assert!(super::use_inherited_listen("127.0.0.1:40059", "127.0.0.1:40059"));
+        // A release under test that names another port must bind that port
+        // and fail, not serve on the socket the harness is holding.
+        assert!(!super::use_inherited_listen("127.0.0.1:40060", "127.0.0.1:40059"));
+        assert!(!super::use_inherited_listen("127.0.0.1:10", "127.0.0.1:40059"));
+    }
 }
 
 /// Set a person's password from standard input (one line).

@@ -94,7 +94,7 @@ impl Installed {
 
     /// The release serving now, once it serves.
     async fn release(&mut self, log: &Path) -> String {
-        let http = reqwest::Client::new();
+        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build().unwrap();
         let start = std::time::Instant::now();
         loop {
             if let Ok(Some(st)) = self.child.try_wait() {
@@ -117,7 +117,7 @@ async fn wait_for(alice: &Api, log: &Path, what: &str, f: impl Fn(&Value) -> boo
     let mut last = Value::Null;
     while start.elapsed() < PATIENCE {
         // Between releases nothing answers.
-        let r = reqwest::Client::new().get(format!("{}/v1/updates", alice.base)).bearer_auth(&alice.token).send().await;
+        let r = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build().unwrap().get(format!("{}/v1/updates", alice.base)).bearer_auth(&alice.token).send().await;
         if let Ok(r) = r {
             let ok = r.status().is_success();
             let v: Value = r.json().await.unwrap_or_default();
@@ -169,6 +169,9 @@ async fn a_signed_release_installs_while_a_task_runs_and_goes_back_one_step() {
     cfg["updates"].as_table_mut().unwrap().insert("dir".into(), updates.display().to_string().into());
     cfg["updates"].as_table_mut().unwrap().insert("public_key".into(), key.public().into());
     std::fs::write(&config, toml::to_string(&cfg).unwrap()).unwrap();
+    // The harness was still listening, so this process could not bind that
+    // port and a health check waited forever on a connection nobody read.
+    app.release_port();
     let err_log = root.join("installed.err");
     let mut a = Installed::start(&inst, &config, &root, &app.base).await;
     let pid = a.child.id();
