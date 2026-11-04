@@ -71,3 +71,35 @@ async fn a_start_waits_for_the_kernel_before_it_to_let_go_of_the_log() {
     let t = alice.submit("Say hello.").await;
     assert_eq!(alice.wait_settled(&t).await["status"], "failed");
 }
+
+/// CI on pull request 132: this test's restart and another appliance both
+/// tried to listen on 127.0.0.1:40059. The restart had written the port it
+/// was given into its config and then killed the process, so the port was
+/// free for the two seconds this test holds the log's lock. The harness
+/// keeps the socket; another bind fails, and the restart still serves there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_appliances_port_stays_taken_until_it_restarts() {
+    let m = FakeModel::start(steps(vec![fail("nothing to do")])).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let port: u16 = app.base.rsplit(':').next().unwrap().parse().unwrap();
+    app.kill().await;
+
+    let start = std::time::Instant::now();
+    let mut stole = None;
+    while start.elapsed() < std::time::Duration::from_millis(500) {
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(taken) => {
+                stole = Some(taken);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    assert!(stole.is_none(), "127.0.0.1:{port} was free after the appliance was killed, so another test can take it");
+
+    app.restart().await;
+    assert!(app.base.ends_with(&format!(":{port}")), "the restart moved off {port} to {}", app.base);
+    let alice = app.api("alice");
+    let t = alice.submit("Say hello.").await;
+    assert_eq!(alice.wait_settled(&t).await["status"], "failed");
+}

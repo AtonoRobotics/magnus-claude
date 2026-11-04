@@ -234,7 +234,9 @@ fn commit(repo: &Path, file: &str) -> String {
 /// What the owner saw (2026-10-31): their app ran pull request A's build,
 /// then got pull request B's, numbered later but built without A's work.
 /// A channel's next build must hold the work of the one there; one that
-/// does not is refused, whatever its version.
+/// does not is not published, whatever its version. On development that
+/// leaves the job green (another open pull request may merge); on test
+/// and production the job fails.
 #[test]
 fn a_build_without_the_work_already_in_its_channel_is_never_published() {
     let tmp = tempfile::tempdir().unwrap();
@@ -255,11 +257,12 @@ fn a_build_without_the_work_already_in_its_channel_is_never_published() {
         (m["version"].as_str().unwrap().into(), m["commit"].as_str().unwrap().into())
     };
 
-    // A's build is in development; B's, later but without A's work, is not.
+    // A's build is in development; B's, later but without A's work, is not
+    // published, and the job still passes.
     git(&repo, &["checkout", "-q", &a]);
     assert_eq!(publish_from(&key, &updates, &w, "0.7.1-review.20.pr.1", "development", &repo, None), 0);
     git(&repo, &["checkout", "-q", &b]);
-    assert_eq!(publish_from(&key, &updates, &w, "0.7.1-review.21.pr.2", "development", &repo, None), 3);
+    assert_eq!(publish_from(&key, &updates, &w, "0.7.1-review.21.pr.2", "development", &repo, None), 0);
     assert_eq!(channel("development"), ("0.7.1-review.20.pr.1".into(), a.clone()));
 
     // A merges. B, built as CI builds a pull request (its merge with
@@ -273,10 +276,10 @@ fn a_build_without_the_work_already_in_its_channel_is_never_published() {
     assert_eq!(publish_from(&key, &updates, &w, "0.7.1-review.23.pr.2", "development", &repo, Some(&b)), 0);
     assert_eq!(channel("development"), ("0.7.1-review.23.pr.2".into(), b.clone()));
 
-    // A's old branch, rebuilt later, lacks B: refused. So is a test build
-    // or a tag of a commit older than the one its channel holds.
+    // A's old branch, rebuilt later, lacks B: not published. A test build
+    // or a tag of a commit older than the one its channel holds fails the job.
     git(&repo, &["checkout", "-q", &a]);
-    assert_eq!(publish_from(&key, &updates, &w, "0.7.1-review.24.pr.1", "development", &repo, None), 3);
+    assert_eq!(publish_from(&key, &updates, &w, "0.7.1-review.24.pr.1", "development", &repo, None), 0);
     git(&repo, &["checkout", "-q", &base]);
     assert_eq!(publish_from(&key, &updates, &w, "0.7.1-test.25", "test", &repo, None), 3);
     assert_eq!(channel("test"), ("0.7.1-test.22".into(), merged.clone()));
@@ -317,10 +320,11 @@ fn a_pull_request_closed_unmerged_or_pushed_again_stops_no_later_build() {
     // Pull request 1's build is in development; it is closed unmerged.
     let a = pr("a", &base);
     assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.20.pr.1", "development", &repo, Some(&a), Some((1, ""))), 0);
-    // Pull request 2, from master: refused while CI has not found 1 closed,
-    // published once it has.
+    // Pull request 2, from master: not published while CI has not found 1
+    // closed (the job still passes), published once it has.
     let b = pr("b", "master");
-    assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.21.pr.2", "development", &repo, Some(&b), Some((2, ""))), 3);
+    assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.21.pr.2", "development", &repo, Some(&b), Some((2, ""))), 0);
+    assert_eq!(dev()["commit"], a.as_str(), "an open pull request's build was replaced");
     assert_eq!(publish_as(&key, &updates, &w, "0.7.1-review.21.pr.2", "development", &repo, Some(&b), Some((2, "1"))), 0, "a pull request closed unmerged stopped the next");
     assert_eq!((dev()["commit"].as_str(), dev()["pr"].as_u64(), dev()["base"].as_str()), (Some(b.as_str()), Some(2), Some(base.as_str())));
 

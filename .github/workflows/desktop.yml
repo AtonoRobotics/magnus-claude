@@ -15,11 +15,17 @@ on:
     branches: [master]
     tags: ["desktop-v*"]
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+  # The merge queue tests the commits it is about to land, including
+  # master's, so a pull request does not have to merge master in first.
+  merge_group:
   workflow_dispatch:
 
+# A new push to the same pull request cancels the run it replaces. Another
+# pull request has its own group, so it does not cancel this one.
 concurrency:
   group: desktop-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -34,6 +40,10 @@ env:
 
 jobs:
   release-checks:
+    # A draft is still being written: the installed-app run is the long one,
+    # and it starts again when the pull request is marked ready. A skipped
+    # required check does not satisfy branch protection, so a draft cannot merge.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 150
     steps:
@@ -68,11 +78,11 @@ jobs:
           echo "MAGNUS_APPLIANCE_VERSION=$(next appliance-v "$a")-$pre" >> "$GITHUB_ENV"
       # The updater packages (AppImage, setup.exe) are signed with the release
       # key, which is on the build box only, bound to the version.
-      # Tested once (DECISIONS.md, "One pull request at a time"): a merge
-      # to master whose files are exactly its pull request's, which passed
-      # these checks, is not tested again, and publishes the build that
-      # passed them (kept below, by its files' tree), versions included;
-      # only when that build is no longer kept is it built again.
+      # Tested once when the merge changes nothing: a merge to master whose
+      # files are exactly its pull request's, which passed these checks, is
+      # not tested again, and publishes the build that passed them (kept
+      # below, by its files' tree), versions included; only when that build
+      # is no longer kept, or the merge changed the files, is it built again.
       - name: Tested already
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         env:
@@ -139,8 +149,8 @@ jobs:
           d=$(sandbox/image.sh)
           echo "MAGNUS_GUEST_KERNEL=$d/vmlinux" >> "$GITHUB_ENV"
           echo "MAGNUS_GUEST_ROOTFS=$d/rootfs.ext4" >> "$GITHUB_ENV"
-      # Every suite, on every pull request and master build, before its
-      # build can reach an app (DECISIONS.md, "One pull request at a time").
+      # Every suite, on every ready pull request and master build, before its
+      # build can reach an app. A draft skips this job.
       - name: Browser sidecar
         if: env.MAGNUS_TESTED != '1'
         run: npm ci --prefix browser
