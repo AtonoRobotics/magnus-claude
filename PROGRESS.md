@@ -1,5 +1,9 @@
 # Progress
 
+## Sharing keeps to where content came from (2026-11-04)
+
+Sharing a chat answer now also checks the apps its private content came from, not only the tools its runs called (`chat_actions.rs`, test in `chat_actions.rs`).
+
 ## Sign-in follows no redirects (2026-11-04)
 
 The sign-in HTTP clients followed redirects, so a token endpoint answering 307 would have had the password resent to wherever it pointed, plain http included. They now follow none (`oidc.rs`).
