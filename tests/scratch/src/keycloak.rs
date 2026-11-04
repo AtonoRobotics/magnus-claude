@@ -437,7 +437,18 @@ impl Drop for Keycloak {
 
 /// The query of the first request to `/callback` on this listener, answered
 /// with a page that says to return to the app.
+///
+/// A browser that never comes back (it failed, or timed out after its two
+/// minutes) fails the test in three, named, never holds the run: waited on
+/// beside the browser, an unbounded accept hung five sign-in tests until the
+/// job's time ran out (run 41877670131).
 pub async fn loopback_once(l: tokio::net::TcpListener) -> HashMap<String, String> {
+    tokio::time::timeout(std::time::Duration::from_secs(180), callback(l))
+        .await
+        .unwrap_or_else(|_| panic!("the browser did not come back to the app's loopback address in three minutes"))
+}
+
+async fn callback(l: tokio::net::TcpListener) -> HashMap<String, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let (mut s, _) = l.accept().await.unwrap();
