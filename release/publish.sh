@@ -21,7 +21,12 @@
 # not published when it is older than the one there (a slower run finishing
 # after a newer one), nor when it was built without the commit the one there
 # was built from (a pull request lacking another's work, or a tag of an
-# older commit): an app would lose what it has. latest.json records that
+# older commit): an app would lose what it has. On the development channel
+# that second refusal does not fail the job: another open pull request may
+# merge, and the owner's app stays on the build it has. Test and production
+# still fail the job, and so does a development build that lacks master's
+# work (a merged pull request's landing commit, or the master a given-up
+# build stood on). latest.json records that
 # commit: MAGNUS_COMMIT (a pull request's head), or HEAD; the release is the
 # checkout at HEAD (for a pull request, its merge with master). It also
 # records the pull request (MAGNUS_PR) and `base`, the master commit the
@@ -122,7 +127,13 @@ elif [ -n "$given_up" ]; then
     exit 3
   fi
 elif [ -n "$was" ] && ! git merge-base --is-ancestor "$was" HEAD 2>/dev/null; then
-  echo "not publishing $what $version: it was built without $was, which $dir/latest.json was built from; bring this branch up to date with that commit's work" >&2
+  echo "not publishing $what $version: it was built without $was, which $dir/latest.json was built from; leaving that build in place so the app does not lose it" >&2
+  # Development is the owner's preview of whichever pull request published
+  # last. Refusing here used to fail the other open pull request's job, so
+  # only one could be green. The app still does not move. A caller that
+  # named where some pull request landed, and named the wrong one, still
+  # fails: that is not an open pull request sitting beside this one.
+  if [ "${channel:-}" = development ] && [ -z "${MAGNUS_LANDED:-}" ]; then exit 0; fi
   exit 3
 fi
 

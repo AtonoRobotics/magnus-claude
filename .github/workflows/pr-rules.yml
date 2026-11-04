@@ -1,12 +1,21 @@
-# The pull request rules (CLAUDE.md, "How work lands"; release/pr-rules.sh),
-# on every pull request: one open at a time in the order opened, into
-# master only, holding master's current commit. Same build box as the other
-# checks (desktop/README.md, "Release checks").
+# The pull request rules (CLAUDE.md, "How work lands"; release/pr-rules.sh):
+# an agent pull request past the cap fails, every pull request merges into
+# master, and a branch behind master or a large diff is a warning.
+# The checkout GitHub builds for a pull request is its merge with master,
+# so this script is the one on master even when the branch has not merged
+# master in. The head commit is passed separately.
+# A merge queue run has already satisfied these rules on each pull request.
+# Same build box as the other checks (desktop/README.md, "Release checks").
 name: pr-rules
 
 on:
   pull_request:
     types: [opened, reopened, synchronize, edited, ready_for_review]
+  merge_group:
+
+concurrency:
+  group: pr-rules-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -18,15 +27,40 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-        with: { fetch-depth: 0, ref: "${{ github.event.pull_request.head.sha }}" }
+        with: { fetch-depth: 0 }
       - name: The pull request rules
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           BASE: ${{ github.event.pull_request.base.ref }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
         run: |
+          if [ "$EVENT" = merge_group ]; then
+            echo "merge queue: each pull request already passed these rules"
+            exit 0
+          fi
           git fetch -q origin master
-          MAGNUS_OPEN_PRS=$(gh pr list --state open --limit 100 --json number -q '.[].number' | tr '\n' ' ')
+          # cursor/ branches, bot authors, the agent label, and Claude Code.
+          MAGNUS_OPEN_PRS=$(gh pr list --state open --limit 100 \
+            --json number,headRefName,author,labels,body --jq '
+              def agent:
+                ((.headRefName // "") | startswith("cursor/"))
+                or (.author.is_bot == true)
+                or ((.author.login // "") | endswith("[bot]"))
+                or (((.labels // []) | map(.name)) | index("agent") != null)
+                or ((.body // "") | test("Generated with \\[?Claude"));
+              .[] | "\(.number):\(if agent then "agent" else "human" end)"
+            ' | tr '\n' ' ')
           export MAGNUS_OPEN_PRS
+          case $BRANCH in
+          cursor/*) export MAGNUS_PR_AGENT=1 ;;
+          esac
+          if [ "$AUTHOR_TYPE" = Bot ]; then export MAGNUS_PR_AGENT=1; fi
+          case $AUTHOR in
+          *"[bot]") export MAGNUS_PR_AGENT=1 ;;
+          esac
           release/pr-rules.sh "$PR" "$HEAD" "$BASE" "$(git rev-parse origin/master)"

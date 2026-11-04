@@ -14,6 +14,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
+    os::unix::io::AsRawFd,
     path::PathBuf,
     process::Stdio,
     time::Duration,
@@ -191,6 +192,11 @@ pub struct Appliance {
     pub base: String,
     config_path: PathBuf,
     child: Option<Child>,
+    /// Bound before the first start and held until this value is dropped,
+    /// including while the child is dead. A restart serves on the same
+    /// socket, so another test's port 0 cannot be given it in the gap
+    /// (CI, 2026-11-04: two appliances on 127.0.0.1:40059).
+    listen_socket: std::net::TcpListener,
     starts: usize,
 }
 
@@ -202,9 +208,15 @@ impl Appliance {
         std::fs::create_dir_all(&state_dir).unwrap();
         let (kernel, rootfs) = sandbox_assets();
         let firecracker = std::env::var("MAGNUS_FIRECRACKER").unwrap_or("/usr/local/bin/firecracker".into());
+        // Held for the life of the test. The child inherits a duplicate
+        // (MAGNUS_LISTEN_FD) and serves on it; letting the port go between
+        // a kill and the next bind is what let another appliance take it.
+        let listen_socket = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+        listen_socket.set_nonblocking(true).expect("nonblocking");
+        let listen_at = listen_socket.local_addr().unwrap().to_string();
 
         let config = json!({
-            "appliance": { "state_dir": state_dir, "listen": "127.0.0.1:0" },
+            "appliance": { "state_dir": state_dir, "listen": listen_at },
             "database": { "url": db.kernel_url() },
             // The kernel speaks the adapter contract to a separate adapter
             // process; the adapter speaks the provider's own API.
@@ -262,6 +274,7 @@ impl Appliance {
             base: String::new(),
             config_path,
             child: None,
+            listen_socket,
             starts: 0,
             spec,
         };
@@ -294,14 +307,36 @@ impl Appliance {
                 .open(self.dir.path().join(format!("serve.{kind}")))
                 .unwrap()
         };
-        let child = Command::new(bin("magnus-appliance"))
-            .args(["serve", "--config"])
+        let raw = self.listen_socket.as_raw_fd();
+        let mut cmd = Command::new(bin("magnus-appliance"));
+        cmd.args(["serve", "--config"])
             .arg(&self.config_path)
+            .env("MAGNUS_LISTEN_FD", "3")
             .stdout(Stdio::from(log("out")))
             .stderr(Stdio::from(log("err")))
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn magnus serve");
+            .kill_on_drop(true);
+        // The child must serve on this process's socket. Binding the port
+        // itself fails: this process is already listening, on purpose.
+        // SAFETY: dup2 and fcntl are async-signal-safe. `raw` is the listening
+        // socket this process holds; the child has not opened fd 3 itself.
+        unsafe {
+            cmd.pre_exec(move || {
+                extern "C" {
+                    fn dup2(oldfd: i32, newfd: i32) -> i32;
+                    fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
+                }
+                if raw != 3 && dup2(raw, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Keep it across exec. The appliance marks it close-on-exec
+                // once it is up, and clears that when it execs a new release.
+                if fcntl(3, 2, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().expect("spawn magnus serve");
         self.child = Some(child);
         let http = reqwest::Client::new();
         let start = std::time::Instant::now();
@@ -310,7 +345,8 @@ impl Appliance {
             // answer alone may come from another test's appliance.
             if let Some(addr) = listening(&self.dir.path().join("serve.err"), from) {
                 if self.base.is_empty() {
-                    // The first start took port 0; restarts keep the port it got.
+                    // The socket was reserved before the first start; restarts
+                    // inherit it, so the address does not move.
                     self.base = format!("http://{addr}");
                     let mut cfg: toml::Table = toml::from_str(&std::fs::read_to_string(&self.config_path).unwrap()).unwrap();
                     cfg["appliance"].as_table_mut().unwrap().insert("listen".into(), addr.clone().into());
