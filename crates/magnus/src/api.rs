@@ -442,6 +442,10 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         return r;
     }
     let device = device_of(&k, peer, &h);
+    // Wrong passwords are counted where they come from: on the appliance's
+    // own machine apart from the network, so the network cannot lock the
+    // person out of the appliance itself.
+    let counter = if on_this_machine(peer, &h) { crate::accounts::Accounts::local_counter(&person) } else { person.clone() };
     let locked = |until: chrono::DateTime<chrono::Utc>| {
         (
             StatusCode::TOO_MANY_REQUESTS,
@@ -477,7 +481,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
                 Err(e) => internal(e),
             };
         }
-        if let Some(until) = k.accounts.locked(&person) {
+        if let Some(until) = k.accounts.locked(&counter) {
             return locked(until);
         }
         // The first time, the provider's own page signs them in: it can walk
@@ -489,11 +493,11 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         // cannot all pass the lockout first; a right answer clears it.
         let ours = k.cfg.person(&person).is_some();
         if ours {
-            k.accounts.failed(&person);
+            k.accounts.failed(&counter);
         }
         let answer = match id.password(&person, password, code, app).await {
             Ok(polled @ crate::identity::Polled::Done { .. }) => {
-                k.accounts.succeeded(&person);
+                k.accounts.succeeded(&counter);
                 return provider_answered(&k, t, id.label(), polled, device.clone()).await;
             }
             Ok(polled) => Some(polled),
@@ -507,14 +511,14 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
                 // Only a refusal says the password was wrong: one that needs
                 // the code or the browser was right, and stays uncounted.
                 if ours && !matches!(polled, crate::identity::Polled::Refused(_)) {
-                    k.accounts.forgive(&person);
+                    k.accounts.forgive(&counter);
                 }
                 provider_answered(&k, t, id.label(), polled, device.clone()).await
             }
             None => {
                 // Down: the attempt said nothing about the password.
                 if ours {
-                    k.accounts.forgive(&person);
+                    k.accounts.forgive(&counter);
                 }
                 let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h);
                 if backup {
@@ -533,7 +537,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         let _ = k.accounts.sign_in(&person, password);
         return err(StatusCode::UNAUTHORIZED, "The name or password is wrong.");
     }
-    match k.accounts.sign_in(&person, password) {
+    match k.accounts.sign_in_counted(&person, password, &counter) {
         Ok(Ok(_)) => issue(&k, t, &person, app, device.as_deref()).await,
         Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
         Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),

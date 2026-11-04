@@ -166,6 +166,13 @@ impl Accounts {
         format!("backup:{person}")
     }
 
+    /// The counter for attempts made on the appliance's own machine: its own,
+    /// so wrong passwords sent from the network cannot lock the person out
+    /// of the appliance itself.
+    pub fn local_counter(person: &str) -> String {
+        format!("local:{person}")
+    }
+
     /// End every session of a person (the provider turned them off).
     /// End every session of `person`; the ids of those ended.
     pub fn end_all(&self, person: &str) -> Result<Vec<String>> {
