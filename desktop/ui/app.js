@@ -493,9 +493,9 @@ async function signInScreen(note) {
           <p>${esc(data.message || `Sign in on the ${data.label} page that just opened in your browser, then come back here.`)}</p>
           <p class="small muted" id="wait" role="status">Waiting for you to sign in…</p>
           <div class="row" style="margin-top:14px"><button class="link" id="cancel">Cancel</button></div>`);
-        // A cancelled sign-in may still finish in the browser; its answer is ignored.
+        // A cancelled sign-in stops waiting; one the browser still finishes is not kept.
         let cancelled = false;
-        $("#cancel").onclick = () => { cancelled = true; back(); };
+        $("#cancel").onclick = () => { cancelled = true; Magnus.providerSignInCancel?.().catch(() => {}); back(); };
         try {
           const r = await Magnus.providerSignIn(data.person);
           if (cancelled) return;
