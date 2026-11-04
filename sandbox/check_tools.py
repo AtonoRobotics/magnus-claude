@@ -236,7 +236,7 @@ def expansion_bodies(cmd):
 def evaluated(cmd):
     """The command with what the shell never expands blanked out: text in
     single quotes (outside double quotes), a character after a backslash,
-    and comments. The length and the rest stay as they were."""
+    and comments before any `${`. The length and the rest stay as they were."""
     out, i, quote = list(cmd), 0, None
     while i < len(cmd):
         c = cmd[i]
@@ -253,7 +253,10 @@ def evaluated(cmd):
             quote = "'"
         elif c == '"':
             quote = None if quote == '"' else '"'
-        elif quote is None and comment_at(cmd, i):
+        # A `#` inside `${...}` is text, not a comment, and bash evaluates
+        # what follows it (`${x- # $((PATH=0))}`). Rather than follow where
+        # each `${` closes, no comment after one is blanked.
+        elif quote is None and comment_at(cmd, i) and "${" not in cmd[:i]:
             nl = cmd.find("\n", i)
             end = len(cmd) if nl < 0 else nl
             out[i:end] = " " * (end - i)

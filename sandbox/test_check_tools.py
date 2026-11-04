@@ -173,6 +173,8 @@ REFUSED = [
     "python3 -Xpycache_prefix=/workspace/pfx -m json.tool /workspace/r.json",
     # A relative program path is resolved from a directory the check chooses.
     "cd /workspace/a && ../usr/bin/cat t.py",
+    # A `#` inside `${...}` does not start a comment (review of #144).
+    ": ${x- # $((PATH=0))}; cat /workspace/f",
     # ANSI-C quoting, which the check cannot follow.
     "echo $'\\'' $(python3 /workspace/t.py) ''",
 ]
