@@ -1,5 +1,9 @@
 # Progress
 
+## A send shows and holds the draft it sends (2026-11-04, `send-reads-the-draft`)
+
+Approvals spec step 2. Gmail's `send_draft` card now shows the draft's To, Cc, Bcc, subject, text and attachments, read through `get_draft` at the gate. The approval holds only for that exact email: an edited draft asks again (`a_draft_changed_after_its_card_asks_again_showing_the_change`, gmail.rs). Gmail manifest 1.1.0. The protected test "A draft edited after approval asks again, including an added Bcc" (inv4_taint.rs, approved in the spec) still needs to be added. Step 1 (#145, `reach-in-manifests`) waits for this step: merge master into it, then set Gmail to 1.2.0. Steps 3–11 follow, one PR each.
+
 ## Approved contract changes keep their taint (2026-11-04)
 
 An approved contract change cleared the taint its checks are judged by, so a tainted run could have a `web_fetch` carrying private data run at completion without asking. It now keeps the run's taint; such a check goes to the person's review instead (`state.rs`, test in `contract_freeze.rs`).
