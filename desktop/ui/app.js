@@ -1957,7 +1957,10 @@ function connectorsChanged() {
 // answer comes back to this computer, and the card turns Connected.
 async function connectApp(name) {
   if (!Magnus.loopbackOpen) { toast("Connect apps from the Magnus desktop app."); return; }
-  const redirect = await Magnus.loopbackOpen();
+  // A provider that matches the redirect exactly (Slack) names the port.
+  // Every other app takes whichever free port this computer gives.
+  const info = await api("GET", `/v1/connectors/${enc(name)}`);
+  const redirect = await Magnus.loopbackOpen(info.loopback);
   const r = await api("POST", `/v1/connectors/${enc(name)}/sign-in`, { redirect_uri: redirect });
   Connecting[name] = r.authorize_url;
   connectorsChanged();

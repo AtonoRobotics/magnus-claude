@@ -776,6 +776,10 @@ pub struct Connector {
     pub hosts: Vec<String>,
     #[serde(default)]
     pub issuer: Option<String>,
+    /// The loopback port a sign-in must come back to, when the provider
+    /// matches the redirect exactly (Slack). None: any loopback port.
+    #[serde(default)]
+    pub loopback: Option<u16>,
 }
 
 /// The company knowledge base. Without an embedding server it is searched

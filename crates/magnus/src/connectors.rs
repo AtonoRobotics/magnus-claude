@@ -283,26 +283,57 @@ fn same_url(a: &str, b: &str) -> bool {
     a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
+/// Whether `resource` is the OAuth resource for `app_url` (RFC 9728 §3.3):
+/// the same address, or — when the metadata names no query of its own — an
+/// ancestor path on the same host. Slack's MCP address is
+/// `https://mcp.slack.com/mcp` and its metadata names the resource
+/// `https://mcp.slack.com` (checked live, 2026-11-04). A resource on
+/// another host is refused, so a server cannot point a sign-in at someone
+/// else's authorization.
+fn resource_covers(resource: &str, app_url: &str) -> bool {
+    if same_url(resource, app_url) {
+        return true;
+    }
+    let (Ok(r), Ok(a)) = (url::Url::parse(resource), url::Url::parse(app_url)) else { return false };
+    if r.scheme() != a.scheme() || r.host_str() != a.host_str() || r.port_or_known_default() != a.port_or_known_default() || r.query().is_some() {
+        return false;
+    }
+    let rp = r.path().trim_end_matches('/');
+    let ap = a.path().trim_end_matches('/');
+    ap.starts_with(&format!("{rp}/")) && (rp.is_empty() || ap.len() > rp.len())
+}
+
+/// A refresh answer that says the grant is dead. Slack's token method
+/// answers that with HTTP 200 and `ok: false`, not an HTTP error. A rate
+/// limit, or a body that still carries an access token, is not dead.
+fn grant_is_dead(v: &Value) -> bool {
+    v["access_token"].as_str().is_none()
+        && matches!(
+            v["error"].as_str(),
+            Some("invalid_grant" | "invalid_refresh_token" | "invalid_code" | "token_revoked" | "token_expired" | "bad_refresh_token")
+        )
+}
+
 /// The app's authorization server metadata: from its protected-resource
 /// metadata (RFC 9728), then the server's own (RFC 8414, else OpenID). The
 /// metadata must be for this app and that server (RFC 9728 §3.3, RFC 8414
 /// §3.3): metadata for another resource or another issuer is refused, so
 /// a sign-in never goes where the app's metadata was not about.
-async fn discover(app_url: &str, resource_metadata: Option<String>) -> Result<(Value, Vec<String>, String)> {
+async fn discover(app_url: &str, resource_metadata: Option<String>) -> Result<(Value, Vec<String>, String, String)> {
     let c = http();
     let prm_urls = match resource_metadata {
         Some(u) => vec![u],
         None => well_known(app_url, "oauth-protected-resource")?,
     };
     let prm = first_json(&c, &prm_urls).await.ok_or_else(|| anyhow!("the app does not say where to sign in (no protected-resource metadata)"))?;
-    if let Some(r) = prm["resource"].as_str() {
-        if !same_url(r, app_url) {
-            bail!("the app's sign-in metadata is for {r}, not {app_url}");
-        }
-    }
+    let resource = match prm["resource"].as_str() {
+        Some(r) if resource_covers(r, app_url) => r.to_string(),
+        Some(r) => bail!("the app's sign-in metadata is for {r}, not {app_url}"),
+        None => app_url.to_string(),
+    };
     let issuer = prm["authorization_servers"][0].as_str().ok_or_else(|| anyhow!("the app names no authorization server"))?.to_string();
     let scopes: Vec<String> = prm["scopes_supported"].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
-    Ok((server_metadata(&issuer).await?, scopes, issuer))
+    Ok((server_metadata(&issuer).await?, scopes, issuer, resource))
 }
 
 /// An authorization server's metadata (RFC 8414, else OpenID), which must
@@ -414,6 +445,13 @@ impl Kernel {
                     return Ok(None);
                 }
             };
+            // Slack says a dead refresh with HTTP 200 and `ok: false`. Left
+            // as a failure to parse, the next call would redeem it again.
+            if grant_is_dead(&v) {
+                t.lapsed = true;
+                self.vault.put(name, &serde_json::to_string(&t)?)?;
+                return Ok(None);
+            }
             let Some(access) = v["access_token"].as_str() else { return Ok(None) };
             t.access_token = access.into();
             if let Some(r) = v["refresh_token"].as_str() {
@@ -432,20 +470,28 @@ impl Kernel {
     /// address to open in the person's browser.
     pub async fn connector_sign_in(&self, c: &Connector, person: &str, redirect_uri: &str) -> Result<(String, String)> {
         loopback(redirect_uri)?;
+        // A provider that matches the redirect exactly, port included
+        // (Slack), has one address registered. Any other port would be
+        // refused there, so it is refused here with the address to use.
+        if let Some(port) = c.loopback {
+            let expect = format!("http://127.0.0.1:{port}/callback");
+            if redirect_uri != expect {
+                bail!("this app's sign-in comes back to {expect} on this computer");
+            }
+        }
         // A brokered connector's sign-in is the provider's own, for its
         // API: at the authorization server its manifest names, with no
         // resource indicator (RFC 8707 names an MCP server a token is for;
         // the provider's API takes the plain OAuth 2.0 request).
         let brokered = c.transport == crate::brokered::BROKERED;
-        let (asm, scopes, issuer) = match &c.issuer {
-            Some(issuer) if brokered => (server_metadata(issuer).await?, vec![], issuer.clone()),
+        let (asm, scopes, issuer, resource) = match &c.issuer {
+            Some(issuer) if brokered => (server_metadata(issuer).await?, vec![], issuer.clone(), String::new()),
             None if brokered => bail!("{} names no authorization server to sign in at", c.name),
             _ => {
                 let meta = asks_sign_in(&c.url).await?.unwrap_or(None);
                 discover(&c.url, meta).await?
             }
         };
-        let resource = if brokered { String::new() } else { c.url.clone() };
         let s = |k: &str| asm[k].as_str().map(String::from);
         let (Some(authorize), Some(token)) = (s("authorization_endpoint"), s("token_endpoint")) else { bail!("the app's authorization server names no authorization or token endpoint") };
         if asm["code_challenge_methods_supported"].as_array().is_some_and(|m| !m.iter().any(|x| x == "S256")) {
@@ -568,6 +614,13 @@ impl Kernel {
             bail!("the app's authorization server refused the sign-in: HTTP {}", r.status());
         }
         let v: Value = r.json().await?;
+        // Slack's token method answers a refusal with HTTP 200 and `ok:
+        // false`. The error it names is what the person can act on.
+        if v["access_token"].as_str().is_none() {
+            if let Some(e) = v["error"].as_str() {
+                bail!("the app's authorization server refused the sign-in: {e}");
+            }
+        }
         let access = v["access_token"].as_str().ok_or_else(|| anyhow!("the sign-in returned no access token"))?;
         let t = Tokens {
             access_token: access.into(),
@@ -850,7 +903,7 @@ impl Kernel {
         let oauth = match asks_sign_in(&url).await {
             Ok(None) => false,
             Ok(Some(meta)) => {
-                let (asm, _, _) = discover(&url, meta).await.map_err(|e| refusal(StatusCode::UNPROCESSABLE_ENTITY, format!("This server asks for a key or token instead of a sign-in ({e:#}), so it cannot be added: people connect an app by signing in with their own accounts")))?;
+                let (asm, _, _, _) = discover(&url, meta).await.map_err(|e| refusal(StatusCode::UNPROCESSABLE_ENTITY, format!("This server asks for a key or token instead of a sign-in ({e:#}), so it cannot be added: people connect an app by signing in with their own accounts")))?;
                 // Alpha Vector's own clients are for the catalog's providers;
                 // an added server registers Magnus itself.
                 if asm["registration_endpoint"].as_str().is_none() {
@@ -883,6 +936,7 @@ impl Kernel {
             catalog: false,
             hosts: vec![],
             issuer: None,
+            loopback: None,
         };
         self.emit(actor, Ev::ConnectorAdded { connector: c }).await.map_err(failed)?;
         Ok(json!({ "name": name, "sign_in": oauth }))
@@ -1163,6 +1217,9 @@ async fn card(k: &Kernel, c: &Connector, person: &str) -> Value {
         // it is signing in again, asking for that too.
         "more_access": !k.wanted_scopes(c, person).is_empty(),
         "listing": listing(c),
+        // The port the desktop listens on, when the provider matches the
+        // redirect exactly. Absent for every other app.
+        "loopback": c.loopback,
     })
 }
 
@@ -1268,6 +1325,8 @@ async fn disconnect(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Re
 
 #[cfg(test)]
 mod naming {
+    use serde_json::json;
+
     /// An app added by its address is named by what it calls itself, else
     /// by the part of its host that says something, made unique.
     #[test]
@@ -1279,5 +1338,28 @@ mod naming {
         assert_eq!(super::name_from("https://mcp.example.com/mcp", Some("Team Calendar"), none), "team-calendar");
         assert_eq!(super::name_from("http://127.0.0.1:8080/mcp", None, none), "app");
         assert_eq!(super::name_from("https://mcp.notion.com/mcp", None, |n| n == "notion"), "notion-2");
+    }
+
+    /// Slack's metadata names the server, not the `/mcp` path. Another host,
+    /// or a query that is not the address's own, is refused.
+    #[test]
+    fn a_resource_covers_its_own_path_and_no_other_host() {
+        assert!(super::resource_covers("https://mcp.slack.com", "https://mcp.slack.com/mcp"));
+        assert!(super::resource_covers("https://mcp.slack.com/mcp", "https://mcp.slack.com/mcp"));
+        assert!(super::resource_covers("https://mcp.supabase.com/mcp?read_only=true", "https://mcp.supabase.com/mcp?read_only=true"));
+        assert!(!super::resource_covers("https://accounts.google.com", "https://mcp.slack.com/mcp"));
+        assert!(!super::resource_covers("https://mcp.slack.com/mcp?read_only=true", "https://mcp.slack.com/mcp"));
+        assert!(!super::resource_covers("https://mcp.slack.com.evil.test", "https://mcp.slack.com/mcp"));
+    }
+
+    /// Slack answers a dead refresh with HTTP 200. A rate limit is not dead,
+    /// and neither is a body that still carries a token.
+    #[test]
+    fn a_slack_refresh_that_says_the_grant_is_dead_is_told_apart_from_one_that_worked() {
+        assert!(super::grant_is_dead(&json!({ "ok": false, "error": "invalid_refresh_token" })));
+        assert!(super::grant_is_dead(&json!({ "error": "invalid_grant" })));
+        assert!(!super::grant_is_dead(&json!({ "ok": false, "error": "ratelimited" })));
+        assert!(!super::grant_is_dead(&json!({ "ok": true, "access_token": "xoxp", "refresh_token": "xoxe", "expires_in": 43200 })));
+        assert!(!super::grant_is_dead(&json!({ "ok": false, "error": "invalid_refresh_token", "access_token": "xoxp" })));
     }
 }

@@ -46,6 +46,10 @@ pub struct AppState {
     pub retired: Vec<String>,
     /// Answer refreshes without `expires_in` (it is only recommended).
     pub refresh_without_expiry: bool,
+    /// A refresh is answered as Slack answers a dead one: HTTP 200,
+    /// `ok: false`, `error: invalid_refresh_token`. The refresh token is
+    /// left in place so a second try would still find it.
+    pub dead_refresh: bool,
     /// Its authorization server lets no client register itself (no RFC
     /// 7591 registration endpoint).
     pub no_registration: bool,
@@ -214,6 +218,10 @@ async fn token(State((base, st)): S, Form(f): Form<HashMap<String, String>>) -> 
         }
         // Rotation: a refresh token is good once.
         "refresh_token" => {
+            if s.dead_refresh {
+                s.refreshes += 1;
+                return Json(json!({ "ok": false, "error": "invalid_refresh_token" })).into_response();
+            }
             if !s.refresh.remove(&g("refresh_token")) {
                 return oauth_error(400, "invalid_grant");
             }

@@ -24,6 +24,7 @@ const SOURCES: &[&str] = &[
     include_str!("../../../catalog/gitlab.toml"),
     include_str!("../../../catalog/supabase.toml"),
     include_str!("../../../catalog/cloudflare.toml"),
+    include_str!("../../../catalog/slack.toml"),
 ];
 
 #[derive(Deserialize, Clone, Debug)]
@@ -73,6 +74,11 @@ pub struct Manifest {
     /// when Disconnect could not revoke it there.
     #[serde(default)]
     pub remove_access: Option<String>,
+    /// The loopback port a sign-in must come back to, when the provider
+    /// matches the redirect exactly, port included (Slack). None: any
+    /// loopback port, which is what a desktop client at Google accepts.
+    #[serde(default)]
+    pub loopback: Option<u16>,
 }
 
 pub fn manifests() -> &'static [Manifest] {
@@ -137,6 +143,7 @@ pub fn connector(m: &Manifest) -> Connector {
         catalog: true,
         hosts: m.hosts.clone(),
         issuer: m.issuer.clone(),
+        loopback: m.loopback.filter(|p| *p != 0),
     }
 }
 
@@ -192,6 +199,7 @@ mod tests {
             assert!(super::CATEGORIES.contains(&m.category.as_str()), "{}: category {}", m.id, m.category);
             assert!(!m.publisher.is_empty() && !m.abilities.is_empty() && !m.can.is_empty() && !m.cannot.is_empty(), "{}: its listing is incomplete", m.id);
             assert_eq!(m.asks.len(), m.scopes.len(), "{}: one plain line for each scope asked for", m.id);
+            assert!(m.loopback != Some(0), "{}: a fixed redirect names a real port", m.id);
             assert!((1..=2).contains(&m.letters.chars().count()) && m.tint.starts_with('#') && m.tint.len() == 7, "{}: its tile", m.id);
             let shown = [&m.summary, &m.can, &m.cannot].into_iter().chain(&m.abilities).chain(&m.asks).map(|s| s.to_lowercase()).collect::<Vec<_>>();
             for word in ["mcp", "oauth", "scope", "token", "api", "port"] {

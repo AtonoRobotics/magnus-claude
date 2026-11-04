@@ -418,11 +418,24 @@ fn open_url(handle: AppHandle, url: String) -> Res<()> {
     handle.opener().open_url(u.as_str(), None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Where one sign-in listens. `port` is set when the provider matches the
+/// redirect exactly, port included (Slack); otherwise any free port.
+fn loopback_addr(port: Option<u16>) -> String {
+    match port {
+        Some(p) if p != 0 => format!("127.0.0.1:{p}"),
+        _ => "127.0.0.1:0".into(),
+    }
+}
+
 /// Open a loopback address on this computer for one sign-in to one of the
 /// person's apps (RFC 8252): the app's sign-in page sends its code here.
 #[tauri::command]
-async fn loopback_open(app: State<'_, App>) -> Res<String> {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| format!("cannot listen on this computer: {e}"))?;
+async fn loopback_open(app: State<'_, App>, port: Option<u16>) -> Res<String> {
+    let addr = loopback_addr(port);
+    let l = tokio::net::TcpListener::bind(&addr).await.map_err(|e| match port {
+        Some(p) if p != 0 => format!("cannot listen on {addr} for this sign-in: {e}"),
+        _ => format!("cannot listen on this computer: {e}"),
+    })?;
     let port = l.local_addr().map_err(|e| e.to_string())?.port();
     *app.loopback.lock().unwrap() = Some(l);
     Ok(format!("http://127.0.0.1:{port}/callback"))
@@ -556,6 +569,18 @@ mod tests {
         assert!(file_path("/v1/tasks/t1").is_err());
         assert!(file_path("/v1/files").is_err());
         assert!(file_path("/v1/files/file_1/info").is_err());
+    }
+
+    #[test]
+    fn a_named_port_is_where_a_sign_in_comes_back() {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let addr = loopback_addr(Some(port));
+        let l = std::net::TcpListener::bind(&addr).unwrap();
+        assert_eq!(l.local_addr().unwrap().to_string(), addr);
+        assert_eq!(loopback_addr(None), "127.0.0.1:0");
+        assert_eq!(loopback_addr(Some(0)), "127.0.0.1:0");
     }
 
     #[test]

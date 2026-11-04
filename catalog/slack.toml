@@ -1,0 +1,58 @@
+id = "slack"
+version = "1.0.0"
+name = "Slack"
+summary = "Magnus can search and read your Slack messages, channels and direct messages, and post as you when you allow it."
+# The Library's card and page (connectors spec, Catalog and connector
+# manifests; Library): who makes it, its category chip, what Magnus can do
+# with it, each scope in plain words (in the order of `scopes`), and what it
+# can and cannot do here, from its tools. `letters` and `tint` draw its tile
+# until the provider's own mark is in its listing.
+publisher = "Slack"
+category = "email"
+abilities = ["Find a message or a decision when you ask about it", "Catch you up on a channel or a direct message", "Find a person or a channel by name", "Post in a channel or a direct message as you, when you allow it"]
+asks = ["Search messages in channels everyone in the workspace can see", "Search messages in private channels", "Search your direct messages", "Search your group direct messages", "Find people by name", "Read messages in channels everyone can see", "Read messages in private channels", "Read your direct messages", "Read your group direct messages", "See the public channels you are in", "See the private channels you are in", "See your direct messages", "See your group direct messages", "See people's names and profiles", "Post messages as you"]
+can = "Search and read your messages, channels and direct messages, and post as you when you allow it"
+cannot = "Delete messages, start a call, or change a workspace's settings"
+letters = "Sl"
+tint = "#4A154B"
+kind = "remote"
+endpoint = "https://mcp.slack.com/mcp"
+# A message reaches the channel's members, who may be outside the
+# organisation. What comes back is the person's workspace, written by others.
+audience = "public"
+label = "private+untrusted"
+registration = "preregistered"
+provider = "slack"
+# Where a person removes Magnus at Slack when Disconnect could not revoke it.
+remove_access = "https://my.slack.com/apps"
+# Slack matches a redirect exactly, port included, and has no "any port"
+# the way a desktop client at Google does. The relay is not built, and
+# magnus.pyrallon.ai asks the browser for a device certificate, so the
+# answer comes back to this port on the person's own computer. The desktop
+# listens here. Do not change it without changing the Slack app's redirect.
+loopback = 8731
+# User token scopes the hosted server lists for searching messages, reading
+# channels and direct messages, and posting as the person (Slack's MCP
+# server, scopes_supported read 2026-11-04). Not the legacy `search:read`,
+# and not `mcp:connect`, which is a bot scope for the opposite direction.
+scopes = ["search:read.public", "search:read.private", "search:read.im", "search:read.mpim", "search:read.users", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"]
+
+# The tools Slack's own client skills name for this (slackapi/slack-skills-plugin,
+# read 2026-11-04). The server lists them only after a sign-in, so a tool it
+# adds later stays hidden until a manifest names it. Canvases, files, lists,
+# reactions and creating channels are not named: this version does not ask
+# for what they need.
+[tools]
+slack_search_public = "read"
+slack_search_public_and_private = "read"
+slack_search_channels = "read"
+slack_search_users = "read"
+slack_read_channel = "read"
+slack_read_thread = "read"
+slack_read_user_profile = "read"
+slack_list_channel_members = "read"
+# A draft stays in the person's drafts until they send it.
+slack_send_message_draft = "reversible_write"
+# A sent message reaches other people, and a scheduled one will.
+slack_schedule_message = "irreversible"
+slack_send_message = "irreversible"

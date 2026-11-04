@@ -32,8 +32,9 @@
 # `admin` for the appliance's owners (config/keycloak-client.py, as root,
 # which reads the realm administrator's file), and the console as a systemd
 # user service beside the appliance, restarted on the programs installed.
-# When GOOGLE_CLIENT_SECRET is set, Google's client secret goes into the
-# appliance's vault through its owner-only API; it is never printed.
+# When GOOGLE_CLIENT_SECRET or SLACK_CLIENT_SECRET is set, that client
+# secret goes into the appliance's vault through its owner-only API; it is
+# never printed.
 #
 # It prints what a person needs to reach the console: its address and the
 # CA's certificate (public). It prints no secret.
@@ -155,16 +156,25 @@ if systemctl list-unit-files avahi-daemon.service >/dev/null 2>&1; then
   sudo -n systemctl enable --now avahi-daemon.service >/dev/null 2>&1 || true
 fi
 
-# Google's client secret, into the appliance's vault through its owner-only
-# API, when the repository's secret is set.
-if [ -n "${GOOGLE_CLIENT_SECRET:-}" ]; then
+# A provider's client secret, into the appliance's vault through its
+# owner-only API, when the repository's secret is set. The same call for
+# each confidential catalog provider. With none set, the owner's token is
+# not read.
+if [ -n "${GOOGLE_CLIENT_SECRET:-}" ] || [ -n "${SLACK_CLIENT_SECRET:-}" ]; then
   token=$(python3 -I -c 'import sys, tomllib; print(next(p["token"] for p in tomllib.load(open(sys.argv[1], "rb"))["people"] if "owner" in p.get("roles", []) and p.get("token")))' "$config")
-  code=$(python3 -I -c 'import json, os; print(json.dumps({"client_secret": os.environ["GOOGLE_CLIENT_SECRET"]}))' |
-    curl -sS -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' --data-binary @- "http://$listen/v1/registrations/google")
-  echo "Google's client secret into the appliance's vault: HTTP $code"
-else
-  echo "GOOGLE_CLIENT_SECRET is not set in the repository: Google's connectors cannot finish signing in yet"
 fi
+provision() {
+  # $1 env var, $2 provider id, $3 what to say when it is missing
+  if [ -z "${!1:-}" ]; then
+    echo "$1 is not set in the repository: $3 cannot finish signing in yet"
+    return 0
+  fi
+  code=$(python3 -I -c 'import json, os, sys; print(json.dumps({"client_secret": os.environ[sys.argv[1]]}))' "$1" |
+    curl -sS -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' --data-binary @- "http://$listen/v1/registrations/$2")
+  echo "$3 into the appliance's vault: HTTP $code"
+}
+provision GOOGLE_CLIENT_SECRET google "Google's client secret"
+provision SLACK_CLIENT_SECRET slack "Slack's client secret"
 
 # What a person needs to reach it.
 echo "The admin console, at any of these on the organisation's network or the tailnet:"
