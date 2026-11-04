@@ -3,6 +3,9 @@
 ## Desktop proxy paths (2026-11-04)
 
 The desktop app's proxy refused `/v1/sign-in…` by string prefix, but `/v1/./sign-in/device` passed and was normalised to the sign-in call, handing the page a session token. Paths are now judged as they will be sent (`desktop/src-tauri/src/lib.rs`).
+## Approved contract changes keep their taint (2026-11-04)
+
+An approved contract change cleared the taint its checks are judged by, so a tainted run could have a `web_fetch` carrying private data run at completion without asking. It now keeps the run's taint; such a check goes to the person's review instead (`state.rs`, test in `contract_freeze.rs`).
 ## Sign-in follows no redirects (2026-11-04)
 
 The sign-in HTTP clients followed redirects, so a token endpoint answering 307 would have had the password resent to wherever it pointed, plain http included. They now follow none (`oidc.rs`).
