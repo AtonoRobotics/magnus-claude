@@ -192,11 +192,14 @@ pub struct Appliance {
     pub base: String,
     config_path: PathBuf,
     child: Option<Child>,
-    /// Bound before the first start and held until this value is dropped,
-    /// including while the child is dead. A restart serves on the same
-    /// socket, so another test's port 0 cannot be given it in the gap
-    /// (CI, 2026-11-04: two appliances on 127.0.0.1:40059).
-    listen_socket: std::net::TcpListener,
+    /// Bound before the first start and held until this value is dropped or
+    /// `release_port` gives it up, including while the child is dead. A
+    /// restart serves on the same socket, so another test's port 0 cannot
+    /// be given it in the gap (CI, 2026-11-04: two appliances on
+    /// 127.0.0.1:40059). It is a listening socket: a client that connects
+    /// while the child is dead is queued here and never answered, so a test
+    /// that starts its own process on this port calls `release_port` first.
+    listen_socket: Option<std::net::TcpListener>,
     starts: usize,
 }
 
@@ -274,7 +277,7 @@ impl Appliance {
             base: String::new(),
             config_path,
             child: None,
-            listen_socket,
+            listen_socket: Some(listen_socket),
             starts: 0,
             spec,
         };
@@ -307,7 +310,7 @@ impl Appliance {
                 .open(self.dir.path().join(format!("serve.{kind}")))
                 .unwrap()
         };
-        let raw = self.listen_socket.as_raw_fd();
+        let raw = self.listen_socket.as_ref().expect("the port was given up").as_raw_fd();
         let mut cmd = Command::new(bin("magnus-appliance"));
         cmd.args(["serve", "--config"])
             .arg(&self.config_path)
@@ -371,12 +374,21 @@ impl Appliance {
         }
     }
 
-    /// SIGKILL the appliance: no shutdown path runs.
+    /// SIGKILL the appliance: no shutdown path runs. The port stays taken
+    /// until `release_port` or drop, so a restart cannot lose it.
     pub async fn kill(&mut self) {
         if let Some(mut c) = self.child.take() {
             let _ = c.start_kill();
             let _ = c.wait().await;
         }
+    }
+
+    /// Stop holding the port. The update test starts its own process on
+    /// this address after `kill`; while this socket is still listening that
+    /// process cannot bind, and a health check hangs on a connection this
+    /// harness accepts into a queue and never reads.
+    pub fn release_port(&mut self) {
+        self.listen_socket.take();
     }
 
     pub async fn restart(&mut self) {
