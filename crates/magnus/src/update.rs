@@ -158,6 +158,10 @@ fn started_as() -> Result<Value> {
 /// now holds the other release (the same process id).
 fn exec_installed(how: &Value) -> Result<()> {
     use std::os::unix::process::CommandExt;
+    // The harness holds this socket for the whole test. The process that
+    // replaces this one has to inherit it, or it binds the port and finds
+    // the harness already there.
+    crate::cli::release_listen_socket_for_exec();
     let path = install_dir()?.join(how["program"].as_str().context("program name")?);
     let args: Vec<String> = how["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
     let e = std::process::Command::new(&path).args(&args).exec();

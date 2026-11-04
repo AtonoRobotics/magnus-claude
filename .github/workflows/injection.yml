@@ -23,6 +23,7 @@ on:
       - tests/scratch/tests/injection.rs
       - .github/workflows/injection.yml
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
     paths: *boundary
   workflow_dispatch:
 
@@ -35,6 +36,9 @@ env:
 
 jobs:
   injection:
+    # Drafts skip this the same way they skip the desktop run. Marking the
+    # pull request ready starts it, because ready_for_review is a trigger.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 60
     steps:

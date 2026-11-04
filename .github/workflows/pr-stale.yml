@@ -1,7 +1,7 @@
-# A pull request is merged or closed within a day of going green (CLAUDE.md,
-# "How work lands"). Every six hours, each open pull request with no
-# activity for a day gets one comment saying what it waits on, so none sits
-# unseen while master moves on (release/pr-stale.sh).
+# Pull requests with nobody touching them pile up (CLAUDE.md, "How work
+# lands"). Every six hours: a comment after a day, the stale label after
+# three, and a close after five. The branch is kept; hold stops the close
+# (release/pr-stale.sh).
 name: pr-stale
 
 on:
@@ -12,6 +12,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 jobs:
   stale:

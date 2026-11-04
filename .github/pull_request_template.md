@@ -12,8 +12,8 @@
 
 ## Before asking for a merge
 
-- [ ] Branched from current master; holds master's latest commit
-- [ ] The only open pull request (CLAUDE.md, "How work lands")
+- [ ] Branched from current master, into master
+- [ ] Not past the cap of 6 open agent pull requests (CLAUDE.md, "How work lands")
 - [ ] One concern; each fix has a test that fails without it
 - [ ] Every CI check green
 - [ ] DECISIONS.md and PROGRESS.md updated
