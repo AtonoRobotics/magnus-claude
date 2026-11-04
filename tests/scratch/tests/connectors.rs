@@ -185,3 +185,40 @@ async fn a_changed_tool_definition_waits_for_the_owner() {
     assert_eq!(item["details"]["tool"], "calendar__list_events", "{item}");
     assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve" })).await.is_success());
 }
+
+/// `sandbox` is the appliance's own microVM, never an app: an app's tool
+/// classed so would skip the task contract, the Rule of Two and the
+/// audience rule, as if what it did stayed on the appliance. The owner
+/// cannot class one so, and one an older log classed so is not offered.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_apps_tool_is_never_classed_as_the_sandbox() {
+    let cal = FakeOAuthApp::start(3600).await;
+    // No contract: the call is refused unless its class skips the contract.
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => tool("calendar__create_event", json!({ "title": "Standup" })),
+            _ => fail("not offered"),
+        }
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert!(st.is_success(), "{v}");
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    sign_in(&alice, "calendar", callback.local_addr().unwrap().port()).await;
+    assert_eq!(alice.put("/v1/connectors/calendar/tools/create_event", json!({ "risk": "sandbox" })).await.0, 400, "an app's tool was classed as the sandbox");
+
+    // An older release took it.
+    app.kill().await;
+    let admin = app.db.admin().await;
+    let ev = json!({ "kind": "tool_classified", "connector": "calendar", "tool": "create_event", "risk": "sandbox" });
+    admin.execute("INSERT INTO public.events (kind, actor, run_id, body) VALUES ('tool_classified', 'person:alice', NULL, $1)", &[&ev]).await.unwrap();
+    app.restart().await;
+    let alice = app.api("alice");
+    let t = alice.submit("Put the standup on my calendar.").await;
+    alice.wait_settled(&t).await;
+    assert_eq!(cal.calls("create_event"), 0, "an app's tool classed as the sandbox ran without a contract");
+    let offered: Vec<String> = m.requests().iter().flat_map(|c| c.offered_tools()).collect();
+    assert!(!offered.iter().any(|t| t == "calendar__create_event"), "{offered:?}");
+}

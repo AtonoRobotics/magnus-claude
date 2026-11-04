@@ -96,7 +96,9 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
     Some(Facts {
         name: tool.into(),
         app: app.into(),
-        risk: Risk::parse(&class.risk)?,
+        // Never the sandbox, which is the appliance's own: an older log may
+        // class an app's tool so, and it counts as unclassified.
+        risk: Risk::parse(&class.risk).filter(|r| *r != Risk::Sandbox)?,
         label: class.label.as_deref().and_then(Label::parse).or_else(|| Label::parse(&c.label))?,
         audience: Audience::parse(&c.audience)?,
         connector: Some(c),

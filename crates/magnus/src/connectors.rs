@@ -1326,7 +1326,12 @@ async fn classify(AxState(k): K, h: HeaderMap, Path((name, tool)): Path<(String,
     }
     let risk = b["risk"].as_str().map(String::from);
     if risk.as_deref().is_some_and(|r| crate::tools::Risk::parse(r).is_none()) {
-        return err(StatusCode::BAD_REQUEST, "risk is read, sandbox, reversible_write, irreversible, financial or prohibited");
+        return err(StatusCode::BAD_REQUEST, "risk is read, reversible_write, irreversible, financial or prohibited");
+    }
+    // The sandbox is the appliance's own microVM: an app's tool acts at the
+    // app, so classed so it would skip the contract and the Rule of Two.
+    if risk.as_deref() == Some("sandbox") {
+        return err(StatusCode::BAD_REQUEST, "sandbox is the appliance's own microVM, never an app's tool: risk is read, reversible_write, irreversible, financial or prohibited");
     }
     if let Err(e) = k.emit(&format!("person:{}", p.id), Ev::ToolClassified { connector: name, tool, risk }).await {
         return internal(e);
