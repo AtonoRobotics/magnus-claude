@@ -3,6 +3,9 @@
 ## Sign-in follows no redirects (2026-11-04)
 
 The sign-in HTTP clients followed redirects, so a token endpoint answering 307 would have had the password resent to wherever it pointed, plain http included. They now follow none (`oidc.rs`).
+## Check-tool labels (2026-11-04)
+
+A review of master found 31 contract checks that `sandbox/check_tools.py` labelled `appliance-verified` although workspace code decided their result: `cat x#; python3 t.py`, process substitution, `env -u cat python3 t.py`, `unset PYTHONSAFEPATH`, `python3 -X pycache_prefix=…`, `../usr/bin/cat` after `cd`, `/usr/bin/env python3 t.py`, abbreviated long options and others (DECISIONS.md, "reads a check as the shell and each tool read it"). Each now gets self-checked or refused, with a case in `sandbox/test_check_tools.py`, which CI now runs. The sandbox image must be rebuilt (`sandbox/build.sh`) before the appliance uses the fix. Still open from the same review, each for its own pull request: an approved contract change clears the taint its checks are judged by (`state.rs`, `contract_taint`); a check expecting a nonzero exit can never pass; the desktop proxy lets `/v1/./sign-in…` through; the sign-in HTTP client follows redirects; a 429 suspends a run at once.
 
 ## Chat replacement validation (2026-11-04)
 
