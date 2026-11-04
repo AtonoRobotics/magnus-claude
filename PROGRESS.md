@@ -1,5 +1,9 @@
 # Progress
 
+## Rate limits are retried (2026-11-04)
+
+A single 429 paused a task until a person resumed it. Rate limits are now retried with backoff (honouring `retry-after`), and only one the provider says lasts longer than the longest backoff suspends the run (`run/agent_loop.rs`, test in `models.rs`).
+
 ## Chat replacement validation (2026-11-04)
 
 PR #134 is open under the replacement workflow. Review found that a space manager could delete another member's message despite the catalog's own-message promise. Deletion now verifies the account through Google UserInfo and matches the message's human sender before sending DELETE. The manifest adds only `openid` and the identity endpoint for that check; missing identity or mismatched ownership refuses deletion. Post-review validation: 6 Chat unit tests, 60 kernel unit tests, 5 Chat VM integration tests, 4 Calendar integration tests and 4 Google library/sign-in tests pass; the live invalid-token contract check also passes (authenticated operations remain unrun).
