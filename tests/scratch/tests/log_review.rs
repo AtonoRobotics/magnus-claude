@@ -87,3 +87,17 @@ async fn a_restore_waits_for_no_kernel_and_a_rolled_back_log_still_backs_up() {
     app.restart().await;
     assert_eq!(alice.task(&t).await["status"], "failed");
 }
+
+/// A password with characters a URL must escape (`@`, `:`, `/`, `%`) is
+/// given to the role as the kernel will send it, decoded, not as written in
+/// the URL, so the kernel can still sign in after `migrate`.
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_sets_the_password_the_kernel_signs_in_with() {
+    let db = pg::TestDb::create().await;
+    let mut u = url::Url::parse(&db.kernel_url()).unwrap();
+    u.set_password(Some("p@ss:w/rd%41'")).unwrap();
+    assert!(u.as_str().contains("%40"), "the URL escapes the password: {u}");
+    magnus::log::migrate(&db.admin_url(), u.as_str(), None).await.expect("migrate");
+    let kernel = magnus::log::connect(u.as_str()).await.expect("the kernel signs in with the password migrate set");
+    kernel.execute("SELECT 1", &[]).await.unwrap();
+}

@@ -1,5 +1,9 @@
 # Progress
 
+## migrate decodes the password (2026-11-04)
+
+`migrate` set a role's password to the URL's percent-escaped text while the kernel signs in with the decoded one; it now decodes it (`log.rs`, test in `log_review.rs`).
+
 ## Chat replacement validation (2026-11-04)
 
 PR #134 is open under the replacement workflow. Review found that a space manager could delete another member's message despite the catalog's own-message promise. Deletion now verifies the account through Google UserInfo and matches the message's human sender before sending DELETE. The manifest adds only `openid` and the identity endpoint for that check; missing identity or mismatched ownership refuses deletion. Post-review validation: 6 Chat unit tests, 60 kernel unit tests, 5 Chat VM integration tests, 4 Calendar integration tests and 4 Google library/sign-in tests pass; the live invalid-token contract check also passes (authenticated operations remain unrun).

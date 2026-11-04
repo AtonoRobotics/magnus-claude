@@ -19,6 +19,7 @@ One line per choice the brief left open, with its reason. The brief and the owne
 
 - `public.events` is the only source of truth. Every other table is a derived projection that can be truncated, and `serve` rebuilds it from the log on boot. Reason: invariant 3 says the log is the source of truth, and truncation tests it directly.
 - The kernel connects as a role that may only INSERT and SELECT on `events`; `migrate` creates that role and the schema with an admin URL. Reason: append-only is enforced by the database, not by kernel code.
+- `migrate` gives a role the password in its URL percent-decoded, as the kernel sends it when it connects (review, 2026-11-04). Reason: it stored the URL's escaped text, so a password with `@`, `:`, `/` or `%` locked the kernel (or the console's root role) out of its own database. Test: `migrate_sets_the_password_the_kernel_signs_in_with` (log_review.rs).
 - The vault is an encrypted file in the appliance state directory, not a database table. Reason: secrets must stay out of the log, and dropping derived tables must not lose them.
 
 ## Boundary and policy

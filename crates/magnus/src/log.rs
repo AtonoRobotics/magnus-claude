@@ -41,12 +41,19 @@ fn ident(s: &str) -> Result<&str> {
     Ok(s)
 }
 
+/// A URL's password as Postgres is to store it: percent-decoded, as the
+/// kernel sends it when it connects, and quoted for a SQL string.
+fn sql_password(in_url: &str) -> Result<String> {
+    let pw = percent_encoding::percent_decode_str(in_url).decode_utf8().context("the database password is not UTF-8")?;
+    Ok(pw.replace('\'', "''"))
+}
+
 /// Create the log table and the kernel role named in `kernel_url`, and,
 /// when the admin console is set up, its root role named in `root_url`.
 pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) -> Result<()> {
     let k = url::Url::parse(kernel_url).context("database.url")?;
     let role = ident(k.username())?.to_string();
-    let password = k.password().context("database.url has no password")?.replace('\'', "''");
+    let password = sql_password(k.password().context("database.url has no password")?)?;
     let db = ident(k.path().trim_start_matches('/'))?.to_string();
     let admin = connect(admin_url).await?;
     let exists = admin.query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role]).await?.is_some();
@@ -100,7 +107,7 @@ pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) 
 async fn migrate_root(admin: &Client, root_url: &str, db: &str) -> Result<()> {
     let r = url::Url::parse(root_url).context("admin.database_url")?;
     let role = ident(r.username())?.to_string();
-    let password = r.password().context("admin.database_url has no password")?.replace('\'', "''");
+    let password = sql_password(r.password().context("admin.database_url has no password")?)?;
     let exists = admin.query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role]).await?.is_some();
     let verb = if exists { "ALTER" } else { "CREATE" };
     admin.batch_execute(&format!("{verb} ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS")).await?;
