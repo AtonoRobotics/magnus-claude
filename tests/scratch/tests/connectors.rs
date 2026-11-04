@@ -185,3 +185,48 @@ async fn a_changed_tool_definition_waits_for_the_owner() {
     assert_eq!(item["details"]["tool"], "calendar__list_events", "{item}");
     assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve" })).await.is_success());
 }
+
+/// An approval covers the action as it was classed when given: the owner's
+/// standing approval of a tool that cannot be undone does not cover the
+/// same tool once the owner reclassifies it as one that moves money; that
+/// call is asked again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_does_not_cover_its_tool_once_it_is_classed_riskier() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("add the standup", "the standup is on the calendar"),
+            1 => tool("calendar__create_event", json!({ "title": "Standup" })),
+            _ => complete("added"),
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert!(st.is_success(), "{v}");
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    sign_in(&alice, "calendar", callback.local_addr().unwrap().port()).await;
+    assert_eq!(alice.put("/v1/connectors/calendar/tools/create_event", json!({ "risk": "irreversible" })).await.0, 204);
+
+    let t = alice.submit("Put the standup on my calendar.").await;
+    let item = alice.wait_item(&t, "approval").await;
+    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "standing" })).await.is_success());
+    alice.wait_settled(&t).await;
+    assert_eq!(cal.calls("create_event"), 1);
+
+    // The same tool, now classed as one that moves money.
+    assert_eq!(alice.put("/v1/connectors/calendar/tools/create_event", json!({ "risk": "financial" })).await.0, 204);
+    let t = alice.submit("Put the standup on my calendar again.").await;
+    let asked = eventually("the call is asked about or runs", PATIENCE, || {
+        let (alice, t, cal) = (alice.clone(), t.clone(), &cal);
+        async move {
+            if cal.calls("create_event") > 1 {
+                return Some(false);
+            }
+            (!alice.open_items(&t, "approval").await.is_empty()).then_some(true)
+        }
+    })
+    .await;
+    assert!(asked, "an approval given for an action that cannot be undone covered it once classed as one that moves money");
+}

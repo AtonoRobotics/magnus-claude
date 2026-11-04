@@ -330,6 +330,9 @@ pub struct Approval {
     pub by: String,
     /// Why the approval was asked for: the rule, or `unknown_outcome`.
     pub reason: Option<String>,
+    /// The risk class the action had when it was approved (its item's): an
+    /// approval covers only that class.
+    pub risk: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1744,7 +1747,7 @@ impl State {
                     }
                 }
             }
-            Ev::Approval { id, person, task, tool, input_hash, scope, until, reason, .. } => self.approvals.push(Approval {
+            Ev::Approval { id, item, person, task, tool, input_hash, scope, until, reason } => self.approvals.push(Approval {
                 id: id.clone(),
                 person: person.clone(),
                 task: task.clone(),
@@ -1755,6 +1758,7 @@ impl State {
                 used: false,
                 by: e.actor.clone(),
                 reason: reason.clone(),
+                risk: self.items.get(item).and_then(|i| i.details["risk"].as_str()).map(String::from),
             }),
             Ev::ApprovalUsed { id, .. } => {
                 if let Some(a) = self.approvals.iter_mut().find(|a| &a.id == id) {
