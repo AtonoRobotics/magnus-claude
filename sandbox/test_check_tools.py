@@ -39,6 +39,21 @@ APPLIANCE_VERIFIED = [
     "python3 -c 'import os.path; print(os.path.getsize(\"/workspace/x\"))'",
     "python3 -c 'from xml.etree import ElementTree as E; print(E.parse(\"/workspace/a.xml\").getroot().tag)'",
     "python3 -c 'import sys, csv; print(sum(1 for _ in csv.reader(open(sys.argv[1]))))' /workspace/f.csv",
+    # Shell syntax and options read as the shell and the tool read them.
+    "cat /workspace/a#b",
+    "grep -q ok /workspace/out.txt # look for ok",
+    "echo \\' && grep -q ok /workspace/out.txt",
+    "timeout 10 grep -q ok /workspace/out.txt",
+    "timeout -s KILL 10 grep -q ok /workspace/out.txt",
+    "env LC_ALL=C sort /workspace/f",
+    "nice -n 5 wc -l /workspace/f",
+    "command -v grep",
+    "python3 -X utf8 -m json.tool /workspace/r.json",
+    "python3 -Wignore -m json.tool /workspace/r.json",
+    "sed -n -e '1p' /workspace/f",
+    "sed -ne '/done/p' /workspace/f",
+    "awk -F: '{print $1}' /workspace/f",
+    "jq -r .ok /workspace/r.json",
 ]
 
 SELF_CHECKED = [
@@ -89,6 +104,32 @@ SELF_CHECKED = [
     "xargs sh < /workspace/list",
     "git log",
     "make check",
+    # Review 2026-11-04: each of these was labelled appliance-verified.
+    # `#` inside a word does not start a comment.
+    "cat x#; python3 /workspace/t.py",
+    # Process substitution runs its command.
+    "bash -c 'cat <(python3 /workspace/t.py)'",
+    "diff <(python3 /workspace/t.py) /workspace/expected.txt",
+    "tee >(sh run.sh) < /workspace/f",
+    # An escaped quote does not open a quoted string.
+    "echo \\' $(python3 /workspace/t.py) \\'",
+    # A wrapper's option arguments are not the program it runs.
+    "env -u cat python3 /workspace/t.py",
+    "env '-Spython3 /workspace/t.py'",
+    "env --split-string='python3 /workspace/t.py'",
+    "xvfb-run -e cat python3 /workspace/t.py",
+    # A wrapper named by its path is still a wrapper.
+    "/usr/bin/env python3 /workspace/t.py",
+    "/usr/bin/env -S 'python3 /workspace/t.py'",
+    # Attached option values and abbreviated long options.
+    "python3 -Wignore::checkrunner.Warn -c 'print(1)'",
+    "sort -S 1K --com=sh /workspace/f",
+    "sed --fi=prog.sed /workspace/f",
+    "sed -n --expr='1e sh run.sh' p",
+    "sed -e'1e sh run.sh' /workspace/f",
+    "awk -bf prog.awk /workspace/f",
+    "jq -nf prog.jq",
+    "jq . -f prog.jq /workspace/r.json",
 ]
 
 REFUSED = [
@@ -99,6 +140,26 @@ REFUSED = [
     "PYTHONPATH=/workspace python3 -m pytest -q",
     "source env.sh",
     "python3 -E tests.py",
+    # Review 2026-11-04: each of these was labelled appliance-verified.
+    # Switching off the check environment, by any route.
+    "unset PYTHONSAFEPATH MAGNUS_CHECK; python3 -m json.tool /workspace/r.json",
+    "env -i python3 -c 'import json'",
+    "env --ignore-env python3 -c 'import json'",
+    "env -u PYTHONSAFEPATH python3 -m json.tool /workspace/r.json",
+    "exec -c python3 -m json.tool /workspace/r.json",
+    "for PATH in /workspace/bin; do cat /workspace/f; done",
+    "read PATH < /workspace/p; cat /workspace/f",
+    "printf -v PATH /workspace/bin; cat /workspace/f",
+    ": $((PATH=0)); cat /workspace/f",
+    "set -a; : ${PYTHONPATH:=/workspace}; python3 -m json.tool /workspace/r.json",
+    "PS4='$(sh run.sh)' bash -xc true",
+    # Moving where Python finds its modules' bytecode.
+    "python3 -X pycache_prefix=/workspace/pfx -m json.tool /workspace/r.json",
+    "python3 -Xpycache_prefix=/workspace/pfx -m json.tool /workspace/r.json",
+    # A relative program path is resolved from a directory the check chooses.
+    "cd /workspace/a && ../usr/bin/cat t.py",
+    # ANSI-C quoting, which the check cannot follow.
+    "echo $'\\'' $(python3 /workspace/t.py) ''",
 ]
 
 
