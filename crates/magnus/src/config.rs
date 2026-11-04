@@ -781,9 +781,13 @@ pub struct Connector {
     /// whose opt-in cannot be undone.
     #[serde(default = "pkce_on")]
     pub pkce: bool,
-    /// The one redirect the provider registered. The desktop listens on it.
+    /// The one redirect the provider registered. The token exchange repeats it.
     #[serde(default)]
     pub redirect_uri: Option<String>,
+    /// The loopback address the desktop listens on when `redirect_uri` is
+    /// the public https callback.
+    #[serde(default)]
+    pub handoff: Option<String>,
 }
 
 fn pkce_on() -> bool {

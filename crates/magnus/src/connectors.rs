@@ -22,6 +22,12 @@ use std::time::{Duration, Instant};
 
 pub const OAUTH: &str = "oauth";
 
+/// The redirect Slack registers for a distributed app. The token exchange
+/// sends this same address. The browser is sent on to `SLACK_HANDOFF`,
+/// which the desktop app is listening on.
+pub const SLACK_OAUTH_CALLBACK: &str = "https://magnus.pyrallon.ai/oauth/slack/callback";
+pub const SLACK_HANDOFF: &str = "http://127.0.0.1:17321/callback";
+
 /// The vault name of an app's credential: the organisation's key for an
 /// app that takes one, or, before connections were each person's own, the
 /// one sign-in everyone's runs used (no longer used; revoked with the app).
@@ -487,11 +493,15 @@ impl Kernel {
     /// Start signing in to an app: register if needed, and return the
     /// address to open in the person's browser.
     pub async fn connector_sign_in(&self, c: &Connector, person: &str, redirect_uri: &str) -> Result<(String, String)> {
-        loopback(redirect_uri)?;
         if let Some(fixed) = &c.redirect_uri {
             if redirect_uri != fixed {
                 bail!("sign in to {} from the Magnus app on this computer", c.title.as_deref().unwrap_or(&c.name));
             }
+        }
+        // A loopback address, or Slack's one registered https address. The
+        // token exchange repeats whichever was sent here.
+        if loopback(redirect_uri).is_err() && redirect_uri != SLACK_OAUTH_CALLBACK {
+            loopback(redirect_uri)?;
         }
         // A brokered connector's sign-in is the provider's own, for its
         // API: at the authorization server its manifest names, with no
@@ -775,10 +785,10 @@ pub fn suggested_risk(annotations: &Value) -> &'static str {
 use crate::api::{err, internal, owner, who};
 use crate::events::Ev;
 use axum::{
-    extract::{Path, State as AxState},
+    extract::{Path, Query, State as AxState},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use std::sync::Arc;
@@ -947,6 +957,7 @@ impl Kernel {
             issuer: None,
             pkce: true,
             redirect_uri: None,
+            handoff: None,
         };
         self.emit(actor, Ev::ConnectorAdded { connector: c }).await.map_err(failed)?;
         Ok(json!({ "name": name, "sign_in": oauth }))
@@ -1078,8 +1089,51 @@ fn answer(r: Result<Value, Refusal>, ok: StatusCode) -> Response {
     }
 }
 
+/// Whether `state` is a Slack sign-in still waiting, started with the
+/// registered https redirect. The pending entry stays: the desktop finishes it.
+fn slack_sign_in_open(state: &str) -> bool {
+    pending().lock().unwrap().get(state).is_some_and(|p| p.app == "slack" && p.redirect_uri == SLACK_OAUTH_CALLBACK && p.at.elapsed() < PENDING_FOR)
+}
+
+/// The desktop's loopback address with only this sign-in's answer. The code
+/// is not written anywhere else.
+pub(crate) fn slack_handoff_url(state: &str, code: Option<&str>, iss: Option<&str>, error: Option<&str>) -> String {
+    let mut u = url::Url::parse(SLACK_HANDOFF).expect("the handoff is a url");
+    {
+        let mut q = u.query_pairs_mut();
+        if let Some(c) = code.filter(|s| !s.is_empty()) {
+            q.append_pair("code", c);
+        }
+        q.append_pair("state", state);
+        if let Some(i) = iss.filter(|s| !s.is_empty()) {
+            q.append_pair("iss", i);
+        }
+        if let Some(e) = error.filter(|s| !s.is_empty()) {
+            q.append_pair("error", e);
+        }
+    }
+    u.to_string()
+}
+
+/// Slack's browser comes here. A waiting sign-in is sent on to the desktop
+/// app; anything else is an empty 404. The code is not logged.
+async fn slack_oauth_callback(Query(q): Query<HashMap<String, String>>) -> Response {
+    let Some(state) = q.get("state").map(String::as_str).filter(|s| slack_sign_in_open(s)) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let loc = slack_handoff_url(state, q.get("code").map(String::as_str), q.get("iss").map(String::as_str), q.get("error").map(String::as_str));
+    let Ok(location) = loc.parse() else { return StatusCode::NOT_FOUND.into_response() };
+    let mut r = Response::new(axum::body::Body::empty());
+    *r.status_mut() = StatusCode::FOUND;
+    r.headers_mut().insert(axum::http::header::LOCATION, location);
+    r.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    r.headers_mut().insert(axum::http::header::REFERRER_POLICY, axum::http::HeaderValue::from_static("no-referrer"));
+    r
+}
+
 pub fn router() -> Router<Arc<Kernel>> {
     Router::new()
+        .route("/oauth/slack/callback", get(slack_oauth_callback))
         .route("/v1/connectors", axum::routing::get(list).post(add))
         .route("/v1/connectors/{name}", axum::routing::get(detail).delete(remove))
         .route("/v1/connectors/{name}/tools/{tool}", put(classify))
@@ -1226,6 +1280,7 @@ async fn card(k: &Kernel, c: &Connector, person: &str) -> Value {
         // The address the desktop app listens on, when the provider
         // registered one exactly. Not shown.
         "redirect_uri": c.redirect_uri,
+        "handoff": c.handoff,
         // The app asked for more access than the sign-in holds: approving
         // it is signing in again, asking for that too.
         "more_access": !k.wanted_scopes(c, person).is_empty(),
@@ -1364,6 +1419,13 @@ mod naming {
         let google = serde_json::json!({ "access_token": "ya29", "refresh_token": "1//", "expires_in": 3600, "token_type": "Bearer" });
         assert_eq!(super::granted(&google).unwrap().access, "ya29");
         assert!(super::granted(&serde_json::json!({ "ok": false, "error": "invalid_code" })).is_err());
+        let bounced = super::slack_handoff_url("st", Some("the-code"), Some("https://mcp.slack.com"), None);
+        assert!(bounced.starts_with("http://127.0.0.1:17321/callback?"));
+        let back: std::collections::HashMap<String, String> = url::Url::parse(&bounced).unwrap().query_pairs().into_owned().collect();
+        assert_eq!(back.get("code").map(String::as_str), Some("the-code"));
+        assert_eq!(back.get("state").map(String::as_str), Some("st"));
+        assert_eq!(back.get("iss").map(String::as_str), Some("https://mcp.slack.com"));
+        assert!(!bounced.contains("client_secret"));
         assert!(super::dead_token(&serde_json::json!({ "ok": false, "error": "invalid_refresh_token" })));
         assert!(!super::dead_token(&serde_json::json!({ "ok": false, "error": "ratelimited" })));
         assert!(!super::dead_token(&google));

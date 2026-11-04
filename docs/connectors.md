@@ -41,7 +41,7 @@ one commit), 2026-11-02.
 - [ ] Never asked, in the admin console: the console still asks an admin for Google's client secret (Security › Connectors and credentials, `desktop/admin/admin.js` `connectorPanel` credential form) until the relay holds it; adding an app asks for no key (`add-by-sign-in`, `admin_connectors.rs`)
 - [ ] Where the org's credentials live: Alpha Vector's client IDs and secrets in the relay's secret store, nowhere in the app, console or manifests, the appliance getting client IDs from the relay (today: client IDs in `catalog/registrations.toml`, compiled in; Google's secret in the appliance's vault, put there by `release/admin-on-appliance.sh` from the repository secret)
 - [x] The connector form asking for a client ID, client secret and web address is deleted from the app, not hidden (#67; `connectors.mjs`, the owner's Settings › Connectors ask for nothing)
-- [ ] Acceptance: on a fresh install a user connects Gmail, Slack, GitHub and Vercel with only clicks and the providers' login pages (Slack is brokered, `catalog/slack.toml`, and signs in through `http://127.0.0.1:17321/callback`; no GitHub or Vercel manifest; Gmail's desktop completion dropped `iss` and was refused, which the app now returns, and no test exchanges a code with Google)
+- [ ] Acceptance: on a fresh install a user connects Gmail, Slack, GitHub and Vercel with only clicks and the providers' login pages (Slack is brokered, `catalog/slack.toml`, and signs in through `https://magnus.pyrallon.ai/oauth/slack/callback`, which the appliance sends on to `http://127.0.0.1:17321/callback`; no GitHub or Vercel manifest; Gmail's desktop completion dropped `iss` and was refused, which the app now returns, and no test exchanges a code with Google)
 - [x] Acceptance: an automated UI test fails if the connect path renders any text input inside Magnus (`connectors.mjs` `typed()`, in the browser; the desktop path is not checked for inputs)
 
 ## Decisions this spec builds on
@@ -349,7 +349,7 @@ one commit), 2026-11-02.
 ## Provider registrations
 
 - [ ] Google: a verified OAuth client for the Workspace MCP servers (client ID in `catalog/registrations.toml`, a Desktop client; its secret provisioned to strix-alpha by CI, HTTP 204 on 2026-11-02); a configured Chat app for the Chat server; Gmail restricted-scope verification and a CASA assessment, yearly; until then 100 users and weekly re-sign-in in Testing
-- [ ] Slack: an app listed in the Slack Marketplace (client ID in `catalog/registrations.toml`, "Magnus (Veyra workspace)", confidential; the secret is the repository's `SLACK_CLIENT_SECRET`, provisioned like Google's; the manifest is brokered over the Web API, not Slack's hosted MCP server). Distribution stays off and PKCE stays off. The one redirect is `http://127.0.0.1:17321/callback`. The app is installed to workspace `T0BQJ3JUE01` when someone connects. Slack's "Enable Slack MCP Server" switch is not required.
+- [ ] Slack: an app listed in the Slack Marketplace (client ID in `catalog/registrations.toml`, "Magnus (Veyra workspace)", confidential; the secret is the repository's `SLACK_CLIENT_SECRET`, provisioned like Google's; the manifest is brokered over the Web API, not Slack's hosted MCP server). PKCE stays off. Token rotation stays on. The one redirect, which a distributed app can use, is `https://magnus.pyrallon.ai/oauth/slack/callback`. Remove `http://127.0.0.1:17321/callback` from the Slack app before turning distribution on: Slack requires every redirect of a distributed app to be https. The appliance sends the browser on to that loopback address, where the desktop is listening. The edge must not ask the browser for a device certificate or an Access login on that path (DECISIONS.md). Slack's "Enable Slack MCP Server" switch is not required.
 - [ ] Microsoft: a multi-tenant Entra app with publisher verification and the Graph permissions (a public client ID exists; no manifest, no brokered servers)
 - [ ] GitHub: a GitHub App or OAuth App for the remote server (an OAuth app client ID exists, confidential; no secret, no manifest); org owners approve it for restricted orgs
 - [ ] Vercel: a place on Vercel's allowlist of approved MCP clients (a public client ID exists, "Magnus by Alpha Vector"; no manifest)
@@ -393,7 +393,7 @@ Microsoft Work IQ (Remote; only tenants with a Microsoft 365 Copilot license tha
 - [ ] Copilot Search
 
 Messaging
-- [ ] Slack (brokered, manifest `slack`: the image built from `brokered/slack`, over Slack's Web API, user token only; search, read and post, posting asked for first, `slack.rs`. Sign-in is `http://127.0.0.1:17321/callback`, no PKCE. The hosted MCP server is not called)
+- [ ] Slack (brokered, manifest `slack`: the image built from `brokered/slack`, over Slack's Web API, user token only; search, read and post, posting asked for first, `slack.rs`. Sign-in is `https://magnus.pyrallon.ai/oauth/slack/callback`, handed to the desktop at `http://127.0.0.1:17321/callback`, no PKCE. The hosted MCP server is not called)
 
 Code and deploy (Remote)
 - [ ] GitHub (in the mockup)
