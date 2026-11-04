@@ -14,7 +14,7 @@ const SERVERS: [(&str, &str, &str); 4] = [
     ("google-gmail", "Gmail", "https://www.googleapis.com/auth/gmail.modify"),
     ("google-calendar", "Google Calendar", "https://www.googleapis.com/auth/calendar"),
     ("google-drive", "Google Drive", "https://www.googleapis.com/auth/drive.readonly"),
-    ("google-chat", "Google Chat", "https://www.googleapis.com/auth/chat.messages.readonly"),
+    ("google-chat", "Google Chat", "https://www.googleapis.com/auth/chat.messages"),
 ];
 
 fn client() -> (String, String) {
@@ -82,13 +82,13 @@ async fn google_s_connectors_are_in_every_library_already_set_up_and_sign_in_at_
 /// Tool drift (connectors spec, Required tests): each remote Google
 /// manifest names exactly the tools its live server lists, so none is
 /// hidden for want of a class and none is classed that does not exist. The
-/// servers list their tools without a sign-in. Gmail and Calendar are
+/// servers list their tools without a sign-in. Gmail, Calendar and Chat are
 /// brokered: each image's tools are checked against its manifest where the
 /// image is built (`every_tool_is_classed_in_the_manifest`).
 #[tokio::test(flavor = "multi_thread")]
 async fn each_google_manifest_names_exactly_the_tools_its_live_server_lists() {
     let http = reqwest::Client::new();
-    for name in ["google-drive", "google-chat"] {
+    for name in ["google-drive"] {
         let path = magnus_invariants::appliance::workspace_root().join(format!("catalog/{name}.toml"));
         let m: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         let endpoint = m["endpoint"].as_str().unwrap();
