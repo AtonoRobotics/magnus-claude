@@ -32,11 +32,23 @@ fn gmail(method: &str, path: &str, token: &str, body: Option<&Value>) -> Result<
     if r.status >= 400 {
         return Err(explain(&r, wrote));
     }
-    let text = String::from_utf8_lossy(&r.body).to_string();
+    read_body(&r.body, wrote)
+}
+
+/// A success answer as JSON (`{}` for none). One that is not JSON says
+/// nothing of what was done, so after a write it is an unknown outcome:
+/// tried again, it could send, label or trash twice. The same rule as
+/// `brokered/google` (review of #126); Gmail kept its own copy of that
+/// code and still said a write's unreadable success as not done.
+fn read_body(body: &[u8], wrote: bool) -> Result<Value, Failure> {
+    let text = String::from_utf8_lossy(body).to_string();
     if text.trim().is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_str(&text).map_err(|_| Failure::NotDone(format!("Gmail's answer was not JSON: {}", clip(&text))))
+    serde_json::from_str(&text).map_err(|_| {
+        let what = format!("Gmail's answer was not JSON: {}", clip(&text));
+        if wrote { Failure::Unknown(format!("{what}; whether it did this is unknown")) } else { Failure::NotDone(what) }
+    })
 }
 
 /// What Gmail's refusal means (from AtonoRobotics/magnus-claude#117's
@@ -498,6 +510,18 @@ mod tests {
         assert!(says(explain(&answer(404, "", json!({})), false)).contains("could not find"));
         assert!(matches!(explain(&answer(503, "", json!({})), true), Failure::Unknown(_)));
         assert!(says(explain(&answer(503, "", json!({})), false)).contains("HTTP 503"));
+    }
+
+    /// A write Gmail answered with something that is not JSON is an unknown
+    /// outcome, not a failure to try again (review of #126, which fixed this
+    /// in `brokered/google` and left Gmail's copy saying the write had not
+    /// happened). A read's unreadable answer is still not done.
+    #[test]
+    fn an_answer_that_is_not_json_after_a_write_is_an_unknown_outcome() {
+        assert!(matches!(read_body(b"<html>ok</html>", true), Err(Failure::Unknown(m)) if m.contains("unknown")));
+        assert!(matches!(read_body(b"<html>ok</html>", false), Err(Failure::NotDone(_))));
+        assert!(read_body(b"", true).is_ok());
+        assert_eq!(read_body(br#"{"id":"m1"}"#, true).unwrap()["id"], "m1");
     }
 
     /// Tool drift (connectors spec, Required tests): the catalog manifest
