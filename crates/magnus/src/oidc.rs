@@ -159,11 +159,14 @@ impl Account {
 impl Provider {
     pub fn new(cfg: Cfg, vault: Arc<crate::vault::Vault>) -> Result<Provider> {
         checked(&cfg.issuer)?;
-        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
+        // No redirects: a 307 from the token endpoint would replay the POST,
+        // password or client secret included, to wherever it points, plain
+        // http among them. Every address used is checked by `checked`.
+        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
         if let Some(u) = &cfg.status_admin_url {
             checked(u)?;
         }
-        let mut admin = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+        let mut admin = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none());
         if let Some(ca) = &cfg.status_admin_ca {
             let pem = std::fs::read(ca).with_context(|| format!("reading status_admin_ca {}", ca.display()))?;
             admin = admin.add_root_certificate(reqwest::Certificate::from_pem(&pem).with_context(|| format!("{} is not a PEM certificate", ca.display()))?);
@@ -586,6 +589,32 @@ mod tests {
             assert!(person(&c, iss, "magnus", "preferred_username", now).is_err(), "{k} was not checked");
         }
         assert!(person(&good, iss, "magnus", "email", now).is_err());
+    }
+
+    /// A token endpoint that answers with a redirect does not get the
+    /// password resent elsewhere: a 307 replays the POST, body included, and
+    /// can point at plain http. Keycloak never redirects, so only here.
+    #[tokio::test]
+    async fn a_redirecting_token_endpoint_never_gets_the_password_resent() {
+        use axum::{routing::{get, post}, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let stolen = Arc::new(AtomicUsize::new(0));
+        let s = stolen.clone();
+        let thief = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let thief_url = format!("http://{}/steal", thief.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(thief, Router::new().route("/steal", post(move || async move { s.fetch_add(1, Ordering::SeqCst); "{}" }))).await });
+        let idp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let iss = format!("http://{}", idp.local_addr().unwrap());
+        let (i, t) = (iss.clone(), thief_url.clone());
+        let app = Router::new()
+            .route("/.well-known/openid-configuration", get(move || async move { axum::Json(json!({ "issuer": i, "token_endpoint": format!("{i}/token") })) }))
+            .route("/token", post(move || async move { (axum::http::StatusCode::TEMPORARY_REDIRECT, [("location", t)]) }));
+        tokio::spawn(async move { axum::serve(idp, app).await });
+        let cfg: Cfg = toml::from_str(&format!("issuer = \"{iss}\"\nclient_id = \"magnus\"")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let p = Provider::new(cfg, Arc::new(crate::vault::Vault::open(dir.path()).unwrap())).unwrap();
+        let _ = p.password("alice", "hunter2", None, false).await;
+        assert_eq!(stolen.load(Ordering::SeqCst), 0, "the password was resent to where the token endpoint redirected");
     }
 
     /// Keycloak always answers with the nonce it was sent, so only here can a
