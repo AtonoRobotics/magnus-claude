@@ -8,7 +8,7 @@ Validation: **156 targeted checks passed**: 30 brokered connector/shared-client 
 
 The live account's read-only Chat API probe returns HTTP 400 `FAILED_PRECONDITION`: "Google Chat is turned off." Enable Chat for the account before expecting live reads. New editing/deletion access may require renewed consent. The hosted MCP response remains 403 with the existing credential. No live messages were sent, edited or deleted.
 
-The replacement is not deployed. Four older PRs (#130–#133) are open; the current `CLAUDE.md` and CI rule allow only one. PR #133 proposes relaxing that rule. The tested Chat change is kept separately from the earlier repository-review fixes on `workspace`.
+The replacement is not deployed. PR #133 has merged: several PRs may now be open, up to six agent PRs. The Chat branch includes that update and is proceeding through CI and release. The tested Chat change is kept separately from the earlier repository-review fixes on `workspace`.
 
 ## Now (2026-10-29)
 
