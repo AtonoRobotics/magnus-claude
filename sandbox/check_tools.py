@@ -468,7 +468,7 @@ def check_simple(words, depth, found):
                     break
         return
     if "/" in prog and not prog.startswith("/"):
-        found.problems.append(f"`{prog}` names its program by a path from the directory the check is in; name an image program, or run a workspace file with its interpreter, such as `sh {prog}` or `python3 {prog}`")
+        found.problems.append(f"`{prog}` names its program by a path from the directory the check is in; name an image program, or, for a workspace file, run it with its interpreter, such as `sh {prog}` or `python3 {prog}`")
         return
     if not image_program(prog):
         if "/" in prog:
