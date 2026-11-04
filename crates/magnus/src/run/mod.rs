@@ -325,7 +325,7 @@ impl Kernel {
                     continue;
                 }
                 if let Some(t) = live.as_ref().and_then(|l| l.iter().find(|t| &t.name == remote)) {
-                    match self.pin(&name, t).await {
+                    match self.pin(&c, &name, t).await {
                         Ok(true) => fresh.push(name.clone()),
                         Ok(false) => {}
                         Err(e) => tracing::warn!("pin {name}: {e:#}"),
@@ -416,10 +416,32 @@ impl Kernel {
 
     /// Pin a tool definition on first sight; disable it if it later changes (B10).
     /// Returns true when the definition was seen for the first time.
-    pub(crate) async fn pin(&self, name: &str, t: &crate::apps::AppTool) -> Result<bool> {
+    ///
+    /// A brokered connector's definitions come from the image its manifest
+    /// names by digest, checked before every boot, so they cannot change
+    /// after the manifest was signed: one that differs from its pin is the
+    /// next manifest version's (connectors spec: "by the next manifest
+    /// version"), seen for the first time, and any change waiting on the
+    /// owner for it is put away. A remote server's can change at any time.
+    pub(crate) async fn pin(&self, c: &crate::config::Connector, name: &str, t: &crate::apps::AppTool) -> Result<bool> {
         let hash = crate::apps::definition_hash(t);
-        let (pinned, changed) = self.read(|s| (s.pins.get(name).map(|p| p.hash.clone()), s.changed.get(name).map(|(_, p)| p.hash.clone())));
+        let (pinned, changed) = self.read(|s| (s.pins.get(name).map(|p| p.hash.clone()), s.changed.get(name).map(|(item, p)| (item.clone(), p.hash.clone()))));
+        let brokered = c.transport == crate::brokered::BROKERED;
         match pinned {
+            Some(h) if brokered && h != hash => {
+                if let Some((item, _)) = changed {
+                    if self.read(|s| s.items.get(&item).is_some_and(|i| i.resolution.is_none())) {
+                        let text = format!("{name}'s definition is now the one in the image {}'s manifest names by digest, so it is pinned as new and awaits only your review of its description.", c.name);
+                        self.emit("kernel", Ev::ItemResolved { id: item, decision: "superseded".into(), scope: None, text: Some(text) }).await?;
+                    }
+                }
+                self.emit(
+                    "kernel",
+                    Ev::ToolPinned { tool: name.into(), hash, description: t.description.clone(), input_schema: t.input_schema.clone(), approved: false },
+                )
+                .await?;
+                return Ok(true);
+            }
             None => {
                 self.emit(
                     "kernel",
@@ -429,7 +451,7 @@ impl Kernel {
                 return Ok(true);
             }
             Some(h) if h == hash => {}
-            Some(_) if changed.as_deref() == Some(hash.as_str()) => {}
+            Some(_) if changed.as_ref().map(|(_, h)| h.as_str()) == Some(hash.as_str()) => {}
             Some(_) => {
                 let owner = self.owners().first().map(|p| p.id.clone()).unwrap_or_default();
                 let item = new_id("item");

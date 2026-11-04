@@ -439,7 +439,7 @@ impl Kernel {
         let Some(t) = live.iter().find(|t| t.name == f.remote) else {
             return Err(format!("{} no longer offers {}", f.app, f.remote));
         };
-        match self.pin(&f.name, t).await {
+        match self.pin(c, &f.name, t).await {
             Ok(true) => {
                 let _ = self.review_item(&f.app, std::slice::from_ref(&f.name)).await;
                 Ok(())
