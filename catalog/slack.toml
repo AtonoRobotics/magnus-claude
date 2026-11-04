@@ -20,13 +20,16 @@ tint = "#4A154B"
 # its token endpoint returns a user token for the Web API. The app has not
 # opted into PKCE (doing so is irreversible and would make the client
 # public), so the sign-in does not send a code challenge. Slack matches
-# the redirect exactly, so it is this address and no other.
+# the redirect exactly, and a distributed app's redirects are https, so
+# Slack is given the appliance's public callback. The browser is sent on
+# to the desktop, which is listening at `handoff`.
 kind = "brokered"
 endpoint = "sha256:ce0e89ba1d8e6fb223b02531ce44cfde8c3899a3a5a749e3a93ad972d604190b"
 hosts = ["slack.com"]
 issuer = "https://mcp.slack.com"
 pkce = false
-redirect_uri = "http://127.0.0.1:17321/callback"
+redirect_uri = "https://magnus.pyrallon.ai/oauth/slack/callback"
+handoff = "http://127.0.0.1:17321/callback"
 # A message reaches everyone in the conversation. What comes back was
 # written by other people.
 audience = "public"

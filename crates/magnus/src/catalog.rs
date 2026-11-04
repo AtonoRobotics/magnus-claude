@@ -79,10 +79,15 @@ pub struct Manifest {
     /// irreversible and would make it public).
     #[serde(default = "pkce_on")]
     pub pkce: bool,
-    /// A redirect the provider registered exactly. The desktop app listens
-    /// there; any other address is refused. Absent: any loopback port.
+    /// A redirect the provider registered exactly. The desktop sends this
+    /// at sign-in, and the token exchange repeats it. Absent: the desktop
+    /// picks a free loopback port.
     #[serde(default)]
     pub redirect_uri: Option<String>,
+    /// Where the appliance sends the browser on, when `redirect_uri` is the
+    /// public https address. The desktop listens here.
+    #[serde(default)]
+    pub handoff: Option<String>,
 }
 
 fn pkce_on() -> bool {
@@ -153,6 +158,7 @@ pub fn connector(m: &Manifest) -> Connector {
         issuer: m.issuer.clone(),
         pkce: m.pkce,
         redirect_uri: m.redirect_uri.clone(),
+        handoff: m.handoff.clone(),
     }
 }
 
@@ -217,8 +223,14 @@ mod tests {
             if let Some(p) = &m.provider {
                 assert!(super::client(p).is_some(), "{}: no client for {p} in catalog/registrations.toml", m.id);
             }
-            if let Some(u) = &m.redirect_uri {
-                assert!(crate::connectors::loopback(u).is_ok(), "{}: its redirect is not a loopback address", m.id);
+            match (&m.redirect_uri, &m.handoff) {
+                (None, None) => {}
+                (Some(u), None) => assert!(crate::connectors::loopback(u).is_ok(), "{}: its redirect is not a loopback address", m.id),
+                (Some(u), Some(h)) => {
+                    assert_eq!(u, crate::connectors::SLACK_OAUTH_CALLBACK, "{}: the https redirect", m.id);
+                    assert_eq!(h, crate::connectors::SLACK_HANDOFF, "{}: the handoff", m.id);
+                }
+                (None, Some(_)) => panic!("{}: a handoff needs the registered redirect", m.id),
             }
         }
         for p in ["google", "microsoft", "github", "vercel", "slack", "sentry"] {

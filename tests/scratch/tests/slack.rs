@@ -111,7 +111,11 @@ async fn slack_signs_in_at_slacks_page_through_its_registered_address_without_pk
     let (alice, carol) = (app.api("alice"), app.api("carol"));
     let (_, list) = carol.get("/v1/connectors").await;
     let card = list["connectors"].as_array().unwrap().iter().find(|c| c["name"] == "slack").cloned().unwrap_or_else(|| panic!("slack is not in the Library: {list}"));
-    assert_eq!((card["title"].as_str(), card["ready"].as_bool(), card["redirect_uri"].as_str()), (Some("Slack"), Some(false), Some(redirect().as_str())), "{card}");
+    assert_eq!(
+        (card["title"].as_str(), card["ready"].as_bool(), card["redirect_uri"].as_str(), card["handoff"].as_str()),
+        (Some("Slack"), Some(false), Some(redirect().as_str()), Some("http://127.0.0.1:17321/callback")),
+        "{card}"
+    );
     assert!(!carol.post("/v1/connectors/slack/sign-in", json!({ "redirect_uri": redirect() })).await.0.is_success());
     assert_eq!(alice.put("/v1/registrations/slack", json!({ "client_secret": secret })).await.0, 204);
     let (st, v) = carol.post("/v1/connectors/slack/sign-in", json!({ "redirect_uri": "http://127.0.0.1:9/callback" })).await;
@@ -124,6 +128,24 @@ async fn slack_signs_in_at_slacks_page_through_its_registered_address_without_pk
     assert_eq!(q.get("client_id").map(String::as_str), Some(id.as_str()), "{u}");
     assert_eq!(q.get("redirect_uri").map(String::as_str), Some(redirect().as_str()), "{u}");
     assert!(q.get("code_challenge").is_none() && q.get("code_challenge_method").is_none(), "PKCE was sent, and this Slack app has not opted in: {u}");
+    let state = v["state"].as_str().unwrap();
+    let code = "never-log-this-code";
+    let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let bounced = http.get(format!("{}/oauth/slack/callback?code={code}&state={state}&iss=https://mcp.slack.com", carol.base)).send().await.unwrap();
+    assert_eq!(bounced.status(), 302);
+    let loc = bounced.headers().get("location").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
+    let body = bounced.text().await.unwrap();
+    assert!(body.is_empty(), "the page echoed the code: {body}");
+    assert!(loc.contains(code), "{loc}");
+    let back: std::collections::HashMap<String, String> = url::Url::parse(&loc).unwrap().query_pairs().into_owned().collect();
+    assert_eq!(back.get("code").map(String::as_str), Some(code));
+    assert_eq!(back.get("state").map(String::as_str), Some(state));
+    assert!(loc.starts_with("http://127.0.0.1:17321/callback?"), "{loc}");
+    let missed = http.get(format!("{}/oauth/slack/callback?code={code}&state=not-a-sign-in", carol.base)).send().await.unwrap();
+    assert_eq!(missed.status(), 404);
+    let missed_body = missed.text().await.unwrap();
+    assert!(!missed_body.contains(code), "a refused callback echoed the code");
+    assert!(!app.logs().contains(code), "the code was written to the log");
     let scope = q.get("scope").map(String::as_str).unwrap_or("");
     for s in ["search:read", "chat:write", "im:history", "groups:history", "mpim:read", "users:read"] {
         assert!(scope.split(' ').any(|x| x == s), "{s} was not asked for: {u}");

@@ -139,7 +139,7 @@ pub fn admit(on: bool, peer: SocketAddr, headers: &axum::http::HeaderMap, method
     if !on || !is_tunnel(peer, headers) {
         return Ok(());
     }
-    if method == axum::http::Method::GET && path == "/v1/health" {
+    if method == axum::http::Method::GET && (path == "/v1/health" || path == "/oauth/slack/callback") {
         return Ok(());
     }
     if live { Ok(()) } else { Err("this device is not paired with the appliance") }
@@ -387,6 +387,18 @@ mod tests {
 
     fn cf(api: String) -> Cloudflare {
         Cloudflare { api, zone: "zone1".into(), token: "token".into(), days: 365 }
+    }
+
+    #[test]
+    fn the_slack_callback_needs_no_device_certificate() {
+        let peer: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("cf-connecting-ip", "203.0.113.8".parse().unwrap());
+        let get = axum::http::Method::GET;
+        assert!(admit(true, peer, &headers, &get, "/oauth/slack/callback", false).is_ok());
+        assert!(admit(true, peer, &headers, &axum::http::Method::POST, "/oauth/slack/callback", false).is_err());
+        assert!(admit(true, peer, &headers, &get, "/v1/connectors", false).is_err());
+        assert!(admit(true, peer, &headers, &get, "/v1/health", false).is_ok());
     }
 
     #[tokio::test]

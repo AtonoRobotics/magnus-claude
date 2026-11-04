@@ -1955,15 +1955,22 @@ function connectorsChanged() {
 
 // Connect: the system browser opens at the app's own sign-in page; the
 // answer comes back to this computer, and the card turns Connected.
+function onThisComputer(u) {
+  try {
+    const x = new URL(u);
+    return x.protocol === "http:" && x.hostname === "127.0.0.1" && x.pathname === "/callback" && x.port;
+  } catch { return false; }
+}
+
 async function connectApp(name) {
   if (!Magnus.loopbackOpen) { toast("Connect apps from the Magnus desktop app."); return; }
-  // A provider that registered one address (Slack) is listened on there.
-  // Any other gets a free port, which a Desktop client accepts.
-  let fixed = null;
-  const known = (Lib.all || []).find(c => c.name === name);
-  if (known) fixed = known.redirect_uri || null;
-  else { try { fixed = (await api("GET", `/v1/connectors/${enc(name)}`)).redirect_uri || null; } catch { /* a free port */ } }
-  const redirect = await Magnus.loopbackOpen(fixed);
+  // Slack's registered address is https. The desktop listens on the handoff,
+  // and the sign-in tells Slack the https address, which the exchange repeats.
+  let card = (Lib.all || []).find(c => c.name === name);
+  if (!card) { try { card = await api("GET", `/v1/connectors/${enc(name)}`); } catch { card = null; } }
+  const listenAt = card && (card.handoff || (onThisComputer(card.redirect_uri) ? card.redirect_uri : null));
+  const caught = await Magnus.loopbackOpen(listenAt || null);
+  const redirect = card && card.redirect_uri && !onThisComputer(card.redirect_uri) ? card.redirect_uri : caught;
   const r = await api("POST", `/v1/connectors/${enc(name)}/sign-in`, { redirect_uri: redirect });
   Connecting[name] = r.authorize_url;
   connectorsChanged();
