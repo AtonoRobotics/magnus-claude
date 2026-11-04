@@ -75,6 +75,8 @@ pub struct Facts {
     pub audience: Audience,
     pub connector: Option<Connector>,
     pub remote: String,
+    /// It stays in the person's own account (`tools::REACH_SELF`).
+    pub reaches_self: bool,
 }
 
 /// Look up a tool by the name the model uses.
@@ -88,15 +90,18 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
             audience: b.audience,
             connector: None,
             remote: tool.into(),
+            reaches_self: false,
         });
     }
     let (app, remote) = tool.split_once("__")?;
     let c = k.connector(app)?;
     let class = c.tools.get(remote)?;
+    let risk = Risk::parse(&class.risk)?;
     Some(Facts {
         name: tool.into(),
         app: app.into(),
-        risk: Risk::parse(&class.risk)?,
+        risk,
+        reaches_self: class.reach.as_deref().is_some_and(|r| crate::tools::reach_fits(r, risk.as_str())),
         label: class.label.as_deref().and_then(Label::parse).or_else(|| Label::parse(&c.label))?,
         audience: Audience::parse(&c.audience)?,
         connector: Some(c),
@@ -528,7 +533,8 @@ impl Kernel {
         // travel there even when it only reads).
         // Starting a task from chat sends nothing out: the task carries the
         // turn's taint, and the rules apply to what it sends.
-        let transmits = !is_chat_tool(f) && !own_memory && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private));
+        // A tool that stays in the person's own account sends nothing out.
+        let transmits = !is_chat_tool(f) && !own_memory && !f.reaches_self && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private));
         // These override a policy ask: the approval must then cover this exact
         // action, not a broader scope granted for policy reasons.
         if transmits && untrusted && private {
@@ -544,7 +550,7 @@ impl Kernel {
         }
         // Private content returning to the app it came from reaches no one new.
         let from_elsewhere = run.private_from.iter().any(|app| app != &f.app);
-        if !ask.as_ref().is_some_and(|(_, r)| matches!(r.as_deref(), Some("kernel:rule_of_two") | Some(WEB_LOOKUPS))) && f.risk.changes_state() && from_elsewhere && f.audience > Audience::Private {
+        if !ask.as_ref().is_some_and(|(_, r)| matches!(r.as_deref(), Some("kernel:rule_of_two") | Some(WEB_LOOKUPS))) && f.risk.changes_state() && !f.reaches_self && from_elsewhere && f.audience > Audience::Private {
             ask = Some((
                 format!("this task has read private data and {} reaches a {} audience", f.app, f.audience.as_str()),
                 Some("kernel:audience".into()),

@@ -70,6 +70,11 @@ pub struct Manifest {
     /// Every tool's class.
     #[serde(default)]
     pub tools: BTreeMap<String, String>,
+    /// What each tool reaches, where declared (approvals spec, The approval
+    /// model): `self` for the person's own account. A tool left out is
+    /// unknown, and asks as before.
+    #[serde(default)]
+    pub reach: BTreeMap<String, String>,
     /// The provider's page where a person removes Magnus's access, named
     /// when Disconnect could not revoke it there.
     #[serde(default)]
@@ -145,7 +150,7 @@ pub fn connector(m: &Manifest) -> Connector {
         access_groups: vec![],
         blocked_groups: vec![],
         idempotency: "none".into(),
-        tools: m.tools.iter().map(|(t, risk)| (t.clone(), ToolClass { risk: risk.clone(), label: None })).collect(),
+        tools: m.tools.iter().map(|(t, risk)| (t.clone(), ToolClass { risk: risk.clone(), label: None, reach: m.reach.get(t).cloned() })).collect(),
         auth: Some(crate::connectors::OAUTH.into()),
         client_id: None,
         system_of_record: false,
@@ -208,6 +213,11 @@ mod tests {
             assert!(crate::tools::Label::parse(&m.label).is_some(), "{}", m.id);
             for (t, risk) in &m.tools {
                 assert!(["read", "reversible_write", "irreversible", "financial", "prohibited"].contains(&risk.as_str()), "{}: {t} is {risk}", m.id);
+            }
+            // A reach is declared only for a tool the manifest classes, and fits its class.
+            for (t, reach) in &m.reach {
+                let risk = m.tools.get(t).unwrap_or_else(|| panic!("{}: reach for {t}, which it does not class", m.id));
+                assert!(crate::tools::reach_fits(reach, risk), "{}: {t} is {risk} and cannot reach {reach:?}", m.id);
             }
             // What the Library shows: a category chip, abilities, a plain line
             // for every scope asked for, and never a protocol word.
