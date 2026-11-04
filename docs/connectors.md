@@ -18,7 +18,7 @@ one commit), 2026-11-02.
 ## Scope and requirements
 
 - [ ] Breadth: Google, Microsoft, coding and deployment services (Vercel and peers), Slack, the other common business services, and FreeCAD, Autodesk Fusion, SolidWorks and Blender (today: four Google manifests, `catalog/google-*.toml`, Slack's, `catalog/slack.toml`, and Sentry's, Hugging Face's, GitLab's, Supabase's (read only) and Cloudflare's, `catalog/<id>.toml`, compiled in by `crates/magnus/src/catalog.rs` `SOURCES`)
-- [ ] Plug and play: every connector is a Connect button that opens the provider's own login page and then works (the button and the page exist, `connectors.mjs`, `app-apps.mjs` against a fake app; a Google sign-in cannot finish in the desktop app, see Connect flow)
+- [ ] Plug and play: every connector is a Connect button that opens the provider's own login page and then works (the button and the page exist, `connectors.mjs`, `app-apps.mjs` against a fake app; a Google sign-in from the desktop app carries `iss` back, see Connect flow, and has not been completed against Google's own token endpoint)
 - [x] No connector shows the user a form: no address, key, token, client ID or header fields in the app (`desktop/tests/connectors.mjs`, "asks nothing here", and the owner's Settings › Connectors)
 - [ ] A service whose provider offers no sign-in is not in the catalog (every catalog manifest signs in; an admin can no longer add a server with a key, `add-by-sign-in`, but can still add one that asks for no sign-in at all: open with the owner)
 - [ ] Desktop programs detected and enabled with one consent (no detection, no bridge)
@@ -36,12 +36,12 @@ one commit), 2026-11-02.
 - [x] Browse: the Library shows the whole catalog as cards (`connectors.mjs`)
 - [x] Browse: the user searches (`connectors.mjs`, by name and by what is wanted)
 - [ ] Browse: or asks Magnus (no catalog tools)
-- [ ] Connect: click Connect, sign in on the provider's page, approve, the card turns Connected (works against a fake app, `app-apps.mjs`; never shown for a real provider, and Google's completion is refused, see Connect flow)
+- [ ] Connect: click Connect, sign in on the provider's page, approve, the card turns Connected (works against a fake app, `app-apps.mjs`; never shown for a real provider. Google's completion was refused because the desktop app dropped `iss`; it now carries it back, see Connect flow, and is still untested against Google's token endpoint)
 - [x] Never asked, in the app: no client ID, secret, address, key, token, redirect URI or scope (`connectors.mjs`)
 - [ ] Never asked, in the admin console: the console still asks an admin for Google's client secret (Security › Connectors and credentials, `desktop/admin/admin.js` `connectorPanel` credential form) until the relay holds it; adding an app asks for no key (`add-by-sign-in`, `admin_connectors.rs`)
 - [ ] Where the org's credentials live: Alpha Vector's client IDs and secrets in the relay's secret store, nowhere in the app, console or manifests, the appliance getting client IDs from the relay (today: client IDs in `catalog/registrations.toml`, compiled in; Google's secret in the appliance's vault, put there by `release/admin-on-appliance.sh` from the repository secret)
 - [x] The connector form asking for a client ID, client secret and web address is deleted from the app, not hidden (#67; `connectors.mjs`, the owner's Settings › Connectors ask for nothing)
-- [ ] Acceptance: on a fresh install a user connects Gmail, Slack, GitHub and Vercel with only clicks and the providers' login pages (Slack is brokered, `catalog/slack.toml`, and signs in through `http://127.0.0.1:17321/callback`; no GitHub or Vercel manifest; Gmail's completion fails in the desktop app)
+- [ ] Acceptance: on a fresh install a user connects Gmail, Slack, GitHub and Vercel with only clicks and the providers' login pages (Slack is brokered, `catalog/slack.toml`, and signs in through `http://127.0.0.1:17321/callback`; no GitHub or Vercel manifest; Gmail's desktop completion dropped `iss` and was refused, which the app now returns, and no test exchanges a code with Google)
 - [x] Acceptance: an automated UI test fails if the connect path renders any text input inside Magnus (`connectors.mjs` `typed()`, in the browser; the desktop path is not checked for inputs)
 
 ## Decisions this spec builds on
@@ -158,7 +158,7 @@ one commit), 2026-11-02.
 - [x] Isolation: one instance per user per connector, each in its own Firecracker microVM, started on first call, stopped when idle (`brokered.rs` `each_person_has_their_own_microvm_called_with_their_current_token_reaching_only_its_hosts`; Disconnect, deletion and the kill switch stop it too, `disconnecting_erasing_and_the_kill_switch_stop_the_persons_microvm`)
 - [x] Credentials: a short-lived access token injected per request; no refresh token, no state between calls, nothing on disk (`each_person_has_their_own_microvm_called_with_their_current_token_reaching_only_its_hosts`: each call carries the token current then, never a refresh token, and an answer holding it is cleaned; the microVM has no disk, `an_instance_has_no_network_device_and_no_disk`; the server kit keeps nothing between calls)
 - [x] Network: the microVM reaches only the manifest's API hosts, through an egress proxy on the appliance (`each_person_has_their_own_microvm_called_with_their_current_token_reaching_only_its_hosts`: another host refused through the proxy, a direct connection unreachable, another host port refused; `the_proxy_admits_only_the_manifests_hosts_exactly`)
-- [ ] Tools at the level a person works (find, read, create, update, share, delete), schemas validated on both sides (the check on both sides is built, `schema::check` in the server kit and `brokered.rs`; Gmail's tools, `brokered/gmail`; Calendar's, `brokered/calendar`; Slack's, `brokered/slack`; not yet Drive, Docs, Sheets or Chat)
+- [ ] Tools at the level a person works (find, read, create, update, share, delete), schemas validated on both sides (the check on both sides is built, `schema::check` in the server kit and `brokered.rs`; Gmail's tools, `brokered/gmail`; Calendar's, `brokered/calendar`; Chat's, `brokered/chat`; Slack's, `brokered/slack`; not yet Drive, Docs or Sheets)
 - [ ] Contract tests in CI against provider test accounts before publishing (Gmail's, `gmail_contract.rs`, Calendar's, `calendar_contract.rs`, and Slack's, `slack_contract.rs`: the provider is reached from the microVM in every run; every tool once the owner's test account is given to CI, which it is not yet)
 - [ ] Switching to Remote retires the image; users keep their connection when the grant carries over, else reconnect once
 
@@ -367,13 +367,13 @@ Notion, GitHub, Vercel, Jira, Figma, Autodesk Fusion Data, Blender and
 FreeCAD.
 
 Google (Remote, Google Workspace MCP servers)
-- [ ] Gmail (brokered, manifest `google-gmail`: the image built from `brokered/gmail`, tools matched by `every_tool_is_classed_in_the_manifest`, sending only a draft the person approves, `gmail.rs`; sign-in cannot complete from the desktop app)
+- [ ] Gmail (brokered, manifest `google-gmail`: the image built from `brokered/gmail`, tools matched by `every_tool_is_classed_in_the_manifest`, sending only a draft the person approves, `gmail.rs`; the desktop app returns Google's `iss`, and no test exchanges a code with Google)
 - [ ] Drive (manifest `google-drive`; same)
 - [ ] Docs
 - [ ] Sheets
 - [ ] Slides
 - [ ] Calendar (brokered, manifest `google-calendar`: the image built from `brokered/calendar`, tools matched by `every_tool_is_classed_in_the_manifest`, each change asked for first, `calendar.rs`; sign-in cannot complete from the desktop app)
-- [ ] Chat (manifest `google-chat`; same; Google's Chat app not configured)
+- [ ] Chat (brokered, manifest `google-chat`: the image built from `brokered/chat`, tools matched by `every_tool_is_classed_in_the_manifest`, each message sent, edited or deleted asked for first, `google_chat.rs`; live account currently returns "Google Chat is turned off"; requires Chat enabled, consent for the requested access and the project's Chat app configured for writes)
 - [ ] Contacts
 
 Microsoft (Brokered over Microsoft Graph)

@@ -89,23 +89,29 @@ pub fn manifest(id: &str) -> toml::Table {
 /// microVM; Alice signed in. The image is kept as long as the appliance
 /// runs.
 pub async fn signed_in(m: &FakeModel, api: &StandIn, id: &str, package: &str, name: &str) -> (Appliance, FakeOAuthApp, Image) {
+    signed_in_at(m, &[api], id, package, name).await
+}
+
+/// The same setup for a connector that also needs a provider identity host.
+pub async fn signed_in_at(m: &FakeModel, apis: &[&StandIn], id: &str, package: &str, name: &str) -> (Appliance, FakeOAuthApp, Image) {
     let mf = manifest(id);
     let image = image(package);
     assert_eq!(mf["endpoint"].as_str(), Some(image.digest.as_str()), "catalog/{id}.toml names another image than the one built from this commit");
     let hosts: Vec<String> = mf["hosts"].as_array().unwrap().iter().map(|h| h.as_str().unwrap().to_string()).collect();
-    assert_eq!(hosts, [api.host]);
+    assert_eq!(hosts, apis.iter().map(|api| api.host).collect::<Vec<_>>());
     let classes: Vec<(String, String)> = mf["tools"].as_table().unwrap().iter().map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string())).collect();
     let tools: Vec<(&str, &str)> = classes.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let provider = FakeOAuthApp::provider_api(3600).await;
     let mut app = Appliance::start(Spec::default(), m).await;
-    let (addr, root, host) = (api.addr.clone(), api.root.clone(), api.host);
     reconfigure(&mut app, |cfg| {
         configure(cfg, &image, 300, name, &hosts, &provider.base, &tools);
         let b = cfg["brokered"].as_table_mut().unwrap();
         let mut resolve = toml::Table::new();
-        resolve.insert(format!("{host}:443"), addr.into());
+        for api in apis {
+            resolve.insert(format!("{}:443", api.host), api.addr.clone().into());
+        }
         b.insert("resolve".into(), resolve.into());
-        b.insert("roots".into(), toml::Value::Array(vec![root.display().to_string().into()]));
+        b.insert("roots".into(), toml::Value::Array(apis.iter().map(|api| api.root.display().to_string().into()).collect()));
         let c = cfg["connectors"].as_array_mut().unwrap().iter_mut().find(|c| c["name"].as_str() == Some(name)).unwrap().as_table_mut().unwrap();
         c.insert("audience".into(), mf["audience"].clone());
         c.insert("scopes".into(), mf["scopes"].clone());
