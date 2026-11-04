@@ -1295,13 +1295,17 @@ async fn put_policy(State(k): K, h: HeaderMap, Path(layer): Path<String>, Json(b
         Err(r) => return r,
     };
     let layer = layer.trim_matches('/').to_string();
+    // A task's layer: the task's own, which only narrows, so its person
+    // may set it as well as the owner (DECISIONS, Layering).
+    let task_of = layer.strip_prefix("task/").and_then(|t| k.read(|s| s.tasks.get(t).map(|t| t.person.clone())));
     let valid = layer == "org"
         || layer.strip_prefix("user/").is_some_and(|u| k.cfg.person(u).is_some())
-        || layer.strip_prefix("group/").is_some_and(|g| !g.is_empty() && !g.contains('/'));
+        || layer.strip_prefix("group/").is_some_and(|g| !g.is_empty() && !g.contains('/'))
+        || task_of.is_some();
     if !valid {
         return err(StatusCode::NOT_FOUND, "no such policy layer");
     }
-    if !inbox::may_set_policy(&p, &layer) {
+    if !(inbox::may_set_policy(&p, &layer) || task_of.as_deref() == Some(p.id.as_str())) {
         return err(StatusCode::FORBIDDEN, "you may not set this layer's policy");
     }
     let cedar = b["cedar"].as_str().unwrap_or_default().to_string();

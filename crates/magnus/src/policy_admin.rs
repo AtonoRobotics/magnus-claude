@@ -163,8 +163,8 @@ impl Kernel {
                 }
             }
         }
-        let layers: Vec<String> = crate::policy::layers_for(&policies, &person).into_iter().map(|(l, _)| l).collect();
-        let outcome = crate::policy::decide(&policies, &person, &facts, b["untrusted"].as_bool().unwrap_or(false), b["private"].as_bool().unwrap_or(false)).map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+        let layers: Vec<String> = crate::policy::layers_for(&policies, &person, b["task"].as_str()).into_iter().map(|(l, _)| l).collect();
+        let outcome = crate::policy::decide(&policies, &person, b["task"].as_str(), &facts, b["untrusted"].as_bool().unwrap_or(false), b["private"].as_bool().unwrap_or(false)).map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
         let (decision, rule, reason) = match outcome {
             crate::policy::Outcome::Allow { rule } => ("allow", Some(rule), None),
             crate::policy::Outcome::Ask { rule } => ("ask", Some(rule), None),
