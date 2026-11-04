@@ -1,5 +1,9 @@
 # Progress
 
+## Desktop proxy paths (2026-11-04)
+
+The desktop app's proxy refused `/v1/sign-in…` by string prefix, but `/v1/./sign-in/device` passed and was normalised to the sign-in call, handing the page a session token. Paths are now judged as they will be sent (`desktop/src-tauri/src/lib.rs`).
+
 ## Chat replacement validation (2026-11-04)
 
 PR #134 is open under the replacement workflow. Review found that a space manager could delete another member's message despite the catalog's own-message promise. Deletion now verifies the account through Google UserInfo and matches the message's human sender before sending DELETE. The manifest adds only `openid` and the identity endpoint for that check; missing identity or mismatched ownership refuses deletion. Post-review validation: 6 Chat unit tests, 60 kernel unit tests, 5 Chat VM integration tests, 4 Calendar integration tests and 4 Google library/sign-in tests pass; the live invalid-token contract check also passes (authenticated operations remain unrun).
