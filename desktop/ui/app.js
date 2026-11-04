@@ -1957,7 +1957,13 @@ function connectorsChanged() {
 // answer comes back to this computer, and the card turns Connected.
 async function connectApp(name) {
   if (!Magnus.loopbackOpen) { toast("Connect apps from the Magnus desktop app."); return; }
-  const redirect = await Magnus.loopbackOpen();
+  // A provider that registered one address (Slack) is listened on there.
+  // Any other gets a free port, which a Desktop client accepts.
+  let fixed = null;
+  const known = (Lib.all || []).find(c => c.name === name);
+  if (known) fixed = known.redirect_uri || null;
+  else { try { fixed = (await api("GET", `/v1/connectors/${enc(name)}`)).redirect_uri || null; } catch { /* a free port */ } }
+  const redirect = await Magnus.loopbackOpen(fixed);
   const r = await api("POST", `/v1/connectors/${enc(name)}/sign-in`, { redirect_uri: redirect });
   Connecting[name] = r.authorize_url;
   connectorsChanged();

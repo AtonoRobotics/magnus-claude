@@ -155,16 +155,23 @@ if systemctl list-unit-files avahi-daemon.service >/dev/null 2>&1; then
   sudo -n systemctl enable --now avahi-daemon.service >/dev/null 2>&1 || true
 fi
 
-# Google's client secret, into the appliance's vault through its owner-only
-# API, when the repository's secret is set.
-if [ -n "${GOOGLE_CLIENT_SECRET:-}" ]; then
-  token=$(python3 -I -c 'import sys, tomllib; print(next(p["token"] for p in tomllib.load(open(sys.argv[1], "rb"))["people"] if "owner" in p.get("roles", []) and p.get("token")))' "$config")
-  code=$(python3 -I -c 'import json, os; print(json.dumps({"client_secret": os.environ["GOOGLE_CLIENT_SECRET"]}))' |
-    curl -sS -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' --data-binary @- "http://$listen/v1/registrations/google")
-  echo "Google's client secret into the appliance's vault: HTTP $code"
-else
-  echo "GOOGLE_CLIENT_SECRET is not set in the repository: Google's connectors cannot finish signing in yet"
-fi
+# Google's and Slack's client secrets, into the appliance's vault through
+# its owner-only API, when the repository's secrets are set.
+token=
+provision() {
+  name=$1
+  var=$2
+  if [ -n "${!var:-}" ]; then
+    [ -n "$token" ] || token=$(python3 -I -c 'import sys, tomllib; print(next(p["token"] for p in tomllib.load(open(sys.argv[1], "rb"))["people"] if "owner" in p.get("roles", []) and p.get("token")))' "$config")
+    code=$(VAR="$var" python3 -I -c 'import json, os; print(json.dumps({"client_secret": os.environ[os.environ["VAR"]]}))' |
+      curl -sS -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' --data-binary @- "http://$listen/v1/registrations/$name")
+    echo "$name's client secret into the appliance's vault: HTTP $code"
+  else
+    echo "$var is not set in the repository: $name's connectors cannot finish signing in yet"
+  fi
+}
+provision google GOOGLE_CLIENT_SECRET
+provision slack SLACK_CLIENT_SECRET
 
 # What a person needs to reach it.
 echo "The admin console, at any of these on the organisation's network or the tailnet:"

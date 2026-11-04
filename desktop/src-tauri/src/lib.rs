@@ -418,14 +418,33 @@ fn open_url(handle: AppHandle, url: String) -> Res<()> {
     handle.opener().open_url(u.as_str(), None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Where a sign-in listens. None: any free port, and the address told to
+/// the provider is `http://127.0.0.1:<that port>/callback`. Some: the
+/// provider registered that address exactly (Slack does), so this is the
+/// only one that works.
+fn sign_in_listen(redirect: Option<&str>) -> Res<String> {
+    let Some(redirect) = redirect.filter(|s| !s.is_empty()) else { return Ok("127.0.0.1:0".into()) };
+    let u = url::Url::parse(redirect).map_err(|_| "the sign-in address is not a link".to_string())?;
+    let port = u.port().ok_or("the sign-in address names no port")?;
+    if u.scheme() != "http" || u.host_str() != Some("127.0.0.1") || u.path() != "/callback" {
+        return Err("the sign-in address must be http://127.0.0.1:<port>/callback on this computer".into());
+    }
+    Ok(format!("127.0.0.1:{port}"))
+}
+
 /// Open a loopback address on this computer for one sign-in to one of the
 /// person's apps (RFC 8252): the app's sign-in page sends its code here.
+/// `redirect`, when the connector names one, is listened on exactly.
 #[tauri::command]
-async fn loopback_open(app: State<'_, App>) -> Res<String> {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| format!("cannot listen on this computer: {e}"))?;
-    let port = l.local_addr().map_err(|e| e.to_string())?.port();
+async fn loopback_open(app: State<'_, App>, redirect: Option<String>) -> Res<String> {
+    let bind = sign_in_listen(redirect.as_deref())?;
+    let l = tokio::net::TcpListener::bind(&bind).await.map_err(|e| format!("cannot listen on this computer ({bind}): {e}"))?;
+    let back = match redirect.filter(|s| !s.is_empty()) {
+        Some(u) => u,
+        None => format!("http://127.0.0.1:{}/callback", l.local_addr().map_err(|e| e.to_string())?.port()),
+    };
     *app.loopback.lock().unwrap() = Some(l);
-    Ok(format!("http://127.0.0.1:{port}/callback"))
+    Ok(back)
 }
 
 /// How long a sign-in page may take before the app stops waiting.
@@ -556,6 +575,15 @@ mod tests {
         assert!(file_path("/v1/tasks/t1").is_err());
         assert!(file_path("/v1/files").is_err());
         assert!(file_path("/v1/files/file_1/info").is_err());
+    }
+
+    #[test]
+    fn a_registered_sign_in_address_is_listened_on_exactly() {
+        assert_eq!(sign_in_listen(None).unwrap(), "127.0.0.1:0");
+        assert_eq!(sign_in_listen(Some("")).unwrap(), "127.0.0.1:0");
+        assert_eq!(sign_in_listen(Some("http://127.0.0.1:17321/callback")).unwrap(), "127.0.0.1:17321");
+        assert!(sign_in_listen(Some("http://localhost:17321/callback")).is_err());
+        assert!(sign_in_listen(Some("https://magnus.pyrallon.ai/oauth/slack/callback")).is_err());
     }
 
     #[test]

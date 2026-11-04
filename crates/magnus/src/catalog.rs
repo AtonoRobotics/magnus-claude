@@ -24,6 +24,7 @@ const SOURCES: &[&str] = &[
     include_str!("../../../catalog/gitlab.toml"),
     include_str!("../../../catalog/supabase.toml"),
     include_str!("../../../catalog/cloudflare.toml"),
+    include_str!("../../../catalog/slack.toml"),
 ];
 
 #[derive(Deserialize, Clone, Debug)]
@@ -73,6 +74,19 @@ pub struct Manifest {
     /// when Disconnect could not revoke it there.
     #[serde(default)]
     pub remove_access: Option<String>,
+    /// Whether the sign-in sends PKCE. On, unless the provider's client
+    /// cannot take it (Slack's confidential client: opting in is
+    /// irreversible and would make it public).
+    #[serde(default = "pkce_on")]
+    pub pkce: bool,
+    /// A redirect the provider registered exactly. The desktop app listens
+    /// there; any other address is refused. Absent: any loopback port.
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+}
+
+fn pkce_on() -> bool {
+    true
 }
 
 pub fn manifests() -> &'static [Manifest] {
@@ -137,6 +151,8 @@ pub fn connector(m: &Manifest) -> Connector {
         catalog: true,
         hosts: m.hosts.clone(),
         issuer: m.issuer.clone(),
+        pkce: m.pkce,
+        redirect_uri: m.redirect_uri.clone(),
     }
 }
 
@@ -200,6 +216,9 @@ mod tests {
             // A preregistered connector is set up already: its provider's client is in the catalog.
             if let Some(p) = &m.provider {
                 assert!(super::client(p).is_some(), "{}: no client for {p} in catalog/registrations.toml", m.id);
+            }
+            if let Some(u) = &m.redirect_uri {
+                assert!(crate::connectors::loopback(u).is_ok(), "{}: its redirect is not a loopback address", m.id);
             }
         }
         for p in ["google", "microsoft", "github", "vercel", "slack", "sentry"] {

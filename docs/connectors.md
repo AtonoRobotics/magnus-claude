@@ -17,7 +17,7 @@ one commit), 2026-11-02.
 
 ## Scope and requirements
 
-- [ ] Breadth: Google, Microsoft, coding and deployment services (Vercel and peers), Slack, the other common business services, and FreeCAD, Autodesk Fusion, SolidWorks and Blender (today: four Google manifests, `catalog/google-*.toml`, and Sentry's, Hugging Face's, GitLab's, Supabase's (read only) and Cloudflare's, `catalog/<id>.toml`, compiled in by `crates/magnus/src/catalog.rs` `SOURCES`)
+- [ ] Breadth: Google, Microsoft, coding and deployment services (Vercel and peers), Slack, the other common business services, and FreeCAD, Autodesk Fusion, SolidWorks and Blender (today: four Google manifests, `catalog/google-*.toml`, Slack's, `catalog/slack.toml`, and Sentry's, Hugging Face's, GitLab's, Supabase's (read only) and Cloudflare's, `catalog/<id>.toml`, compiled in by `crates/magnus/src/catalog.rs` `SOURCES`)
 - [ ] Plug and play: every connector is a Connect button that opens the provider's own login page and then works (the button and the page exist, `connectors.mjs`, `app-apps.mjs` against a fake app; a Google sign-in cannot finish in the desktop app, see Connect flow)
 - [x] No connector shows the user a form: no address, key, token, client ID or header fields in the app (`desktop/tests/connectors.mjs`, "asks nothing here", and the owner's Settings › Connectors)
 - [ ] A service whose provider offers no sign-in is not in the catalog (every catalog manifest signs in; an admin can no longer add a server with a key, `add-by-sign-in`, but can still add one that asks for no sign-in at all: open with the owner)
@@ -41,7 +41,7 @@ one commit), 2026-11-02.
 - [ ] Never asked, in the admin console: the console still asks an admin for Google's client secret (Security › Connectors and credentials, `desktop/admin/admin.js` `connectorPanel` credential form) until the relay holds it; adding an app asks for no key (`add-by-sign-in`, `admin_connectors.rs`)
 - [ ] Where the org's credentials live: Alpha Vector's client IDs and secrets in the relay's secret store, nowhere in the app, console or manifests, the appliance getting client IDs from the relay (today: client IDs in `catalog/registrations.toml`, compiled in; Google's secret in the appliance's vault, put there by `release/admin-on-appliance.sh` from the repository secret)
 - [x] The connector form asking for a client ID, client secret and web address is deleted from the app, not hidden (#67; `connectors.mjs`, the owner's Settings › Connectors ask for nothing)
-- [ ] Acceptance: on a fresh install a user connects Gmail, Slack, GitHub and Vercel with only clicks and the providers' login pages (no Slack, GitHub or Vercel manifest; Gmail's completion fails in the desktop app)
+- [ ] Acceptance: on a fresh install a user connects Gmail, Slack, GitHub and Vercel with only clicks and the providers' login pages (Slack is brokered, `catalog/slack.toml`, and signs in through `http://127.0.0.1:17321/callback`; no GitHub or Vercel manifest; Gmail's completion fails in the desktop app)
 - [x] Acceptance: an automated UI test fails if the connect path renders any text input inside Magnus (`connectors.mjs` `typed()`, in the browser; the desktop path is not checked for inputs)
 
 ## Decisions this spec builds on
@@ -98,7 +98,7 @@ one commit), 2026-11-02.
 ### Client registration
 
 - [x] Pre-registered: Alpha Vector's own client for the provider (Google: `google.rs`)
-- [ ] Pre-registered clients for Microsoft, Slack and the others under Provider registrations (client IDs for Microsoft, GitHub, Vercel, Slack and Sentry in `catalog/registrations.toml`, no manifest uses them; Sentry's catalog connector registers Magnus itself at `mcp.sentry.dev`, which does not take sentry.io's clients)
+- [ ] Pre-registered clients for Microsoft, Slack and the others under Provider registrations (Slack's manifest uses its client, `slack.rs`; client IDs for Microsoft, GitHub, Vercel and Sentry are in `catalog/registrations.toml` and no manifest uses them; Sentry's catalog connector registers Magnus itself at `mcp.sentry.dev`, which does not take sentry.io's clients)
 - [ ] Client ID Metadata Document, used when the provider advertises it, one document at pyrallon.ai naming the relay callback
 - [x] Dynamic Client Registration as the fallback (`connectors.rs`, the fake app registers Magnus; against Sentry, Hugging Face, GitLab.com, Supabase and Cloudflare, `sentry.rs`, `huggingface.rs`, `gitlab.rs`, `supabase.rs`, `cloudflare.rs`)
 - [ ] The order the MCP authorization spec (2026-07-28) sets: pre-registered, then CIMD, then DCR
@@ -158,8 +158,8 @@ one commit), 2026-11-02.
 - [x] Isolation: one instance per user per connector, each in its own Firecracker microVM, started on first call, stopped when idle (`brokered.rs` `each_person_has_their_own_microvm_called_with_their_current_token_reaching_only_its_hosts`; Disconnect, deletion and the kill switch stop it too, `disconnecting_erasing_and_the_kill_switch_stop_the_persons_microvm`)
 - [x] Credentials: a short-lived access token injected per request; no refresh token, no state between calls, nothing on disk (`each_person_has_their_own_microvm_called_with_their_current_token_reaching_only_its_hosts`: each call carries the token current then, never a refresh token, and an answer holding it is cleaned; the microVM has no disk, `an_instance_has_no_network_device_and_no_disk`; the server kit keeps nothing between calls)
 - [x] Network: the microVM reaches only the manifest's API hosts, through an egress proxy on the appliance (`each_person_has_their_own_microvm_called_with_their_current_token_reaching_only_its_hosts`: another host refused through the proxy, a direct connection unreachable, another host port refused; `the_proxy_admits_only_the_manifests_hosts_exactly`)
-- [ ] Tools at the level a person works (find, read, create, update, share, delete), schemas validated on both sides (the check on both sides is built, `schema::check` in the server kit and `brokered.rs`; Gmail's tools, `brokered/gmail`; not yet Drive, Calendar, Docs, Sheets or Chat)
-- [ ] Contract tests in CI against provider test accounts before publishing (Gmail's, `gmail_contract.rs`: real Gmail reached from the microVM in every run; every tool once the owner's test account is given to CI, which it is not yet)
+- [ ] Tools at the level a person works (find, read, create, update, share, delete), schemas validated on both sides (the check on both sides is built, `schema::check` in the server kit and `brokered.rs`; Gmail's tools, `brokered/gmail`; Calendar's, `brokered/calendar`; Slack's, `brokered/slack`; not yet Drive, Docs, Sheets or Chat)
+- [ ] Contract tests in CI against provider test accounts before publishing (Gmail's, `gmail_contract.rs`, Calendar's, `calendar_contract.rs`, and Slack's, `slack_contract.rs`: the provider is reached from the microVM in every run; every tool once the owner's test account is given to CI, which it is not yet)
 - [ ] Switching to Remote retires the image; users keep their connection when the grant carries over, else reconnect once
 
 ## Local desktop connectors
@@ -349,7 +349,7 @@ one commit), 2026-11-02.
 ## Provider registrations
 
 - [ ] Google: a verified OAuth client for the Workspace MCP servers (client ID in `catalog/registrations.toml`, a Desktop client; its secret provisioned to strix-alpha by CI, HTTP 204 on 2026-11-02); a configured Chat app for the Chat server; Gmail restricted-scope verification and a CASA assessment, yearly; until then 100 users and weekly re-sign-in in Testing
-- [ ] Slack: an app listed in the Slack Marketplace (a client ID exists, "Magnus (Veyra workspace)", confidential; no secret provisioned, no manifest)
+- [ ] Slack: an app listed in the Slack Marketplace (client ID in `catalog/registrations.toml`, "Magnus (Veyra workspace)", confidential; the secret is the repository's `SLACK_CLIENT_SECRET`, provisioned like Google's; the manifest is brokered over the Web API, not Slack's hosted MCP server). Distribution stays off and PKCE stays off. The one redirect is `http://127.0.0.1:17321/callback`. The app is installed to workspace `T0BQJ3JUE01` when someone connects. Slack's "Enable Slack MCP Server" switch is not required.
 - [ ] Microsoft: a multi-tenant Entra app with publisher verification and the Graph permissions (a public client ID exists; no manifest, no brokered servers)
 - [ ] GitHub: a GitHub App or OAuth App for the remote server (an OAuth app client ID exists, confidential; no secret, no manifest); org owners approve it for restricted orgs
 - [ ] Vercel: a place on Vercel's allowlist of approved MCP clients (a public client ID exists, "Magnus by Alpha Vector"; no manifest)
@@ -392,8 +392,8 @@ Microsoft Work IQ (Remote; only tenants with a Microsoft 365 Copilot license tha
 - [ ] Word
 - [ ] Copilot Search
 
-Messaging (Remote)
-- [ ] Slack (in the mockup, and its page in Connector details and Connecting from chat)
+Messaging
+- [ ] Slack (brokered, manifest `slack`: the image built from `brokered/slack`, over Slack's Web API, user token only; search, read and post, posting asked for first, `slack.rs`. Sign-in is `http://127.0.0.1:17321/callback`, no PKCE. The hosted MCP server is not called)
 
 Code and deploy (Remote)
 - [ ] GitHub (in the mockup)

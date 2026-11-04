@@ -55,6 +55,9 @@ struct Pending {
     /// so in its answer (RFC 9207): an answer from another one is refused.
     issuer: String,
     iss_required: bool,
+    /// Whether this sign-in sent a PKCE challenge. The verifier is sent
+    /// back only then.
+    pkce: bool,
     at: Instant,
 }
 
@@ -105,10 +108,55 @@ struct Tokens {
 /// the token came straight from the app's token endpoint).
 fn account_of(answer: &Value) -> Option<String> {
     use base64::Engine;
-    let claims = answer["id_token"].as_str()?.split('.').nth(1)?;
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(claims.trim_end_matches('=')).ok()?;
-    let c: Value = serde_json::from_slice(&raw).ok()?;
-    ["email", "preferred_username", "name"].iter().find_map(|k| c[*k].as_str().map(String::from))
+    if let Some(claims) = answer["id_token"].as_str().and_then(|t| t.split('.').nth(1)) {
+        if let Ok(raw) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(claims.trim_end_matches('=')) {
+            if let Ok(c) = serde_json::from_slice::<Value>(&raw) {
+                if let Some(named) = ["email", "preferred_username", "name"].iter().find_map(|k| c[*k].as_str().map(String::from)) {
+                    return Some(named);
+                }
+            }
+        }
+    }
+    // Slack names the person and the workspace on the token answer, and
+    // sends no ID token unless identity scopes were asked for.
+    let user = answer["authed_user"]["id"].as_str();
+    let team = answer["team"]["name"].as_str().or(answer["team"]["id"].as_str());
+    match (user, team) {
+        (Some(u), Some(t)) => Some(format!("{u} in {t}")),
+        (Some(u), None) => Some(u.to_string()),
+        (None, Some(t)) => Some(t.to_string()),
+        _ => None,
+    }
+}
+
+/// What a token answer granted. A Slack install that also has a bot token
+/// puts that at the top and the person's under `authed_user`; the person
+/// is who Magnus acts as, so the user token is the one kept. An answer
+/// with `ok: false` (Slack's refusals are HTTP 200) is an error.
+struct Grant {
+    access: String,
+    refresh: Option<String>,
+    expires: Option<i64>,
+    account: Option<String>,
+}
+
+fn granted(v: &Value) -> Result<Grant, String> {
+    if v["ok"] == false {
+        return Err(format!("the sign-in was refused ({})", v["error"].as_str().unwrap_or("no reason given")));
+    }
+    let user = &v["authed_user"];
+    let as_user = v["token_type"].as_str() == Some("bot") && user["access_token"].as_str().is_some();
+    let access = if as_user { user["access_token"].as_str() } else { v["access_token"].as_str() };
+    let Some(access) = access else { return Err("the sign-in returned no access token".into()) };
+    let refresh = if as_user { user["refresh_token"].as_str().or(v["refresh_token"].as_str()) } else { v["refresh_token"].as_str() };
+    let expires = if as_user { user["expires_in"].as_i64().or(v["expires_in"].as_i64()) } else { v["expires_in"].as_i64() };
+    Ok(Grant { access: access.to_string(), refresh: refresh.map(str::to_string), expires, account: account_of(v) })
+}
+
+/// Slack says a refresh token is dead with HTTP 200 and `ok: false`. Those
+/// end the sign-in; a limit or a blip does not.
+fn dead_token(v: &Value) -> bool {
+    v["ok"] == false && matches!(v["error"].as_str(), Some("invalid_refresh_token" | "invalid_grant" | "token_revoked" | "invalid_auth" | "token_expired" | "account_inactive"))
 }
 
 /// Where one person stands with one of the organisation's apps.
@@ -414,14 +462,22 @@ impl Kernel {
                     return Ok(None);
                 }
             };
-            let Some(access) = v["access_token"].as_str() else { return Ok(None) };
-            t.access_token = access.into();
-            if let Some(r) = v["refresh_token"].as_str() {
-                t.refresh_token = Some(r.into());
+            if dead_token(&v) {
+                t.lapsed = true;
+                self.vault.put(name, &serde_json::to_string(&t)?)?;
+                return Ok(None);
+            }
+            let Ok(g) = granted(&v) else { return Ok(None) };
+            t.access_token = g.access;
+            if let Some(r) = g.refresh {
+                t.refresh_token = Some(r);
+            }
+            if g.account.is_some() {
+                t.account = g.account;
             }
             // A token that had a lifetime keeps one: without it, it would
             // never be refreshed again and sign the person out at expiry.
-            t.lifetime = v["expires_in"].as_i64().or(t.lifetime).or(Some(3600));
+            t.lifetime = g.expires.or(t.lifetime).or(Some(3600));
             t.expires_at = t.lifetime.map(|s| now + s);
             self.vault.put(name, &serde_json::to_string(&t)?)?;
         }
@@ -432,6 +488,11 @@ impl Kernel {
     /// address to open in the person's browser.
     pub async fn connector_sign_in(&self, c: &Connector, person: &str, redirect_uri: &str) -> Result<(String, String)> {
         loopback(redirect_uri)?;
+        if let Some(fixed) = &c.redirect_uri {
+            if redirect_uri != fixed {
+                bail!("sign in to {} from the Magnus app on this computer", c.title.as_deref().unwrap_or(&c.name));
+            }
+        }
         // A brokered connector's sign-in is the provider's own, for its
         // API: at the authorization server its manifest names, with no
         // resource indicator (RFC 8707 names an MCP server a token is for;
@@ -448,7 +509,7 @@ impl Kernel {
         let resource = if brokered { String::new() } else { c.url.clone() };
         let s = |k: &str| asm[k].as_str().map(String::from);
         let (Some(authorize), Some(token)) = (s("authorization_endpoint"), s("token_endpoint")) else { bail!("the app's authorization server names no authorization or token endpoint") };
-        if asm["code_challenge_methods_supported"].as_array().is_some_and(|m| !m.iter().any(|x| x == "S256")) {
+        if c.pkce && asm["code_challenge_methods_supported"].as_array().is_some_and(|m| !m.iter().any(|x| x == "S256")) {
             bail!("the app's authorization server does not support PKCE (S256), which MCP requires");
         }
         // A catalog connector signs in through Alpha Vector's own client
@@ -495,12 +556,10 @@ impl Kernel {
         let mut u = url::Url::parse(&authorize)?;
         {
             let mut q = u.query_pairs_mut();
-            q.append_pair("response_type", "code")
-                .append_pair("client_id", &client_id)
-                .append_pair("redirect_uri", redirect_uri)
-                .append_pair("code_challenge", &challenge(&verifier))
-                .append_pair("code_challenge_method", "S256")
-                .append_pair("state", &state);
+            q.append_pair("response_type", "code").append_pair("client_id", &client_id).append_pair("redirect_uri", redirect_uri).append_pair("state", &state);
+            if c.pkce {
+                q.append_pair("code_challenge", &challenge(&verifier)).append_pair("code_challenge_method", "S256");
+            }
             if !resource.is_empty() {
                 q.append_pair("resource", &resource);
             }
@@ -525,7 +584,7 @@ impl Kernel {
         let mut p = pending().lock().unwrap();
         p.retain(|_, x| x.at.elapsed() < PENDING_FOR);
         let iss_required = asm["authorization_response_iss_parameter_supported"] == true;
-        p.insert(state.clone(), Pending { app: c.name.clone(), person: person.into(), verifier, redirect_uri: redirect_uri.into(), client, issuer, iss_required, at: Instant::now() });
+        p.insert(state.clone(), Pending { app: c.name.clone(), person: person.into(), verifier, redirect_uri: redirect_uri.into(), client, issuer, iss_required, pkce: c.pkce, at: Instant::now() });
         Ok((u.to_string(), state))
     }
 
@@ -560,6 +619,9 @@ impl Kernel {
             ("resource", c.resource.clone()),
         ];
         form.retain(|(k, v)| *k != "resource" || !v.is_empty());
+        if !p.pkce {
+            form.retain(|(k, _)| *k != "code_verifier");
+        }
         if let Some(s) = &c.client_secret {
             form.push(("client_secret", s.clone()));
         }
@@ -568,15 +630,15 @@ impl Kernel {
             bail!("the app's authorization server refused the sign-in: HTTP {}", r.status());
         }
         let v: Value = r.json().await?;
-        let access = v["access_token"].as_str().ok_or_else(|| anyhow!("the sign-in returned no access token"))?;
+        let g = granted(&v).map_err(|e| anyhow!(e))?;
         let t = Tokens {
-            access_token: access.into(),
-            refresh_token: v["refresh_token"].as_str().map(String::from),
-            expires_at: v["expires_in"].as_i64().map(|s| chrono::Utc::now().timestamp() + s),
-            lifetime: v["expires_in"].as_i64(),
+            access_token: g.access,
+            refresh_token: g.refresh,
+            expires_at: g.expires.map(|s| chrono::Utc::now().timestamp() + s),
+            lifetime: g.expires,
             client: p.client,
             connected_at: Some(chrono::Utc::now().timestamp()),
-            account: account_of(&v),
+            account: g.account,
             lapsed: false,
             wants: vec![],
         };
@@ -883,6 +945,8 @@ impl Kernel {
             catalog: false,
             hosts: vec![],
             issuer: None,
+            pkce: true,
+            redirect_uri: None,
         };
         self.emit(actor, Ev::ConnectorAdded { connector: c }).await.map_err(failed)?;
         Ok(json!({ "name": name, "sign_in": oauth }))
@@ -1159,6 +1223,9 @@ async fn card(k: &Kernel, c: &Connector, person: &str) -> Value {
         "connected_at": at.and_then(|s| chrono::DateTime::from_timestamp(s, 0)), "account": account, "last_used": last,
         // False only on an appliance Alpha Vector has not finished setting up.
         "ready": k.provider_ready(c),
+        // The address the desktop app listens on, when the provider
+        // registered one exactly. Not shown.
+        "redirect_uri": c.redirect_uri,
         // The app asked for more access than the sign-in holds: approving
         // it is signing in again, asking for that too.
         "more_access": !k.wanted_scopes(c, person).is_empty(),
@@ -1279,5 +1346,26 @@ mod naming {
         assert_eq!(super::name_from("https://mcp.example.com/mcp", Some("Team Calendar"), none), "team-calendar");
         assert_eq!(super::name_from("http://127.0.0.1:8080/mcp", None, none), "app");
         assert_eq!(super::name_from("https://mcp.notion.com/mcp", None, |n| n == "notion"), "notion-2");
+    }
+
+    /// A Slack answer that also carries a bot token keeps the person's
+    /// user token, and a dead refresh is told apart from a limit.
+    #[test]
+    fn a_slack_answer_keeps_the_persons_token_not_the_bots() {
+        let both = serde_json::json!({
+            "ok": true, "access_token": "xoxb-bot", "token_type": "bot", "refresh_token": "xoxe-bot", "expires_in": 43200,
+            "authed_user": { "id": "U1", "access_token": "xoxp-user", "refresh_token": "xoxe-user", "expires_in": 43200, "token_type": "user" },
+            "team": { "id": "T1", "name": "Veyra" }
+        });
+        let g = super::granted(&both).unwrap();
+        assert_eq!((g.access.as_str(), g.refresh.as_deref(), g.expires, g.account.as_deref()), ("xoxp-user", Some("xoxe-user"), Some(43200), Some("U1 in Veyra")));
+        let user = serde_json::json!({ "ok": true, "access_token": "xoxp-only", "token_type": "user", "refresh_token": "xoxe-1", "expires_in": 43200, "authed_user": { "id": "U2" }, "team": { "name": "Veyra" } });
+        assert_eq!(super::granted(&user).unwrap().access, "xoxp-only");
+        let google = serde_json::json!({ "access_token": "ya29", "refresh_token": "1//", "expires_in": 3600, "token_type": "Bearer" });
+        assert_eq!(super::granted(&google).unwrap().access, "ya29");
+        assert!(super::granted(&serde_json::json!({ "ok": false, "error": "invalid_code" })).is_err());
+        assert!(super::dead_token(&serde_json::json!({ "ok": false, "error": "invalid_refresh_token" })));
+        assert!(!super::dead_token(&serde_json::json!({ "ok": false, "error": "ratelimited" })));
+        assert!(!super::dead_token(&google));
     }
 }
