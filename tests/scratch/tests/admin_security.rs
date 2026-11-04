@@ -56,7 +56,9 @@ async fn root_sets_the_sign_in_rules_and_edits_tests_applies_and_rolls_back_the_
     let mut app = Appliance::start(Spec::default(), &m).await;
     kc.configure(&mut app).await;
     let mine = format!("{}/32", lan_ip());
-    let lapse = 20;
+    // Long enough for a browser's sign-in to hand back its session (that
+    // has taken 23 seconds after the password on a loaded machine).
+    let lapse = 60;
     let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", lapse.into())]);
     let jwks = p.jwks().await;
     kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &jwks).await;
