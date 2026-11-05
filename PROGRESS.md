@@ -3,6 +3,9 @@
 ## Kernel role made beforehand (2026-11-04)
 
 `migrate` now strips a pre-existing kernel role's superuser-style attributes and refuses when it can still change the log through a grant or membership (`log.rs`, test in `log_review.rs`).
+## Cancelling a browser sign-in ends it (2026-11-04)
+
+Cancel in the app's browser sign-in now ends the wait in the app, so a sign-in finished later in the browser leaves no session and never replaces the stored one (`desktop/src-tauri/src/lib.rs`, `desktop/ui/app.js`, `bridge.js`).
 
 ## Adapter messages print without credentials (2026-11-04)
 
