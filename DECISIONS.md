@@ -4,6 +4,7 @@ One line per choice the brief left open, with its reason. The brief and the owne
 
 ## Process
 
+- The console's browser sign-in script waits 120 seconds for each step, not 60 (2026-11-05, run 41960251290). The password was accepted and the heading "Only admins can enter" was not visible before the old limit. Reason: the console was right and the build box was busy drawing it. Test: `the_console_sign_in_script_waits_two_minutes`.
 - `graphify-out/` is not tracked. Reason: the graphify git hooks regenerate it on every commit and checkout.
 
 - Built independently of other `~/magnus*` attempts on this machine; no code or decisions are copied. Reason: this workspace was started fresh for this brief.
