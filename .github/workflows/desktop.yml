@@ -149,6 +149,12 @@ jobs:
           d=$(sandbox/image.sh)
           echo "MAGNUS_GUEST_KERNEL=$d/vmlinux" >> "$GITHUB_ENV"
           echo "MAGNUS_GUEST_ROOTFS=$d/rootfs.ext4" >> "$GITHUB_ENV"
+      # Which contract checks are appliance-verified, self-checked or refused
+      # (sandbox/check_tools.py, which the image runs when a contract is
+      # recorded). Its program lookups use the build box.
+      - name: Check-tool labels
+        if: env.MAGNUS_TESTED != '1'
+        run: python3 -I sandbox/test_check_tools.py
       # Every suite, on every ready pull request and master build, before its
       # build can reach an app. A draft skips this job.
       - name: Browser sidecar

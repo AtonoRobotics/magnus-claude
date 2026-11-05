@@ -328,6 +328,31 @@ async fn search_by_meaning_keeps_to_the_readers() {
     assert!(seen.lock().unwrap().iter().any(|t| t == "when does the office open"), "the query was not embedded");
 }
 
+/// An embedding server that takes the connection and never answers is a
+/// failed server: search falls back to its words within the configured
+/// time, rather than waiting for ever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_embedding_server_does_not_stall_search() {
+    let mut k = start().await;
+    let carol = k.app.api("carol");
+    let (_, entry) = carol.post("/v1/knowledge", json!({ "title": "Office hours", "text": "The office opens at eight.", "everyone": true })).await;
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", silent.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut held = vec![];
+        while let Ok((s, _)) = silent.accept().await {
+            held.push(s);
+        }
+    });
+    let path = k.app.dir.path().join("magnus.toml");
+    let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    cfg.insert("knowledge".into(), toml::Value::Table(toml::toml! { [embeddings] url = url model = "fake-embed" timeout_s = 2 }));
+    std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+    k.app.restart().await;
+    let hits = tokio::time::timeout(std::time::Duration::from_secs(30), search(&carol, "office opens")).await.expect("search waited on a server that never answered");
+    assert!(hits.iter().any(|h| h["id"] == entry["id"]), "the entry was not found by its words: {hits:?}");
+}
+
 /// A knowledge entry's text is not kept by the kernel (recall only, step
 /// 6): it is read from the content store when the entry is indexed, and
 /// every reader reads it from the index. An entry edited in the content

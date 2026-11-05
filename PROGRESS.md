@@ -3,6 +3,22 @@
 ## Approvals keep their risk class (2026-11-04)
 
 An approval no longer covers its tool after the owner reclassifies the tool as riskier: it is matched on the class its item recorded (`state.rs`, `boundary.rs`, test in `connectors.rs`).
+## Embedding server timeout (2026-11-04)
+
+A silent embedding server stalled knowledge search and adds for ever. Requests now time out after `[knowledge.embeddings] timeout_s` (default 30) and search falls back to full-text (`knowledge.rs`, `config.rs`).
+## A send shows and holds the draft it sends (2026-11-04, `send-reads-the-draft`)
+
+Approvals spec step 2. Gmail's `send_draft` card now shows the draft's To, Cc, Bcc, subject, text and attachments, read through `get_draft` at the gate. The approval holds only for that exact email: an edited draft asks again (`a_draft_changed_after_its_card_asks_again_showing_the_change`, gmail.rs). Gmail manifest 1.1.0. The protected test `a_draft_edited_after_approval_asks_again_including_an_added_bcc` (inv4_taint.rs) lands here, as the spec approved; the harness gains `Spec::destinations`. Step 1 (#145, `reach-in-manifests`) waits for this step: merge master into it, then set Gmail to 1.2.0. Steps 3–11 follow, one PR each.
+
+## Approved contract changes keep their taint (2026-11-04)
+
+An approved contract change cleared the taint its checks are judged by, so a tainted run could have a `web_fetch` carrying private data run at completion without asking. It now keeps the run's taint; such a check goes to the person's review instead (`state.rs`, test in `contract_freeze.rs`).
+## Sign-in follows no redirects (2026-11-04)
+
+The sign-in HTTP clients followed redirects, so a token endpoint answering 307 would have had the password resent to wherever it pointed, plain http included. They now follow none (`oidc.rs`).
+## Check-tool labels (2026-11-04)
+
+A review of master found 31 contract checks that `sandbox/check_tools.py` labelled `appliance-verified` although workspace code decided their result: `cat x#; python3 t.py`, process substitution, `env -u cat python3 t.py`, `unset PYTHONSAFEPATH`, `python3 -X pycache_prefix=…`, `../usr/bin/cat` after `cd`, `/usr/bin/env python3 t.py`, abbreviated long options and others (DECISIONS.md, "reads a check as the shell and each tool read it"). Each now gets self-checked or refused, with a case in `sandbox/test_check_tools.py`, which CI now runs. The sandbox image must be rebuilt (`sandbox/build.sh`) before the appliance uses the fix. Still open from the same review, each for its own pull request: an approved contract change clears the taint its checks are judged by (`state.rs`, `contract_taint`); a check expecting a nonzero exit can never pass; the desktop proxy lets `/v1/./sign-in…` through; the sign-in HTTP client follows redirects; a 429 suspends a run at once.
 
 ## Chat replacement validation (2026-11-04)
 
@@ -18,6 +34,7 @@ The replacement is not deployed. PR #133 has merged: several PRs may now be open
 
 ## Now (2026-10-29)
 
+- **A task's summary read in conversation carries what its task read (invariant 4; branch `chat-controls-taint`).** Magnus listing tasks or schedules in a chat took in each run's summary as clean words, so a summary of untrusted, private mail could leave in the turn's next web lookup without asking. Now the list carries the taint of every run whose words it returned, and the Rule of Two asks. Found by the spec review of 2026-11-04, with the rest of its findings still to fix one pull request each.
 - **Slack's sign-in comes back through the appliance's public name (branch `slack-https-redirect`).** A distributed Slack app may only register https redirects, so Slack is given `https://magnus.pyrallon.ai/oauth/slack/callback`. The appliance checks the state and sends the browser on to `http://127.0.0.1:17321/callback`, where the desktop is listening. The desktop posts the code back, and the exchange repeats the https address. The code is not logged. The path is open without a device certificate. The microVM still reaches only `slack.com`.
 - **Slack is brokered (connectors spec, Brokered API connectors; branch `slack-brokered`).** A person connects Slack from the desktop app: the browser opens Slack's own page, and Magnus can then search messages, read channels and direct messages, and post as that person (it asks first). The server is Alpha Vector's, over Slack's Web API (`brokered/slack`), named by digest, in a microVM that reaches only `slack.com`. The sign-in is Slack's user-token endpoints (the metadata at `https://mcp.slack.com`), with the client secret on the appliance, no PKCE, and the one redirect `http://127.0.0.1:17321/callback`. Slack's hosted MCP server is not called. The secret is `SLACK_CLIENT_SECRET`, provisioned like Google's.
 - **A Gmail write with an unreadable success is an unknown outcome (branch `gmail-write-outcome`).** Gmail kept its own copy of Google's request code when Calendar moved onto `brokered/google`. That copy still said a write Gmail had answered with something other than JSON as not done, so a sent draft could be sent again. It is an unknown outcome now, as Calendar's is. Gmail's desktop sign-in was refused because the app dropped Google's `iss`; that was fixed on `connector-sign-in-iss` and the shell carries it back. Nothing here exchanges a code with Google.
