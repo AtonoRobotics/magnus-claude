@@ -186,6 +186,164 @@ async fn a_changed_tool_definition_waits_for_the_owner() {
     assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve" })).await.is_success());
 }
 
+/// The kill switch takes each sign-in out of the vault and revokes it at its
+/// app before anything is recorded, so it works when the log does not. A
+/// crash in between (the sign-in out of the vault, not yet revoked, the
+/// switch not yet recorded) is finished at the next start: the vault comes
+/// back sealed, the switch is recorded on, and the sign-in is revoked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kill_switch_cut_short_by_a_crash_is_finished_at_the_next_start() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(steps(vec![fail("nothing to do")])).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert!(st.is_success(), "{v}");
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    sign_in(&alice, "calendar", callback.local_addr().unwrap().port()).await;
+
+    // What the vault holds after the switch took the sign-in out, then the
+    // appliance died: sealed, the sign-in waiting to be revoked.
+    app.kill().await;
+    let vault = app.state_dir.join("vault");
+    let mut all: serde_json::Map<String, Value> = serde_json::from_slice(&std::fs::read(vault.join("secrets.json")).unwrap()).unwrap();
+    let entry = all.remove("connector_calendar__alice").expect("alice's sign-in is in the vault");
+    std::fs::write(vault.join("revoking.json"), serde_json::to_vec(&json!({ "connector_calendar__alice": entry })).unwrap()).unwrap();
+    std::fs::write(vault.join("secrets.json"), serde_json::to_vec(&all).unwrap()).unwrap();
+    std::fs::write(vault.join("sealed"), b"").unwrap();
+    app.restart().await;
+
+    // Engaged before the appliance answers anything: until then, scheduled
+    // and incoming work would run unchecked (review of #151).
+    let alice = app.api("alice");
+    let (_, first) = alice.get("/v1/kill-switch").await;
+    assert_eq!(first["engaged"], true, "the appliance answered before the cut-short switch was engaged again: {first}");
+    let ks = eventually("the cut-short switch is finished", PATIENCE, || async {
+        let (_, ks) = alice.get("/v1/kill-switch").await;
+        (ks["engaged"] == true && ks["revoked"]["connector_calendar__alice"]["at_provider"] == true).then_some(ks)
+    })
+    .await;
+    assert!(cal.state.lock().unwrap().revoked.iter().any(|t| t.starts_with("rt-")), "{ks}");
+    assert!(!vault.join("revoking.json").exists() || std::fs::read_to_string(vault.join("revoking.json")).unwrap().trim() == "{}", "a revoked sign-in is still waiting");
+}
+
+/// An approval covers the action as it was classed when given: the owner's
+/// standing approval of a tool that cannot be undone does not cover the
+/// same tool once the owner reclassifies it as one that moves money; that
+/// call is asked again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_does_not_cover_its_tool_once_it_is_classed_riskier() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("add the standup", "the standup is on the calendar"),
+            1 => tool("calendar__create_event", json!({ "title": "Standup" })),
+            _ => complete("added"),
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert!(st.is_success(), "{v}");
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    sign_in(&alice, "calendar", callback.local_addr().unwrap().port()).await;
+    assert_eq!(alice.put("/v1/connectors/calendar/tools/create_event", json!({ "risk": "irreversible" })).await.0, 204);
+
+    let t = alice.submit("Put the standup on my calendar.").await;
+    let item = alice.wait_item(&t, "approval").await;
+    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "standing" })).await.is_success());
+    alice.wait_settled(&t).await;
+    assert_eq!(cal.calls("create_event"), 1);
+
+    // The same tool, now classed as one that moves money.
+    assert_eq!(alice.put("/v1/connectors/calendar/tools/create_event", json!({ "risk": "financial" })).await.0, 204);
+    let t = alice.submit("Put the standup on my calendar again.").await;
+    let asked = eventually("the call is asked about or runs", PATIENCE, || {
+        let (alice, t, cal) = (alice.clone(), t.clone(), &cal);
+        async move {
+            if cal.calls("create_event") > 1 {
+                return Some(false);
+            }
+            (!alice.open_items(&t, "approval").await.is_empty()).then_some(true)
+        }
+    })
+    .await;
+    assert!(asked, "an approval given for an action that cannot be undone covered it once classed as one that moves money");
+}
+
+/// An approval keeps the class it was given at when the task that asked for
+/// it is deleted: the task's approval item goes with its content, the
+/// approval's record stays (review of #148).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_standing_approval_outlives_deleting_the_task_that_asked_for_it() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("add the standup", "the standup is on the calendar"),
+            1 => tool("calendar__create_event", json!({ "title": "Standup" })),
+            _ => complete("added"),
+        }
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert!(st.is_success(), "{v}");
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    sign_in(&alice, "calendar", callback.local_addr().unwrap().port()).await;
+    assert_eq!(alice.put("/v1/connectors/calendar/tools/create_event", json!({ "risk": "irreversible" })).await.0, 204);
+
+    let t = alice.submit("Put the standup on my calendar.").await;
+    let item = alice.wait_item(&t, "approval").await;
+    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "standing" })).await.is_success());
+    alice.wait_settled(&t).await;
+    assert_eq!(cal.calls("create_event"), 1);
+    assert!(alice.post(&format!("/v1/tasks/{t}/cancel"), json!({})).await.0.is_success());
+    alice.wait_status(&t, &["cancelled"]).await;
+    let (st, v) = alice.post("/v1/trash", json!({ "item": t })).await;
+    assert!(st.is_success(), "{v}");
+    assert_eq!(alice.post("/v1/trash/empty", json!({})).await.0, 200);
+    app.restart().await;
+
+    let t = app.api("alice").submit("Put the standup on my calendar again.").await;
+    let ran = eventually("the call runs or is asked about", PATIENCE, || {
+        let (alice, t, cal) = (app.api("alice"), t.clone(), &cal);
+        async move {
+            if cal.calls("create_event") > 1 {
+                return Some(true);
+            }
+            (!alice.open_items(&t, "approval").await.is_empty()).then_some(false)
+        }
+    })
+    .await;
+    assert!(ran, "deleting the task that asked for a standing approval revoked it");
+}
+
+/// An app's address carries no key or token (connectors spec: nobody types
+/// one into Magnus): one in its query or user part is refused before the
+/// app is asked anything, and never reaches the log or the app list.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_address_holding_a_secret_is_refused() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(steps(vec![fail("nothing to do")])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let with_query = format!("{}?api_key=s3cret-in-query", cal.url);
+    let with_user = cal.url.replacen("://", "://me:s3cret-in-user@", 1);
+    for url in [&with_query, &with_user] {
+        let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": url, "audience": "private", "label": "private+untrusted" })).await;
+        assert_eq!(st, 400, "an address holding a secret was taken: {url} {v}");
+    }
+    let (_, list) = alice.get("/v1/connectors").await;
+    assert!(!list.to_string().contains("s3cret"), "{list}");
+    let (_, audit) = alice.get("/v1/audit").await;
+    assert!(!audit.to_string().contains("s3cret"), "the secret reached the log");
+    // The address itself is still taken.
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private+untrusted" })).await;
+    assert!(st.is_success(), "{v}");
+}
+
 /// `sandbox` is the appliance's own microVM, never an app: an app's tool
 /// classed so would skip the task contract, the Rule of Two and the
 /// audience rule, as if what it did stayed on the appliance. The owner

@@ -6,6 +6,20 @@ use magnus_adapter_proto::ToolSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// A tool's reach (approvals spec, The approval model): `self` stays in the
+/// person's own account (a draft, a label, the trash) and reaches no one, so
+/// neither the Rule of Two nor the audience rule counts it as sending, as
+/// for a write to Magnus's memory. A tool that declares no reach is
+/// unknown, and asks as before. Money never counts as `self`.
+pub const REACH_SELF: &str = "self";
+
+/// Whether a declared reach is one Magnus knows, on a tool of this class:
+/// `self` on a write; never on a read (nothing to reach), money (it asks
+/// every time) or a prohibited tool.
+pub fn reach_fits(reach: &str, risk: &str) -> bool {
+    reach == REACH_SELF && ["reversible_write", "irreversible"].contains(&risk)
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Risk {
@@ -531,4 +545,61 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
         });
     }
     v
+}
+
+/// The addresses in a recipients field, lowercased, as they match a grant
+/// (approvals spec, Email end to end: exact addresses, and a mailing list
+/// is one). It reads a header (`Ann <ann@x.example>, "Doe, Bo" <bo@y>`),
+/// a list of them, or objects carrying an `email` or `address`.
+pub fn addresses(v: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match v {
+        Value::String(s) => {
+            let (mut part, mut quoted, mut angle) = (String::new(), false, false);
+            for ch in s.chars().chain([',']) {
+                match ch {
+                    '"' if !angle => quoted = !quoted,
+                    '<' if !quoted => angle = true,
+                    '>' if !quoted => angle = false,
+                    ',' | ';' if !quoted && !angle => {
+                        if let Some(a) = address(&part) {
+                            out.push(a);
+                        }
+                        part.clear();
+                        continue;
+                    }
+                    _ => {}
+                }
+                part.push(ch);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|i| out.extend(addresses(i))),
+        Value::Object(m) => out.extend(m.get("email").or_else(|| m.get("address")).map(addresses).unwrap_or_default()),
+        _ => {}
+    }
+    out
+}
+
+/// One address from `Name <a@x>` or a bare `a@x`.
+fn address(part: &str) -> Option<String> {
+    let inner = match (part.rfind('<'), part.rfind('>')) {
+        (Some(l), Some(r)) if l < r => &part[l + 1..r],
+        _ => part,
+    };
+    let a = inner.trim().trim_matches('"').trim().to_lowercase();
+    (!a.is_empty()).then_some(a)
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::addresses;
+    use serde_json::json;
+
+    #[test]
+    fn a_recipients_field_reads_as_exact_lowercased_addresses() {
+        let h = json!(r#"Ann <Ann@X.example>, "Doe, Bo" <bo@y.example>,  team@lists.example ; "#);
+        assert_eq!(addresses(&h), ["ann@x.example", "bo@y.example", "team@lists.example"]);
+        assert_eq!(addresses(&json!(["A@b.example", { "email": "c@d.example" }, null])), ["a@b.example", "c@d.example"]);
+        assert!(addresses(&json!("")).is_empty() && addresses(&json!(null)).is_empty());
+    }
 }
