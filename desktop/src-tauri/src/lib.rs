@@ -36,7 +36,7 @@ struct App {
     /// The loopback address an app sign-in comes back to, open for one sign-in.
     loopback: Mutex<Option<tokio::net::TcpListener>>,
     /// The provider sign-in waiting on the browser: dropping it cancels the wait.
-    browser_sign_in: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    browser_sign_in: Mutex<BrowserSignIn>,
 }
 
 impl App {
@@ -524,10 +524,14 @@ async fn redirected(l: tokio::net::TcpListener, wait: std::time::Duration) -> Re
 #[tauri::command]
 async fn provider_sign_in(handle: AppHandle, app: State<'_, App>, login_hint: Option<String>) -> Res<Value> {
     let (url, c) = app.conn()?;
+    // One at a time, from the first request: a new sign-in, or the person's
+    // Cancel (shown as soon as this starts), ends this one.
+    let (n, mut cancel) = app.browser_sign_in.lock().unwrap().begin();
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| format!("cannot listen on this computer: {e}"))?;
     let port = l.local_addr().map_err(|e| e.to_string())?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    let r = c.post(format!("{url}/v1/sign-in/browser")).json(&json!({ "redirect_uri": redirect_uri, "login_hint": login_hint, "client": "app" })).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e)))?;
+    let begin = async { c.post(format!("{url}/v1/sign-in/browser")).json(&json!({ "redirect_uri": redirect_uri, "login_hint": login_hint, "client": "app" })).send().await.map_err(|e| format!("Cannot reach {url}: {}", pin::describe(&e))) };
+    let r = unless_cancelled(begin, &mut cancel).await?;
     let (status, begun) = body_of(r).await;
     if status >= 400 {
         return Err(message(&begun, status));
@@ -537,12 +541,12 @@ async fn provider_sign_in(handle: AppHandle, app: State<'_, App>, login_hint: Op
     if page.scheme() != "https" && page.scheme() != "http" {
         return Err("the appliance sent a sign-in page that is not a web link".into());
     }
+    if !matches!(cancel.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)) {
+        return Err(CANCELLED.into());
+    }
     handle.opener().open_url(page.as_str(), None::<&str>).map_err(|e| format!("cannot open the browser: {e}"))?;
     // As long as the appliance keeps the sign-in open.
     let wait = std::time::Duration::from_secs(begun["expires_in"].as_u64().unwrap_or(SIGN_IN_WAIT.as_secs()));
-    // One at a time: a new sign-in, or the person's Cancel, ends this one.
-    let (tx, mut cancel) = tokio::sync::oneshot::channel();
-    *app.browser_sign_in.lock().unwrap() = Some(tx);
     let q = unless_cancelled(redirected(l, wait), &mut cancel).await?;
     if q.get("state").map(String::as_str) != Some(state) {
         return Err("the browser came back from a different sign-in; start again".into());
@@ -554,18 +558,60 @@ async fn provider_sign_in(handle: AppHandle, app: State<'_, App>, login_hint: Op
         return Err(message(&body, status));
     }
     let token = body["token"].as_str().ok_or("the appliance sent no session")?;
-    // Cancelled while the appliance was finishing: its session is ended there
-    // and never stored, so it cannot replace the one the person chose.
-    if !matches!(cancel.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)) {
+    // Kept only if this is still the sign-in under way, checked and stored
+    // under one lock, so neither a Cancel nor a newer sign-in can come in
+    // between. Otherwise its session is ended there and never stored, so it
+    // cannot replace the one the person chose.
+    let kept = {
+        let mut current = app.browser_sign_in.lock().unwrap();
+        if current.finish(n) {
+            app.store.set_token(&url, token)?;
+            true
+        } else {
+            false
+        }
+    };
+    if !kept {
         let _ = c.post(format!("{url}/v1/sign-out")).bearer_auth(token).send().await;
         return Err(CANCELLED.into());
     }
-    app.browser_sign_in.lock().unwrap().take();
-    app.store.set_token(&url, token)?;
     Ok(json!({ "person": body["person"] }))
 }
 
 const CANCELLED: &str = "the sign-in was cancelled";
+
+/// The browser sign-in under way, if any: each has its number, and only the
+/// latest, not cancelled, may finish.
+#[derive(Default)]
+struct BrowserSignIn {
+    latest: u64,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl BrowserSignIn {
+    /// Start one: the one before is cancelled (its sender dropped).
+    fn begin(&mut self) -> (u64, tokio::sync::oneshot::Receiver<()>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.latest += 1;
+        self.cancel = Some(tx);
+        (self.latest, rx)
+    }
+
+    /// The person's Cancel: the one under way ends, and none may finish.
+    fn cancel(&mut self) {
+        self.cancel = None;
+    }
+
+    /// Whether sign-in `n` may finish: it is the latest and not cancelled.
+    /// It is then done, so a Cancel after it changes nothing.
+    fn finish(&mut self, n: u64) -> bool {
+        let ok = n == self.latest && self.cancel.is_some();
+        if ok {
+            self.cancel = None;
+        }
+        ok
+    }
+}
 
 /// `wait`, unless the sign-in is cancelled (its sender sent or dropped) first.
 async fn unless_cancelled<T>(wait: impl std::future::Future<Output = Res<T>>, cancel: &mut tokio::sync::oneshot::Receiver<()>) -> Res<T> {
@@ -578,7 +624,7 @@ async fn unless_cancelled<T>(wait: impl std::future::Future<Output = Res<T>>, ca
 /// The person cancelled the provider sign-in: nothing it brings back is kept.
 #[tauri::command]
 async fn provider_sign_in_cancel(app: State<'_, App>) -> Res<()> {
-    app.browser_sign_in.lock().unwrap().take();
+    app.browser_sign_in.lock().unwrap().cancel();
     Ok(())
 }
 
@@ -594,7 +640,7 @@ pub fn run() {
             update::start(app.handle().clone());
             Ok(())
         })
-        .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default(), loopback: Mutex::new(None), browser_sign_in: Mutex::new(None) })
+        .manage(App { store: store::Store::open(), client: Mutex::new(None), live: Mutex::new(HashMap::new()), speech: speech::Speech::default(), loopback: Mutex::new(None), browser_sign_in: Mutex::new(BrowserSignIn::default()) })
         .invoke_handler(tauri::generate_handler![restore, connect, trust, sign_in_method, sign_in, pair_device, provider_sign_in, provider_sign_in_cancel, sign_out, api, fetch_bytes, download, live_start, live_stop, notify, speak, stop_speaking, open_url, loopback_open, loopback_wait, app_info, update::update_state, update::update_look, update::update_install, update::whats_new, look::set_material, look::system_look])
         .run(tauri::generate_context!())
         .expect("start the Magnus app");
@@ -611,6 +657,27 @@ mod tests {
         drop(tx);
         let r = tokio::time::timeout(std::time::Duration::from_secs(5), super::unless_cancelled(forever, &mut rx)).await;
         assert_eq!(r, Ok(Err(super::CANCELLED.to_string())), "the sign-in kept waiting after it was cancelled");
+    }
+
+    /// Only the latest sign-in, not cancelled, finishes: a Cancel at any
+    /// point, even before the appliance answered the first request, stops it,
+    /// and an older one never takes a newer one's place (review of #160).
+    #[test]
+    fn only_the_latest_uncancelled_sign_in_finishes() {
+        let mut s = super::BrowserSignIn::default();
+        let (first, mut rx1) = s.begin();
+        s.cancel();
+        assert!(rx1.try_recv().is_err_and(|e| e == tokio::sync::oneshot::error::TryRecvError::Closed), "a Cancel before the first answer did not reach the sign-in");
+        assert!(!s.finish(first), "a cancelled sign-in finished");
+
+        let (older, mut rx2) = s.begin();
+        let (newer, mut rx3) = s.begin();
+        assert!(rx2.try_recv().is_err_and(|e| e == tokio::sync::oneshot::error::TryRecvError::Closed), "a newer sign-in did not end the older one");
+        assert!(!s.finish(older), "an older sign-in finished in a newer one's place");
+        assert_eq!(rx3.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty), "the older one's finish ended the newer one");
+        assert!(s.finish(newer));
+        s.cancel();
+        assert!(!s.finish(newer), "a sign-in finished twice");
     }
 
     use super::*;
