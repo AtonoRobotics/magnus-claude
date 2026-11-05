@@ -4,6 +4,10 @@
 
 `migrate` now strips a pre-existing kernel role's superuser-style attributes and refuses when it can still change the log through a grant or membership (`log.rs`, test in `log_review.rs`).
 
+## Rate limits are retried (2026-11-04)
+
+A single 429 paused a task until a person resumed it. Rate limits are now retried with backoff (honouring `retry-after`), and only one the provider says lasts longer than the longest backoff suspends the run (`run/agent_loop.rs`, test in `models.rs`).
+
 ## Agent loop path (2026-11-04)
 
 DECISIONS.md named the agent loop `run/loop.rs`, which does not exist; it is `run/agent_loop.rs`. Only the name was corrected. The file has no deny rule yet; whether to add one is the owner's decision.
