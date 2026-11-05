@@ -158,6 +158,11 @@ impl Kernel {
             cfg,
         });
         k.emit("kernel", Ev::KernelBoot { version: HARNESS_VERSION.into(), pid: std::process::id(), instructions: crate::run::instructions_version() }).await?;
+        // A kill switch a crash cut short is engaged again before anything
+        // else runs: until it is recorded, the schedule and action gates do
+        // not see it. Revoking its sign-ins at their providers goes on in
+        // the background.
+        k.finish_kill_switch().await;
         // The search index catches up with the log (a restore, a missed
         // write, a new embedding model) without holding up the boot.
         let sync = k.clone();

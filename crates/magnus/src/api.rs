@@ -1431,33 +1431,17 @@ impl Kernel {
         }
     }
     let take: Vec<String> = revoking.iter().map(|(n, _)| n.clone()).collect();
+    // With any an earlier switch took and a crash kept from revoking.
     let taken = match k.vault.seal_and_take(&take) {
         Ok(t) => t,
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("{e:#}") }))),
     };
+    let take: Vec<String> = taken.iter().map(|(n, _)| n.clone()).collect();
     // Revoked at once; each result is recorded only after the vault's
     // sealing below (or its failure), which starts the list it goes in: a
     // result recorded first was wiped, and the owner told it was not done.
     let (sealed_tx, sealed_rx) = tokio::sync::oneshot::channel::<()>();
-    let kk = k.clone();
-    tokio::spawn(async move {
-        let mut done = vec![];
-        for (name, secret) in taken {
-            let adapter = revoking.iter().find(|(n, _)| *n == name).map(|(_, a)| a.clone()).unwrap_or_default();
-            let (at_provider, detail) = if adapter.starts_with("connector:") {
-                crate::connectors::revoke(secret.expose()).await
-            } else {
-                kk.adapters.revoke(&adapter, secret.expose().to_string()).await
-            };
-            done.push(Ev::SecretRevoked { name, adapter, at_provider, detail });
-        }
-        let _ = sealed_rx.await;
-        for ev in done {
-            if let Err(e) = kk.emit("kernel", ev).await {
-                tracing::error!("could not record a revocation: {e:#}");
-            }
-        }
-    });
+    k.revoke_taken(taken, revoking, Some(sealed_rx));
     // Then the records: the policy is deny-all from this event on, and every
     // run is suspended.
     let kept: Vec<String> = names.iter().filter(|n| !take.contains(n)).cloned().collect();
@@ -1479,6 +1463,70 @@ impl Kernel {
         ));
     }
     Ok(json!({ "engaged": true, "revoking": take, "sealed": kept }))
+    }
+}
+
+impl Kernel {
+    /// Revoke at their providers the sign-ins the kill switch took out of
+    /// the vault, each let go by the vault once its provider has answered,
+    /// and record each result once `after` says the sealing is recorded.
+    fn revoke_taken(self: &Arc<Self>, taken: Vec<(String, crate::vault::Secret)>, known: Vec<(String, String)>, after: Option<tokio::sync::oneshot::Receiver<()>>) {
+        let k = self.clone();
+        tokio::spawn(async move {
+            let mut done = vec![];
+            for (name, secret) in taken {
+                let adapter = match known.iter().find(|(n, _)| *n == name) {
+                    Some((_, a)) => a.clone(),
+                    None => k.revoker_of(&name).await,
+                };
+                let (at_provider, detail) = if adapter.starts_with("connector:") {
+                    crate::connectors::revoke(secret.expose()).await
+                } else {
+                    k.adapters.revoke(&adapter, secret.expose().to_string()).await
+                };
+                if let Err(e) = k.vault.revoked(&name) {
+                    tracing::error!("could not let go of {name} after revoking it: {e:#}");
+                }
+                done.push(Ev::SecretRevoked { name, adapter, at_provider, detail });
+            }
+            if let Some(after) = after {
+                let _ = after.await;
+            }
+            for ev in done {
+                if let Err(e) = k.emit("kernel", ev).await {
+                    tracing::error!("could not record a revocation: {e:#}");
+                }
+            }
+        });
+    }
+
+    /// Who revokes a sign-in the switch took: its adapter, or the app it
+    /// signs in to (`connector:<app>`), even one removed since.
+    async fn revoker_of(&self, name: &str) -> String {
+        if let Some(adapter) = self.adapters.oauth_owner_of(name).await {
+            return adapter;
+        }
+        let app = self.all_connectors().into_iter().map(|(c, _)| c.name).find(|app| crate::connectors::is_sign_in_of(name, app));
+        format!("connector:{}", app.unwrap_or_default())
+    }
+
+    /// At start: a kill switch a crash cut short is finished. Sealed but not
+    /// recorded, it is engaged again (which records it and revokes what it
+    /// took); otherwise what it took and did not see revoked is revoked,
+    /// released since or not.
+    pub async fn finish_kill_switch(self: &Arc<Self>) {
+        if self.vault.is_sealed() && !self.read(|s| s.kill_switch) {
+            tracing::warn!("the vault is sealed but the kill switch is not recorded: engaging it again");
+            if let Err((_, e)) = self.kill_switch("kernel", true).await {
+                tracing::error!("could not engage the kill switch again: {e}");
+            }
+            return;
+        }
+        match self.vault.revoking() {
+            Ok(taken) if !taken.is_empty() => self.revoke_taken(taken, vec![], None),
+            Ok(_) => {}
+            Err(e) => tracing::error!("could not read the sign-ins waiting to be revoked: {e:#}"),
+        }
     }
 }
 
