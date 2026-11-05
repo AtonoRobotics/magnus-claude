@@ -242,6 +242,13 @@ pub struct StandInGmail {
     pub seen: Arc<Mutex<Vec<GmailRequest>>>,
     /// The next answer, instead of Gmail's usual one: status, headers, body.
     pub next: Arc<Mutex<Option<(u16, String, String)>>>,
+    /// What every draft says when read: `to`, `cc`, `bcc`, `subject` and
+    /// `body`. A test changes it as the person (or anyone with the
+    /// mailbox) would edit the draft in Gmail.
+    pub draft: Arc<Mutex<serde_json::Value>>,
+    /// The next send's answer, instead of Gmail's usual one (the draft is
+    /// read before it is sent, so `next` would answer that read).
+    pub next_send: Arc<Mutex<Option<(u16, String, String)>>>,
     _ca: TestCa,
 }
 
@@ -259,15 +266,18 @@ impl StandInGmail {
         let addr = l.local_addr().unwrap().to_string();
         let seen: Arc<Mutex<Vec<GmailRequest>>> = Arc::default();
         let next: Arc<Mutex<Option<(u16, String, String)>>> = Arc::default();
-        let (s2, n2) = (seen.clone(), next.clone());
+        let draft = Arc::new(Mutex::new(serde_json::json!({ "to": "Bo <bo@example.com>", "cc": "", "bcc": "", "subject": "Re: Plans", "body": "Friday works." })));
+        let next_send: Arc<Mutex<Option<(u16, String, String)>>> = Arc::default();
+        let (s2, n2, d2, ns2) = (seen.clone(), next.clone(), draft.clone(), next_send.clone());
         tokio::spawn(async move {
             while let Ok((tcp, _)) = l.accept().await {
-                let (acceptor, seen, next) = (acceptor.clone(), s2.clone(), n2.clone());
+                let (acceptor, seen, next, draft, next_send) = (acceptor.clone(), s2.clone(), n2.clone(), d2.clone(), ns2.clone());
                 tokio::spawn(async move {
                     let Ok(mut s) = acceptor.accept(tcp).await else { return };
                     let sni = s.get_ref().1.server_name().unwrap_or_default().to_string();
                     let Some(r) = read_request(&mut s, sni).await else { return };
-                    let (status, head, body) = next.lock().unwrap().take().unwrap_or_else(|| gmail_answer(&r, &seen.lock().unwrap(), drafts));
+                    let send = r.method == "POST" && r.path.ends_with("/drafts/send");
+                    let (status, head, body) = send.then(|| next_send.lock().unwrap().take()).flatten().or_else(|| next.lock().unwrap().take()).unwrap_or_else(|| gmail_answer(&r, &seen.lock().unwrap(), drafts, &draft.lock().unwrap()));
                     seen.lock().unwrap().push(r);
                     let out = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{head}\r\n{body}", body.len());
                     use tokio::io::AsyncWriteExt;
@@ -276,7 +286,7 @@ impl StandInGmail {
                 });
             }
         });
-        StandInGmail { addr, root, seen, next, _ca: ca }
+        StandInGmail { addr, root, seen, next, draft, next_send, _ca: ca }
     }
 
     pub fn requests(&self) -> Vec<GmailRequest> {
@@ -309,8 +319,8 @@ pub(crate) async fn read_request(s: &mut (impl tokio::io::AsyncRead + Unpin), sn
 
 /// What Gmail answers, for the requests the tests make: one thread in the
 /// inbox, drafts made `d1`, `d2`, ... (after those there already) and sent
-/// only if made.
-fn gmail_answer(r: &GmailRequest, before: &[GmailRequest], drafts: usize) -> (u16, String, String) {
+/// only if made, each reading as `draft` says.
+fn gmail_answer(r: &GmailRequest, before: &[GmailRequest], drafts: usize, draft: &serde_json::Value) -> (u16, String, String) {
     let base = "/gmail/v1/users/me";
     let path = r.path.strip_prefix(base).unwrap_or("");
     let made = drafts + before.iter().filter(|x| x.method == "POST" && x.path == format!("{base}/drafts")).count();
@@ -318,6 +328,17 @@ fn gmail_answer(r: &GmailRequest, before: &[GmailRequest], drafts: usize) -> (u1
     match (r.method.as_str(), path.split('?').next().unwrap_or("")) {
         ("GET", "/threads") => ok(serde_json::json!({ "threads": [{ "id": "t1", "snippet": "Can you send me the plan for Friday?" }] })),
         ("POST", "/drafts") => ok(serde_json::json!({ "id": format!("d{}", made + 1), "message": { "id": format!("dm{}", made + 1), "threadId": "t1", "labelIds": ["DRAFT"] } })),
+        ("POST", p) if p.starts_with("/threads/") && p.ends_with("/modify") => ok(serde_json::json!({ "id": "t1", "messages": [{ "id": "m1", "labelIds": ["INBOX", "Label_plans"] }] })),
+        ("GET", p) if p.strip_prefix("/drafts/d").and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| (1..=made).contains(&n)) => {
+            use base64::Engine;
+            let n = &p["/drafts/d".len()..];
+            let headers: Vec<serde_json::Value> = [("To", "to"), ("Cc", "cc"), ("Bcc", "bcc"), ("Subject", "subject")]
+                .iter()
+                .filter_map(|(name, k)| draft[k].as_str().filter(|v| !v.is_empty()).map(|v| serde_json::json!({ "name": name, "value": v })))
+                .collect();
+            let data = base64::engine::general_purpose::URL_SAFE.encode(draft["body"].as_str().unwrap_or_default());
+            ok(serde_json::json!({ "id": format!("d{n}"), "message": { "id": format!("dm{n}"), "threadId": "t1", "labelIds": ["DRAFT"], "payload": { "mimeType": "text/plain", "headers": headers, "body": { "data": data } } } }))
+        }
         ("POST", "/drafts/send") => {
             let id = serde_json::from_str::<serde_json::Value>(&r.body).unwrap_or_default()["id"].as_str().unwrap_or_default().to_string();
             match id.strip_prefix('d').and_then(|n| n.parse::<usize>().ok()) {

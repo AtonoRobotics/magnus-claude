@@ -15,6 +15,24 @@ if (!socket || !executablePath) { console.error('usage: MAGNUS_CHROMIUM=<chrome>
 let browser;
 const runs = new Map(); // run -> { context, page }
 const MAX_TEXT = 40000;
+// A click on a busy build box used the whole 10s and failed
+// (browser_navigates_clicks_types_and_screenshots, runs 41930362272,
+// 41902288030, 41929170386) while the same test passed when that box ran
+// one suite. Navigation already waits 45s.
+const ACTION_MS = 45000;
+
+// This browser reads websites. Host files, browser settings and executable
+// URLs are not websites, even when Chromium knows how to open them.
+function website(raw) {
+  const url = new URL(raw);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('The browser can only open http and https websites.');
+  }
+}
+
+function visiblePage(p) {
+  if (p.url() !== 'about:blank') website(p.url());
+}
 
 async function page(run) {
   if (!browser) browser = await chromium.launch({ executablePath, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
@@ -30,6 +48,7 @@ async function page(run) {
 
 // Interactive elements get refs [e1], [e2] ... that later calls can target.
 async function snapshot(p) {
+  visiblePage(p);
   const tree = await p.evaluate(() => {
     let n = 0;
     const lines = [];
@@ -72,6 +91,7 @@ function locate(p, target) {
 async function handle(req) {
   const { op, run } = req;
   if (op === 'close') { const r = runs.get(run); if (r) { await r.context.close(); runs.delete(run); } return { ok: true }; }
+  if (op === 'navigate') website(req.url);
   const p = await page(run);
   switch (op) {
     case 'navigate': {
@@ -80,15 +100,15 @@ async function handle(req) {
       return { status: resp ? resp.status() : null, text: await snapshot(p) };
     }
     case 'snapshot': return { text: await snapshot(p) };
-    case 'click': { await locate(p, req.target).click({ timeout: 10000 }); await p.waitForLoadState('domcontentloaded').catch(() => {}); await p.waitForTimeout(500); return { text: await snapshot(p) }; }
+    case 'click': { await locate(p, req.target).click({ timeout: ACTION_MS }); await p.waitForLoadState('domcontentloaded').catch(() => {}); await p.waitForTimeout(500); return { text: await snapshot(p) }; }
     case 'type': {
-      const l = locate(p, req.target); await l.fill(req.text, { timeout: 10000 });
+      const l = locate(p, req.target); await l.fill(req.text, { timeout: ACTION_MS });
       if (req.submit) { await l.press('Enter'); await p.waitForLoadState('domcontentloaded').catch(() => {}); await p.waitForTimeout(500); }
       return { text: await snapshot(p) };
     }
-    case 'select': { await locate(p, req.target).selectOption(req.value, { timeout: 10000 }); return { text: await snapshot(p) }; }
+    case 'select': { await locate(p, req.target).selectOption(req.value, { timeout: ACTION_MS }); return { text: await snapshot(p) }; }
     case 'back': { await p.goBack({ timeout: 15000 }).catch(() => {}); return { text: await snapshot(p) }; }
-    case 'screenshot': { const b = await p.screenshot({ type: 'png' }); return { image_b64: b.toString('base64'), text: `URL: ${p.url()}` }; }
+    case 'screenshot': { visiblePage(p); const b = await p.screenshot({ type: 'png' }); return { image_b64: b.toString('base64'), text: `URL: ${p.url()}` }; }
     default: return { error: `unknown op ${op}` };
   }
 }

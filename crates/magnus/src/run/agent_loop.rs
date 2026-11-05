@@ -173,7 +173,7 @@ impl Kernel {
                 Err(e) => {
                     self.emit(
                         "kernel",
-                        Ev::ModelError { run: run_id.into(), step, attempt, class: e.class, message: e.message.clone() },
+                        Ev::ModelError { run: run_id.into(), step, attempt, class: e.class, message: e.message.clone(), usage: e.usage.clone() },
                     )
                     .await?;
                     match e.class {

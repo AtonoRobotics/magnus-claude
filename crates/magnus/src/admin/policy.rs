@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 fn layer(id: &str) -> Option<String> {
     let l = id.replacen(':', "/", 1);
-    let ok = l == "org" || l.strip_prefix("group/").or(l.strip_prefix("user/")).is_some_and(|n| !n.is_empty() && n.len() <= 100 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'));
+    let ok = l == "org" || l.strip_prefix("group/").or(l.strip_prefix("user/")).or(l.strip_prefix("task/")).is_some_and(|n| !n.is_empty() && n.len() <= 100 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'));
     ok.then_some(l)
 }
 
@@ -27,7 +27,7 @@ fn id_of(layer: &str) -> String {
 }
 
 fn bad_id() -> Response {
-    refuse(StatusCode::NOT_FOUND, "not_found", "A policy set is org, group:<name> or user:<person>.")
+    refuse(StatusCode::NOT_FOUND, "not_found", "A policy set is org, group:<name>, user:<person> or task:<task>.")
 }
 
 async fn sets_now(c: &Console) -> anyhow::Result<Vec<Value>> {
@@ -150,4 +150,15 @@ pub async fn rollback(State(c): State<Arc<Console>>, Extension(a): Extension<Adm
     };
     let Some(cedar) = past else { return refuse(StatusCode::NOT_FOUND, "not_found", "No such version.") };
     put_in_force(&c, &a, "policy_rolled_back", &l, &cedar, json!({ "to_version": version })).await
+}
+
+#[cfg(test)]
+mod tests {
+    /// A task's layer is a set the console edits like any other (review of #157).
+    #[test]
+    fn a_task_layer_is_a_policy_set() {
+        assert_eq!(super::layer("task:task_0f3a").as_deref(), Some("task/task_0f3a"));
+        assert_eq!(super::layer("group:ops").as_deref(), Some("group/ops"));
+        assert!(super::layer("task:").is_none() && super::layer("task:a/b").is_none() && super::layer("tasks:x").is_none());
+    }
 }
