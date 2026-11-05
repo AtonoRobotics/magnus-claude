@@ -4,6 +4,10 @@
 
 Classifying an app's tool as `sandbox` let it skip the contract and the Rule of Two. The classification is refused, and an older one is treated as unclassified (`connectors.rs`, `boundary.rs`, test in `connectors.rs`).
 
+## The network cannot lock the appliance's own machine (2026-11-04)
+
+Wrong passwords from the network no longer lock a name out on the appliance's own machine (`accounts.rs`, `api.rs`, test in `app.rs`). Open for the owner: counting the network's attempts per address instead of per name.
+
 ## Browser navigation stays on websites (2026-11-04)
 
 The browser accepted `file://` URLs and returned appliance-host files to the model. It now accepts only HTTP and HTTPS navigation, and refuses snapshots or screenshots of other pages except its initial blank page. `browser_cannot_read_the_appliances_files_or_execute_a_navigation_script` first failed by returning a temporary private-file canary, then passed with the guard; the existing navigation, typing, click and screenshot test also passes. This closes the direct host-file read while the separately requested browser-workspace redesign is researched.
