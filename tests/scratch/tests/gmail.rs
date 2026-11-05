@@ -54,6 +54,7 @@ async fn brokered_gmail(app: &mut Appliance, gmail: &StandInGmail) -> (FakeOAuth
         let c = cfg["connectors"].as_array_mut().unwrap().iter_mut().find(|c| c["name"].as_str() == Some("gmail")).unwrap().as_table_mut().unwrap();
         c.insert("audience".into(), mf["audience"].clone());
         c.insert("scopes".into(), mf["scopes"].clone());
+        c.insert("destinations".into(), mf["destinations"].clone());
     })
     .await;
     let alice = app.api("alice");
@@ -95,8 +96,9 @@ fn calls(gmail: &StandInGmail) -> Vec<(String, String)> {
 }
 
 /// Sending is never undone, so it always asks first: here Magnus has read
-/// nothing yet (nothing else makes it ask), and nothing reaches Gmail
-/// until Alice approves the send.
+/// nothing yet (nothing else makes it ask), and nothing is sent until
+/// Alice approves the send. Its card shows the email as Gmail has it, read
+/// from the draft, not the draft's id Magnus wrote.
 #[tokio::test(flavor = "multi_thread")]
 async fn gmail_sends_a_draft_only_once_the_person_approves_it_reaching_only_gmail() {
     let gmail = StandInGmail::with_drafts(1).await;
@@ -114,14 +116,19 @@ async fn gmail_sends_a_draft_only_once_the_person_approves_it_reaching_only_gmai
     let task = alice.submit("Send Bob the draft I wrote him.").await;
     let (ask, tool) = asked(&alice, &task).await;
     assert_eq!(tool, "send_draft");
-    assert!(calls(&gmail).is_empty(), "Gmail was called before Alice approved: {:?}", calls(&gmail));
+    let read = ("GET".to_string(), "/drafts/d1".to_string());
+    assert_eq!(calls(&gmail), [read.clone()], "Gmail was called for more than reading the draft before Alice approved");
+    assert_eq!(
+        ask["details"]["destinations"],
+        json!({ "recipients": { "to": ["bo@example.com"], "cc": [], "bcc": [] }, "content": { "subject": "Re: Plans", "body": "Friday works.", "attachments": [] } })
+    );
     approve(&alice, &ask).await;
 
     let review = alice.wait_item(&task, "review").await;
     assert!(alice.respond(review["id"].as_str().unwrap(), json!({ "decision": "accept" })).await.is_success());
     assert_eq!(alice.wait_settled(&task).await["status"], "completed");
-    assert_eq!(calls(&gmail), [("POST".to_string(), "/drafts/send".to_string())]);
-    assert_eq!(serde_json::from_str::<Value>(&gmail.requests()[0].body).unwrap(), json!({ "id": "d1" }));
+    assert_eq!(calls(&gmail), [read.clone(), read, ("POST".to_string(), "/drafts/send".to_string())]);
+    assert_eq!(serde_json::from_str::<Value>(&gmail.requests()[2].body).unwrap(), json!({ "id": "d1" }));
     let said = m.requests().iter().filter(|c| c.text().contains("Send Bob the draft I wrote him.")).map(|c| c.text()).max_by_key(|t| t.len()).unwrap();
     assert!(said.contains("SENT"), "the send's answer did not reach Magnus: {said}");
     only_gmail(&app, &gmail, &provider);
@@ -153,7 +160,7 @@ async fn having_read_mail_gmail_asks_before_the_draft_and_again_before_the_send(
     assert_eq!((tool.as_str(), calls(&gmail)), ("create_draft", vec![get("/threads")]));
     approve(&alice, &ask).await;
     let (ask, tool) = asked(&alice, &task).await;
-    assert_eq!((tool.as_str(), calls(&gmail)), ("send_draft", vec![get("/threads"), post("/drafts")]));
+    assert_eq!((tool.as_str(), calls(&gmail)), ("send_draft", vec![get("/threads"), post("/drafts"), get("/drafts/d1")]));
     let draft: Value = serde_json::from_str(&gmail.requests()[1].body).unwrap();
     let raw = String::from_utf8(base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE, draft["message"]["raw"].as_str().unwrap()).unwrap()).unwrap();
     assert!(raw.starts_with("To: bob@example.com\r\nSubject: The plan\r\n"), "{raw}");
@@ -162,7 +169,48 @@ async fn having_read_mail_gmail_asks_before_the_draft_and_again_before_the_send(
     let review = alice.wait_item(&task, "review").await;
     assert!(alice.respond(review["id"].as_str().unwrap(), json!({ "decision": "accept" })).await.is_success());
     assert_eq!(alice.wait_settled(&task).await["status"], "completed");
-    assert_eq!(calls(&gmail), [get("/threads"), post("/drafts"), post("/drafts/send")]);
+    assert_eq!(calls(&gmail), [get("/threads"), post("/drafts"), get("/drafts/d1"), get("/drafts/d1"), post("/drafts/send")]);
+    only_gmail(&app, &gmail, &provider);
+}
+
+/// An approval holds for the email as it was shown: a draft changed after
+/// its card went up (here a Bcc added, as anyone with the mailbox could) is
+/// another email, so approving the old card sends nothing and the new card
+/// shows the change. Only the email Alice saw last is sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_changed_after_its_card_asks_again_showing_the_change() {
+    let gmail = StandInGmail::with_drafts(1).await;
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("send Bob the draft I wrote him", "Bob has it"),
+            1 => tool("gmail__send_draft", json!({ "draft_id": "d1" })),
+            _ => complete("sent Bob your draft"),
+        }
+    }))
+    .await;
+    let (app, provider, _image) = gmail_for_alice(&m, &gmail).await;
+    let alice = app.api("alice");
+    let send = ("POST".to_string(), "/drafts/send".to_string());
+
+    let task = alice.submit("Send Bob the draft I wrote him.").await;
+    let (first, _) = asked(&alice, &task).await;
+    assert_eq!(first["details"]["destinations"]["recipients"]["bcc"], json!([]));
+    gmail.draft.lock().unwrap()["bcc"] = json!("Eve <EVE@evil.example>");
+    approve(&alice, &first).await;
+
+    let second = eventually("a new card for the changed draft", std::time::Duration::from_secs(60), || async {
+        alice.open_items(&task, "approval").await.into_iter().find(|i| i["id"] != first["id"])
+    })
+    .await;
+    assert_eq!(second["details"]["destinations"]["recipients"]["bcc"], json!(["eve@evil.example"]));
+    assert_ne!(second["details"]["input_hash"], first["details"]["input_hash"]);
+    assert!(!calls(&gmail).contains(&send), "the changed draft was sent on the old card's approval");
+    approve(&alice, &second).await;
+
+    let review = alice.wait_item(&task, "review").await;
+    assert!(alice.respond(review["id"].as_str().unwrap(), json!({ "decision": "accept" })).await.is_success());
+    assert_eq!(alice.wait_settled(&task).await["status"], "completed");
+    assert_eq!(calls(&gmail).iter().filter(|c| **c == send).count(), 1);
     only_gmail(&app, &gmail, &provider);
 }
 
@@ -201,7 +249,7 @@ async fn gmail_s_refusals_reach_the_boundary_as_what_they_mean() {
     }
     assert_eq!(ask.1, "send_draft");
     // The send: Gmail breaks off with 503, so it may have gone.
-    *gmail.next.lock().unwrap() = Some((503, String::new(), json!({ "error": { "code": 503, "message": "The service is currently unavailable." } }).to_string()));
+    *gmail.next_send.lock().unwrap() = Some((503, String::new(), json!({ "error": { "code": 503, "message": "The service is currently unavailable." } }).to_string()));
     approve(&alice, &ask.0).await;
     eventually("the send's unknown outcome", std::time::Duration::from_secs(60), || async { app.logs().contains("send_draft: outcome unknown: Gmail answered HTTP 503 and whether it did this is unknown.").then_some(()) }).await;
     only_gmail(&app, &gmail, &provider);
