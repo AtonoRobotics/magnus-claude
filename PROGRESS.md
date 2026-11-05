@@ -1,5 +1,9 @@
 # Progress
 
+## Magnus registers once per app server (2026-11-05)
+
+Magnus registered a new client at GitLab on every sign-in, and gitlab.com allows about ten an hour per address (#208). Magnus now keeps the client it registers and reuses it for everyone's later sign-ins from any port on their computer, as RFC 8252 lets loopback redirects do. If the provider has dropped the client, Magnus registers again once. CI still registers once per GitLab test run, since each test starts a fresh appliance.
+
 ## A sign-in waits for the provider to know a new client (2026-11-05)
 
 Master's rerun failed when gitlab.com said a client Magnus had just registered "does not exist" (#170). After registering, Magnus now checks that the provider's sign-in page knows the client, for up to ten seconds, before giving the address to the person. gitlab.com also allows only about ten registrations an hour per address, and Magnus registers on every sign-in. Reusing one client is #208. Still open from the same night: the installed-app update test's lost Accept (#207).

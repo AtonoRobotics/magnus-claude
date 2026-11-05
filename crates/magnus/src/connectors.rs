@@ -64,6 +64,9 @@ struct Pending {
     /// Whether this sign-in sent a PKCE challenge. The verifier is sent
     /// back only then.
     pkce: bool,
+    /// The vault name of the registered client this sign-in used again,
+    /// forgotten if the token endpoint no longer knows it.
+    kept: Option<String>,
     at: Instant,
 }
 
@@ -249,20 +252,48 @@ fn http() -> reqwest::Client {
 /// page); then it is handed out as it is. Redirects are not followed: the
 /// answer is the provider's own.
 async fn until_client_known(authorize: &str) {
-    let c = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("http client");
     let known = async {
-        loop {
-            let unknown = match c.get(authorize).send().await {
-                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => r.text().await.unwrap_or_default().contains("invalid_client"),
-                _ => false,
-            };
-            if !unknown {
-                return;
-            }
+        while unknown(authorize).await {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     };
     let _ = tokio::time::timeout(Duration::from_secs(10), known).await;
+}
+
+fn no_redirects() -> reqwest::Client {
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(10)).build().expect("http client")
+}
+
+/// The provider's sign-in says it does not know the client (401
+/// invalid_client, as GitLab.com answers).
+async fn unknown(authorize: &str) -> bool {
+    match no_redirects().get(authorize).send().await {
+        Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => r.text().await.unwrap_or_default().contains("invalid_client"),
+        _ => false,
+    }
+}
+
+/// The provider's sign-in refuses the address outright (a client error),
+/// as it does for a client it no longer knows: GitLab.com answers 401
+/// invalid_client before anyone signs in. Redirects are not followed.
+async fn refused(authorize: &str) -> bool {
+    no_redirects().get(authorize).send().await.is_ok_and(|r| r.status().is_client_error())
+}
+
+/// Where the client Magnus registered at `registration` for a redirect is
+/// kept. Any port on a loopback IP address is the same redirect (RFC 8252
+/// §7.3; GitLab.com's Doorkeeper and Cloudflare's provider library match it
+/// so), so one client serves every sign-in from the person's computer.
+/// `localhost` is a name, matched exactly.
+fn registered_client_name(registration: &str, redirect_uri: &str) -> String {
+    let redirect = match url::Url::parse(redirect_uri) {
+        Ok(mut u) if u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1" | "[::1]")) => {
+            let _ = u.set_port(None);
+            u.to_string()
+        }
+        _ => redirect_uri.to_string(),
+    };
+    format!("registered_client {registration} {redirect}")
 }
 
 pub(crate) fn random() -> String {
@@ -516,6 +547,27 @@ impl Kernel {
         Ok(Some(Secret::new(t.access_token)))
     }
 
+    /// Register Magnus at an authorization server for a redirect address
+    /// (RFC 7591), and keep the client under `name` for later sign-ins.
+    async fn register_client(&self, name: &str, registration: &str, redirect_uri: &str) -> Result<(String, Option<String>)> {
+        let r = http()
+            .post(registration)
+            .json(&json!({
+                "client_name": "Magnus", "redirect_uris": [redirect_uri], "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"], "token_endpoint_auth_method": "none"
+            }))
+            .send()
+            .await?;
+        if !r.status().is_success() {
+            bail!("the app's authorization server refused to register Magnus: HTTP {}", r.status());
+        }
+        let v: Value = r.json().await?;
+        let id = v["client_id"].as_str().ok_or_else(|| anyhow!("registration returned no client id"))?.to_string();
+        let secret = v["client_secret"].as_str().map(String::from);
+        self.vault.put(name, &json!({ "client_id": id, "client_secret": secret }).to_string())?;
+        Ok((id, secret))
+    }
+
     /// Start signing in to an app: register if needed, and return the
     /// address to open in the person's browser.
     pub async fn connector_sign_in(&self, c: &Connector, person: &str, redirect_uri: &str) -> Result<(String, String)> {
@@ -567,33 +619,35 @@ impl Kernel {
             }
             None => None,
         };
-        let fresh = registered.is_none() && c.client_id.is_none();
-        let (client_id, client_secret) = match (registered, &c.client_id, s("registration_endpoint")) {
-            (Some(r), _, _) => r,
-            (None, Some(id), _) => (id.clone(), None),
+        // A client Magnus registered itself is kept and used again for
+        // every later sign-in at that server, by anyone on the appliance:
+        // gitlab.com lets one address register about ten an hour (#208).
+        let mut kept: Option<(String, String)> = None;
+        let (mut client_id, mut client_secret, fresh) = match (registered, &c.client_id, s("registration_endpoint")) {
+            (Some((id, secret)), _, _) => (id, secret, false),
+            (None, Some(id), _) => (id.clone(), None, false),
             (None, None, Some(reg)) => {
-                let r = http()
-                    .post(&reg)
-                    .json(&json!({
-                        "client_name": "Magnus", "redirect_uris": [redirect_uri], "grant_types": ["authorization_code", "refresh_token"],
-                        "response_types": ["code"], "token_endpoint_auth_method": "none"
-                    }))
-                    .send()
-                    .await?;
-                if !r.status().is_success() {
-                    bail!("the app's authorization server refused to register Magnus: HTTP {}", r.status());
+                let name = registered_client_name(&reg, redirect_uri);
+                let stored = self.vault.get(&name)?.and_then(|raw| serde_json::from_str::<Value>(raw.expose()).ok());
+                let had = stored.as_ref().and_then(|v| v["client_id"].as_str().map(|id| (id.to_string(), v["client_secret"].as_str().map(String::from))));
+                kept = Some((name.clone(), reg.clone()));
+                match had {
+                    Some((id, secret)) => (id, secret, false),
+                    None => {
+                        let (id, secret) = self.register_client(&name, &reg, redirect_uri).await?;
+                        (id, secret, true)
+                    }
                 }
-                let v: Value = r.json().await?;
-                (v["client_id"].as_str().ok_or_else(|| anyhow!("registration returned no client id"))?.to_string(), v["client_secret"].as_str().map(String::from))
             }
             (None, None, None) => bail!("the app's authorization server does not let Magnus register itself, and Magnus never asks for client details"),
         };
         let verifier = random();
         let state = random();
-        let mut u = url::Url::parse(&authorize)?;
-        {
+        let wanted = self.wanted_scopes(c, person);
+        let address = |client_id: &str| -> Result<url::Url> {
+            let mut u = url::Url::parse(&authorize)?;
             let mut q = u.query_pairs_mut();
-            q.append_pair("response_type", "code").append_pair("client_id", &client_id).append_pair("redirect_uri", redirect_uri).append_pair("state", &state);
+            q.append_pair("response_type", "code").append_pair("client_id", client_id).append_pair("redirect_uri", redirect_uri).append_pair("state", &state);
             if c.pkce {
                 q.append_pair("code_challenge", &challenge(&verifier)).append_pair("code_challenge_method", "S256");
             }
@@ -601,9 +655,9 @@ impl Kernel {
                 q.append_pair("resource", &resource);
             }
             // Exactly what the app's manifest asks for, where it names it.
-            let mut scopes = if c.scopes.is_empty() { scopes } else { c.scopes.clone() };
+            let mut scopes = if c.scopes.is_empty() { scopes.clone() } else { c.scopes.clone() };
             // More access the app asked of this person's sign-in.
-            for w in self.wanted_scopes(c, person) {
+            for w in wanted.iter().cloned() {
                 if !scopes.contains(&w) {
                     scopes.push(w);
                 }
@@ -616,15 +670,26 @@ impl Kernel {
             if authorize.starts_with("https://accounts.google.com/") {
                 q.append_pair("access_type", "offline").append_pair("prompt", "consent");
             }
-        }
+            drop(q);
+            Ok(u)
+        };
+        let mut u = address(&client_id)?;
         if fresh {
             until_client_known(u.as_str()).await;
+        } else if let Some((name, reg)) = &kept {
+            // The provider may have dropped a client kept from before: its
+            // sign-in refuses the address. Magnus registers again, once.
+            if refused(u.as_str()).await {
+                (client_id, client_secret) = self.register_client(name, reg, redirect_uri).await?;
+                u = address(&client_id)?;
+                until_client_known(u.as_str()).await;
+            }
         }
         let client = Client { token_endpoint: token, revocation_endpoint: s("revocation_endpoint"), client_id, client_secret, resource };
         let mut p = pending().lock().unwrap();
         p.retain(|_, x| x.at.elapsed() < PENDING_FOR);
         let iss_required = asm["authorization_response_iss_parameter_supported"] == true;
-        p.insert(state.clone(), Pending { app: c.name.clone(), person: person.into(), verifier, redirect_uri: redirect_uri.into(), client, issuer, iss_required, pkce: c.pkce, at: Instant::now() });
+        p.insert(state.clone(), Pending { app: c.name.clone(), person: person.into(), verifier, redirect_uri: redirect_uri.into(), client, issuer, iss_required, pkce: c.pkce, kept: kept.map(|(name, _)| name), at: Instant::now() });
         Ok((u.to_string(), state))
     }
 
@@ -667,7 +732,14 @@ impl Kernel {
         }
         let r = http().post(&c.token_endpoint).form(&form).send().await?;
         if !r.status().is_success() {
-            bail!("the app's authorization server refused the sign-in: HTTP {}", r.status());
+            let status = r.status();
+            // A kept client the provider dropped: the next sign-in registers.
+            if let Some(name) = &p.kept {
+                if r.text().await.unwrap_or_default().contains("invalid_client") {
+                    let _ = self.vault.remove(name);
+                }
+            }
+            bail!("the app's authorization server refused the sign-in: HTTP {status}");
         }
         let v: Value = r.json().await?;
         let g = granted(&v).map_err(|e| anyhow!(e))?;

@@ -68,7 +68,24 @@ pub struct AppState {
     first_seen: HashMap<String, std::time::Instant>,
     /// Clients it has answered a sign-in request for.
     known: HashSet<String>,
+    /// How many clients have registered.
+    pub registrations: usize,
     n: usize,
+}
+
+/// Whether a sign-in's redirect is one a client registered. On a loopback
+/// IP address any port is the same redirect (RFC 8252 §7.3), as GitLab.com's
+/// Doorkeeper 5.9.9 and Cloudflare's workers-oauth-provider match it (#208);
+/// anything else must be exactly the same.
+fn redirect_registered(registered: &[String], asked: &str) -> bool {
+    let any_port = |u: &str| match url::Url::parse(u) {
+        Ok(mut u) if u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1" | "[::1]")) => {
+            let _ = u.set_port(None);
+            u.to_string()
+        }
+        _ => u.to_string(),
+    };
+    registered.iter().any(|r| any_port(r) == any_port(asked))
 }
 
 #[derive(Clone)]
@@ -170,6 +187,7 @@ async fn metadata(State((base, st)): S) -> Json<Value> {
 async fn register(State((_, st)): S, Json(b): Json<Value>) -> Response {
     let mut s = st.lock().unwrap();
     s.n += 1;
+    s.registrations += 1;
     let id = format!("client-{}", s.n);
     let redirects = b["redirect_uris"].as_array().into_iter().flatten().filter_map(|u| u.as_str().map(String::from)).collect();
     s.clients.insert(id.clone(), redirects);
@@ -211,7 +229,7 @@ async fn authorize(State((base, st)): S, Query(q): Query<HashMap<String, String>
             .body(Body::from(json!({ "error": "invalid_client", "error_description": "The requested OAuth 2.0 Client does not exist." }).to_string()))
             .unwrap();
     }
-    if !s.clients.get(&g("client_id")).is_some_and(|r| r.contains(&g("redirect_uri"))) || g("code_challenge_method") != "S256" || g("response_type") != "code" {
+    if !s.clients.get(&g("client_id")).is_some_and(|r| redirect_registered(r, &g("redirect_uri"))) || g("code_challenge_method") != "S256" || g("response_type") != "code" {
         return oauth_error(400, "invalid_request");
     }
     s.n += 1;
@@ -337,6 +355,12 @@ impl FakeOAuthApp {
         let mut s = self.state.lock().unwrap();
         s.access.clear();
         s.refresh.clear();
+    }
+
+    /// The provider drops every client registered with it: it no longer
+    /// knows them.
+    pub fn forget_clients(&self) {
+        self.state.lock().unwrap().clients.clear();
     }
 
     pub fn calls(&self, tool: &str) -> usize {

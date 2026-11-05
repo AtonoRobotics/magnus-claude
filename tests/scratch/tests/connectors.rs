@@ -66,6 +66,45 @@ async fn a_sign_in_waits_for_a_new_client_ten_seconds_at_most() {
     assert!(waited < std::time::Duration::from_secs(12), "the person waited {waited:?} for the sign-in page");
 }
 
+/// Magnus registers at an app's authorization server once: every later
+/// sign-in, by anyone on the appliance and from whatever port on their
+/// computer, uses that client. GitLab.com lets one address register about
+/// ten clients an hour (#208).
+#[tokio::test(flavor = "multi_thread")]
+async fn sign_ins_by_anyone_from_any_port_register_magnus_once() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(steps(vec![])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (st, v) = app.api("alice").post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    for who in ["alice", "bob", "alice"] {
+        let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        sign_in(&app.api(who), "calendar", callback.local_addr().unwrap().port()).await;
+    }
+    let (_, list) = app.api("bob").get("/v1/connectors").await;
+    assert_eq!(list["connectors"][0]["signed_in"], true, "{list}");
+    assert_eq!(cal.state.lock().unwrap().registrations, 1, "Magnus registered again for a later sign-in");
+}
+
+/// A provider can drop a client Magnus keeps: the next sign-in finds its
+/// sign-in refusing the client, registers again, and goes through.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_the_provider_dropped_is_registered_again() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(steps(vec![])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (st, v) = app.api("alice").post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = callback.local_addr().unwrap().port();
+    sign_in(&app.api("alice"), "calendar", port).await;
+    cal.forget_clients();
+    sign_in(&app.api("bob"), "calendar", port).await;
+    let (_, list) = app.api("bob").get("/v1/connectors").await;
+    assert_eq!(list["connectors"][0]["signed_in"], true, "{list}");
+    assert_eq!(cal.state.lock().unwrap().registrations, 2);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_adds_an_app_each_person_signs_in_with_their_own_account_and_the_kill_switch_revokes_every_sign_in() {
     // Tokens last 30 s, inside the minute Magnus refreshes ahead: every use refreshes.
