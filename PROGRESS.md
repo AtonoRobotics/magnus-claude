@@ -1,5 +1,9 @@
 # Progress
 
+## Cancelling a browser sign-in ends it (2026-11-04)
+
+Cancel in the app's browser sign-in now ends the wait in the app, so a sign-in finished later in the browser leaves no session and never replaces the stored one (`desktop/src-tauri/src/lib.rs`, `desktop/ui/app.js`, `bridge.js`).
+
 ## Adapter messages print without credentials (2026-11-04)
 
 Printing an unexpected adapter message could write a refreshed credential into an error, tracing or the log. The protocol's messages now print with credentials redacted (`adapter-proto`).
