@@ -4,6 +4,10 @@
 
 An entry saved while the embedding server was down was missing from every search until the next start. Searches by meaning now also return word matches among entries not yet embedded (`knowledge.rs`, test in `knowledge.rs`).
 
+## A task's own policy layer (2026-11-04)
+
+The task layer DECISIONS names now exists: `task/<id>`, set by the owner or the task's person, narrowing that task alone (`policy.rs`, `boundary.rs`, `api.rs`, `policy_admin.rs`, test in `task_policy.rs`).
+
 ## An app's tool is never the sandbox (2026-11-04)
 
 Classifying an app's tool as `sandbox` let it skip the contract and the Rule of Two. The classification is refused, and an older one is treated as unclassified (`connectors.rs`, `boundary.rs`, test in `connectors.rs`).
