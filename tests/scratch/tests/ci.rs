@@ -197,3 +197,13 @@ printf '%s\n' 'throwaway' > "$w"
     let runs_on = workflow.split("runs-on:").nth(1).unwrap().lines().next().unwrap();
     assert!(runs_on.contains("magnus-linux") && !runs_on.contains("magnus-light"), "{runs_on}");
 }
+
+/// The two update AppImages compile after the suite. Beside it, they took
+/// the cores the browser tests need (run 41949527809).
+#[test]
+fn the_update_builds_wait_until_the_suite_has_finished() {
+    let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
+    let suite = workflow.find("Unit, invariant and scratch tests").expect("suite step");
+    let builds = workflow.find("Start the update test's two builds").expect("update builds");
+    assert!(builds > suite, "the update builds start during the suite");
+}
