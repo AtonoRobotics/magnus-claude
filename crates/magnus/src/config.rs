@@ -788,6 +788,50 @@ pub struct Connector {
     /// the public https callback.
     #[serde(default)]
     pub handoff: Option<String>,
+    /// Where a tool's action goes, read from what it acts on, by tool.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub destinations: BTreeMap<String, Destination>,
+}
+
+/// Where an action goes, read at the gate from the object it acts on and
+/// never taken from what the model wrote (approvals spec, Destination
+/// fields): `read` is the app's read tool for that object, called with the
+/// action's `id` field as it is; `recipients` and `content` point (JSON
+/// pointers) into what it returns. The approval card shows them, and an
+/// approval holds only for exactly what they were.
+#[derive(Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
+pub struct Destination {
+    pub read: String,
+    pub id: String,
+    pub recipients: Vec<String>,
+    #[serde(default)]
+    pub content: Vec<String>,
+}
+
+impl Destination {
+    /// What is wrong with this declaration for `tool`, given each tool's
+    /// risk class: it is for a write, it reads with a read tool of the same
+    /// app, and each pointer is one and names its own field.
+    pub fn fault(&self, tool: &str, risk: impl Fn(&str) -> Option<String>) -> Option<String> {
+        let r = risk(tool)?;
+        if r == "read" {
+            return Some(format!("{tool} is a read: it goes nowhere"));
+        }
+        if risk(&self.read).as_deref() != Some("read") {
+            return Some(format!("{tool} reads its destinations with {}, which is not a read tool of the same app", self.read));
+        }
+        if self.id.is_empty() || self.recipients.is_empty() {
+            return Some(format!("{tool} names no id field or no recipients"));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for p in self.recipients.iter().chain(&self.content) {
+            let name = p.rsplit('/').next().unwrap_or_default();
+            if !p.starts_with('/') || name.is_empty() || !names.insert(name) {
+                return Some(format!("{tool}: {p:?} is not a JSON pointer ending in a field name of its own"));
+            }
+        }
+        None
+    }
 }
 
 fn pkce_on() -> bool {
@@ -845,6 +889,13 @@ impl Config {
             );
             for (t, class) in &c.tools {
                 anyhow::ensure!(crate::tools::Risk::parse(&class.risk).is_some(), "tool {}.{t}: unknown risk class {}", c.name, class.risk);
+            }
+            for (t, d) in &c.destinations {
+                let risk = |t: &str| c.tools.get(t).map(|class| class.risk.clone());
+                anyhow::ensure!(risk(t).is_some(), "connector {}: destinations for {t}, which is not one of its tools", c.name);
+                if let Some(why) = d.fault(t, risk) {
+                    anyhow::bail!("connector {}: {why}", c.name);
+                }
             }
             anyhow::ensure!(crate::tools::Label::parse(&c.label).is_some(), "connector {}: unknown label {}", c.name, c.label);
             anyhow::ensure!(crate::tools::Audience::parse(&c.audience).is_some(), "connector {}: unknown audience {}", c.name, c.audience);
