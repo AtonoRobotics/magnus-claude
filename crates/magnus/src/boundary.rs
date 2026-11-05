@@ -96,7 +96,9 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
     let (app, remote) = tool.split_once("__")?;
     let c = k.connector(app)?;
     let class = c.tools.get(remote)?;
-    let risk = Risk::parse(&class.risk)?;
+    // Never the sandbox, which is the appliance's own: an older log may
+    // class an app's tool so, and it counts as unclassified.
+    let risk = Risk::parse(&class.risk).filter(|r| *r != Risk::Sandbox)?;
     Some(Facts {
         name: tool.into(),
         app: app.into(),
