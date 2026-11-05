@@ -1,5 +1,9 @@
 # Progress
 
+## Test consoles listen below the ephemeral range (2026-11-05)
+
+The admin console tests picked a port by binding port 0 and letting it go, then started the console on it later. With the suites running at once, another process could take that port, and the test talked to the wrong listener (`InvalidCertificate(BadSignature)` in `admin_operations` on #164). `admin::free_port` now picks a free port in 20000-31999, below the ephemeral range, and `admin_on_appliance` uses that helper (`admin.rs`). Test: `a_console_port_is_below_the_ephemeral_range`.
+
 ## One `ready` issue (2026-11-05)
 
 At most one open issue carries `ready`. It is the single next pull for work that shares `PROGRESS.md`, `DECISIONS.md`, the release and tag paths or live OAuth. The owner may mark another issue `ready` only when that issue does not share those files. A new finding or product idea is labelled `queue` only; `queue` alone is the backlog and is not pullable, until the owner or the agent finishing the one `in-progress` claim promotes it to `ready`. Claiming still takes `ready` off and adds `in-progress`. The rest of how a claim becomes a pull request is unchanged (CLAUDE.md, "Work starts from an issue"; DECISIONS.md).
