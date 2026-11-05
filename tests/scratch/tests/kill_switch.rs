@@ -265,3 +265,95 @@ async fn new_work_is_refused_while_the_kill_switch_is_on() {
     let (st, v) = alice.post("/v1/tasks", json!({ "text": "Email bob a hello." })).await;
     assert_eq!(st.as_u16(), 201, "released, new work is still refused: {v}");
 }
+
+/// A page that keeps calling home while it is open, and how often each did.
+async fn calling_pages() -> (String, Arc<Mutex<HashMap<String, usize>>>) {
+    use axum::{extract::Path, response::Html};
+    let calls: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    let app = Router::new()
+        .route("/page/{name}", get(|Path(n): Path<String>| async move { Html(format!("<html><body><h1>Page {n}</h1><script>setInterval(() => fetch('/call/{n}'), 100)</script></body></html>")) }))
+        .route(
+            "/call/{name}",
+            get(|State(s): State<Arc<Mutex<HashMap<String, usize>>>>, Path(n): Path<String>| async move {
+                *s.lock().unwrap().entry(n).or_default() += 1;
+                ""
+            }),
+        )
+        .with_state(calls.clone());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (url, calls)
+}
+
+/// The kill switch stops what runs in the browser too: every run's pages
+/// close, the running run's and the one already waiting on a question, so
+/// no page's scripts go on after it (found reviewing the shared computer
+/// spec, 2026-11-04: a suspended run kept its browser context open).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_kill_switch_closes_every_runs_pages() {
+    let (site, calls) = calling_pages().await;
+    let in_turn = Arc::new(AtomicBool::new(false));
+    let go = Arc::new(tokio::sync::Notify::new());
+    let (t, g, s) = (in_turn.clone(), go.clone(), site.clone());
+    let m = FakeModel::start(script(move |c| {
+        let (t, g, s) = (t.clone(), g.clone(), s.clone());
+        async move {
+            let page = if c.body.to_string().contains("Watch page a.") { "a" } else { "b" };
+            match c.turn() {
+                0 => contract_unchecked("watch the page", "the page was watched"),
+                1 => tool("browser_navigate", json!({ "url": format!("{s}/page/{page}") })),
+                2 if c.last_results().iter().any(|r| r.is_error) => fail(&format!("the page did not open: {}", c.last_results()[0].text)),
+                2 if page == "b" => tool("ask_principal", json!({ "question": "Keep watching?" })),
+                // Held in a model call until the kill switch is engaged.
+                2 => {
+                    t.store(true, Ordering::SeqCst);
+                    g.notified().await;
+                    complete("Watched.")
+                }
+                _ => complete("Watched."),
+            }
+        }
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    reconfigure(&mut app, |cfg| {
+        let browser = json!({ "command": ["node", workspace_root().join("browser/sidecar.js")], "chromium": chromium() });
+        cfg.insert("browser".into(), toml::Value::try_from(browser).unwrap());
+    })
+    .await;
+    let alice = app.api("alice");
+    let calling = |n: &'static str| {
+        let calls = calls.clone();
+        move || {
+            let calls = calls.clone();
+            async move { (calls.lock().unwrap().get(n).copied().unwrap_or(0) > 3).then_some(()) }
+        }
+    };
+
+    // One run waits on a question with its page open; another is running.
+    let waiting = alice.submit("Watch page b.").await;
+    alice.wait_item(&waiting, "question").await;
+    eventually("the waiting run's page calls home", PATIENCE, calling("b")).await;
+    let running = alice.submit("Watch page a.").await;
+    eventually("the running run is in a model call", PATIENCE, || {
+        let t = in_turn.clone();
+        async move { t.load(Ordering::SeqCst).then_some(()) }
+    })
+    .await;
+    eventually("the running run's page calls home", PATIENCE, calling("a")).await;
+
+    let (st, v) = alice.post("/v1/kill-switch", json!({ "engaged": true })).await;
+    assert!(st.is_success(), "{v}");
+    go.notify_one();
+    let t = alice.wait_status(&running, &["suspended"]).await;
+    assert_eq!(t["waiting_on"], "kill_switch", "{t}");
+    // A call already on its way when the page closed may still arrive.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let at = calls.lock().unwrap().clone();
+    never("a page went on running under the kill switch", Duration::from_secs(3), || {
+        let (calls, at) = (calls.clone(), at.clone());
+        async move { *calls.lock().unwrap() != at }
+    })
+    .await;
+}

@@ -145,3 +145,29 @@ async fn sandbox_desktop_takes_screenshots_and_types() {
     assert_eq!(String::from_utf8_lossy(&typed).trim(), "hi");
     s.destroy("r1").await;
 }
+
+/// The kill switch closes every run's pages with the browser; a run that
+/// goes on afterwards gets a new browser and starts blank.
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_the_browser_closes_every_runs_pages_and_a_later_request_starts_blank() {
+    let chromium = std::env::var("MAGNUS_CHROMIUM").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/ms-playwright/chromium-1234/chrome-linux64/chrome")
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let b = Browser::new(
+        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium }),
+        dir.path(),
+    );
+    let url = page_server().await;
+    for run in ["r1", "r2"] {
+        b.request(run, json!({ "op": "navigate", "url": url })).await.unwrap();
+    }
+    b.close_all().await;
+    for run in ["r1", "r2"] {
+        let v = b.request(run, json!({ "op": "snapshot" })).await.unwrap();
+        let text = v["text"].as_str().unwrap();
+        assert!(text.contains("about:blank") && !text.contains("Welcome"), "{run} kept its page: {text}");
+    }
+    let v = b.request("r1", json!({ "op": "navigate", "url": url })).await.unwrap();
+    assert!(v["text"].as_str().unwrap().contains("Welcome"), "{}", v["text"]);
+}
