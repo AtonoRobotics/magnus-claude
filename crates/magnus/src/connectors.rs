@@ -244,22 +244,25 @@ fn http() -> reqwest::Client {
 /// requested OAuth 2.0 Client does not exist" (master run 42105845733,
 /// #170), and the person would land on that error. After registering, the
 /// address is handed out once the provider's sign-in answers it with
-/// anything else, asked every quarter second for up to ten seconds (how long
-/// the person may wait for the sign-in page); then it is handed out as it is.
-/// Redirects are not followed: the answer is the provider's own.
+/// anything else, asked every quarter second for ten seconds at most in all,
+/// however slowly it answers (how long the person may wait for the sign-in
+/// page); then it is handed out as it is. Redirects are not followed: the
+/// answer is the provider's own.
 async fn until_client_known(authorize: &str) {
-    let c = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(10)).build().expect("http client");
-    let end = Instant::now() + Duration::from_secs(10);
-    loop {
-        let unknown = match c.get(authorize).send().await {
-            Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => r.text().await.unwrap_or_default().contains("invalid_client"),
-            _ => false,
-        };
-        if !unknown || Instant::now() >= end {
-            return;
+    let c = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("http client");
+    let known = async {
+        loop {
+            let unknown = match c.get(authorize).send().await {
+                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => r.text().await.unwrap_or_default().contains("invalid_client"),
+                _ => false,
+            };
+            if !unknown {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(10), known).await;
 }
 
 pub(crate) fn random() -> String {
