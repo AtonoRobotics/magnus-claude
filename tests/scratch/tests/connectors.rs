@@ -213,7 +213,11 @@ async fn a_kill_switch_cut_short_by_a_crash_is_finished_at_the_next_start() {
     std::fs::write(vault.join("sealed"), b"").unwrap();
     app.restart().await;
 
+    // Engaged before the appliance answers anything: until then, scheduled
+    // and incoming work would run unchecked (review of #151).
     let alice = app.api("alice");
+    let (_, first) = alice.get("/v1/kill-switch").await;
+    assert_eq!(first["engaged"], true, "the appliance answered before the cut-short switch was engaged again: {first}");
     let ks = eventually("the cut-short switch is finished", PATIENCE, || async {
         let (_, ks) = alice.get("/v1/kill-switch").await;
         (ks["engaged"] == true && ks["revoked"]["connector_calendar__alice"]["at_provider"] == true).then_some(ks)
