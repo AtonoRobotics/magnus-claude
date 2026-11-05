@@ -1749,7 +1749,7 @@ impl State {
                     }
                 }
             }
-            Ev::Approval { id, item, person, task, tool, input_hash, scope, until, reason } => self.approvals.push(Approval {
+            Ev::Approval { id, item, person, task, tool, input_hash, scope, until, reason, risk } => self.approvals.push(Approval {
                 id: id.clone(),
                 person: person.clone(),
                 task: task.clone(),
@@ -1760,7 +1760,9 @@ impl State {
                 used: false,
                 by: e.actor.clone(),
                 reason: reason.clone(),
-                risk: self.items.get(item).and_then(|i| i.details["risk"].as_str()).map(String::from),
+                // Approvals written before the event kept it read it from
+                // their item; with that deleted, they ask again.
+                risk: risk.clone().or_else(|| self.items.get(item).and_then(|i| i.details["risk"].as_str()).map(String::from)),
             }),
             Ev::ApprovalUsed { id, .. } => {
                 if let Some(a) = self.approvals.iter_mut().find(|a| &a.id == id) {

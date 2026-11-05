@@ -230,3 +230,51 @@ async fn an_approval_does_not_cover_its_tool_once_it_is_classed_riskier() {
     .await;
     assert!(asked, "an approval given for an action that cannot be undone covered it once classed as one that moves money");
 }
+
+/// An approval keeps the class it was given at when the task that asked for
+/// it is deleted: the task's approval item goes with its content, the
+/// approval's record stays (review of #148).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_standing_approval_outlives_deleting_the_task_that_asked_for_it() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("add the standup", "the standup is on the calendar"),
+            1 => tool("calendar__create_event", json!({ "title": "Standup" })),
+            _ => complete("added"),
+        }
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert!(st.is_success(), "{v}");
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    sign_in(&alice, "calendar", callback.local_addr().unwrap().port()).await;
+    assert_eq!(alice.put("/v1/connectors/calendar/tools/create_event", json!({ "risk": "irreversible" })).await.0, 204);
+
+    let t = alice.submit("Put the standup on my calendar.").await;
+    let item = alice.wait_item(&t, "approval").await;
+    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "standing" })).await.is_success());
+    alice.wait_settled(&t).await;
+    assert_eq!(cal.calls("create_event"), 1);
+    assert!(alice.post(&format!("/v1/tasks/{t}/cancel"), json!({})).await.0.is_success());
+    alice.wait_status(&t, &["cancelled"]).await;
+    let (st, v) = alice.post("/v1/trash", json!({ "item": t })).await;
+    assert!(st.is_success(), "{v}");
+    assert_eq!(alice.post("/v1/trash/empty", json!({})).await.0, 200);
+    app.restart().await;
+
+    let t = app.api("alice").submit("Put the standup on my calendar again.").await;
+    let ran = eventually("the call runs or is asked about", PATIENCE, || {
+        let (alice, t, cal) = (app.api("alice"), t.clone(), &cal);
+        async move {
+            if cal.calls("create_event") > 1 {
+                return Some(true);
+            }
+            (!alice.open_items(&t, "approval").await.is_empty()).then_some(false)
+        }
+    })
+    .await;
+    assert!(ran, "deleting the task that asked for a standing approval revoked it");
+}
