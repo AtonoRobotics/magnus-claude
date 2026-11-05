@@ -45,7 +45,10 @@ jobs:
     # and it starts again when the pull request is marked ready. A skipped
     # required check does not satisfy branch protection, so a draft cannot merge.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: [self-hosted, linux, magnus-linux]
+    # The build box has both labels and the release key. build-box-beta has
+    # magnus-linux only and no key, so signing failed there (run 41948685783:
+    # the path was decoded as the key). build-box-2 has magnus-light only.
+    runs-on: [self-hosted, linux, magnus-linux, magnus-light]
     timeout-minutes: 150
     steps:
       # Keep target/ between runs: a clean build of everything is long. The
@@ -120,9 +123,15 @@ jobs:
             echo "MAGNUS_BUILT=$b" >> "$GITHUB_ENV"
             echo "publishing the build that passed them: $(cat "$b/versions" | tr '\n' ' ')"
           fi
-      # cargo-tauri is a binary on PATH, not a rustup component. build-box-beta
-      # has the magnus-linux label and rustup, and not this binary, so
-      # `cargo tauri` stopped the job before any test (2026-11-05).
+      # The key stays on the build box (desktop/README.md). A runner without
+      # the file makes tauri decode the path as the key and fail at the first `.`.
+      - name: Release key
+        if: env.MAGNUS_BUILT == '' && env.MAGNUS_SELECT == 'full'
+        run: |
+          key="$HOME/.magnus-release/update.key"
+          [ -f "$key" ] || { echo "::error::no release key at $key; release-checks runs on the build box"; exit 1; }
+      # cargo-tauri is a binary on PATH, not a rustup component. A runner that
+      # has rustup and not this binary stops at `cargo tauri` before any test.
       - name: Tauri CLI
         if: env.MAGNUS_BUILT == '' && env.MAGNUS_SELECT == 'full'
         run: release/ensure-tauri.sh >> "$GITHUB_PATH"

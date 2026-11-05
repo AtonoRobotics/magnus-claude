@@ -148,3 +148,14 @@ exit 1
     let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
     assert!(workflow.contains("release/ensure-tauri.sh"), "release-checks installs tauri before it builds");
 }
+
+/// Signing needs the build box. beta has `magnus-linux` and no release key
+/// (run 41948685783). build-box-2 has `magnus-light` only.
+#[test]
+fn release_checks_runs_where_the_release_key_is() {
+    let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
+    let job = workflow.split("release-checks:").nth(1).expect("release-checks job");
+    let runs_on = job.split("runs-on:").nth(1).unwrap().lines().next().unwrap();
+    assert!(runs_on.contains("magnus-linux") && runs_on.contains("magnus-light"), "{runs_on}");
+    assert!(workflow.contains("no release key"), "a runner without the key stops before it compiles");
+}
