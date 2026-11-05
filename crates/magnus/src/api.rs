@@ -445,7 +445,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
     // Wrong passwords are counted where they come from: on the appliance's
     // own machine apart from the network, so the network cannot lock the
     // person out of the appliance itself.
-    let counter = if on_this_machine(peer, &h) { crate::accounts::Accounts::local_counter(&person) } else { person.clone() };
+    let counter = if on_this_machine(peer, &h) { crate::accounts::Accounts::local_counter(&person) } else { crate::accounts::Accounts::network_counter(&person) };
     let locked = |until: chrono::DateTime<chrono::Utc>| {
         (
             StatusCode::TOO_MANY_REQUESTS,
