@@ -156,6 +156,13 @@ jobs:
         run: |
           export TAURI_SIGNING_PRIVATE_KEY="$MAGNUS_SIGNING_KEY" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
           "$GITHUB_WORKSPACE/release/ensure-windows-target.sh"
+          # build-box-beta has rustup and not this target (run 41957162011),
+          # and not mingw's dlltool once the target is added (run 41958793139).
+          rustup target add x86_64-pc-windows-gnu
+          if ! command -v x86_64-w64-mingw32-dlltool >/dev/null || ! command -v makensis >/dev/null; then
+            sudo -n apt-get update -qq
+            sudo -n apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 nsis
+          fi
           c="{\"version\":\"$MAGNUS_VERSION\"}"
           cargo tauri build --bundles deb,appimage --config "$c"
           cargo tauri build --runner cargo --target x86_64-pc-windows-gnu --bundles nsis --config "$c"
@@ -233,6 +240,22 @@ jobs:
           until [ -f "$t/build.status" ]; do sleep 5; done
           s=$(cat "$t/build.status")
           [ "$s" = 0 ] || { tail -50 "$t/build.log"; exit "$s"; }
+      # build-box-beta has no WebKitWebDriver, so every installed-app test
+      # stopped at once (run 41959422399). desktop/README.md names the package.
+      - name: Installed-app drivers
+        if: env.MAGNUS_TESTED != '1' && env.MAGNUS_SELECT == 'full'
+        run: |
+          pkgs=""
+          command -v WebKitWebDriver >/dev/null || pkgs=" webkit2gtk-driver"
+          command -v xclip >/dev/null || pkgs=" xclip"
+          if [ -n "" ]; then
+            sudo -n apt-get update -qq
+            # shellcheck disable=SC2086
+            sudo -n apt-get install -y 
+          fi
+          if ! command -v tauri-driver >/dev/null && [ ! -x "${CARGO_HOME:-$HOME/.cargo}/bin/tauri-driver" ]; then
+            cargo install tauri-driver --locked
+          fi
       # They take about two minutes; a hang fails here, not at the job's end.
       - name: Installed-app tests
         if: env.MAGNUS_TESTED != '1' && env.MAGNUS_SELECT == 'full'

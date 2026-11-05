@@ -41,22 +41,28 @@ fn ident(s: &str) -> Result<&str> {
     Ok(s)
 }
 
+/// A URL's password as Postgres is to store it: percent-decoded, as the
+/// kernel sends it when it connects, and quoted for a SQL string.
+fn sql_password(in_url: &str) -> Result<String> {
+    let pw = percent_encoding::percent_decode_str(in_url).decode_utf8().context("the database password is not UTF-8")?;
+    Ok(pw.replace('\'', "''"))
+}
+
 /// Create the log table and the kernel role named in `kernel_url`, and,
 /// when the admin console is set up, its root role named in `root_url`.
 pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) -> Result<()> {
     let k = url::Url::parse(kernel_url).context("database.url")?;
     let role = ident(k.username())?.to_string();
-    let password = k.password().context("database.url has no password")?.replace('\'', "''");
+    let password = sql_password(k.password().context("database.url has no password")?)?;
     let db = ident(k.path().trim_start_matches('/'))?.to_string();
     let admin = connect(admin_url).await?;
     let exists = admin.query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role]).await?.is_some();
-    if exists {
-        admin.batch_execute(&format!("ALTER ROLE {role} LOGIN PASSWORD '{password}'")).await?;
-    } else {
-        admin
-            .batch_execute(&format!("CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE"))
-            .await?;
-    }
+    // A role made beforehand keeps whatever it was given, so its attributes
+    // are set either way; what it may still do to the log is checked below.
+    let verb = if exists { "ALTER" } else { "CREATE" };
+    admin
+        .batch_execute(&format!("{verb} ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"))
+        .await?;
     admin
         .batch_execute(&format!(
             "CREATE TABLE IF NOT EXISTS public.events (
@@ -88,6 +94,16 @@ pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) 
     admin.batch_execute(&content_walls_sql(&role)).await.context("wall the content store by person")?;
     // The knowledge base's index, filtered for each reader by row security.
     admin.batch_execute(&crate::knowledge::migrate_sql(&role)).await.context("create the knowledge index (pgvector must be installed)")?;
+    // Append-only is the database's to enforce: whatever grants or
+    // memberships the role holds (pg_write_all_data, owning the table, a
+    // role that does), it must not be able to change or delete the log.
+    let can: Vec<String> = admin
+        .query("SELECT p FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE']) p WHERE has_table_privilege($1, 'public.events', p)", &[&role])
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    anyhow::ensure!(can.is_empty(), "the kernel's role {role} can change the log ({}), through a grant or a role it is a member of; take that away and run migrate again", can.join(", "));
     if let Some(root) = root_url {
         migrate_root(&admin, root, &db).await.context("the admin console's database role")?;
     }
@@ -136,7 +152,7 @@ async fn move_inline_content(admin: &Client) -> Result<()> {
 async fn migrate_root(admin: &Client, root_url: &str, db: &str) -> Result<()> {
     let r = url::Url::parse(root_url).context("admin.database_url")?;
     let role = ident(r.username())?.to_string();
-    let password = r.password().context("admin.database_url has no password")?.replace('\'', "''");
+    let password = sql_password(r.password().context("admin.database_url has no password")?)?;
     let exists = admin.query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role]).await?.is_some();
     let verb = if exists { "ALTER" } else { "CREATE" };
     admin.batch_execute(&format!("{verb} ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS")).await?;

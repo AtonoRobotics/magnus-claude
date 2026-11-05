@@ -889,6 +889,13 @@ impl Kernel {
         let s = |f: &str| b[f].as_str().map(str::trim).unwrap_or_default().to_string();
         let (mut name, url, audience, label) = (s("name"), s("url"), s("audience"), s("label"));
         let taken = |n: &str| self.all_connectors().iter().any(|(c, _)| c.name == n) || crate::tools::builtin_apps().contains(&n);
+        // Never a key or token in the address either (below): checked before
+        // the app is asked anything, so one is neither sent nor recorded.
+        match url::Url::parse(&url) {
+            Ok(u) if u.username().is_empty() && u.password().is_none() && u.query().is_none() && u.fragment().is_none() => {}
+            Ok(_) => return Err(refusal(StatusCode::BAD_REQUEST, "the app's address takes no user, password, query or fragment: Magnus never takes a key or token for an app, and each person signs in to it with their own account")),
+            Err(_) => return Err(refusal(StatusCode::BAD_REQUEST, "the app's address is not a URL")),
+        }
         // The address is the one field the owner fills in (connectors spec):
         // the name comes from the app. (The app's form sends what it returns
         // and what reaches it at their most guarded; they stay named here.)
@@ -1327,7 +1334,12 @@ async fn classify(AxState(k): K, h: HeaderMap, Path((name, tool)): Path<(String,
     }
     let risk = b["risk"].as_str().map(String::from);
     if risk.as_deref().is_some_and(|r| crate::tools::Risk::parse(r).is_none()) {
-        return err(StatusCode::BAD_REQUEST, "risk is read, sandbox, reversible_write, irreversible, financial or prohibited");
+        return err(StatusCode::BAD_REQUEST, "risk is read, reversible_write, irreversible, financial or prohibited");
+    }
+    // The sandbox is the appliance's own microVM: an app's tool acts at the
+    // app, so classed so it would skip the contract and the Rule of Two.
+    if risk.as_deref() == Some("sandbox") {
+        return err(StatusCode::BAD_REQUEST, "sandbox is the appliance's own microVM, never an app's tool: risk is read, reversible_write, irreversible, financial or prohibited");
     }
     if let Err(e) = k.emit(&format!("person:{}", p.id), Ev::ToolClassified { connector: name, tool, risk }).await {
         return internal(e);

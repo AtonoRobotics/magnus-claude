@@ -158,8 +158,8 @@ impl Index {
     }
 
     /// The entries these principals may read that best match the query (by
-    /// meaning with an embedding, by words without), or the latest with no
-    /// query. Postgres filters them as the reader role.
+    /// meaning with an embedding, and by words those not yet embedded; by
+    /// words without), or the latest with no query. Postgres filters them as the reader role.
     async fn search(&self, principals: &[String], query: &str, embedding: Option<(String, String)>) -> Result<Vec<Value>> {
         let mut g = self.client().await?;
         let c = g.as_mut().context("index connection")?;
@@ -169,7 +169,21 @@ impl Index {
         let words: Vec<String> = query.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 2).map(String::from).collect();
         let rows = match embedding {
             Some((model, v)) => {
-                tx.query("SELECT entry FROM public.knowledge WHERE model = $1 ORDER BY embedding <=> $2::text::vector LIMIT $3", &[&model, &v, &HITS]).await?
+                // An entry not embedded with this model (saved while the
+                // server was down, until the next sync embeds it) is found
+                // by its words, first, as it matched them.
+                let mut rows = match words.is_empty() {
+                    true => vec![],
+                    false => tx
+                        .query(
+                            "SELECT entry FROM public.knowledge WHERE model IS DISTINCT FROM $1 AND words @@ to_tsquery('simple', $2) ORDER BY ts_rank(words, to_tsquery('simple', $2)) DESC, version DESC LIMIT $3",
+                            &[&model, &words.join(" | "), &HITS],
+                        )
+                        .await?,
+                };
+                let room = HITS - rows.len() as i64;
+                rows.extend(tx.query("SELECT entry FROM public.knowledge WHERE model = $1 ORDER BY embedding <=> $2::text::vector LIMIT $3", &[&model, &v, &room]).await?);
+                rows
             }
             None if query.trim().is_empty() => tx.query("SELECT entry FROM public.knowledge ORDER BY version DESC LIMIT 50", &[]).await?,
             None if words.is_empty() => vec![],

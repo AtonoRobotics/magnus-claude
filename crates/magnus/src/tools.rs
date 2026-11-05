@@ -6,6 +6,20 @@ use magnus_adapter_proto::ToolSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// A tool's reach (approvals spec, The approval model): `self` stays in the
+/// person's own account (a draft, a label, the trash) and reaches no one, so
+/// neither the Rule of Two nor the audience rule counts it as sending, as
+/// for a write to Magnus's memory. A tool that declares no reach is
+/// unknown, and asks as before. Money never counts as `self`.
+pub const REACH_SELF: &str = "self";
+
+/// Whether a declared reach is one Magnus knows, on a tool of this class:
+/// `self` on a write; never on a read (nothing to reach), money (it asks
+/// every time) or a prohibited tool.
+pub fn reach_fits(reach: &str, risk: &str) -> bool {
+    reach == REACH_SELF && ["reversible_write", "irreversible"].contains(&risk)
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Risk {

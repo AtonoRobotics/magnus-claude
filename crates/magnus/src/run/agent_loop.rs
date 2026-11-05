@@ -16,6 +16,10 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The longest wait between attempts at a failed model call (the backoff
+/// below doubles from one second up to this).
+const LONGEST_BACKOFF: Duration = Duration::from_millis(500 * 2u64.pow(6));
+
 pub enum Flow {
     Continue,
     Stop,
@@ -169,13 +173,21 @@ impl Kernel {
                 Err(e) => {
                     self.emit(
                         "kernel",
-                        Ev::ModelError { run: run_id.into(), step, attempt, class: e.class, message: e.message.clone() },
+                        Ev::ModelError { run: run_id.into(), step, attempt, class: e.class, message: e.message.clone(), usage: e.usage.clone() },
                     )
                     .await?;
                     match e.class {
-                        ErrorClass::Unavailable if attempt < run.config.max_retries => {
+                        // An outage, or a rate limit the provider says will
+                        // pass within the longest backoff, is waited out and
+                        // asked again; a limit it says lasts longer (a spent
+                        // quota) persists, and pauses the task below.
+                        ErrorClass::Unavailable | ErrorClass::UsageLimit
+                            if attempt < run.config.max_retries && (e.class == ErrorClass::Unavailable || e.retry_after_s.is_none_or(|s| s <= LONGEST_BACKOFF.as_secs_f64())) =>
+                        {
                             attempt += 1;
-                            tokio::time::sleep(Duration::from_millis(500 * 2u64.pow(attempt.min(6)))).await;
+                            let backoff = Duration::from_millis(500 * 2u64.pow(attempt.min(6))).min(LONGEST_BACKOFF);
+                            let asked = e.retry_after_s.filter(|s| s.is_finite() && *s > 0.0).map(Duration::from_secs_f64).unwrap_or_default();
+                            tokio::time::sleep(backoff.max(asked)).await;
                         }
                         ErrorClass::Malformed => {
                             self.emit(

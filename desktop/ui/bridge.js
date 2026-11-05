@@ -32,6 +32,7 @@ const appBridge = tauri && {
   // Sign in through the identity provider in the person's own browser,
   // which comes back to this computer; resolves with who signed in.
   async providerSignIn(loginHint) { return this.invoke("provider_sign_in", { loginHint: loginHint || null }); },
+  async providerSignInCancel() { return this.invoke("provider_sign_in_cancel"); },
   async signOut() { return this.invoke("sign_out"); },
   async api(method, path, body) {
     const r = await this.invoke("api", { method, path, body: body === undefined ? null : body });
