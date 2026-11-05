@@ -21,7 +21,10 @@ env:
 
 jobs:
   release:
-    runs-on: [self-hosted, linux, magnus-linux]
+    # The build box: the one runner with the appliance whose updates
+    # directory the owner's app reads (magnus-linux and magnus-light; see
+    # desktop.yml and #204).
+    runs-on: [self-hosted, linux, magnus-linux, magnus-light]
     timeout-minutes: 120
     steps:
       # The whole history, so publishing can check a release contains the
@@ -30,6 +33,10 @@ jobs:
         with: { clean: false, fetch-depth: 0 }
       # Postgres and Keycloak, which the tests and the deploy use, up and
       # answering (they may still be starting after a reboot).
+      # A release publishes, so a runner without the release key or the
+      # appliance stops before it builds (#204).
+      - name: On the build box
+        run: release/can-publish.sh "${{ vars.MAGNUS_APPLIANCE_CONFIG }}" 1
       - name: Build box services
         run: dev/services.sh
       # The browser sidecar's packages (some suites drive a browser).

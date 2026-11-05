@@ -236,7 +236,50 @@ printf '%s\n' 'throwaway' > "$w"
     assert!(workflow.contains("release/signing-key.sh"));
     assert!(workflow.contains("env.MAGNUS_PUBLISH == '1'"), "publishing waits for the release key");
     let runs_on = workflow.split("runs-on:").nth(1).unwrap().lines().next().unwrap();
-    assert!(runs_on.contains("magnus-linux") && !runs_on.contains("magnus-light"), "{runs_on}");
+    let pull_requests = runs_on.split("||").next().unwrap();
+    assert!(pull_requests.contains("pull_request") && pull_requests.contains("magnus-linux") && !pull_requests.contains("magnus-light"), "{runs_on}");
+}
+
+/// Master run 42097633195 landed on build-box-beta, which has the release key
+/// now and no appliance: it published the test build into a directory no app
+/// reads, then failed installing on the appliance (#204). A run publishes only
+/// with the key and the appliance; master and tags fail at once without them,
+/// and run on the build box, the one runner with magnus-linux and magnus-light.
+#[test]
+fn only_the_runner_with_the_appliance_publishes_and_master_and_tags_run_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("update.key");
+    let config = dir.path().join("magnus.toml");
+    let run = |must: &str| {
+        let out = std::process::Command::new(repo().join("release/can-publish.sh"))
+            .arg(&config)
+            .arg(must)
+            .env("MAGNUS_RELEASE_KEY", &key)
+            .output()
+            .unwrap();
+        (out.status.success(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
+    };
+    assert_eq!(run("0"), (true, "0\n".into(), String::new()), "no key, no appliance");
+    let (ok, _, err) = run("1");
+    assert!(!ok && err.contains("no release key") && err.contains("no appliance"), "{err}");
+    std::fs::write(&key, "release-key").unwrap();
+    assert_eq!(run("0"), (true, "0\n".into(), String::new()), "the key without the appliance (strix-beta)");
+    let (ok, _, err) = run("1");
+    assert!(!ok && !err.contains("no release key") && err.contains("no appliance"), "{err}");
+    std::fs::write(&config, "").unwrap();
+    assert_eq!(run("0"), (true, "1\n".into(), String::new()));
+    assert_eq!(run("1"), (true, "1\n".into(), String::new()));
+
+    let desktop = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
+    assert!(desktop.contains("release/can-publish.sh \"${{ vars.MAGNUS_APPLIANCE_CONFIG }}\" \"${{ github.event_name == 'push' && '1' || '0' }}\""));
+    let runs_on = desktop.split("runs-on:").nth(1).unwrap().lines().next().unwrap();
+    let pushes = runs_on.split("||").nth(1).expect("master and tags have their own runner");
+    assert!(pushes.contains("magnus-linux") && pushes.contains("magnus-light"), "{runs_on}");
+    let appliance = std::fs::read_to_string(repo().join(".github/workflows/appliance.yml")).unwrap();
+    let runs_on = appliance.split("runs-on:").nth(1).unwrap().lines().next().unwrap();
+    assert!(runs_on.contains("magnus-linux") && runs_on.contains("magnus-light"), "{runs_on}");
+    let check = appliance.find("release/can-publish.sh \"${{ vars.MAGNUS_APPLIANCE_CONFIG }}\" 1").expect("the release checks its runner");
+    assert!(check < appliance.find("dev/services.sh").unwrap(), "the release checks its runner before it builds");
 }
 
 /// The two update AppImages compile after the suite. Beside it, they took

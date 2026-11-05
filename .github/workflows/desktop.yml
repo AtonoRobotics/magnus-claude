@@ -45,11 +45,13 @@ jobs:
     # and it starts again when the pull request is marked ready. A skipped
     # required check does not satisfy branch protection, so a draft cannot merge.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # magnus-linux is build-box and build-box-beta. beta has no release key.
-    # Requiring magnus-light as well matched no runner (run 41949170226 sat
-    # queued): build-box does not carry that label. A runner without the key
-    # builds with a throwaway key and does not publish (release/signing-key.sh).
-    runs-on: [self-hosted, linux, magnus-linux]
+    # magnus-linux is build-box and build-box-beta; build-box alone also
+    # carries magnus-light, and alone has the appliance and the updates
+    # directory the owner's app reads. Master and tags publish there, so they
+    # run there; beta, which has the release key now and no appliance, failed
+    # master run 42097633195 (#204). Pull requests take either. A runner
+    # without the key or the appliance does not publish (release/can-publish.sh).
+    runs-on: ${{ github.event_name == 'pull_request' && fromJSON('["self-hosted","linux","magnus-linux"]') || fromJSON('["self-hosted","linux","magnus-linux","magnus-light"]') }}
     timeout-minutes: 150
     steps:
       # Keep target/ between runs: a clean build of everything is long. The
@@ -129,27 +131,23 @@ jobs:
       - name: Tauri CLI
         if: env.MAGNUS_BUILT == '' && env.MAGNUS_SELECT == 'full'
         run: release/ensure-tauri.sh >> "$GITHUB_PATH"
-      # The release key is on the build box only. Another magnus-linux runner
-      # gets a throwaway key and MAGNUS_PUBLISH=0, so it can test and cannot
-      # replace the owner's app or the channels.
+      # The release key signs; a runner without it gets a throwaway key. Only
+      # a runner with the key and the appliance publishes (MAGNUS_PUBLISH=1),
+      # so another can test and cannot replace the owner's app or the
+      # channels; master and tags, which must publish, stop here elsewhere.
       - name: Signing key
         if: env.MAGNUS_SELECT == 'full'
         run: |
           real="${MAGNUS_RELEASE_KEY:-$HOME/.magnus-release/update.key}"
           if [ -n "${MAGNUS_BUILT:-}" ]; then
-            if [ -f "$real" ]; then
-              echo "MAGNUS_SIGNING_KEY=$real" >> "$GITHUB_ENV"
-              echo "MAGNUS_PUBLISH=1" >> "$GITHUB_ENV"
-            else
-              echo "MAGNUS_PUBLISH=0" >> "$GITHUB_ENV"
-              echo "::notice::reused build on a runner with no release key; not publishing"
-            fi
+            [ ! -f "$real" ] || echo "MAGNUS_SIGNING_KEY=$real" >> "$GITHUB_ENV"
           else
             out=$(release/signing-key.sh "$RUNNER_TEMP/signing")
             echo "MAGNUS_SIGNING_KEY=$(printf '%s\n' "$out" | sed -n 1p)" >> "$GITHUB_ENV"
-            echo "MAGNUS_PUBLISH=$(printf '%s\n' "$out" | sed -n 2p)" >> "$GITHUB_ENV"
-            [ "$(printf '%s\n' "$out" | sed -n 2p)" = 1 ] || echo "::notice::no release key on this runner; the installers are signed with a throwaway key and not published"
           fi
+          publish=$(release/can-publish.sh "${{ vars.MAGNUS_APPLIANCE_CONFIG }}" "${{ github.event_name == 'push' && '1' || '0' }}")
+          echo "MAGNUS_PUBLISH=$publish" >> "$GITHUB_ENV"
+          [ "$publish" = 1 ] || echo "::notice::no release key or no appliance on this runner; nothing is published"
       - name: Installers
         if: env.MAGNUS_BUILT == '' && env.MAGNUS_SELECT == 'full'
         working-directory: desktop/src-tauri
