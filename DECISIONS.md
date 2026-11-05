@@ -65,6 +65,7 @@ One line per choice the brief left open, with its reason. The brief and the owne
 - The verifier reads through `execute()` as its own issuer: read-only tools or the check VM, never an approval wait, and its reads taint the run. Reason: the record's verifier rows; its words reach the agent, so what it read must count as read.
 - A model reply with no tool call is a malformed step. It goes back to the model as an error and does not end the run. Reason: K29; only the model's `task_complete` or `task_fail`, or the principal, ends a run (K40).
 - An exhausted budget or a persistent provider failure suspends the run with an inbox notice. The principal resumes it on the pinned model. Reason: K24, K12.
+- A model call the provider charged for and then failed (its reply could not be used, or the stream broke after the cost was reported) counts its dollars and tokens against the run, like a reply's: the adapter's error carries the usage it had reported, and `ModelError` records it (review, 2026-11-04). Reason: the cost was dropped with the error, so repeated unusable replies were paid for but never reached the run's dollar budget. Each attempt already counted against the model-call limit. Tests: `a_failed_turn_keeps_what_it_cost` (adapters.rs), `a_charged_call_that_failed_counts_against_the_budget` (state.rs).
 
 ## Identity
 
