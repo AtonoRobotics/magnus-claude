@@ -3,6 +3,10 @@
 ## Cancelling a browser sign-in ends it (2026-11-04)
 
 Cancel in the app's browser sign-in now ends the wait in the app, so a sign-in finished later in the browser leaves no session and never replaces the stored one (`desktop/src-tauri/src/lib.rs`, `desktop/ui/app.js`, `bridge.js`).
+## migrate decodes the password (2026-11-04)
+
+`migrate` set a role's password to the URL's percent-escaped text while the kernel signs in with the decoded one; it now decodes it (`log.rs`, test in `log_review.rs`).
+
 ## The network cannot lock the appliance's own machine (2026-11-04)
 
 Wrong passwords from the network no longer lock a name out on the appliance's own machine (`accounts.rs`, `api.rs`, test in `app.rs`). Open for the owner: counting the network's attempts per address instead of per name.
