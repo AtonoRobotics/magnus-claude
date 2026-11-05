@@ -14,6 +14,7 @@ async fn page_server() -> String {
     let app = Router::new()
         .route("/", get(|| async { Html("<html><head><title>Shop</title></head><body><h1>Welcome</h1><a href='/next'>Go next</a><input placeholder='Your name'></body></html>") }))
         .route("/next", get(|| async { Html("<html><body><p>Second page</p></body></html>") }))
+        .route("/sign-in", get(|| async { Html("<html><body><input id='user' value='dana@example.com'><input type='password' value='PASSWORD-CANARY'><input autocomplete='one-time-code' value='OTP-CANARY'><input autocomplete='cc-number' value='CARD-CANARY'><input type='password'></body></html>") }))
         .route("/non-web-link", get(|| async { Html("<html><body><a id='open'>Open document</a><script>document.querySelector('a').href = URL.createObjectURL(new Blob(['NON-WEB-DOCUMENT'], {type:'text/html'}));</script></body></html>") }));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", l.local_addr().unwrap());
@@ -45,6 +46,36 @@ async fn browser_navigates_clicks_types_and_screenshots() {
     // Runs are isolated: a second run starts blank.
     let v = b.request("r2", json!({ "op": "snapshot" })).await.unwrap();
     assert!(v["text"].as_str().unwrap().contains("about:blank"));
+}
+
+/// The snapshot is the model's view of the page. A password, a one-time
+/// code or a card number a person filled in must not reach it as text.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_snapshot_never_shows_a_secret_field_value() {
+    let chromium = std::env::var("MAGNUS_CHROMIUM").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/ms-playwright/chromium-1234/chrome-linux64/chrome")
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let b = Browser::new(
+        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium }),
+        dir.path(),
+    );
+    let url = page_server().await;
+    let v = b.request("r1", json!({ "op": "navigate", "url": format!("{url}/sign-in") })).await.unwrap();
+    let snap = v["text"].as_str().unwrap();
+    assert!(snap.contains("= \"dana@example.com\""), "{snap}");
+    for secret in ["PASSWORD-CANARY", "OTP-CANARY", "CARD-CANARY"] {
+        assert!(!snap.contains(secret), "{secret} reached the snapshot:\n{snap}");
+    }
+    // A filled secret field is still there for the model to target and
+    // shows that it holds a value; an empty one shows no marker.
+    assert!(snap.contains("[e2] password input \"\" = (hidden)"), "{snap}");
+    assert!(snap.contains("[e5] password input \"\"\n") || snap.ends_with("[e5] password input \"\""), "{snap}");
+    // Typing into one through the browser tool is not shown back either.
+    let v = b.request("r1", json!({ "op": "type", "target": "e5", "text": "TYPED-CANARY" })).await.unwrap();
+    let snap = v["text"].as_str().unwrap();
+    assert!(!snap.contains("TYPED-CANARY") && snap.contains("[e5] password input \"\" = (hidden)"), "{snap}");
+    b.close("r1").await;
 }
 
 /// The click that failed release-checks gave up after 10 seconds. The sidecar

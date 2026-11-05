@@ -53,7 +53,11 @@ async function snapshot(p) {
     let n = 0;
     const lines = [];
     const vis = el => { const s = getComputedStyle(el); const r = el.getBoundingClientRect(); return s.visibility !== 'hidden' && s.display !== 'none' && r.width > 0 && r.height > 0; };
-    const label = el => (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || el.alt || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+    // A password, one-time code or card field's value is the person's
+    // secret. The snapshot says the field is filled, never what it holds.
+    const secret = el => (el.tagName === 'INPUT' && el.type === 'password') ||
+      (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/).some(t => ['current-password', 'new-password', 'one-time-code', 'cc-number', 'cc-csc'].includes(t) || t.startsWith('cc-exp'));
+    const label = el => (el.getAttribute('aria-label') || el.innerText || (secret(el) ? '' : el.value) || el.placeholder || el.title || el.alt || '').trim().replace(/\s+/g, ' ').slice(0, 120);
     document.querySelectorAll('[data-magnus-ref]').forEach(el => el.removeAttribute('data-magnus-ref'));
     const walk = (el, depth) => {
       if (!(el instanceof Element) || !vis(el)) return;
@@ -64,7 +68,7 @@ async function snapshot(p) {
         const ref = 'e' + (++n);
         el.setAttribute('data-magnus-ref', ref);
         const kind = role || (tag === 'a' ? 'link' : tag === 'input' ? (el.type || 'text') + ' input' : tag);
-        const extra = tag === 'a' && el.href ? ` -> ${el.href}` : (tag === 'input' || tag === 'textarea') && el.value ? ` = "${String(el.value).slice(0, 60)}"` : '';
+        const extra = tag === 'a' && el.href ? ` -> ${el.href}` : (tag === 'input' || tag === 'textarea') && el.value ? (secret(el) ? ' = (hidden)' : ` = "${String(el.value).slice(0, 60)}"`) : '';
         lines.push(`${'  '.repeat(Math.min(depth, 6))}[${ref}] ${kind} "${label(el)}"${extra}`);
         if (tag !== 'select') return;
       } else if (/^h[1-6]$/.test(tag)) {
