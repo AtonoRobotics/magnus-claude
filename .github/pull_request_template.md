@@ -14,6 +14,7 @@
 
 - [ ] Branched from current master, into master
 - [ ] Not past the cap of 6 open agent pull requests (CLAUDE.md, "How work lands")
+- [ ] Started from a `ready` issue, or one the owner named; claimed `in-progress`; body has `Fixes #N` (CLAUDE.md, "How work lands")
 - [ ] One concern; each fix has a test that fails without it
 - [ ] Every CI check green
 - [ ] DECISIONS.md and PROGRESS.md updated
