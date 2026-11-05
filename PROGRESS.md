@@ -3,6 +3,12 @@
 ## A kill switch cut short by a crash is finished (2026-11-04)
 
 The vault keeps its seal and the sign-ins the switch took on disk until each is revoked, and the next start finishes a switch a crash cut short (`vault.rs`, `api.rs`, `kernel.rs`, tests in `connectors.rs` and `vault.rs`).
+## Approvals keep their risk class (2026-11-04)
+
+An approval no longer covers its tool after the owner reclassifies the tool as riskier: it is matched on the class its item recorded (`state.rs`, `boundary.rs`, test in `connectors.rs`).
+## Sharing keeps to where content came from (2026-11-04)
+
+Sharing a chat answer now also checks the apps its private content came from, not only the tools its runs called (`chat_actions.rs`, test in `chat_actions.rs`).
 
 ## The console sign-in script waits two minutes (2026-11-05)
 

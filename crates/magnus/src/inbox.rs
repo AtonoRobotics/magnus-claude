@@ -161,6 +161,7 @@ impl Kernel {
                         scope,
                         until,
                         reason,
+                        risk: item.details["risk"].as_str().map(String::from),
                     },
                 )
                 .await?;
