@@ -57,6 +57,17 @@ pub struct AppState {
     /// list still in the body, as Google's Gmail server did for a project
     /// without its MCP service enabled.
     pub forbids_listing: bool,
+    /// It answers the first sign-in request for a client it has just
+    /// registered with 401 invalid_client, as GitLab.com did (master run
+    /// 42105845733, #170): it does not know the client yet.
+    pub new_clients_unknown_at_first: bool,
+    /// It answers sign-in requests for a new client with 401 invalid_client
+    /// for this long after the first, then stops answering at all.
+    pub new_clients_unknown_then_silent: Option<std::time::Duration>,
+    /// When it first saw a sign-in request for each client.
+    first_seen: HashMap<String, std::time::Instant>,
+    /// Clients it has answered a sign-in request for.
+    known: HashSet<String>,
     n: usize,
 }
 
@@ -168,7 +179,38 @@ async fn register(State((_, st)): S, Json(b): Json<Value>) -> Response {
 /// The person approves at once: straight back to the redirect with a code.
 async fn authorize(State((base, st)): S, Query(q): Query<HashMap<String, String>>) -> Response {
     let g = |k: &str| q.get(k).cloned().unwrap_or_default();
+    let silent = {
+        let mut s = st.lock().unwrap();
+        match s.new_clients_unknown_then_silent {
+            Some(d) => {
+                let first = *s.first_seen.entry(g("client_id")).or_insert_with(std::time::Instant::now);
+                Some(first.elapsed() >= d)
+            }
+            None => None,
+        }
+    };
+    match silent {
+        Some(true) => {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            return oauth_error(503, "temporarily_unavailable");
+        }
+        Some(false) => {
+            return Response::builder()
+                .status(401)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "error": "invalid_client", "error_description": "The requested OAuth 2.0 Client does not exist." }).to_string()))
+                .unwrap()
+        }
+        None => {}
+    }
     let mut s = st.lock().unwrap();
+    if s.new_clients_unknown_at_first && s.known.insert(g("client_id")) {
+        return Response::builder()
+            .status(401)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "error": "invalid_client", "error_description": "The requested OAuth 2.0 Client does not exist." }).to_string()))
+            .unwrap();
+    }
     if !s.clients.get(&g("client_id")).is_some_and(|r| r.contains(&g("redirect_uri"))) || g("code_challenge_method") != "S256" || g("response_type") != "code" {
         return oauth_error(400, "invalid_request");
     }

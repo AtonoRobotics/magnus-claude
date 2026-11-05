@@ -239,6 +239,32 @@ fn http() -> reqwest::Client {
     reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(30)).build().expect("http client")
 }
 
+/// A provider may not know a client it registered a moment ago: GitLab.com
+/// answered the sign-in address built from one with 401 invalid_client, "The
+/// requested OAuth 2.0 Client does not exist" (master run 42105845733,
+/// #170), and the person would land on that error. After registering, the
+/// address is handed out once the provider's sign-in answers it with
+/// anything else, asked every quarter second for ten seconds at most in all,
+/// however slowly it answers (how long the person may wait for the sign-in
+/// page); then it is handed out as it is. Redirects are not followed: the
+/// answer is the provider's own.
+async fn until_client_known(authorize: &str) {
+    let c = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("http client");
+    let known = async {
+        loop {
+            let unknown = match c.get(authorize).send().await {
+                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => r.text().await.unwrap_or_default().contains("invalid_client"),
+                _ => false,
+            };
+            if !unknown {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(10), known).await;
+}
+
 pub(crate) fn random() -> String {
     use rand::RngCore;
     let mut b = [0u8; 32];
@@ -541,6 +567,7 @@ impl Kernel {
             }
             None => None,
         };
+        let fresh = registered.is_none() && c.client_id.is_none();
         let (client_id, client_secret) = match (registered, &c.client_id, s("registration_endpoint")) {
             (Some(r), _, _) => r,
             (None, Some(id), _) => (id.clone(), None),
@@ -589,6 +616,9 @@ impl Kernel {
             if authorize.starts_with("https://accounts.google.com/") {
                 q.append_pair("access_type", "offline").append_pair("prompt", "consent");
             }
+        }
+        if fresh {
+            until_client_known(u.as_str()).await;
         }
         let client = Client { token_endpoint: token, revocation_endpoint: s("revocation_endpoint"), client_id, client_secret, resource };
         let mut p = pending().lock().unwrap();

@@ -25,6 +25,47 @@ async fn sign_in(api: &Api, app: &str, port: u16) {
     assert_eq!(api.post(&format!("/v1/connectors/{app}/sign-in/complete"), json!({ "state": state, "code": code })).await.0, 204);
 }
 
+/// A provider may not know a client it registered a moment ago: GitLab.com
+/// answered the sign-in address for one with 401 invalid_client, "The
+/// requested OAuth 2.0 Client does not exist" (master run 42105845733,
+/// #170). Magnus hands the person the address once the provider knows the
+/// client, so her sign-in goes through.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_the_provider_does_not_know_yet_is_waited_for_before_the_person_signs_in() {
+    let cal = FakeOAuthApp::start(3600).await;
+    cal.state.lock().unwrap().new_clients_unknown_at_first = true;
+    let m = FakeModel::start(steps(vec![])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    sign_in(&alice, "calendar", callback.local_addr().unwrap().port()).await;
+    let (_, list) = alice.get("/v1/connectors").await;
+    assert_eq!(list["connectors"][0]["signed_in"], true, "{list}");
+}
+
+/// The person waits for the sign-in page ten seconds at most, whatever the
+/// provider does: here it says it does not know the client for seven
+/// seconds, then answers nothing. A request started near the end used to
+/// get ten seconds of its own (review of #209).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sign_in_waits_for_a_new_client_ten_seconds_at_most() {
+    let cal = FakeOAuthApp::start(3600).await;
+    cal.state.lock().unwrap().new_clients_unknown_then_silent = Some(std::time::Duration::from_secs(7));
+    let m = FakeModel::start(steps(vec![])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let started = std::time::Instant::now();
+    let (st, v) = alice.post("/v1/connectors/calendar/sign-in", json!({ "redirect_uri": format!("http://127.0.0.1:{}/callback", callback.local_addr().unwrap().port()) })).await;
+    let waited = started.elapsed();
+    assert!(st.is_success() && v["authorize_url"].is_string(), "{v}");
+    assert!(waited < std::time::Duration::from_secs(12), "the person waited {waited:?} for the sign-in page");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_adds_an_app_each_person_signs_in_with_their_own_account_and_the_kill_switch_revokes_every_sign_in() {
     // Tokens last 30 s, inside the minute Magnus refreshes ahead: every use refreshes.

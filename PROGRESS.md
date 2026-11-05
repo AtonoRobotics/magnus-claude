@@ -1,5 +1,9 @@
 # Progress
 
+## A sign-in waits for the provider to know a new client (2026-11-05)
+
+Master's rerun failed when gitlab.com said a client Magnus had just registered "does not exist" (#170). After registering, Magnus now checks that the provider's sign-in page knows the client, for up to ten seconds, before giving the address to the person. gitlab.com also allows only about ten registrations an hour per address, and Magnus registers on every sign-in. Reusing one client is #208. Still open from the same night: the installed-app update test's lost Accept (#207).
+
 ## Reads of the person's own account stop asking (2026-11-05)
 
 Once a run had read one email, every further Gmail, Slack or Calendar read asked a Rule of Two card, because the kernel counted any read of a public-audience app as sending. A read through the person's own sign-in now sends nothing out: its query goes only to the provider that holds their data already. Web lookups, the browser and apps on the organisation's key still ask (#175, approvals spec build order 3). Next in the spec: recipient and content provenance at the send gate (#176).
