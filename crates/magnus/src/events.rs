@@ -592,6 +592,10 @@ pub enum Ev {
         attempt: u32,
         class: ErrorClass,
         message: String,
+        /// What the provider charged before the call failed (it counts
+        /// against the budget like a reply's).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
     },
     /// Text the loop shows the model after a step (a malformed reply, a
     /// verification failure without a tool call to answer).

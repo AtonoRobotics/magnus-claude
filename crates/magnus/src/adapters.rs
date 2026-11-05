@@ -48,11 +48,14 @@ pub struct AdapterError {
     pub class: ErrorClass,
     pub message: String,
     pub retry_after_s: Option<f64>,
+    /// What the call cost, when the provider answered and charged for it
+    /// before the call failed.
+    pub usage: Option<Usage>,
 }
 
 impl AdapterError {
     fn unavailable(m: impl Into<String>) -> Self {
-        AdapterError { class: ErrorClass::Unavailable, message: m.into(), retry_after_s: None }
+        AdapterError { class: ErrorClass::Unavailable, message: m.into(), retry_after_s: None, usage: None }
     }
 }
 
@@ -204,48 +207,7 @@ impl Adapters {
         let mut call = proto::Call::open(&r.socket, Request::Complete(params))
             .await
             .map_err(|e| AdapterError::unavailable(format!("adapter {id} unreachable: {e}")))?;
-        let mut text = String::new();
-        let mut calls = vec![];
-        let (mut state, mut usage, mut served) = (None, None, None);
-        loop {
-            let ev = tokio::time::timeout(Duration::from_secs(600), call.next())
-                .await
-                .map_err(|_| AdapterError::unavailable("adapter stream stalled for 10 minutes"))?
-                .map_err(|e| AdapterError { class: ErrorClass::Malformed, message: format!("adapter stream: {e}"), retry_after_s: None })?;
-            match ev {
-                None => return Err(AdapterError::unavailable(format!("adapter {id} closed the stream early"))),
-                Some(Event::Text { text: t }) => {
-                    on_text(&t);
-                    text.push_str(&t);
-                }
-                Some(Event::ToolCall { id, name, input }) => calls.push(Block::ToolCall { id, name, input }),
-                Some(Event::State { state: s }) => state = Some(s),
-                Some(Event::Usage(u)) => usage = Some(u),
-                Some(Event::ServedModel { id }) => served = Some(id),
-                Some(Event::Credential { value }) => self.store_refreshed(&cred_name, &value),
-                Some(Event::Error { class, message, retry_after_s }) => return Err(AdapterError { class, message, retry_after_s }),
-                Some(Event::Done { stop }) => {
-                    let mut blocks = vec![];
-                    if !text.is_empty() {
-                        blocks.push(Block::Text { text });
-                    }
-                    blocks.extend(calls);
-                    let served_model = served.ok_or_else(|| AdapterError {
-                        class: ErrorClass::Malformed,
-                        message: "the adapter did not report the served model".into(),
-                        retry_after_s: None,
-                    })?;
-                    return Ok(TurnOut {
-                        blocks,
-                        state,
-                        usage: usage.unwrap_or(Usage { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0.0 }),
-                        served_model,
-                        stop,
-                    });
-                }
-                Some(other) => tracing::warn!("adapter {id} sent an unexpected event: {other:?}"),
-            }
-        }
+        read_turn(&mut call, id, &mut on_text, |v| self.store_refreshed(&cred_name, v)).await
     }
 
     /// Start a sign-in for adapter `id`: returns what the person must do.
@@ -316,5 +278,90 @@ impl Adapters {
                 ev => return Ok(ev),
             }
         }
+    }
+}
+
+/// Read one turn's events from an adapter: its reply, or the error that
+/// ended it with whatever the provider had charged by then.
+async fn read_turn(call: &mut proto::Call, id: &str, on_text: &mut impl FnMut(&str), mut store: impl FnMut(&str)) -> Result<TurnOut, AdapterError> {
+    let mut text = String::new();
+    let mut calls = vec![];
+    let (mut state, mut usage, mut served) = (None, None, None);
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(600), call.next())
+            .await
+            .map_err(|_| AdapterError { usage: usage.clone(), ..AdapterError::unavailable("adapter stream stalled for 10 minutes") })?
+            .map_err(|e| AdapterError { class: ErrorClass::Malformed, message: format!("adapter stream: {e}"), retry_after_s: None, usage: usage.clone() })?;
+        match ev {
+            None => return Err(AdapterError { usage, ..AdapterError::unavailable(format!("adapter {id} closed the stream early")) }),
+            Some(Event::Text { text: t }) => {
+                on_text(&t);
+                text.push_str(&t);
+            }
+            Some(Event::ToolCall { id, name, input }) => calls.push(Block::ToolCall { id, name, input }),
+            Some(Event::State { state: s }) => state = Some(s),
+            Some(Event::Usage(u)) => usage = Some(u),
+            Some(Event::ServedModel { id }) => served = Some(id),
+            Some(Event::Credential { value }) => store(&value),
+            // Charged, then failed: the cost still counts.
+            Some(Event::Error { class, message, retry_after_s }) => return Err(AdapterError { class, message, retry_after_s, usage }),
+            Some(Event::Done { stop }) => {
+                let mut blocks = vec![];
+                if !text.is_empty() {
+                    blocks.push(Block::Text { text });
+                }
+                blocks.extend(calls);
+                let served_model = served.ok_or_else(|| AdapterError {
+                    class: ErrorClass::Malformed,
+                    message: "the adapter did not report the served model".into(),
+                    retry_after_s: None,
+                    usage: usage.clone(),
+                })?;
+                return Ok(TurnOut {
+                    blocks,
+                    state,
+                    usage: usage.unwrap_or(Usage { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0.0 }),
+                    served_model,
+                    stop,
+                });
+            }
+            Some(other) => tracing::warn!("adapter {id} sent an unexpected event: {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An adapter that reports what the provider charged and then fails
+    /// (here, a reply that named no model) hands the cost back with the
+    /// error, so the run's budget counts it.
+    #[tokio::test]
+    async fn a_failed_turn_keeps_what_it_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("a.sock");
+        let usage = Usage { input_tokens: 1000, output_tokens: 200, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0.25 };
+        let sent = usage.clone();
+        let path = socket.clone();
+        tokio::spawn(async move {
+            proto::serve(&path, move |_, mut sink| {
+                let sent = sent.clone();
+                async move {
+                    sink.send(&Event::Usage(sent)).await?;
+                    sink.error(ErrorClass::Malformed, "the response did not name its model").await
+                }
+            })
+            .await
+        });
+        let params = CompleteParams { model: "m".into(), settings: Value::Null, credential: None, system: String::new(), messages: vec![], tools: vec![], max_tokens: 1 };
+        let mut call = loop {
+            match proto::Call::open(&socket, Request::Complete(params.clone())).await {
+                Ok(c) => break c,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+        let Err(e) = read_turn(&mut call, "a", &mut |_| {}, |_| {}).await else { panic!("the turn did not fail") };
+        assert_eq!((e.class, e.usage), (ErrorClass::Malformed, Some(usage)), "the cost was dropped with the error");
     }
 }

@@ -4,6 +4,10 @@
 
 Cancel in the app's browser sign-in now ends the wait in the app, so a sign-in finished later in the browser leaves no session and never replaces the stored one (`desktop/src-tauri/src/lib.rs`, `desktop/ui/app.js`, `bridge.js`).
 
+## Failed model calls count their cost (2026-11-04)
+
+A call the provider charged for and then failed now adds its cost and tokens to the run (`adapters.rs`, `events.rs`, `state.rs`, `run/agent_loop.rs`, with unit tests).
+
 ## A task's own policy layer (2026-11-04)
 
 The task layer DECISIONS names now exists: `task/<id>`, set by the owner or the task's person, narrowing that task alone (`policy.rs`, `boundary.rs`, `api.rs`, `policy_admin.rs`, test in `task_policy.rs`).
