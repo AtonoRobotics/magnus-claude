@@ -57,13 +57,12 @@ pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) 
     let db = ident(k.path().trim_start_matches('/'))?.to_string();
     let admin = connect(admin_url).await?;
     let exists = admin.query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role]).await?.is_some();
-    if exists {
-        admin.batch_execute(&format!("ALTER ROLE {role} LOGIN PASSWORD '{password}'")).await?;
-    } else {
-        admin
-            .batch_execute(&format!("CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE"))
-            .await?;
-    }
+    // A role made beforehand keeps whatever it was given, so its attributes
+    // are set either way; what it may still do to the log is checked below.
+    let verb = if exists { "ALTER" } else { "CREATE" };
+    admin
+        .batch_execute(&format!("{verb} ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"))
+        .await?;
     admin
         .batch_execute(&format!(
             "CREATE TABLE IF NOT EXISTS public.events (
@@ -95,6 +94,16 @@ pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) 
     admin.batch_execute(&content_walls_sql(&role)).await.context("wall the content store by person")?;
     // The knowledge base's index, filtered for each reader by row security.
     admin.batch_execute(&crate::knowledge::migrate_sql(&role)).await.context("create the knowledge index (pgvector must be installed)")?;
+    // Append-only is the database's to enforce: whatever grants or
+    // memberships the role holds (pg_write_all_data, owning the table, a
+    // role that does), it must not be able to change or delete the log.
+    let can: Vec<String> = admin
+        .query("SELECT p FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE']) p WHERE has_table_privilege($1, 'public.events', p)", &[&role])
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    anyhow::ensure!(can.is_empty(), "the kernel's role {role} can change the log ({}), through a grant or a role it is a member of; take that away and run migrate again", can.join(", "));
     if let Some(root) = root_url {
         migrate_root(&admin, root, &db).await.context("the admin console's database role")?;
     }

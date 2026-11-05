@@ -126,3 +126,28 @@ async fn migrate_sets_the_password_the_kernel_signs_in_with() {
     let kernel = magnus::log::connect(u.as_str()).await.expect("the kernel signs in with the password migrate set");
     kernel.execute("SELECT 1", &[]).await.unwrap();
 }
+
+/// The log is append-only because the database says so (DECISIONS, Event
+/// log and state), whoever made the kernel's role. `migrate` takes away
+/// what a role made beforehand may hold (superuser and the like), and
+/// refuses when the role can still change or delete the log, here through
+/// membership in `pg_write_all_data`.
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_leaves_the_kernel_role_unable_to_change_the_log() {
+    // Made beforehand as a superuser: migrate takes that away.
+    let db = pg::TestDb::create().await;
+    let admin = db.admin().await;
+    admin.batch_execute(&format!("CREATE ROLE {} LOGIN SUPERUSER PASSWORD 'x'", db.kernel_role)).await.unwrap();
+    magnus::log::migrate(&db.admin_url(), &db.kernel_url(), None).await.expect("migrate");
+    let kernel = db.as_kernel().await;
+    kernel.execute("INSERT INTO public.events (kind, actor, body) VALUES ('x', 'test', '{}')", &[]).await.unwrap();
+    assert!(kernel.execute("UPDATE public.events SET kind = 'y'", &[]).await.is_err(), "the kernel's role can change the log");
+    assert!(kernel.execute("DELETE FROM public.events", &[]).await.is_err(), "the kernel's role can delete from the log");
+
+    // Granted a way past the table's grants: migrate refuses.
+    let db = pg::TestDb::create().await;
+    let admin = db.admin().await;
+    admin.batch_execute(&format!("CREATE ROLE {} LOGIN PASSWORD 'x'; GRANT pg_write_all_data TO {}", db.kernel_role, db.kernel_role)).await.unwrap();
+    let err = magnus::log::migrate(&db.admin_url(), &db.kernel_url(), None).await.expect_err("migrate left a role that can change the log");
+    assert!(format!("{err:#}").contains("change the log"), "{err:#}");
+}
