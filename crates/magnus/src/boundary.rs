@@ -557,7 +557,7 @@ impl Kernel {
         let (untrusted, private) = if a.issuer == Issuer::Check { run.contract_taint } else { (run.untrusted, run.private) };
         let policies = self.read(|s| s.policies.clone());
         let facts = ToolFacts { name: &f.name, app: &f.app, risk: f.risk, audience: f.audience };
-        let outcome = policy::decide(&policies, person, &facts, untrusted, private)?;
+        let outcome = policy::decide(&policies, person, Some(&run.task), &facts, untrusted, private)?;
         let mut ask = match outcome {
             Outcome::Deny { reason, rule } => return Ok(Err(self.deny(a, "policy", &reason, false, rule).await?)),
             Outcome::Ask { rule } => Some((format!("policy asks before {}", a.tool), Some(rule))),

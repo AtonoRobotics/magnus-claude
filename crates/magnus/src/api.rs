@@ -1285,9 +1285,11 @@ async fn policies(State(k): K, h: HeaderMap) -> Response {
         Err(r) => return r,
     };
     let all = k.read(|s| s.policies.clone());
+    // The layers of their own tasks, which they may set (`put_policy`).
+    let own_task = |l: &str| l.strip_prefix("task/").is_some_and(|t| k.read(|s| s.tasks.get(t).is_some_and(|t| t.person == p.id)));
     let mine: serde_json::Map<String, Value> = all
         .into_iter()
-        .filter(|(l, _)| inbox::may_set_policy(&p, l) || l == "org" || l == &format!("user/{}", p.id) || p.groups.iter().any(|g| l == &format!("group/{g}")))
+        .filter(|(l, _)| inbox::may_set_policy(&p, l) || l == "org" || l == &format!("user/{}", p.id) || p.groups.iter().any(|g| l == &format!("group/{g}")) || own_task(l))
         .map(|(l, c)| (l, Value::String(c)))
         .collect();
     Json(json!({ "layers": mine, "default_org": crate::policy::DEFAULT_ORG })).into_response()
@@ -1299,13 +1301,17 @@ async fn put_policy(State(k): K, h: HeaderMap, Path(layer): Path<String>, Json(b
         Err(r) => return r,
     };
     let layer = layer.trim_matches('/').to_string();
+    // A task's layer: the task's own, which only narrows, so its person
+    // may set it as well as the owner (DECISIONS, Layering).
+    let task_of = layer.strip_prefix("task/").and_then(|t| k.read(|s| s.tasks.get(t).map(|t| t.person.clone())));
     let valid = layer == "org"
         || layer.strip_prefix("user/").is_some_and(|u| k.cfg.person(u).is_some())
-        || layer.strip_prefix("group/").is_some_and(|g| !g.is_empty() && !g.contains('/'));
+        || layer.strip_prefix("group/").is_some_and(|g| !g.is_empty() && !g.contains('/'))
+        || task_of.is_some();
     if !valid {
         return err(StatusCode::NOT_FOUND, "no such policy layer");
     }
-    if !inbox::may_set_policy(&p, &layer) {
+    if !(inbox::may_set_policy(&p, &layer) || task_of.as_deref() == Some(p.id.as_str())) {
         return err(StatusCode::FORBIDDEN, "you may not set this layer's policy");
     }
     let cedar = b["cedar"].as_str().unwrap_or_default().to_string();
