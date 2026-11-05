@@ -743,6 +743,11 @@ pub enum Ev {
         until: Option<chrono::DateTime<chrono::Utc>>,
         #[serde(default)]
         reason: Option<String>,
+        /// The risk class the action had when approved: the approval covers
+        /// only that class. Kept here, not only in the item, whose details
+        /// are deleted with the task. Absent from approvals written before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        risk: Option<String>,
     },
     ApprovalUsed {
         id: String,
