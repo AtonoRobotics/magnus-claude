@@ -71,7 +71,7 @@ export async function open(wd, app, shots, prefix) {
     if (!asked.includes(words)) throw new Error(`the confirmation says: ${asked}`);
     await d.click(d.css("dialog.ask[open] [data-ask=yes]"));
   };
-  d.seen = t => d.until(`"${t}"`, () => d.run("return document.body.innerText.includes(arguments[0])", t));
+  d.seen = (t, ms) => d.until(`"${t}"`, () => d.run("return document.body.innerText.includes(arguments[0])", t), ms);
   let n = 0;
   const shot = async name => {
     if (!shots) return;

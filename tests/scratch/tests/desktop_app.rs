@@ -792,3 +792,9 @@ async fn the_owners_installed_app_follows_development() {
     let (ok, log) = d.script("app-channels.mjs", &url, &fingerprint, &[("MAGNUS_APP", &app.display().to_string()), ("MAGNUS_NEW", &fresh)]).await;
     assert!(ok, "the owner's app did not follow development:\n{log}");
 }
+
+#[test]
+fn the_update_script_waits_two_minutes_to_accept_the_task_that_waited() {
+    let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests/app-update.mjs")).unwrap();
+    assert!(src.contains("seen(\"Accepted.\", 120_000)"), "{src}");
+}
