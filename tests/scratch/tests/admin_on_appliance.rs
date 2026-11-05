@@ -13,7 +13,7 @@
 
 use magnus_invariants::appliance::{bin, workspace_root};
 use magnus_invariants::*;
-use magnus_scratch::admin::{lan_ip, presented_at, FakeTailscale};
+use magnus_scratch::admin::{free_port, lan_ip, presented_at, FakeTailscale};
 use std::net::SocketAddr;
 
 fn run(config: &std::path::Path, lan: &str, port: u16) {
@@ -47,7 +47,7 @@ async fn the_setup_writes_an_admin_console_that_answers_its_hostname_on_the_netw
     std::fs::write(&config, toml::to_string(&cfg).unwrap()).unwrap();
 
     let ip = lan_ip();
-    let port = std::net::TcpListener::bind((ip, 0)).unwrap().local_addr().unwrap().port();
+    let port = free_port(ip);
     // What #78's first run wrote on strix-alpha: one name, no aliases.
     let before = std::fs::read_to_string(&config).unwrap();
     std::fs::write(&config, format!("{before}\n# The admin console (written by release/admin-on-appliance.sh; admin console spec).\n[admin]\nhostname = \"strix-alpha.local\"\nlisten = [\"{ip}:{port}\"]\nallow = [\"{ip}/32\"]\ntls_cert = \"x\"\ntls_key = \"y\"\ndatabase_url = \"postgres://magnus_root:kept@127.0.0.1:1/magnus\"\n")).unwrap();

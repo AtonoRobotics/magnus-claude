@@ -19,8 +19,21 @@ pub fn lan_ip() -> IpAddr {
     ip
 }
 
-fn free_port(ip: IpAddr) -> u16 {
-    std::net::TcpListener::bind((ip, 0)).unwrap().local_addr().unwrap().port()
+/// A port for a console to listen on, free when asked. Taken below the
+/// system's ephemeral range (32768 and up), from a random start: a port the
+/// system hands out (port 0, or any outgoing connection of the hundreds of
+/// tests running at once) can be taken again before the console binds it,
+/// and the test then talks to whatever holds it (another test's console,
+/// whose certificate fails as `BadSignature`). Here only another console
+/// picking the same port can, one chance in about 12,000.
+pub fn free_port(ip: IpAddr) -> u16 {
+    const LOW: u16 = 20000;
+    const SPAN: u16 = 12000;
+    let start = (uuid::Uuid::new_v4().as_u128() % SPAN as u128) as u16;
+    (0..SPAN)
+        .map(|i| LOW + (start + i) % SPAN)
+        .find(|&p| std::net::TcpListener::bind((ip, p)).is_ok())
+        .expect("a free port below the ephemeral range")
 }
 
 /// A console made ready to start: where it will listen, its config, and
@@ -255,4 +268,21 @@ pub async fn presented_at(addr: SocketAddr, host: &str, ca: reqwest::Certificate
     let b = reqwest::Client::builder().add_root_certificate(ca).tls_built_in_root_certs(false).tls_info(true).resolve(host, addr).no_proxy().build().unwrap();
     let r = b.get(format!("https://{host}:{}/status", addr.port())).send().await.map_err(|e| format!("{e:?}"))?;
     r.extensions().get::<reqwest::tls::TlsInfo>().and_then(|i| i.peer_certificate()).map(<[u8]>::to_vec).ok_or_else(|| "no certificate seen".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Binding port 0 hands back a port in the kernel's ephemeral range.
+    /// A console's port has to be chosen in 20000-31999, below that range,
+    /// or another test can take it before the console binds it.
+    #[test]
+    fn a_console_port_is_below_the_ephemeral_range() {
+        let ip = IpAddr::from([127, 0, 0, 1]);
+        for _ in 0..4 {
+            let port = free_port(ip);
+            assert!((20000..=31999).contains(&port), "port {port} is not in 20000-31999");
+        }
+    }
 }
