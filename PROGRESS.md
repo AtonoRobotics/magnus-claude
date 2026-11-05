@@ -2,7 +2,7 @@
 
 ## Windows cross target on every release-checks runner (2026-11-05)
 
-`build-box-beta` built the Linux installers and then failed the Windows one: rustup had no `x86_64-pc-windows-gnu` target (run 41957162011, #144). The workflow installs that target before the Windows build.
+`build-box-beta` built the Linux installers and then failed the Windows one: rustup had no `x86_64-pc-windows-gnu` target (run 41957162011, #144). Adding the target, the compile then failed because `x86_64-w64-mingw32-dlltool` was not installed (run 41958793139). The workflow installs that target, and mingw and NSIS when those tools are missing.
 
 
 ## Check-tool labels: quoted expansions (2026-11-04)

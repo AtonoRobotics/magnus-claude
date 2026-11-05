@@ -213,6 +213,7 @@ fn the_update_builds_wait_until_the_suite_has_finished() {
 fn the_windows_installer_adds_its_cross_target_first() {
     let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
     let add = workflow.find("rustup target add x86_64-pc-windows-gnu").expect("rustup target");
+    let mingw = workflow.find("x86_64-w64-mingw32-dlltool").expect("mingw");
     let build = workflow.find("cargo tauri build --runner cargo --target x86_64-pc-windows-gnu").expect("windows build");
-    assert!(add < build, "the Windows build runs before its target is installed");
+    assert!(add < build && mingw < build, "the Windows build runs before its target and mingw are installed");
 }
