@@ -54,6 +54,11 @@ async fn brokered_gmail(app: &mut Appliance, gmail: &StandInGmail) -> (FakeOAuth
         let c = cfg["connectors"].as_array_mut().unwrap().iter_mut().find(|c| c["name"].as_str() == Some("gmail")).unwrap().as_table_mut().unwrap();
         c.insert("audience".into(), mf["audience"].clone());
         c.insert("scopes".into(), mf["scopes"].clone());
+        // What each tool reaches, as the catalog gives it.
+        let tools = c["tools"].as_table_mut().unwrap();
+        for (t, reach) in mf.get("reach").and_then(|r| r.as_table()).into_iter().flatten() {
+            tools[t].as_table_mut().unwrap().insert("reach".into(), reach.clone());
+        }
         c.insert("destinations".into(), mf["destinations"].clone());
     })
     .await;
@@ -134,18 +139,20 @@ async fn gmail_sends_a_draft_only_once_the_person_approves_it_reaching_only_gmai
     only_gmail(&app, &gmail, &provider);
 }
 
-/// Having read her mail (private, and written by others), Magnus asks
-/// before it writes anything there (the Rule of Two), then again before
+/// Having read her mail (private, and written by others), Magnus labels the
+/// thread and writes the draft without asking: they stay in her own account
+/// and reach no one (approvals spec, Email end to end). It asks once, before
 /// the send.
 #[tokio::test(flavor = "multi_thread")]
-async fn having_read_mail_gmail_asks_before_the_draft_and_again_before_the_send() {
+async fn having_read_mail_gmail_labels_and_drafts_without_asking_and_asks_only_before_the_send() {
     let gmail = StandInGmail::start().await;
     let m = FakeModel::start(script(|c| async move {
         match c.turn() {
             0 => contract_unchecked("send Bob the plan he asked for", "Bob has the plan"),
             1 => tool("gmail__search_threads", json!({ "query": "from:bob plan" })),
-            2 => tool("gmail__create_draft", json!({ "to": ["bob@example.com"], "subject": "The plan", "body": "Friday at ten." })),
-            3 => tool("gmail__send_draft", json!({ "draft_id": "d1" })),
+            2 => tool("gmail__label_thread", json!({ "thread_id": "t1", "label_ids": ["Label_plans"] })),
+            3 => tool("gmail__create_draft", json!({ "to": ["bob@example.com"], "subject": "The plan", "body": "Friday at ten." })),
+            4 => tool("gmail__send_draft", json!({ "draft_id": "d1" })),
             _ => complete("sent Bob the plan"),
         }
     }))
@@ -157,11 +164,10 @@ async fn having_read_mail_gmail_asks_before_the_draft_and_again_before_the_send(
 
     let task = alice.submit("Send Bob the plan he asked for.").await;
     let (ask, tool) = asked(&alice, &task).await;
-    assert_eq!((tool.as_str(), calls(&gmail)), ("create_draft", vec![get("/threads")]));
-    approve(&alice, &ask).await;
-    let (ask, tool) = asked(&alice, &task).await;
-    assert_eq!((tool.as_str(), calls(&gmail)), ("send_draft", vec![get("/threads"), post("/drafts"), get("/drafts/d1")]));
-    let draft: Value = serde_json::from_str(&gmail.requests()[1].body).unwrap();
+    assert_eq!((tool.as_str(), calls(&gmail)), ("send_draft", vec![get("/threads"), post("/threads/t1/modify"), post("/drafts"), get("/drafts/d1")]), "the label or the draft asked first");
+    let (_, t) = alice.get(&format!("/v1/tasks/{task}")).await;
+    assert_eq!(t["taint"], json!({ "untrusted": true, "private": true }), "{t}");
+    let draft: Value = serde_json::from_str(&gmail.requests()[2].body).unwrap();
     let raw = String::from_utf8(base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE, draft["message"]["raw"].as_str().unwrap()).unwrap()).unwrap();
     assert!(raw.starts_with("To: bob@example.com\r\nSubject: The plan\r\n"), "{raw}");
     approve(&alice, &ask).await;
@@ -169,7 +175,7 @@ async fn having_read_mail_gmail_asks_before_the_draft_and_again_before_the_send(
     let review = alice.wait_item(&task, "review").await;
     assert!(alice.respond(review["id"].as_str().unwrap(), json!({ "decision": "accept" })).await.is_success());
     assert_eq!(alice.wait_settled(&task).await["status"], "completed");
-    assert_eq!(calls(&gmail), [get("/threads"), post("/drafts"), get("/drafts/d1"), get("/drafts/d1"), post("/drafts/send")]);
+    assert_eq!(calls(&gmail), [get("/threads"), post("/threads/t1/modify"), post("/drafts"), get("/drafts/d1"), get("/drafts/d1"), post("/drafts/send")]);
     only_gmail(&app, &gmail, &provider);
 }
 
