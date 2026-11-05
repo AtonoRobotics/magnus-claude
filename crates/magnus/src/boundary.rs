@@ -570,7 +570,12 @@ impl Kernel {
         // Starting a task from chat sends nothing out: the task carries the
         // turn's taint, and the rules apply to what it sends.
         // A tool that stays in the person's own account sends nothing out.
-        let transmits = !is_chat_tool(f) && !own_memory && !f.reaches_self && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private));
+        // Nor does a read through the person's own sign-in: its query goes
+        // only to the provider that holds their data already, and it reaches
+        // no one there (#175). A read through the organisation's key, the web
+        // and the browser keep the rule.
+        let own_account_read = f.risk == Risk::Read && f.connector.as_ref().is_some_and(|c| c.auth.as_deref() == Some(crate::connectors::OAUTH));
+        let transmits = !is_chat_tool(f) && !own_memory && !f.reaches_self && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private && !own_account_read));
         // These override a policy ask: the approval must then cover this exact
         // action, not a broader scope granted for policy reasons.
         if transmits && untrusted && private {
