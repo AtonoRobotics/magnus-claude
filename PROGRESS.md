@@ -3,6 +3,10 @@
 ## A task's own policy layer (2026-11-04)
 
 The task layer DECISIONS names now exists: `task/<id>`, set by the owner or the task's person, narrowing that task alone (`policy.rs`, `boundary.rs`, `api.rs`, `policy_admin.rs`, test in `task_policy.rs`).
+## The control socket listens before the network is answered (2026-11-05)
+
+The kernel bound its control socket in a task spawned just before it began answering on the network, so a caller that had seen it answer (the admin console after a restart, or the tests' harness) could still find the previous process's socket file and get "connection refused". `the_kill_switch_through_the_kernel_is_the_apps_own_and_outlives_a_restart` failed so in #159's CI. The socket is now bound (`control::bind`) before the network is served, and only its serving is spawned.
+
 ## migrate decodes the password (2026-11-04)
 
 `migrate` set a role's password to the URL's percent-escaped text while the kernel signs in with the decoded one; it now decodes it (`log.rs`, test in `log_review.rs`).
