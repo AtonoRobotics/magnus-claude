@@ -1,5 +1,9 @@
 # Progress
 
+## One `ready` issue (2026-11-05)
+
+At most one open issue carries `ready`. It is the single next pull for work that shares `PROGRESS.md`, `DECISIONS.md`, the release and tag paths or live OAuth. The owner may mark another issue `ready` only when that issue does not share those files. A new finding or product idea is labelled `queue` only; `queue` alone is the backlog and is not pullable, until the owner or the agent finishing the one `in-progress` claim promotes it to `ready`. Claiming still takes `ready` off and adds `in-progress`. The rest of how a claim becomes a pull request is unchanged (CLAUDE.md, "Work starts from an issue"; DECISIONS.md).
+
 ## The browser snapshot hides secret fields (2026-11-05)
 
 A filled password, one-time-code or card field reached the model in the browser snapshot, as its value and as its label. The snapshot now marks such a field `= (hidden)` and never prints what it holds (`browser/sidecar.js`, test `browser_snapshot_never_shows_a_secret_field_value` in `tools.rs`). Screenshots are unchanged.
@@ -10,7 +14,7 @@ Workspace version stays 0.2.4 so `appliance-v0.2.4` can be tagged. Master is mer
 
 ## Agents pull work from issues (2026-11-05)
 
-An agent opens a product or fix pull request only from an open issue labelled `ready` (usually `queue`), or from an issue the owner names. It claims that issue (`ready` off, `in-progress` on, a short comment) and opens one pull request with `Fixes #N`, which closes the issue on merge. One change that edits `PROGRESS.md`, `DECISIONS.md`, the release and tag paths or live OAuth is in flight at a time; work that leaves those files untouched may run beside it. The cap of six open agent pull requests is still the ceiling. The rule is in CLAUDE.md, "How work lands" (DECISIONS.md). CI leaves it to that instruction.
+An agent opens a product or fix pull request only from an open issue labelled `ready` (usually `queue`), or from an issue the owner names. It claims that issue (`ready` off, `in-progress` on, a short comment) and opens one pull request with `Fixes #N`, which closes the issue on merge. One change that edits `PROGRESS.md`, `DECISIONS.md`, the release and tag paths or live OAuth is in flight at a time; work that leaves those files untouched may run beside it. The cap of six open agent pull requests is still the ceiling. The rule is in CLAUDE.md, "How work lands" (DECISIONS.md). CI leaves it to that instruction. How many issues may carry `ready` is in "One `ready` issue" above (#181): at most one, unless the owner marks more that do not share those files, and `queue` alone is not pullable.
 
 ## The kill switch closes the browser (2026-11-05)
 
