@@ -3,6 +3,14 @@
 ## Unembedded knowledge is still found (2026-11-04)
 
 An entry saved while the embedding server was down was missing from every search until the next start. Searches by meaning now also return word matches among entries not yet embedded (`knowledge.rs`, test in `knowledge.rs`).
+## The control socket listens before the network is answered (2026-11-05)
+
+The kernel bound its control socket in a task spawned just before it began answering on the network, so a caller that had seen it answer (the admin console after a restart, or the tests' harness) could still find the previous process's socket file and get "connection refused". `the_kill_switch_through_the_kernel_is_the_apps_own_and_outlives_a_restart` failed so in #159's CI. The socket is now bound (`control::bind`) before the network is served, and only its serving is spawned.
+
+## migrate decodes the password (2026-11-04)
+
+`migrate` set a role's password to the URL's percent-escaped text while the kernel signs in with the decoded one; it now decodes it (`log.rs`, test in `log_review.rs`).
+
 ## The network cannot lock the appliance's own machine (2026-11-04)
 
 Wrong passwords from the network no longer lock a name out on the appliance's own machine (`accounts.rs`, `api.rs`, test in `app.rs`). Open for the owner: counting the network's attempts per address instead of per name.
