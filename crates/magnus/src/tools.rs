@@ -580,6 +580,19 @@ pub fn addresses(v: &Value) -> Vec<String> {
     out
 }
 
+/// The email addresses written in free text, lowercased: a word with one
+/// `@`, a name before it and a dotted domain after it, once punctuation
+/// around it is taken off (`<bob@x.example>,`, `(bob@x.example).`).
+pub fn addresses_in(text: &str) -> Vec<String> {
+    text.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '<' | '>' | '(' | ')' | '[' | ']' | '"' | '\'' | '`'))
+        .map(|w| w.trim_matches(|c: char| matches!(c, '.' | ':' | '!' | '?')).to_lowercase())
+        .filter(|w| match w.split_once('@') {
+            Some((name, domain)) => !name.is_empty() && !domain.contains('@') && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.'),
+            None => false,
+        })
+        .collect()
+}
+
 /// One address from `Name <a@x>` or a bare `a@x`.
 fn address(part: &str) -> Option<String> {
     let inner = match (part.rfind('<'), part.rfind('>')) {
@@ -592,8 +605,15 @@ fn address(part: &str) -> Option<String> {
 
 #[cfg(test)]
 mod address_tests {
-    use super::addresses;
+    use super::{addresses, addresses_in};
     use serde_json::json;
+
+    #[test]
+    fn addresses_are_read_from_what_a_person_wrote() {
+        let said = "Send Bob (Bob@Corp.example) the Q3 draft, cc <ann@x.example>; not @handle, me@, a@b or a@b. or \"quoted@q.example\".";
+        assert_eq!(addresses_in(said), ["bob@corp.example", "ann@x.example", "quoted@q.example"]);
+        assert!(addresses_in("Reply to Bob about Friday.").is_empty());
+    }
 
     #[test]
     fn a_recipients_field_reads_as_exact_lowercased_addresses() {
