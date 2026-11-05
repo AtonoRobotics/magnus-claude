@@ -3,6 +3,10 @@
 ## Cancelling a browser sign-in ends it (2026-11-04)
 
 Cancel in the app's browser sign-in now ends the wait in the app, so a sign-in finished later in the browser leaves no session and never replaces the stored one (`desktop/src-tauri/src/lib.rs`, `desktop/ui/app.js`, `bridge.js`).
+## The control socket listens before the network is answered (2026-11-05)
+
+The kernel bound its control socket in a task spawned just before it began answering on the network, so a caller that had seen it answer (the admin console after a restart, or the tests' harness) could still find the previous process's socket file and get "connection refused". `the_kill_switch_through_the_kernel_is_the_apps_own_and_outlives_a_restart` failed so in #159's CI. The socket is now bound (`control::bind`) before the network is served, and only its serving is spawned.
+
 ## migrate decodes the password (2026-11-04)
 
 `migrate` set a role's password to the URL's percent-escaped text while the kernel signs in with the decoded one; it now decodes it (`log.rs`, test in `log_review.rs`).
