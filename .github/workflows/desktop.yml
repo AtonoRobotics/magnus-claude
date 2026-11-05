@@ -239,6 +239,18 @@ jobs:
           until [ -f "$t/build.status" ]; do sleep 5; done
           s=$(cat "$t/build.status")
           [ "$s" = 0 ] || { tail -50 "$t/build.log"; exit "$s"; }
+      # build-box-beta has no WebKitWebDriver, so every installed-app test
+      # stopped at once (run 41959422399). desktop/README.md names the package.
+      - name: Installed-app drivers
+        if: env.MAGNUS_TESTED != '1' && env.MAGNUS_SELECT == 'full'
+        run: |
+          if ! command -v WebKitWebDriver >/dev/null; then
+            sudo -n apt-get update -qq
+            sudo -n apt-get install -y webkit2gtk-driver
+          fi
+          if ! command -v tauri-driver >/dev/null && [ ! -x "${CARGO_HOME:-$HOME/.cargo}/bin/tauri-driver" ]; then
+            cargo install tauri-driver --locked
+          fi
       # They take about two minutes; a hang fails here, not at the job's end.
       - name: Installed-app tests
         if: env.MAGNUS_TESTED != '1' && env.MAGNUS_SELECT == 'full'
