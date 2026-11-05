@@ -13,7 +13,8 @@ async fn page_server() -> String {
     use axum::{response::Html, routing::get, Router};
     let app = Router::new()
         .route("/", get(|| async { Html("<html><head><title>Shop</title></head><body><h1>Welcome</h1><a href='/next'>Go next</a><input placeholder='Your name'></body></html>") }))
-        .route("/next", get(|| async { Html("<html><body><p>Second page</p></body></html>") }));
+        .route("/next", get(|| async { Html("<html><body><p>Second page</p></body></html>") }))
+        .route("/non-web-link", get(|| async { Html("<html><body><a id='open'>Open document</a><script>document.querySelector('a').href = URL.createObjectURL(new Blob(['NON-WEB-DOCUMENT'], {type:'text/html'}));</script></body></html>") }));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", l.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
@@ -72,6 +73,15 @@ async fn browser_cannot_read_the_appliances_files_or_execute_a_navigation_script
     let v = b.request("r1", json!({ "op": "snapshot" })).await.unwrap();
     let text = v["text"].as_str().unwrap();
     assert!(text.contains("Welcome") && !text.contains("PRIVATE-HOST-FILE-CANARY") && !text.contains("SCRIPT-RAN"), "{text}");
+    // A page can navigate indirectly. The observation guards must also
+    // refuse a non-web document reached without the navigate command.
+    b.request("r1", json!({ "op": "navigate", "url": format!("{url}/non-web-link") })).await.unwrap();
+    let error = b.request("r1", json!({ "op": "click", "target": "Open document" })).await.unwrap_err();
+    assert!(error.to_string().contains("only open http and https"), "{error}");
+    for op in ["snapshot", "screenshot"] {
+        let error = b.request("r1", json!({ "op": op })).await.unwrap_err();
+        assert!(error.to_string().contains("only open http and https"), "{error}");
+    }
     b.close("r1").await;
 }
 
