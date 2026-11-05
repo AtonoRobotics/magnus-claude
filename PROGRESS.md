@@ -3,6 +3,9 @@
 ## No secret in an app's address (2026-11-04)
 
 Adding an app now refuses an address with a user, password, query or fragment, before contacting it, so a token in the address is neither sent, logged nor listed (`connectors.rs`, test in `connectors.rs`).
+## Approvals keep their risk class (2026-11-04)
+
+An approval no longer covers its tool after the owner reclassifies the tool as riskier: it is matched on the class its item recorded (`state.rs`, `boundary.rs`, test in `connectors.rs`).
 ## Sharing keeps to where content came from (2026-11-04)
 
 Sharing a chat answer now also checks the apps its private content came from, not only the tools its runs called (`chat_actions.rs`, test in `chat_actions.rs`).

@@ -616,6 +616,8 @@ impl Kernel {
                 .filter(|ap| {
                     ap.person == run.person
                         && ap.tool == a.tool
+                        // Approved as the class it had then, not a riskier one since.
+                        && ap.risk.as_deref() == Some(f.risk.as_str())
                         && ap.reason.as_deref() != Some("unknown_outcome")
                         && (!kernel_ask || ap.scope == "once")
                         && match ap.scope.as_str() {
