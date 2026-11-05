@@ -442,6 +442,10 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         return r;
     }
     let device = device_of(&k, peer, &h);
+    // Wrong passwords are counted where they come from: on the appliance's
+    // own machine apart from the network, so the network cannot lock the
+    // person out of the appliance itself.
+    let counter = if on_this_machine(peer, &h) { crate::accounts::Accounts::local_counter(&person) } else { crate::accounts::Accounts::network_counter(&person) };
     let locked = |until: chrono::DateTime<chrono::Utc>| {
         (
             StatusCode::TOO_MANY_REQUESTS,
@@ -477,7 +481,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
                 Err(e) => internal(e),
             };
         }
-        if let Some(until) = k.accounts.locked(&person) {
+        if let Some(until) = k.accounts.locked(&counter) {
             return locked(until);
         }
         // The first time, the provider's own page signs them in: it can walk
@@ -489,11 +493,11 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         // cannot all pass the lockout first; a right answer clears it.
         let ours = k.cfg.person(&person).is_some();
         if ours {
-            k.accounts.failed(&person);
+            k.accounts.failed(&counter);
         }
         let answer = match id.password(&person, password, code, app).await {
             Ok(polled @ crate::identity::Polled::Done { .. }) => {
-                k.accounts.succeeded(&person);
+                k.accounts.succeeded(&counter);
                 return provider_answered(&k, t, id.label(), polled, device.clone()).await;
             }
             Ok(polled) => Some(polled),
@@ -507,14 +511,14 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
                 // Only a refusal says the password was wrong: one that needs
                 // the code or the browser was right, and stays uncounted.
                 if ours && !matches!(polled, crate::identity::Polled::Refused(_)) {
-                    k.accounts.forgive(&person);
+                    k.accounts.forgive(&counter);
                 }
                 provider_answered(&k, t, id.label(), polled, device.clone()).await
             }
             None => {
                 // Down: the attempt said nothing about the password.
                 if ours {
-                    k.accounts.forgive(&person);
+                    k.accounts.forgive(&counter);
                 }
                 let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h);
                 if backup {
@@ -533,7 +537,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         let _ = k.accounts.sign_in(&person, password);
         return err(StatusCode::UNAUTHORIZED, "The name or password is wrong.");
     }
-    match k.accounts.sign_in(&person, password) {
+    match k.accounts.sign_in_counted(&person, password, &counter) {
         Ok(Ok(_)) => issue(&k, t, &person, app, device.as_deref()).await,
         Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
         Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
@@ -1281,9 +1285,11 @@ async fn policies(State(k): K, h: HeaderMap) -> Response {
         Err(r) => return r,
     };
     let all = k.read(|s| s.policies.clone());
+    // The layers of their own tasks, which they may set (`put_policy`).
+    let own_task = |l: &str| l.strip_prefix("task/").is_some_and(|t| k.read(|s| s.tasks.get(t).is_some_and(|t| t.person == p.id)));
     let mine: serde_json::Map<String, Value> = all
         .into_iter()
-        .filter(|(l, _)| inbox::may_set_policy(&p, l) || l == "org" || l == &format!("user/{}", p.id) || p.groups.iter().any(|g| l == &format!("group/{g}")))
+        .filter(|(l, _)| inbox::may_set_policy(&p, l) || l == "org" || l == &format!("user/{}", p.id) || p.groups.iter().any(|g| l == &format!("group/{g}")) || own_task(l))
         .map(|(l, c)| (l, Value::String(c)))
         .collect();
     Json(json!({ "layers": mine, "default_org": crate::policy::DEFAULT_ORG })).into_response()
@@ -1295,13 +1301,17 @@ async fn put_policy(State(k): K, h: HeaderMap, Path(layer): Path<String>, Json(b
         Err(r) => return r,
     };
     let layer = layer.trim_matches('/').to_string();
+    // A task's layer: the task's own, which only narrows, so its person
+    // may set it as well as the owner (DECISIONS, Layering).
+    let task_of = layer.strip_prefix("task/").and_then(|t| k.read(|s| s.tasks.get(t).map(|t| t.person.clone())));
     let valid = layer == "org"
         || layer.strip_prefix("user/").is_some_and(|u| k.cfg.person(u).is_some())
-        || layer.strip_prefix("group/").is_some_and(|g| !g.is_empty() && !g.contains('/'));
+        || layer.strip_prefix("group/").is_some_and(|g| !g.is_empty() && !g.contains('/'))
+        || task_of.is_some();
     if !valid {
         return err(StatusCode::NOT_FOUND, "no such policy layer");
     }
-    if !inbox::may_set_policy(&p, &layer) {
+    if !(inbox::may_set_policy(&p, &layer) || task_of.as_deref() == Some(p.id.as_str())) {
         return err(StatusCode::FORBIDDEN, "you may not set this layer's policy");
     }
     let cedar = b["cedar"].as_str().unwrap_or_default().to_string();
@@ -1431,33 +1441,17 @@ impl Kernel {
         }
     }
     let take: Vec<String> = revoking.iter().map(|(n, _)| n.clone()).collect();
+    // With any an earlier switch took and a crash kept from revoking.
     let taken = match k.vault.seal_and_take(&take) {
         Ok(t) => t,
         Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("{e:#}") }))),
     };
+    let take: Vec<String> = taken.iter().map(|(n, _)| n.clone()).collect();
     // Revoked at once; each result is recorded only after the vault's
     // sealing below (or its failure), which starts the list it goes in: a
     // result recorded first was wiped, and the owner told it was not done.
     let (sealed_tx, sealed_rx) = tokio::sync::oneshot::channel::<()>();
-    let kk = k.clone();
-    tokio::spawn(async move {
-        let mut done = vec![];
-        for (name, secret) in taken {
-            let adapter = revoking.iter().find(|(n, _)| *n == name).map(|(_, a)| a.clone()).unwrap_or_default();
-            let (at_provider, detail) = if adapter.starts_with("connector:") {
-                crate::connectors::revoke(secret.expose()).await
-            } else {
-                kk.adapters.revoke(&adapter, secret.expose().to_string()).await
-            };
-            done.push(Ev::SecretRevoked { name, adapter, at_provider, detail });
-        }
-        let _ = sealed_rx.await;
-        for ev in done {
-            if let Err(e) = kk.emit("kernel", ev).await {
-                tracing::error!("could not record a revocation: {e:#}");
-            }
-        }
-    });
+    k.revoke_taken(taken, revoking, Some(sealed_rx));
     // Then the records: the policy is deny-all from this event on, and every
     // run is suspended.
     let kept: Vec<String> = names.iter().filter(|n| !take.contains(n)).cloned().collect();
@@ -1479,6 +1473,70 @@ impl Kernel {
         ));
     }
     Ok(json!({ "engaged": true, "revoking": take, "sealed": kept }))
+    }
+}
+
+impl Kernel {
+    /// Revoke at their providers the sign-ins the kill switch took out of
+    /// the vault, each let go by the vault once its provider has answered,
+    /// and record each result once `after` says the sealing is recorded.
+    fn revoke_taken(self: &Arc<Self>, taken: Vec<(String, crate::vault::Secret)>, known: Vec<(String, String)>, after: Option<tokio::sync::oneshot::Receiver<()>>) {
+        let k = self.clone();
+        tokio::spawn(async move {
+            let mut done = vec![];
+            for (name, secret) in taken {
+                let adapter = match known.iter().find(|(n, _)| *n == name) {
+                    Some((_, a)) => a.clone(),
+                    None => k.revoker_of(&name).await,
+                };
+                let (at_provider, detail) = if adapter.starts_with("connector:") {
+                    crate::connectors::revoke(secret.expose()).await
+                } else {
+                    k.adapters.revoke(&adapter, secret.expose().to_string()).await
+                };
+                if let Err(e) = k.vault.revoked(&name) {
+                    tracing::error!("could not let go of {name} after revoking it: {e:#}");
+                }
+                done.push(Ev::SecretRevoked { name, adapter, at_provider, detail });
+            }
+            if let Some(after) = after {
+                let _ = after.await;
+            }
+            for ev in done {
+                if let Err(e) = k.emit("kernel", ev).await {
+                    tracing::error!("could not record a revocation: {e:#}");
+                }
+            }
+        });
+    }
+
+    /// Who revokes a sign-in the switch took: its adapter, or the app it
+    /// signs in to (`connector:<app>`), even one removed since.
+    async fn revoker_of(&self, name: &str) -> String {
+        if let Some(adapter) = self.adapters.oauth_owner_of(name).await {
+            return adapter;
+        }
+        let app = self.all_connectors().into_iter().map(|(c, _)| c.name).find(|app| crate::connectors::is_sign_in_of(name, app));
+        format!("connector:{}", app.unwrap_or_default())
+    }
+
+    /// At start: a kill switch a crash cut short is finished. Sealed but not
+    /// recorded, it is engaged again (which records it and revokes what it
+    /// took); otherwise what it took and did not see revoked is revoked,
+    /// released since or not.
+    pub async fn finish_kill_switch(self: &Arc<Self>) {
+        if self.vault.is_sealed() && !self.read(|s| s.kill_switch) {
+            tracing::warn!("the vault is sealed but the kill switch is not recorded: engaging it again");
+            if let Err((_, e)) = self.kill_switch("kernel", true).await {
+                tracing::error!("could not engage the kill switch again: {e}");
+            }
+            return;
+        }
+        match self.vault.revoking() {
+            Ok(taken) if !taken.is_empty() => self.revoke_taken(taken, vec![], None),
+            Ok(_) => {}
+            Err(e) => tracing::error!("could not read the sign-ins waiting to be revoked: {e:#}"),
+        }
     }
 }
 

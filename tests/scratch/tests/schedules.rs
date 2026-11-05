@@ -23,6 +23,16 @@ use std::time::Duration;
 /// half-second tick and a run's start.
 const MINUTE: Duration = Duration::from_secs(100);
 
+/// A minute to become due, then the run that ends the schedule, on a busy
+/// build box. The 90-second patience lapsed first (runs 41949527809,
+/// 41957157578, 41960121035).
+const NOTICE: Duration = Duration::from_secs(180);
+
+#[test]
+fn a_schedule_notice_outlasts_a_quiet_minute() {
+    assert!(NOTICE > MINUTE);
+}
+
 fn simple_contract() -> Reply {
     tool(
         "task_contract",
@@ -61,7 +71,7 @@ async fn tasks_with(api: &Api, text: &str) -> Vec<Value> {
 }
 
 async fn notice(api: &Api, starts: &str, schedule: &str) -> Value {
-    eventually(&format!("a notice \"{starts}\" for {schedule}"), PATIENCE, || async {
+    eventually(&format!("a notice \"{starts}\" for {schedule}"), NOTICE, || async {
         api.inbox().await.into_iter().find(|i| i["kind"] == "notice" && i["summary"].as_str().unwrap_or_default().starts_with(starts) && i["details"]["evidence"]["schedule"] == schedule)
     })
     .await

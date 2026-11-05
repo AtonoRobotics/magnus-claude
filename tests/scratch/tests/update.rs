@@ -140,9 +140,13 @@ async fn a_signed_release_installs_while_a_task_runs_and_goes_back_one_step() {
             0 => contract_unchecked("read the inbox", "the inbox was read"),
             1 => tool("mail__list_inbox", json!({})),
             // The reply in flight when the update comes: it returns once the
-            // appliance is switching releases.
+            // appliance is switching releases, or after PATIENCE, so an
+            // update that never starts fails the test's own waits below by
+            // name and never holds the reply, and the run, open-ended (run
+            // 41782499090 held this test for more than ten minutes).
             2 => {
-                while !SWITCHING.load(std::sync::atomic::Ordering::SeqCst) {
+                let start = std::time::Instant::now();
+                while !SWITCHING.load(std::sync::atomic::Ordering::SeqCst) && start.elapsed() < PATIENCE {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 complete("read")

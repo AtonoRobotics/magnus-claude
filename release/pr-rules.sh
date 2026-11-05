@@ -20,10 +20,13 @@
 # It fails (exit 4), naming each rule broken, when:
 # - this agent pull request is past the cap of open agent pull requests;
 # - it asks to merge into anything but master: no stacked pull requests.
+# It notes, without failing, when the branch does not hold master's
+# current commit: that is not a reason to merge master in (only a conflict
+# is). GitHub merges it with current master when it lands, and master's own
+# run tests that result in full; merging master into every open branch
+# restarted every run on the shared runner (owner, 2026-11-04). The
+# development channel will not publish over a build this lacks.
 # It warns, without failing, when:
-# - the branch does not hold master's current commit (merge master in
-#   before merging; the development channel will not publish over a build
-#   this lacks);
 # - this agent pull request is past the warning line but within the cap;
 # - the change is large (more than MAGNUS_PR_LINES lines, default 800,
 #   outside tests and documents).
@@ -33,6 +36,7 @@ pr=$1 head=$2 base_branch=$3 master=$4
 broken=0
 fail() { echo "::error::$1"; broken=1; }
 warn() { echo "::warning::$1"; }
+note() { echo "::notice::$1"; }
 
 cap=${MAGNUS_PR_CAP:-6}
 soft=${MAGNUS_PR_WARN:-4}
@@ -75,7 +79,7 @@ if [ "$base_branch" != master ]; then
   fail "this pull request merges into $base_branch: every pull request merges into master, from a branch made from current master (no stacked pull requests)."
 fi
 if ! git merge-base --is-ancestor "$master" "$head" 2>/dev/null; then
-  warn "this branch does not hold master's current commit $(git rev-parse --short "$master" 2>/dev/null || echo "$master"): merge master into it before merging (git fetch origin master && git merge origin/master), unless the merge queue lands it. Development is not published while that would replace the owner's app with a build that lacks work it already has."
+  note "this branch does not hold master's current commit $(git rev-parse --short "$master" 2>/dev/null || echo "$master"). Do not merge master in for that alone: it lands merged with current master, and master's own run tests the result in full. Merge master in only to resolve a conflict. Development is not published while that would replace the owner's app with a build that lacks work it already has."
 fi
 
 lines=$(git diff --numstat "$(git merge-base "$master" "$head")" "$head" -- . ':(exclude)tests' ':(exclude)*.md' ':(exclude)docs' 2>/dev/null | awk '$1 != "-" { n += $1 + $2 } END { print n + 0 }')

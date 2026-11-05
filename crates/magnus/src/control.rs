@@ -24,13 +24,20 @@ pub fn socket_path(state_dir: &Path) -> PathBuf {
 }
 
 /// Serve the control socket until the kernel stops.
-pub async fn serve(k: Arc<Kernel>, state_dir: &Path) -> Result<()> {
+/// Listen on the control socket, replacing one a previous process left.
+/// Bound before the appliance answers on the network, so nothing that has
+/// seen it answer finds the old socket (connection refused) instead.
+pub fn bind(state_dir: &Path) -> Result<tokio::net::UnixListener> {
     use std::os::unix::fs::PermissionsExt;
     let path = socket_path(state_dir);
     let _ = std::fs::remove_file(&path);
     let l = tokio::net::UnixListener::bind(&path).with_context(|| format!("listen on {}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!("magnus control socket at {}", path.display());
+    Ok(l)
+}
+
+pub async fn serve(k: Arc<Kernel>, l: tokio::net::UnixListener) -> Result<()> {
     let app = Router::new().route("/v1/audit", post(record).get(list)).route("/v1/kill-switch", post(switch).get(switch_state)).route("/v1/overview", axum::routing::get(overview))
         .route("/v1/people", axum::routing::get(people))
         .route("/v1/people/{person}/sessions", axum::routing::get(sessions).delete(end_sessions))
