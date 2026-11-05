@@ -4,6 +4,15 @@
 
 Wrong passwords from the network no longer lock a name out on the appliance's own machine (`accounts.rs`, `api.rs`, test in `app.rs`). Open for the owner: counting the network's attempts per address instead of per name.
 
+## Windows cross target on every release-checks runner (2026-11-05)
+
+`build-box-beta` built the Linux installers and then failed the Windows one: rustup had no `x86_64-pc-windows-gnu` target (run 41957162011, #144). Adding the target, the compile then failed because `x86_64-w64-mingw32-dlltool` was not installed (run 41958793139). The workflow installs that target, and mingw and NSIS when those tools are missing. The Windows build then succeeded. Every installed-app test stopped because `WebKitWebDriver` is not installed (run 41959422399). The workflow installs `webkit2gtk-driver` and `tauri-driver` when they are missing. Twelve installed-app tests then passed. Copying an answer failed because `xclip` is not installed (run 41961388534). That package is installed with the driver when it is missing.
+
+
+## Check-tool labels: quoted expansions (2026-11-04)
+
+From #136's review: a check that only prints `${PATH:=...}` in single quotes, after a backslash or in a comment is no longer refused. An assignment bash makes through arithmetic on a variable's value, and one hidden by `\$` in `sh -c "..."`, now is (`sandbox/check_tools.py`, cases in `test_check_tools.py`).
+
 ## No secret in an app's address (2026-11-04)
 
 Adding an app now refuses an address with a user, password, query or fragment, before contacting it, so a token in the address is neither sent, logged nor listed (`connectors.rs`, test in `connectors.rs`).
@@ -48,7 +57,7 @@ A silent embedding server stalled knowledge search and adds for ever. Requests n
 
 ## A send shows and holds the draft it sends (2026-11-04, `send-reads-the-draft`)
 
-Approvals spec step 2. Gmail's `send_draft` card now shows the draft's To, Cc, Bcc, subject, text and attachments, read through `get_draft` at the gate. The approval holds only for that exact email: an edited draft asks again (`a_draft_changed_after_its_card_asks_again_showing_the_change`, gmail.rs). Gmail manifest 1.1.0. The protected test `a_draft_edited_after_approval_asks_again_including_an_added_bcc` (inv4_taint.rs) lands here, as the spec approved; the harness gains `Spec::destinations`. Step 1 (#145, `reach-in-manifests`) waits for this step: merge master into it, then set Gmail to 1.2.0. Steps 3–11 follow, one PR each.
+Approvals spec step 2. Gmail's `send_draft` card now shows the draft's To, Cc, Bcc, subject, text and attachments, read through `get_draft` at the gate. The approval holds only for that exact email: an edited draft asks again (`a_draft_changed_after_its_card_asks_again_showing_the_change`, gmail.rs). The protected test `a_draft_edited_after_approval_asks_again_including_an_added_bcc` (inv4_taint.rs) lands here, as the spec approved; the harness gains `Spec::destinations`. This branch is step 1 merged with that step, so Gmail is manifest 1.2.0, with `[reach]` and `[destinations.send_draft]`. Steps 3–11 follow, one PR each.
 
 ## Approved contract changes keep their taint (2026-11-04)
 
@@ -76,6 +85,7 @@ The replacement is not deployed. PR #133 has merged: several PRs may now be open
 
 ## Now (2026-10-29)
 
+- **Approvals spec, steps 1 and 2 on `reach-in-manifests` ("Magnus Approvals and Shared Computer Spec", 2026-11-04).** Having read mail, Magnus asked before every label, trash and draft. A manifest now declares a tool's reach, and a `self` tool passes the Rule of Two; Gmail declares it for drafts, labels, trash and spam. The send still asks, and its card shows the draft read at the gate (step 2, already on master). Gmail is manifest 1.2.0. Next: grants (3), the card (4), approver:self and grants across work (5), ask_approval and the grants list (6), schedules and the verifier (7), and the shared computer (8 to 11).
 - **A task's summary read in conversation carries what its task read (invariant 4; branch `chat-controls-taint`).** Magnus listing tasks or schedules in a chat took in each run's summary as clean words, so a summary of untrusted, private mail could leave in the turn's next web lookup without asking. Now the list carries the taint of every run whose words it returned, and the Rule of Two asks. Found by the spec review of 2026-11-04, with the rest of its findings still to fix one pull request each.
 - **Slack's sign-in comes back through the appliance's public name (branch `slack-https-redirect`).** A distributed Slack app may only register https redirects, so Slack is given `https://magnus.pyrallon.ai/oauth/slack/callback`. The appliance checks the state and sends the browser on to `http://127.0.0.1:17321/callback`, where the desktop is listening. The desktop posts the code back, and the exchange repeats the https address. The code is not logged. The path is open without a device certificate. The microVM still reaches only `slack.com`.
 - **Slack is brokered (connectors spec, Brokered API connectors; branch `slack-brokered`).** A person connects Slack from the desktop app: the browser opens Slack's own page, and Magnus can then search messages, read channels and direct messages, and post as that person (it asks first). The server is Alpha Vector's, over Slack's Web API (`brokered/slack`), named by digest, in a microVM that reaches only `slack.com`. The sign-in is Slack's user-token endpoints (the metadata at `https://mcp.slack.com`), with the client secret on the appliance, no PKCE, and the one redirect `http://127.0.0.1:17321/callback`. Slack's hosted MCP server is not called. The secret is `SLACK_CLIENT_SECRET`, provisioned like Google's.

@@ -1163,7 +1163,9 @@ impl State {
                 if let Some(c) = self.connectors.get_mut(connector) {
                     match risk {
                         Some(r) => {
-                            c.tools.insert(tool.clone(), crate::config::ToolClass { risk: r.clone(), label: None });
+                            // Its reach is what the tool is, whatever its class.
+                            let reach = c.tools.get(tool).and_then(|t| t.reach.clone());
+                            c.tools.insert(tool.clone(), crate::config::ToolClass { risk: r.clone(), label: None, reach });
                         }
                         None => {
                             c.tools.remove(tool);

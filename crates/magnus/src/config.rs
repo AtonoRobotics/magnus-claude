@@ -882,6 +882,10 @@ pub struct ToolClass {
     /// Overrides the app's inbound label for this tool's results.
     #[serde(default)]
     pub label: Option<String>,
+    /// What the tool reaches: `self` for the person's own account
+    /// (`tools::REACH_SELF`); absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<String>,
 }
 
 impl Config {
@@ -898,6 +902,9 @@ impl Config {
             );
             for (t, class) in &c.tools {
                 anyhow::ensure!(crate::tools::Risk::parse(&class.risk).is_some(), "tool {}.{t}: unknown risk class {}", c.name, class.risk);
+                if let Some(r) = &class.reach {
+                    anyhow::ensure!(crate::tools::reach_fits(r, &class.risk), "tool {}.{t}: reach {r:?} does not fit a {} tool; the only reach is \"self\", on a write that stays in the person's own account", c.name, class.risk);
+                }
             }
             for (t, d) in &c.destinations {
                 let risk = |t: &str| c.tools.get(t).map(|class| class.risk.clone());
@@ -981,5 +988,19 @@ mod tests {
         assert_eq!(load(&brokered).unwrap().connectors[0].idempotency, "none");
         // A remote app may say it honors the header.
         assert!(load("url = \"https://a.example/mcp\"\nidempotency = \"header\"\n").is_ok());
+    }
+
+    /// A tool's reach is `self` on a write, or nothing: a read reaches no
+    /// one to begin with, money asks every time, and any other word is
+    /// unknown (approvals spec, The approval model).
+    #[test]
+    fn a_tool_reaches_self_only_as_a_write() {
+        let tool = |risk: &str, reach: &str| load(&format!("url = \"https://a.example/mcp\"\n[connectors.tools.draft]\nrisk = \"{risk}\"\nreach = \"{reach}\"\n"));
+        assert_eq!(tool("reversible_write", "self").unwrap().connectors[0].tools["draft"].reach.as_deref(), Some("self"));
+        assert!(tool("irreversible", "self").is_ok());
+        for (risk, reach) in [("financial", "self"), ("read", "self"), ("prohibited", "self"), ("reversible_write", "everyone")] {
+            let e = tool(risk, reach).unwrap_err();
+            assert!(format!("{e:#}").contains("does not fit"), "{risk} {reach}: {e:#}");
+        }
     }
 }

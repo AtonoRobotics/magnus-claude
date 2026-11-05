@@ -328,6 +328,7 @@ fn gmail_answer(r: &GmailRequest, before: &[GmailRequest], drafts: usize, draft:
     match (r.method.as_str(), path.split('?').next().unwrap_or("")) {
         ("GET", "/threads") => ok(serde_json::json!({ "threads": [{ "id": "t1", "snippet": "Can you send me the plan for Friday?" }] })),
         ("POST", "/drafts") => ok(serde_json::json!({ "id": format!("d{}", made + 1), "message": { "id": format!("dm{}", made + 1), "threadId": "t1", "labelIds": ["DRAFT"] } })),
+        ("POST", p) if p.starts_with("/threads/") && p.ends_with("/modify") => ok(serde_json::json!({ "id": "t1", "messages": [{ "id": "m1", "labelIds": ["INBOX", "Label_plans"] }] })),
         ("GET", p) if p.strip_prefix("/drafts/d").and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| (1..=made).contains(&n)) => {
             use base64::Engine;
             let n = &p["/drafts/d".len()..];
