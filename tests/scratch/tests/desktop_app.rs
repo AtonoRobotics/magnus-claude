@@ -798,3 +798,48 @@ fn the_update_script_waits_two_minutes_to_accept_the_task_that_waited() {
     let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests/app-update.mjs")).unwrap();
     assert!(src.contains("seen(\"Accepted.\", 120_000)"), "{src}");
 }
+
+/// A click lands where the element was when the driver measured it. A card
+/// sizes its outcome frame once the frame has loaded, which moves the
+/// buttons below it; on a busy runner the update test's Accept was clicked
+/// just before, landed on the frame, and nothing was accepted (runs
+/// 41969612463 and 42105845733, #207). The driver clicks an element once no
+/// outcome frame in its card is still loading and it has stopped moving. A
+/// stand-in WebDriver answers as such a page: the card's frame loads 400 ms
+/// after the button is found, and the click must come after.
+#[test]
+fn the_app_driver_clicks_a_button_once_its_card_has_stopped_moving() {
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests");
+    let driver = url::Url::from_file_path(tests.join("appdriver.mjs").canonicalize().expect("desktop/tests/appdriver.mjs")).unwrap();
+    let check = format!(
+        r#"
+import("node:http").then(async ({{ createServer }}) => {{
+  const E = "element-6066-11e4-a52e-4f735466cecf";
+  let found = 0, sized = Infinity, clicked = 0;
+  const server = createServer((req, res) => {{
+    let body = "";
+    req.on("data", c => body += c);
+    req.on("end", () => {{
+      const send = value => {{ res.setHeader("content-type", "application/json"); res.end(JSON.stringify({{ value }})); }};
+      if (req.url === "/session") return send({{ sessionId: "s" }});
+      if (req.url === "/session/s/elements") {{ found = Date.now(); sized = found + 400; return send([{{ [E]: "accept" }}]); }}
+      // The page: until its frame has loaded, the frame is unsized and the button is higher up.
+      if (req.url === "/session/s/execute/sync") return send(Date.now() < sized ? null : "0,700,80,40");
+      if (req.url === "/session/s/element/accept/click") {{ clicked = Date.now(); return send(null); }}
+      res.statusCode = 404; send({{ error: "unknown command", message: req.url }});
+    }});
+  }}).listen(0, "127.0.0.1", async () => {{
+    const {{ open }} = await import("{driver}");
+    const d = await open(`http://127.0.0.1:${{server.address().port}}`, "app");
+    await d.click(d.button("Accept"));
+    server.close();
+    if (!clicked) throw new Error("no click");
+    if (clicked < sized) throw new Error(`clicked ${{clicked - found}} ms after the button was found, before its card's frame loaded at 400 ms`);
+    console.log("ok");
+  }});
+}});
+"#
+    );
+    let out = std::process::Command::new("node").args(["--input-type=module", "-e", &check]).output().expect("run node");
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
