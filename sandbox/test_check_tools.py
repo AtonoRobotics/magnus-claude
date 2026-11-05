@@ -22,6 +22,11 @@ def label(cmd):
 
 APPLIANCE_VERIFIED = [
     "grep -q ok /workspace/out.txt",
+    # Expansion syntax the shell never expands: single-quoted, escaped, or in a comment.
+    "printf '%s\\n' '${PATH:=/workspace/bin}'",
+    "echo \\${PATH:=/workspace/bin}",
+    "grep -q ok /workspace/out.txt # not ${PATH:=/workspace/bin}",
+    "echo '$((PATH=1))'",
     "test -f /workspace/a && echo yes",
     "wc -l < /workspace/f.txt",
     "head -1 /workspace/f | grep -q x",
@@ -57,6 +62,10 @@ APPLIANCE_VERIFIED = [
 ]
 
 SELF_CHECKED = [
+    # The inner shell drops the backslash of "\$": the substitution runs.
+    "bash -c \"cat \\$(sh run.sh)\"",
+    # Arithmetic reads a quoted value as arithmetic, too.
+    "x='$(sh run.sh)'; : $((x)); cat /workspace/f",
     # Workspace code by name.
     "sh run.sh",
     "bash -e run.sh",
@@ -152,12 +161,20 @@ REFUSED = [
     "printf -v PATH /workspace/bin; cat /workspace/f",
     ": $((PATH=0)); cat /workspace/f",
     "set -a; : ${PYTHONPATH:=/workspace}; python3 -m json.tool /workspace/r.json",
+    # bash evaluates a variable's value as arithmetic, assignments included.
+    "bash -c \"x='PATH=5'; : \\$((x)); cat f\"",
+    "x='PATH=5'; : $((x)); cat /workspace/f",
+    # Double quotes expand, and a single quote inside them is literal.
+    "echo \"${PATH:=/workspace/bin}\"; cat /workspace/f",
+    "echo \"'${PATH:=/workspace/bin}'\"; cat /workspace/f",
     "PS4='$(sh run.sh)' bash -xc true",
     # Moving where Python finds its modules' bytecode.
     "python3 -X pycache_prefix=/workspace/pfx -m json.tool /workspace/r.json",
     "python3 -Xpycache_prefix=/workspace/pfx -m json.tool /workspace/r.json",
     # A relative program path is resolved from a directory the check chooses.
     "cd /workspace/a && ../usr/bin/cat t.py",
+    # A `#` inside `${...}` does not start a comment (review of #144).
+    ": ${x- # $((PATH=0))}; cat /workspace/f",
     # ANSI-C quoting, which the check cannot follow.
     "echo $'\\'' $(python3 /workspace/t.py) ''",
 ]

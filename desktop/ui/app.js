@@ -1275,8 +1275,22 @@ function whatHappens(d) {
     <div class="field"><span>Action</span><span class="mono">${esc(d.tool)}</span></div>
     ${d.app ? `<div class="field"><span>App</span><span>${esc(d.app)}</span></div>` : ""}
     ${d.audience ? `<div class="field"><span>Who can see it</span><span>${esc(AUDIENCE[d.audience] || d.audience)}</span></div>` : ""}
+    ${destinationFields(d.destinations)}
     ${Object.entries(input).map(([k, v]) => `<div class="field"><span>${esc(k)}</span>${fieldValue(v)}</div>`).join("")}
   </div>`;
+}
+
+// Who it reaches and what it says, as the app has it (a draft's To, Cc,
+// Bcc, subject, text and attachments), read by the appliance, not taken
+// from what Magnus wrote.
+function destinationFields(ds) {
+  if (!ds) return "";
+  const label = k => esc(k[0].toUpperCase() + k.slice(1));
+  const to = Object.entries(ds.recipients || {}).filter(([, a]) => a.length)
+    .map(([k, a]) => `<div class="field"><span>${label(k)}</span><span>${a.map(esc).join(", ")}</span></div>`);
+  const content = Object.entries(ds.content || {}).filter(([, v]) => v !== null && v !== "" && !(Array.isArray(v) && !v.length))
+    .map(([k, v]) => `<div class="field"><span>${label(k)}</span>${Array.isArray(v) ? `<span>${v.map(f => esc(f.filename || f.name || JSON.stringify(f))).join(", ")}</span>` : fieldValue(v)}</div>`);
+  return to.concat(content).join("");
 }
 
 function taintNote(t) {
