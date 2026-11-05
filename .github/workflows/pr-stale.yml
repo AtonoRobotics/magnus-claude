@@ -15,8 +15,9 @@ permissions:
   issues: write
 
 jobs:
+  # A light runner, like the rules check's (pr-rules.yml).
   stale:
-    runs-on: [self-hosted, linux, magnus-linux]
+    runs-on: [self-hosted, linux, magnus-light]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7

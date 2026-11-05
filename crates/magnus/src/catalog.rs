@@ -93,6 +93,9 @@ pub struct Manifest {
     /// public https address. The desktop listens here.
     #[serde(default)]
     pub handoff: Option<String>,
+    /// Where a tool's action goes, read from what it acts on.
+    #[serde(default)]
+    pub destinations: BTreeMap<String, crate::config::Destination>,
 }
 
 fn pkce_on() -> bool {
@@ -164,6 +167,7 @@ pub fn connector(m: &Manifest) -> Connector {
         pkce: m.pkce,
         redirect_uri: m.redirect_uri.clone(),
         handoff: m.handoff.clone(),
+        destinations: m.destinations.clone(),
     }
 }
 
@@ -218,6 +222,10 @@ mod tests {
             for (t, reach) in &m.reach {
                 let risk = m.tools.get(t).unwrap_or_else(|| panic!("{}: reach for {t}, which it does not class", m.id));
                 assert!(crate::tools::reach_fits(reach, risk), "{}: {t} is {risk} and cannot reach {reach:?}", m.id);
+            }
+            for (t, d) in &m.destinations {
+                assert_eq!(d.fault(t, |t| m.tools.get(t).cloned()), None, "{}", m.id);
+                assert!(m.tools.contains_key(t), "{}: destinations for {t}, which it does not have", m.id);
             }
             // What the Library shows: a category chip, abilities, a plain line
             // for every scope asked for, and never a protocol word.

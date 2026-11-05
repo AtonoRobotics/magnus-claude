@@ -1,5 +1,5 @@
 id = "google-gmail"
-version = "1.1.0"
+version = "1.2.0"
 name = "Gmail"
 summary = "Magnus can search and read your email, write drafts and send one when you allow it, and file, label or trash messages."
 # The Library's card and page (connectors spec, Catalog and connector
@@ -72,8 +72,8 @@ unmark_thread_spam = "reversible_write"
 # end). `self`: it stays in the person's own account, a draft, a label, the
 # trash or spam, and reaches no one, so it does not count as sending under
 # the Rule of Two. delete_draft is irreversible and still asks by policy.
-# send_draft is left out: who it reaches is the draft's To, Cc and Bcc,
-# read at the gate (step 2); until then it asks as before.
+# send_draft is left out of [reach]: who it reaches is the draft's To, Cc and
+# Bcc, read at the gate in [destinations.send_draft].
 [reach]
 create_draft = "self"
 update_draft = "self"
@@ -94,3 +94,11 @@ mark_message_spam = "self"
 unmark_message_spam = "self"
 mark_thread_spam = "self"
 unmark_thread_spam = "self"
+# Who a send reaches is read from the draft at the gate (get_draft), never
+# taken from what Magnus wrote: the card shows its To, Cc and Bcc, subject,
+# text and attachments, and an approval holds only for exactly those.
+[destinations.send_draft]
+read = "get_draft"
+id = "draft_id"
+recipients = ["/message/to", "/message/cc", "/message/bcc"]
+content = ["/message/subject", "/message/body", "/message/attachments"]

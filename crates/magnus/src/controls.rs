@@ -7,6 +7,7 @@
 use crate::config::Person;
 use crate::events::Ev;
 use crate::kernel::Kernel;
+use crate::tools::Label;
 use serde_json::{json, Value};
 
 /// Why a control was not done: the person sees "no such" for what is not
@@ -178,6 +179,27 @@ impl Kernel {
             self.record_data_read(&format!("person:{}", who.id), &who.name, &others, "tasks", None).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
         }
         Ok(rows)
+    }
+
+    /// What a list of tasks or schedules carries (invariant 4): a summary is
+    /// the words of the run that wrote it, so the list is labelled as each
+    /// run whose summary it returned, and names the apps those runs read
+    /// private data from. A row with no summary says nothing a run wrote.
+    pub fn listed_taint(&self, listed: &Value) -> (Label, Vec<String>) {
+        let tasks = listed["tasks"].as_array().into_iter().flatten().filter(|r| r["summary"].is_string()).filter_map(|r| r["id"].as_str());
+        let latest = listed["schedules"].as_array().into_iter().flatten().map(|x| &x["latest"]).filter(|r| r["summary"].is_string()).filter_map(|r| r["task"].as_str());
+        let ids: Vec<&str> = tasks.chain(latest).collect();
+        self.read(|s| {
+            let mut label = Label::PRINCIPAL;
+            let mut from = std::collections::BTreeSet::new();
+            for r in ids.iter().filter_map(|t| s.tasks.get(*t)).filter_map(|t| s.runs.get(&t.run_id)) {
+                label = label.join(Label { untrusted: r.untrusted, private: r.private });
+                if r.private {
+                    from.extend(r.private_from.iter().cloned());
+                }
+            }
+            (label, from.into_iter().collect())
+        })
     }
 
     /// One of the control tools Magnus calls in a conversation, for the
