@@ -21,7 +21,7 @@ tint = "#2F5BD3"
 # commit by `brokered/build.sh`; each person's runs in a microVM of its own
 # that reaches only Google's API host, and people sign in at Google.
 kind = "brokered"
-endpoint = "sha256:bab7e1c678d7319298cfea53ec21db5bf4aab506a88b7664b4d0d8d0ace2ea00"
+endpoint = "sha256:957a08ad6e395139372eb515c10e0aece7a2b41255988721e5d2b130fda9058c"
 hosts = ["www.googleapis.com"]
 issuer = "https://accounts.google.com"
 # Events and replies reach their attendees, who may be anyone.

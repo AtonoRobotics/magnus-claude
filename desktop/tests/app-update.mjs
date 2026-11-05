@@ -51,7 +51,10 @@ if (phase === "before") {
     await click(button("Approve once", card));
     await seen("Approved.");
     await click(button("Accept", "//aside[@id='detail']//article[contains(@class,'review')]"));
-    await seen("Accepted.");
+    // The update has just restarted the app. On build-box-beta the rest of
+    // the installed-app tests were still up, and 60s was not enough
+    // (run 41969612463).
+    await seen("Accepted.", 120_000);
   });
   await d.close();
   console.log("update finished");

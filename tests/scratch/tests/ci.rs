@@ -149,6 +149,47 @@ exit 1
     assert!(workflow.contains("release/ensure-tauri.sh"), "release-checks installs tauri before it builds");
 }
 
+/// build-box-beta has rustup and not the gnu Windows target, so the
+/// installer step never reached the tests (master runs 41958146895 and
+/// 41955875225). The second run does not add it again.
+#[test]
+fn a_runner_without_the_windows_target_installs_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.path().join("adds");
+    let rustup = bin.join("rustup");
+    std::fs::write(
+        &rustup,
+        r#"#!/bin/sh
+set -eu
+if [ "${1:-}" = target ] && [ "${2:-}" = list ]; then
+  [ -f "$ADDS" ] && echo x86_64-pc-windows-gnu
+  exit 0
+fi
+if [ "${1:-}" = target ] && [ "${2:-}" = add ] && [ "${3:-}" = x86_64-pc-windows-gnu ]; then
+  echo add >> "$ADDS"
+  exit 0
+fi
+echo "unexpected: $*" >&2
+exit 1
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&rustup, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let run = || {
+        let out = std::process::Command::new(repo().join("release/ensure-windows-target.sh")).env("ADDS", &log).env("PATH", &path).output().unwrap();
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    };
+    run();
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "add\n");
+    run();
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "add\n", "a runner that already has the target is left alone");
+    let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
+    assert!(workflow.contains("release/ensure-windows-target.sh"), "release-checks installs the Windows target before it builds");
+}
+
 /// The release key is a file on the build box. A runner without it gets a
 /// throwaway key and must not publish. Requiring `magnus-light` as well
 /// matched no runner.

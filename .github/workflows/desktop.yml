@@ -155,6 +155,7 @@ jobs:
         working-directory: desktop/src-tauri
         run: |
           export TAURI_SIGNING_PRIVATE_KEY="$MAGNUS_SIGNING_KEY" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          "$GITHUB_WORKSPACE/release/ensure-windows-target.sh"
           # build-box-beta has rustup and not this target (run 41957162011),
           # and not mingw's dlltool once the target is added (run 41958793139).
           rustup target add x86_64-pc-windows-gnu
