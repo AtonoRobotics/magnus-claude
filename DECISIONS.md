@@ -4,6 +4,7 @@ One line per choice the brief left open, with its reason. The brief and the owne
 
 ## Process
 
+- A schedule's own end notice is waited for for 180 seconds, not 90 (2026-11-05). The test's own minute budget is 100 seconds, and the notice wait was the shared 90-second patience, so a run that finished just after the minute was reported as missing. It failed that way on build-box three times (runs 41949527809, 41957157578, 41960121035). Reason: the schedule is due within a minute and then has to run. Test: `a_schedule_notice_outlasts_a_quiet_minute`.
 - `graphify-out/` is not tracked. Reason: the graphify git hooks regenerate it on every commit and checkout.
 
 - Built independently of other `~/magnus*` attempts on this machine; no code or decisions are copied. Reason: this workspace was started fresh for this brief.

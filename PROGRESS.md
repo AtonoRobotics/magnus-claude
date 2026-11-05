@@ -1,5 +1,9 @@
 # Progress
 
+## A schedule's end notice waits out a busy minute (2026-11-05)
+
+`a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run` gave up at 90 seconds, three times, waiting for "A schedule ended itself" (runs 41949527809, 41957157578, 41960121035). That wait is now 180 seconds. The file already said a minute schedule needs longer than a quiet minute.
+
 ## Checks expecting a nonzero exit (2026-11-04)
 
 A check expecting `/exit_code` 1 (for example `grep -q TODO` finding nothing) always failed, because a nonzero exit marked the result an error. The expected exit code now decides (`run/mod.rs`, test in `contract_freeze.rs`).
