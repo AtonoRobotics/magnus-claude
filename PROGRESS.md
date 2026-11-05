@@ -1,5 +1,9 @@
 # Progress
 
+## Sharing keeps to where content came from (2026-11-04)
+
+Sharing a chat answer now also checks the apps its private content came from, not only the tools its runs called (`chat_actions.rs`, test in `chat_actions.rs`).
+
 ## The console sign-in script waits two minutes (2026-11-05)
 
 On build-box-beta the member's sign-in reached the provider and then did not show "Only admins can enter" within 60 seconds (run 41960251290, #139). `desktop/tests/admin-sign-in.mjs` now waits 120 seconds for each of those steps.
