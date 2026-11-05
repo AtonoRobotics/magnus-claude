@@ -189,6 +189,25 @@ fn exits_0() -> Value {
     json!([{ "pointer": "/exit_code", "equals": 0 }])
 }
 
+/// A check may expect a nonzero exit: `grep -q TODO` finding nothing exits
+/// 1, and that is the criterion holding, not the check failing to run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_expecting_a_nonzero_exit_passes_when_the_command_exits_so() {
+    let model = FakeModel::start(steps(vec![
+        exec_contract(&[("no-todo", "grep -q TODO /workspace/notes.md", json!([{ "pointer": "/exit_code", "equals": 1 }]))]),
+        tool("sandbox_write_file", json!({ "path": "/workspace/notes.md", "content": "all done\n" })),
+        complete("no TODO left"),
+        fail("the check did not pass"),
+    ]))
+    .await;
+    let app = Appliance::start(Spec::default(), &model).await;
+    let alice = app.api("alice");
+    let id = alice.submit("Clear the TODOs.").await;
+    let t = alice.wait_settled(&id).await;
+    assert_eq!(t["status"], "completed", "a check that exited as expected failed: {t}");
+    assert_eq!(t["criteria"][0]["verified"], true, "{t}");
+}
+
 /// The tools a check runs come from the image, and nothing may change where
 /// they are looked up: a program the image lacks, a changed PYTHONPATH, or a
 /// workspace file executed directly (the check VM mounts the workspace
