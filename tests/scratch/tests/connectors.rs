@@ -278,3 +278,27 @@ async fn a_standing_approval_outlives_deleting_the_task_that_asked_for_it() {
     .await;
     assert!(ran, "deleting the task that asked for a standing approval revoked it");
 }
+
+/// An app's address carries no key or token (connectors spec: nobody types
+/// one into Magnus): one in its query or user part is refused before the
+/// app is asked anything, and never reaches the log or the app list.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_address_holding_a_secret_is_refused() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(steps(vec![fail("nothing to do")])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let with_query = format!("{}?api_key=s3cret-in-query", cal.url);
+    let with_user = cal.url.replacen("://", "://me:s3cret-in-user@", 1);
+    for url in [&with_query, &with_user] {
+        let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": url, "audience": "private", "label": "private+untrusted" })).await;
+        assert_eq!(st, 400, "an address holding a secret was taken: {url} {v}");
+    }
+    let (_, list) = alice.get("/v1/connectors").await;
+    assert!(!list.to_string().contains("s3cret"), "{list}");
+    let (_, audit) = alice.get("/v1/audit").await;
+    assert!(!audit.to_string().contains("s3cret"), "the secret reached the log");
+    // The address itself is still taken.
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private+untrusted" })).await;
+    assert!(st.is_success(), "{v}");
+}
