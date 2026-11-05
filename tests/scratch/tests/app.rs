@@ -111,6 +111,37 @@ async fn repeated_wrong_passwords_lock_the_name() {
     assert!(v["retry_at"].is_string());
 }
 
+/// Wrong passwords sent from elsewhere on the network lock the name there,
+/// but not on the appliance's own machine: someone on the network cannot
+/// lock the owner out of the appliance itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_passwords_from_the_network_do_not_lock_the_appliances_own_machine() {
+    let model = FakeModel::start(steps(vec![])).await;
+    let app = Appliance::start(spec(), &model).await;
+    assert!(set_password(&app, "carol", PASSWORD).status.success());
+    // Through a proxy on the appliance, as from another computer.
+    let from_elsewhere = |pw: &'static str| {
+        let base = app.base.clone();
+        async move {
+            let r = reqwest::Client::new()
+                .post(format!("{base}/v1/sign-in"))
+                .header("x-magnus-app", "0.5.0")
+                .header("x-forwarded-for", "192.168.1.66")
+                .json(&json!({ "person": "carol", "password": pw, "client": "app" }))
+                .send()
+                .await
+                .unwrap();
+            r.status()
+        }
+    };
+    for _ in 0..5 {
+        assert_eq!(from_elsewhere("wrong password here").await, 401);
+    }
+    assert_eq!(from_elsewhere(PASSWORD).await, 429, "the right password got through a lockout from the network");
+    let (st, v) = sign_in(&app, "carol", PASSWORD).await;
+    assert_eq!(st, 200, "the network locked the name out on the appliance's own machine: {v}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_browser_session_needs_the_client_header_to_change_anything() {
     let model = FakeModel::start(steps(vec![])).await;
