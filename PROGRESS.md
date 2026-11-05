@@ -3,6 +3,11 @@
 ## Cancelling a browser sign-in ends it (2026-11-04)
 
 Cancel in the app's browser sign-in now ends the wait in the app, so a sign-in finished later in the browser leaves no session and never replaces the stored one (`desktop/src-tauri/src/lib.rs`, `desktop/ui/app.js`, `bridge.js`).
+
+## Agent loop path (2026-11-04)
+
+DECISIONS.md named the agent loop `run/loop.rs`, which does not exist; it is `run/agent_loop.rs`. Only the name was corrected. The file has no deny rule yet; whether to add one is the owner's decision.
+
 ## Unembedded knowledge is still found (2026-11-04)
 
 An entry saved while the embedding server was down was missing from every search until the next start. Searches by meaning now also return word matches among entries not yet embedded (`knowledge.rs`, test in `knowledge.rs`).
