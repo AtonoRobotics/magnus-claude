@@ -1,5 +1,9 @@
 # Progress
 
+## Master and release tags run on the build box (2026-11-05)
+
+Master went red on the merge of #202 (run 42097633195). The job ran on build-box-beta, which now has the release key and no appliance. It published the test build where no app reads it, then failed installing on an appliance that is not there. Now a run publishes only with the key and the appliance (`release/can-publish.sh`). Master and tags fail at once on a runner without them, and they run on build-box (`magnus-linux` + `magnus-light`), as `appliance.yml` does. Pull requests still take either machine. Next: master green on this merge, then tag `appliance-v0.2.5` (#171).
+
 ## Appliance release 0.2.5 (2026-11-05)
 
 Workspace version 0.2.5, so `appliance-v0.2.5` can be tagged once master's run on this merge is green. 0.2.4 never shipped: its release run failed two console tests at their first page with `net::ERR_NETWORK_CHANGED` (#171), and its tag keeps the old sign-in script. 0.2.5 carries that fix (#199) and everything since 0.2.4: the kill switch closing the browser, the snapshot hiding secret fields, the console test ports below the ephemeral range. `brokered/` has not changed since 0.2.4, so the manifests name the same server images.
