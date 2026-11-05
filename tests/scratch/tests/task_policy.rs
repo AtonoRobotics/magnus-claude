@@ -4,6 +4,7 @@
 //! call, and no other task's.
 
 use magnus_invariants::*;
+use magnus_scratch::control;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -41,6 +42,14 @@ async fn a_tasks_own_layer_forbids_what_it_names_for_that_task_alone() {
     assert_eq!(app.api("bob").put_policy(&layer, cedar).await.as_u16(), 403, "someone else set carol's task's policy");
     assert_eq!(carol.put_policy("task/task_nonexistent", cedar).await.as_u16(), 404);
     assert!(carol.put_policy(&layer, cedar).await.is_success());
+    // She reads back what she set, and nobody else's task's layer is shown to
+    // others; the console drafts and applies it like any layer (review of #157).
+    assert_eq!(carol.get("/v1/policies").await.1["layers"][&layer], cedar, "carol cannot read her task's layer");
+    assert!(app.api("bob").get("/v1/policies").await.1["layers"].get(&layer).is_none(), "bob reads carol's task's layer");
+    let (st, v) = control(&app, "POST", "/v1/admin/policy/draft", json!({ "actor": "admin:alice", "layer": layer, "cedar": cedar })).await;
+    assert_eq!(st, 200, "the console cannot draft a task's layer: {v}");
+    let (st, v) = control(&app, "POST", "/v1/admin/policy/apply", json!({ "actor": "admin:alice", "layer": layer, "cedar": cedar })).await;
+    assert_eq!(st, 200, "the console cannot apply a task's layer: {v}");
     go.store(true, Ordering::SeqCst);
     carol.wait_settled(&fenced).await;
     carol.wait_settled(&other).await;

@@ -1281,9 +1281,11 @@ async fn policies(State(k): K, h: HeaderMap) -> Response {
         Err(r) => return r,
     };
     let all = k.read(|s| s.policies.clone());
+    // The layers of their own tasks, which they may set (`put_policy`).
+    let own_task = |l: &str| l.strip_prefix("task/").is_some_and(|t| k.read(|s| s.tasks.get(t).is_some_and(|t| t.person == p.id)));
     let mine: serde_json::Map<String, Value> = all
         .into_iter()
-        .filter(|(l, _)| inbox::may_set_policy(&p, l) || l == "org" || l == &format!("user/{}", p.id) || p.groups.iter().any(|g| l == &format!("group/{g}")))
+        .filter(|(l, _)| inbox::may_set_policy(&p, l) || l == "org" || l == &format!("user/{}", p.id) || p.groups.iter().any(|g| l == &format!("group/{g}")) || own_task(l))
         .map(|(l, c)| (l, Value::String(c)))
         .collect();
     Json(json!({ "layers": mine, "default_org": crate::policy::DEFAULT_ORG })).into_response()
