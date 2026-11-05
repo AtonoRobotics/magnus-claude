@@ -4,6 +4,44 @@
 
 The vault keeps its seal and the sign-ins the switch took on disk until each is revoked, and the next start finishes a switch a crash cut short (`vault.rs`, `api.rs`, `kernel.rs`, tests in `connectors.rs` and `vault.rs`).
 
+## The console sign-in script waits two minutes (2026-11-05)
+
+On build-box-beta the member's sign-in reached the provider and then did not show "Only admins can enter" within 60 seconds (run 41960251290, #139). `desktop/tests/admin-sign-in.mjs` now waits 120 seconds for each of those steps.
+
+## Desktop proxy paths (2026-11-04)
+
+The desktop app's proxy refused `/v1/sign-in…` by string prefix, but `/v1/./sign-in/device` passed and was normalised to the sign-in call, handing the page a session token. Paths are now judged as they will be sent (`desktop/src-tauri/src/lib.rs`).
+
+## A schedule's end notice waits out a busy minute (2026-11-05)
+
+`a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run` gave up at 90 seconds, three times, waiting for "A schedule ended itself" (runs 41949527809, 41957157578, 41960121035). That wait is now 180 seconds. The file already said a minute schedule needs longer than a quiet minute.
+
+## Checks expecting a nonzero exit (2026-11-04)
+
+A check expecting `/exit_code` 1 (for example `grep -q TODO` finding nothing) always failed, because a nonzero exit marked the result an error. The expected exit code now decides (`run/mod.rs`, test in `contract_freeze.rs`).
+
+## Inline content moved to the content store (2026-11-04)
+
+An appliance that ran before `migrate` made the content store still had those events' content in the log, where trash and erasure cannot delete it. `migrate` now moves it to the content store, one event per statement, and the walls' fill then names each row's person (`log::move_inline_content`). Test: `migrate_moves_content_written_into_the_log_to_the_content_store` (log_review.rs).
+## CI throughput fixes (2026-11-04, branch `ci-throughput-fixes`)
+
+Pull requests stopped landing after the pull request process changed: agent sessions merged master into every open branch and reran failed runs, each merge restarted a 150-minute run, a hung browser sign-in held a runner to its time limit, and two full suites ran on one machine at once. The rules check now says not to merge master in for being behind, only for a conflict. A pull request runs only the tests its paths reach (`release/ci-select.sh`); master runs everything. Every test has a time limit (`.config/nextest.toml`), the sign-in and update-test waits are bounded, and each run clears test realms and mail sinks left for three hours (`release/ci-clean.sh`). The quick checks run on build-box-2 (`magnus-light`); the release and injection checks on build-box. The merge queue could not be turned on: the repository is private and owned by a person (DECISIONS.md, "CI throughput on the shared runner").
+
+Release-checks was still red after that. `build-box-beta` also has `magnus-linux` and has no `cargo-tauri`, so any job that landed there died at Installers (`no such command: tauri`; master run 41942081672). The job now installs tauri-cli 2 and puts `~/.cargo/bin` on `PATH` (`release/ensure-tauri.sh`). On build-box itself the same suite usually passes (#141, run 41945238436) and sometimes fails one loaded step: a browser click gave up at 10 seconds (runs 41930362272, 41902288030, 41929170386), the console's loopback check connected to another test's socket on that port (#143), and the desktop type test looked for its file before xterm had focus (#146). Those waits and the check are fixed. The realm cleanup also dropped a final line with no newline, so its own test failed on the first run. Beta has no release key, and tauri decoded the path as the key (run 41948685783). Requiring `magnus-light` as well queued with no runner (run 41949170226). A runner without the key now signs with a throwaway key and does not publish or install onto the appliance. On build-box the suite then failed 7 of 414 while the update test's two AppImages compiled beside it (run 41949527809). Those builds now start after the suite. The console sign-in tests that need a fresh step-up use 90 seconds.
+
+## Embedding server timeout (2026-11-04)
+
+A silent embedding server stalled knowledge search and adds for ever. Requests now time out after `[knowledge.embeddings] timeout_s` (default 30) and search falls back to full-text (`knowledge.rs`, `config.rs`).
+## A send shows and holds the draft it sends (2026-11-04, `send-reads-the-draft`)
+
+Approvals spec step 2. Gmail's `send_draft` card now shows the draft's To, Cc, Bcc, subject, text and attachments, read through `get_draft` at the gate. The approval holds only for that exact email: an edited draft asks again (`a_draft_changed_after_its_card_asks_again_showing_the_change`, gmail.rs). Gmail manifest 1.1.0. The protected test `a_draft_edited_after_approval_asks_again_including_an_added_bcc` (inv4_taint.rs) lands here, as the spec approved; the harness gains `Spec::destinations`. Step 1 (#145, `reach-in-manifests`) waits for this step: merge master into it, then set Gmail to 1.2.0. Steps 3–11 follow, one PR each.
+
+## Approved contract changes keep their taint (2026-11-04)
+
+An approved contract change cleared the taint its checks are judged by, so a tainted run could have a `web_fetch` carrying private data run at completion without asking. It now keeps the run's taint; such a check goes to the person's review instead (`state.rs`, test in `contract_freeze.rs`).
+## Sign-in follows no redirects (2026-11-04)
+
+The sign-in HTTP clients followed redirects, so a token endpoint answering 307 would have had the password resent to wherever it pointed, plain http included. They now follow none (`oidc.rs`).
 ## Check-tool labels (2026-11-04)
 
 A review of master found 31 contract checks that `sandbox/check_tools.py` labelled `appliance-verified` although workspace code decided their result: `cat x#; python3 t.py`, process substitution, `env -u cat python3 t.py`, `unset PYTHONSAFEPATH`, `python3 -X pycache_prefix=…`, `../usr/bin/cat` after `cd`, `/usr/bin/env python3 t.py`, abbreviated long options and others (DECISIONS.md, "reads a check as the shell and each tool read it"). Each now gets self-checked or refused, with a case in `sandbox/test_check_tools.py`, which CI now runs. The sandbox image must be rebuilt (`sandbox/build.sh`) before the appliance uses the fix. Still open from the same review, each for its own pull request: an approved contract change clears the taint its checks are judged by (`state.rs`, `contract_taint`); a check expecting a nonzero exit can never pass; the desktop proxy lets `/v1/./sign-in…` through; the sign-in HTTP client follows redirects; a 429 suspends a run at once.
@@ -22,6 +60,7 @@ The replacement is not deployed. PR #133 has merged: several PRs may now be open
 
 ## Now (2026-10-29)
 
+- **A task's summary read in conversation carries what its task read (invariant 4; branch `chat-controls-taint`).** Magnus listing tasks or schedules in a chat took in each run's summary as clean words, so a summary of untrusted, private mail could leave in the turn's next web lookup without asking. Now the list carries the taint of every run whose words it returned, and the Rule of Two asks. Found by the spec review of 2026-11-04, with the rest of its findings still to fix one pull request each.
 - **Slack's sign-in comes back through the appliance's public name (branch `slack-https-redirect`).** A distributed Slack app may only register https redirects, so Slack is given `https://magnus.pyrallon.ai/oauth/slack/callback`. The appliance checks the state and sends the browser on to `http://127.0.0.1:17321/callback`, where the desktop is listening. The desktop posts the code back, and the exchange repeats the https address. The code is not logged. The path is open without a device certificate. The microVM still reaches only `slack.com`.
 - **Slack is brokered (connectors spec, Brokered API connectors; branch `slack-brokered`).** A person connects Slack from the desktop app: the browser opens Slack's own page, and Magnus can then search messages, read channels and direct messages, and post as that person (it asks first). The server is Alpha Vector's, over Slack's Web API (`brokered/slack`), named by digest, in a microVM that reaches only `slack.com`. The sign-in is Slack's user-token endpoints (the metadata at `https://mcp.slack.com`), with the client secret on the appliance, no PKCE, and the one redirect `http://127.0.0.1:17321/callback`. Slack's hosted MCP server is not called. The secret is `SLACK_CLIENT_SECRET`, provisioned like Google's.
 - **A Gmail write with an unreadable success is an unknown outcome (branch `gmail-write-outcome`).** Gmail kept its own copy of Google's request code when Calendar moved onto `brokered/google`. That copy still said a write Gmail had answered with something other than JSON as not done, so a sent draft could be sent again. It is an unknown outcome now, as Calendar's is. Gmail's desktop sign-in was refused because the app dropped Google's `iss`; that was fixed on `connector-sign-in-iss` and the shell carries it back. Nothing here exchanges a code with Google.
