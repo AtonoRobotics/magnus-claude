@@ -3,6 +3,11 @@
 ## Adapter messages print without credentials (2026-11-04)
 
 Printing an unexpected adapter message could write a refreshed credential into an error, tracing or the log. The protocol's messages now print with credentials redacted (`adapter-proto`).
+
+## Agent loop path (2026-11-04)
+
+DECISIONS.md named the agent loop `run/loop.rs`, which does not exist; it is `run/agent_loop.rs`. Only the name was corrected. The file has no deny rule yet; whether to add one is the owner's decision.
+
 ## Unembedded knowledge is still found (2026-11-04)
 
 An entry saved while the embedding server was down was missing from every search until the next start. Searches by meaning now also return word matches among entries not yet embedded (`knowledge.rs`, test in `knowledge.rs`).
