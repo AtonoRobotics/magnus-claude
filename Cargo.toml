@@ -4,6 +4,6 @@ members = ["crates/magnus", "crates/adapter-proto", "crates/adapter-anthropic", 
 
 [workspace.package]
 edition = "2021"
-version = "0.2.4"
+version = "0.2.5"
 license = "UNLICENSED"
 publish = false
