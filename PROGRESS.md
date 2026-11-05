@@ -6,6 +6,9 @@ Master's rerun failed when gitlab.com said a client Magnus had just registered "
 ## The installed-app driver clicks once a card has stopped moving (2026-11-05)
 
 The update test's Accept was lost twice on master (#207). A review card's outcome frame takes its height once loaded and pushes the buttons down, and the driver clicked before that, onto the frame. The app now marks a frame `data-sized` once it has its height. The driver clicks an element once its card's frames are sized and it has stopped moving.
+## A send to someone the person named passes (2026-11-05)
+
+After a run reads mail, a send no longer asks when every recipient on the draft is an address the person wrote in their request or their chat messages (#176, approvals spec build order 4). An address that only an email named still asks. Next: sent mail (#210) and the directory (#211) as sources of the person's recipients; then the draft lock (#177).
 
 ## Reads of the person's own account stop asking (2026-11-05)
 
