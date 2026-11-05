@@ -1,5 +1,10 @@
 # Progress
 
+## Windows cross target on every release-checks runner (2026-11-05)
+
+`build-box-beta` built the Linux installers and then failed the Windows one: rustup had no `x86_64-pc-windows-gnu` target (run 41957162011, #144). The workflow installs that target before the Windows build.
+
+
 ## Check-tool labels: quoted expansions (2026-11-04)
 
 From #136's review: a check that only prints `${PATH:=...}` in single quotes, after a backslash or in a comment is no longer refused. An assignment bash makes through arithmetic on a variable's value, and one hidden by `\$` in `sh -c "..."`, now is (`sandbox/check_tools.py`, cases in `test_check_tools.py`).

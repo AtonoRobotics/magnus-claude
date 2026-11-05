@@ -207,3 +207,12 @@ fn the_update_builds_wait_until_the_suite_has_finished() {
     let builds = workflow.find("Start the update test's two builds").expect("update builds");
     assert!(builds > suite, "the update builds start during the suite");
 }
+
+/// build-box-beta has rustup and not the Windows cross target (run 41957162011).
+#[test]
+fn the_windows_installer_adds_its_cross_target_first() {
+    let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
+    let add = workflow.find("rustup target add x86_64-pc-windows-gnu").expect("rustup target");
+    let build = workflow.find("cargo tauri build --runner cargo --target x86_64-pc-windows-gnu").expect("windows build");
+    assert!(add < build, "the Windows build runs before its target is installed");
+}
