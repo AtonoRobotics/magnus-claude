@@ -1,5 +1,9 @@
 # Progress
 
+## Unembedded knowledge is still found (2026-11-04)
+
+An entry saved while the embedding server was down was missing from every search until the next start. Searches by meaning now also return word matches among entries not yet embedded (`knowledge.rs`, test in `knowledge.rs`).
+
 ## Failed model calls count their cost (2026-11-04)
 
 A call the provider charged for and then failed now adds its cost and tokens to the run (`adapters.rs`, `events.rs`, `state.rs`, `run/agent_loop.rs`, with unit tests).
