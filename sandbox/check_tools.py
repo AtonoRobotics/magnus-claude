@@ -233,14 +233,57 @@ def expansion_bodies(cmd):
         yield m.group(1), cmd[m.end() : j]
 
 
+def evaluated(cmd):
+    """The command with what the shell never expands blanked out: text in
+    single quotes (outside double quotes), a character after a backslash,
+    and comments before any `${`. The length and the rest stay as they were."""
+    out, i, quote = list(cmd), 0, None
+    while i < len(cmd):
+        c = cmd[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            else:
+                out[i] = " "
+        elif c == "\\":
+            out[i : i + 2] = " " * len(cmd[i : i + 2])
+            i += 2
+            continue
+        elif c == "'" and quote is None:
+            quote = "'"
+        elif c == '"':
+            quote = None if quote == '"' else '"'
+        # A `#` inside `${...}` is text, not a comment, and bash evaluates
+        # what follows it (`${x- # $((PATH=0))}`). Rather than follow where
+        # each `${` closes, no comment after one is blanked.
+        elif quote is None and comment_at(cmd, i) and "${" not in cmd[:i]:
+            nl = cmd.find("\n", i)
+            end = len(cmd) if nl < 0 else nl
+            out[i:end] = " " * (end - i)
+            i = end
+            continue
+        i += 1
+    return "".join(out)
+
+
 def expansion_assignments(cmd, found):
-    for kind, body in expansion_bodies(cmd):
+    visible = evaluated(cmd)
+    # Where bash reads text as arithmetic, a quoted value can be evaluated
+    # too (x='a[$(cmd)]'; : $((x))): then the quoted text counts as well.
+    arithmetic = EVALUATES.search(visible)
+    scan = cmd if arithmetic else visible
+    if arithmetic:
+        # And bash evaluates a variable's value as arithmetic, assignments
+        # included (x='PATH=5'; : $((x))), wherever the value was written.
+        for name in [n for m in ARITH_ASSIGN.finditer(cmd) for n in m.groups() if n]:
+            search_var(name, found)
+    for kind, body in expansion_bodies(scan):
         names = [n for m in ARITH_ASSIGN.finditer(body) for n in m.groups() if n]
         if kind == "{" and DEFAULT_ASSIGN.match(body):
             names.append(DEFAULT_ASSIGN.match(body).group(1))
         for name in names:
             search_var(name, found)
-    if EVALUATES.search(cmd) and QUOTED_SUBSTITUTION.search(cmd):
+    if EVALUATES.search(visible) and QUOTED_SUBSTITUTION.search(cmd):
         found.runs.append("it holds a quoted command substitution where bash evaluates text as arithmetic or as a variable's name, which runs it")
 
 
@@ -507,7 +550,10 @@ def check_shell(base, args, depth, found):
             elif depth > 3:
                 found.problems.append("the command nests shells too deeply to resolve")
             else:
-                check(args[j + 1], depth + 1, found)
+                # shlex keeps the backslash of "\$" and "\`" in double quotes,
+                # where the shell drops it: read them as the inner shell may
+                # see them. (Where they were literal, this only refuses more.)
+                check(args[j + 1].replace("\\$", "$").replace("\\`", "`"), depth + 1, found)
             return
         if a == "-s" or a == "-":
             break

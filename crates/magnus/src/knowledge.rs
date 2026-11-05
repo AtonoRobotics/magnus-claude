@@ -236,7 +236,8 @@ impl Kernel {
     /// vector literal; None without a server.
     async fn embed(&self, text: &str) -> Result<Option<(String, String)>> {
         let Some(e) = &self.cfg.knowledge.embeddings else { return Ok(None) };
-        let mut req = reqwest::Client::new().post(format!("{}/embeddings", e.url.trim_end_matches('/'))).json(&json!({ "model": e.model, "input": [text] }));
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(e.timeout_s)).build()?;
+        let mut req = client.post(format!("{}/embeddings", e.url.trim_end_matches('/'))).json(&json!({ "model": e.model, "input": [text] }));
         if let Some(name) = &e.credential {
             if let Some(key) = self.vault.get(name)? {
                 req = req.bearer_auth(key.expose());

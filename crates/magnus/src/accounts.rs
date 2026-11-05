@@ -166,6 +166,20 @@ impl Accounts {
         format!("backup:{person}")
     }
 
+    /// The counter for attempts made over the network. Every counter is a
+    /// scope and the whole person id, so no two people's counters meet,
+    /// whatever their ids.
+    pub fn network_counter(person: &str) -> String {
+        format!("net:{person}")
+    }
+
+    /// The counter for attempts made on the appliance's own machine: its own,
+    /// so wrong passwords sent from the network cannot lock the person out
+    /// of the appliance itself.
+    pub fn local_counter(person: &str) -> String {
+        format!("local:{person}")
+    }
+
     /// End every session of a person (the provider turned them off).
     /// End every session of `person`; the ids of those ended.
     pub fn end_all(&self, person: &str) -> Result<Vec<String>> {
@@ -199,7 +213,7 @@ impl Accounts {
 
     /// Check a password. The caller opens the session.
     pub fn sign_in(&self, person: &str, password: &str) -> Result<std::result::Result<(), SignInError>> {
-        self.sign_in_counted(person, password, person)
+        self.sign_in_counted(person, password, &Self::network_counter(person))
     }
 
     /// Check a password, counting wrong ones on `counter`.
@@ -336,5 +350,21 @@ mod tests {
         let old = r#"{"h":{"id":"sess_old","person":"ada","created":"2030-01-01T00:00:00Z","expires":"2030-02-01T00:00:00Z","client":"app"}}"#;
         let map: BTreeMap<String, Session> = serde_json::from_str(old).unwrap();
         assert!(map["h"].device.is_none(), "a session from before device certificates did not load");
+    }
+
+    /// Each counter is its scope then the whole person id, so no person's
+    /// network counter is another's local or backup one, whatever their ids
+    /// (review of #154: `local:carol` from the network locked carol locally).
+    #[test]
+    fn one_persons_counter_is_never_anothers() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = open(dir.path());
+        for _ in 0..5 {
+            accounts.failed(&Accounts::network_counter("local:carol"));
+            accounts.failed(&Accounts::network_counter("backup:carol"));
+        }
+        assert!(accounts.locked(&Accounts::network_counter("local:carol")).is_some());
+        assert!(accounts.locked(&Accounts::local_counter("carol")).is_none(), "local:carol's network failures locked carol on this machine");
+        assert!(accounts.locked(&Accounts::backup_counter("carol")).is_none(), "backup:carol's network failures locked carol's backup password");
     }
 }

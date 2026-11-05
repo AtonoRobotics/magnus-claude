@@ -1,7 +1,9 @@
 //! The pull request rules CI checks (`release/pr-rules.sh`; CLAUDE.md, "How
 //! work lands"): several may be open, an agent pull request past the cap
-//! is the one that fails, into master only; a branch behind master and a
-//! large change are warned about, not refused. The one-at-a-time gate
+//! is the one that fails, into master only; a large change is warned
+//! about, not refused; a branch behind master is noted, and told not to
+//! merge master in for that alone (owner, 2026-11-04: merging master into
+//! every branch restarted every run). The one-at-a-time gate
 //! blocked every pull request behind a single unfinished one (owner,
 //! 2026-11-04). `release/pr-stale.sh --decide` is the age at which a quiet
 //! pull request is commented on, labelled, and closed.
@@ -81,17 +83,20 @@ fn several_pull_requests_may_be_open_and_only_a_new_agent_one_past_the_cap_fails
     assert_eq!(code, 4, "{out}");
     assert!(out.contains("merges into feature"), "{out}");
 
-    // Master moves on: a warning, not a failure. Merging it in clears it.
+    // Master moves on: a notice, not a warning or a failure, and it does
+    // not ask for master to be merged in. Merging it in (as for a
+    // conflict) clears it.
     git(repo, &["checkout", "-q", "master"]);
     let moved = commit(repo, "other.rs", 1);
     let (code, out) = rules(repo, 43, &fix, "master", &moved, "43:agent");
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("::warning::") && out.contains("merge master into it"), "{out}");
+    assert!(out.contains("::notice::") && out.contains("Do not merge master in for that alone"), "{out}");
+    assert!(!out.contains("::warning::") && !out.contains("merge master into it"), "{out}");
     git(repo, &["checkout", "-q", "fix"]);
     git(repo, &["merge", "-q", "--no-edit", "master"]);
     let merged = git(repo, &["rev-parse", "HEAD"]);
     let (code, out) = rules(repo, 43, &merged, "master", &moved, "43:agent");
-    assert!(code == 0 && !out.contains("::warning::"), "{out}");
+    assert!(code == 0 && !out.contains("::warning::") && !out.contains("::notice::"), "{out}");
 
     // A large change is warned about, not refused; tests and documents
     // do not count.

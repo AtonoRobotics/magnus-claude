@@ -260,8 +260,21 @@ async fn sign_out(app: State<'_, App>) -> Res<()> {
 
 /// Only the appliance's API, and never the calls that hand out a session.
 fn allowed(path: &str) -> Res<()> {
-    if !path.starts_with("/v1/") || path.contains("..") || path.contains('#') || path.starts_with("/v1/sign-in") || path.starts_with("/v1/sign-out") || path.starts_with("/v1/devices") {
-        return Err(format!("{path} is not an appliance call this app makes"));
+    let refused = || Err(format!("{path} is not an appliance call this app makes"));
+    // The request URL is normalised before it is sent (dot segments
+    // removed), so the path is judged as it will be sent: it must already be
+    // in that form, with no encoded dot, slash or backslash to decode later.
+    let route = path.split('?').next().unwrap_or_default();
+    let lower = route.to_ascii_lowercase();
+    if route.contains('\\') || ["%2e", "%2f", "%5c"].iter().any(|e| lower.contains(e)) {
+        return refused();
+    }
+    let normal = url::Url::parse("https://appliance.invalid").ok().and_then(|b| b.join(route).ok()).map(|u| u.path().to_string());
+    if normal.as_deref() != Some(route) {
+        return refused();
+    }
+    if !route.starts_with("/v1/") || path.contains('#') || route.starts_with("/v1/sign-in") || route.starts_with("/v1/sign-out") || route.starts_with("/v1/devices") {
+        return refused();
     }
     Ok(())
 }
@@ -567,7 +580,13 @@ mod tests {
         for bad in ["/v1/sign-in", "/v1/sign-in/device", "/v1/sign-in/device/signin_1", "/v1/sign-out", "/v1/devices", "/v1/devices/dev_1", "/v1/../etc", "https://evil.example/v1/x", "/other", "/v1/x#y"] {
             assert!(allowed(bad).is_err(), "{bad} was allowed");
         }
+        // The request URL is normalised before it is sent: a dot segment or
+        // an encoded dot or slash must not hide a sign-in call.
+        for bad in ["/v1/./sign-in/device", "/v1/%2e/sign-in", "/v1/%2E/sign-out", "/v1/x/%2e%2e/devices", "/v1/x/.%2E/sign-in", "/v1/%2fsign-in", "/v1\\sign-in", "/v1/x?y#z"] {
+            assert!(allowed(bad).is_err(), "{bad} was allowed");
+        }
         assert!(allowed("/v1/inbox").is_ok());
+        assert!(allowed("/v1/tasks?status=open").is_ok());
         assert!(file_path("/v1/tasks/t1/outputs/o1").is_ok());
         assert!(file_path("/v1/files/file_1").is_ok());
         assert!(file_path("/v1/chat/th1/entries/a:t1/export").is_ok());

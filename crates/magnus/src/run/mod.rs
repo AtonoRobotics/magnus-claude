@@ -877,6 +877,12 @@ impl Kernel {
                 None if crate::tools::check_fields(&tool).is_some() => json!({ "text": text }),
                 None => serde_json::from_str::<Value>(&text).ok().unwrap_or(Value::String(text.clone())),
             };
+            // A command that ran and exited nonzero is reported as an error,
+            // but when the check states the exit code it expects, that code
+            // decides (`grep -q TODO` exiting 1 is the criterion holding).
+            let exit_decides = observed.get("exit_code").is_some_and(Value::is_number)
+                && check["expect"].as_array().is_some_and(|es| es.iter().any(|e| e["pointer"] == "/exit_code"));
+            let is_error = is_error && !exit_decides;
             let mut ok = !is_error;
             let mut seen = vec![];
             for e in check["expect"].as_array().cloned().unwrap_or_default() {
