@@ -3,6 +3,9 @@
 ## Desktop proxy paths (2026-11-04)
 
 The desktop app's proxy refused `/v1/sign-in…` by string prefix, but `/v1/./sign-in/device` passed and was normalised to the sign-in call, handing the page a session token. Paths are now judged as they will be sent (`desktop/src-tauri/src/lib.rs`).
+## Embedding server timeout (2026-11-04)
+
+A silent embedding server stalled knowledge search and adds for ever. Requests now time out after `[knowledge.embeddings] timeout_s` (default 30) and search falls back to full-text (`knowledge.rs`, `config.rs`).
 ## A send shows and holds the draft it sends (2026-11-04, `send-reads-the-draft`)
 
 Approvals spec step 2. Gmail's `send_draft` card now shows the draft's To, Cc, Bcc, subject, text and attachments, read through `get_draft` at the gate. The approval holds only for that exact email: an edited draft asks again (`a_draft_changed_after_its_card_asks_again_showing_the_change`, gmail.rs). Gmail manifest 1.1.0. The protected test `a_draft_edited_after_approval_asks_again_including_an_added_bcc` (inv4_taint.rs) lands here, as the spec approved; the harness gains `Spec::destinations`. Step 1 (#145, `reach-in-manifests`) waits for this step: merge master into it, then set Gmail to 1.2.0. Steps 3–11 follow, one PR each.
