@@ -50,6 +50,10 @@ pub struct Connector {
     /// header: the app honors an `Idempotency-Key` header. none: it does not.
     pub idempotency: String,
     pub tools: BTreeMap<String, Tool>,
+    /// Where a tool's action goes, read from what it acts on
+    /// (`Spec::destinations`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub destinations: BTreeMap<String, Value>,
 }
 
 #[derive(Clone)]
@@ -110,6 +114,7 @@ impl Spec {
             access_groups: vec![],
             idempotency: "header".into(),
             tools: tools.iter().map(|(t, r)| (t.to_string(), Tool { risk: r.to_string() })).collect(),
+            destinations: BTreeMap::new(),
         });
         self
     }
@@ -117,6 +122,15 @@ impl Spec {
     pub fn access(mut self, app: &str, groups: &[&str]) -> Self {
         let c = self.connectors.iter_mut().find(|c| c.name == app).expect("app");
         c.access_groups = groups.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    /// `tool` of `app` goes where its `read` tool, called with the action's
+    /// `id` field, says: the addresses at `recipients`, with `content`
+    /// (JSON pointers into what it returns).
+    pub fn destinations(mut self, app: &str, tool: &str, read: &str, id: &str, recipients: &[&str], content: &[&str]) -> Self {
+        let c = self.connectors.iter_mut().find(|c| c.name == app).expect("app");
+        c.destinations.insert(tool.into(), json!({ "read": read, "id": id, "recipients": recipients, "content": content }));
         self
     }
 
