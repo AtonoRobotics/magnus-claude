@@ -1466,6 +1466,11 @@ impl Kernel {
     };
     let recorded = recorded.await;
     let _ = sealed_tx.send(());
+    // Every run's pages in the browser, the running ones' and those already
+    // waiting (a suspended run keeps its context otherwise), whether or not
+    // the records were written. After the suspensions, so no run opens a
+    // page after it; a run continued later starts on a blank one.
+    k.browser.close_all().await;
     if let Err(e) = recorded {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
