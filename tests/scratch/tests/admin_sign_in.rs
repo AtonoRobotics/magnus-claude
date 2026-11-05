@@ -13,6 +13,11 @@ use magnus_scratch::*;
 use reqwest::StatusCode;
 use serde_json::Value;
 
+/// A browser sign-in on a busy build box outlasted 30 seconds, so the
+/// session's step-up had already lapsed when it was read (run 41949527809,
+/// `stepped_up_until: null`). The test still waits the window out.
+const STEP_UP_SECONDS: i64 = 90;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn only_an_admin_signs_in_on_the_providers_page_and_the_session_holds_to_its_rules() {
     let kc = Keycloak::start().await;
@@ -28,7 +33,7 @@ async fn only_an_admin_signs_in_on_the_providers_page_and_the_session_holds_to_i
     // A step-up counts from the password typed on the provider's page; a
     // real browser's sign-in on a busy machine takes seconds to come back,
     // so the window is wide enough for that, and the test waits it out.
-    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", 30.into()), ("refresh_seconds", 2.into())]);
+    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", STEP_UP_SECONDS.into()), ("refresh_seconds", 2.into())]);
     kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &p.jwks().await).await;
     let url = p.url();
     let c = launch(p).await;
@@ -62,7 +67,7 @@ async fn only_an_admin_signs_in_on_the_providers_page_and_the_session_holds_to_i
     let r = with_cookie(b.post(api("/session/step-up")), &sid).header("x-csrf-token", &csrf).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NO_CONTENT, "a fresh step-up did not count");
     // Once the step-up lapses, an action that needs one says so.
-    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(STEP_UP_SECONDS as u64 + 1)).await;
     let r = with_cookie(b.post(api("/session/step-up")), &sid).header("x-csrf-token", &csrf).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     let v: Value = r.json().await.unwrap();
@@ -143,7 +148,7 @@ async fn the_console_stops_all_agents_at_once_and_releases_only_with_a_fresh_pas
     kc.configure(&mut app).await;
     let mine = format!("{}/32", lan_ip());
     // Wide enough for a browser's sign-in on a busy machine (see above).
-    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", 30.into())]);
+    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", STEP_UP_SECONDS.into())]);
     kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &p.jwks().await).await;
     let url = p.url();
     let c = launch(p).await;
@@ -160,7 +165,7 @@ async fn the_console_stops_all_agents_at_once_and_releases_only_with_a_fresh_pas
     assert!(o["cards"]["running_tasks"].is_number() && o["status"]["version"].is_string(), "{o}");
 
     // Long after the sign-in's own step-up has lapsed: engaging still works.
-    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(STEP_UP_SECONDS as u64 + 1)).await;
     let r = with_cookie(b.post(api("/kill-switch/engage")), &sid).header("x-csrf-token", &csrf).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(app.api("alice").get("/v1/kill-switch").await.1["engaged"], true, "the app's switch is not on");
@@ -205,4 +210,10 @@ async fn a_sign_in_the_provider_lets_through_without_a_password_is_no_step_up() 
     let r = with_cookie(b.post(api("/session/step-up")), &sid).header("x-csrf-token", me["csrf"].as_str().unwrap()).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(r.json::<Value>().await.unwrap()["error"], "step_up_required");
+}
+
+#[test]
+fn the_console_sign_in_script_waits_two_minutes() {
+    let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests/admin-sign-in.mjs")).unwrap();
+    assert!(src.contains("const T = 120_000"), "{src}");
 }
