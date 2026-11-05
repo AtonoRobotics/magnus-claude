@@ -4,6 +4,10 @@
 
 Cancel in the app's browser sign-in now ends the wait in the app, so a sign-in finished later in the browser leaves no session and never replaces the stored one (`desktop/src-tauri/src/lib.rs`, `desktop/ui/app.js`, `bridge.js`).
 
+## Rate limits are retried (2026-11-04)
+
+A single 429 paused a task until a person resumed it. Rate limits are now retried with backoff (honouring `retry-after`), and only one the provider says lasts longer than the longest backoff suspends the run (`run/agent_loop.rs`, test in `models.rs`).
+
 ## Agent loop path (2026-11-04)
 
 DECISIONS.md named the agent loop `run/loop.rs`, which does not exist; it is `run/agent_loop.rs`. Only the name was corrected. The file has no deny rule yet; whether to add one is the owner's decision.

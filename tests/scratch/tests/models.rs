@@ -70,3 +70,30 @@ async fn a_token_refreshed_while_listing_models_goes_to_the_vault_not_the_caller
     // The refreshed token was stored: the second listing did not refresh again.
     assert_eq!(refreshes.load(Ordering::SeqCst), 1, "the refreshed credential was not kept");
 }
+
+/// A rate limit is transient: the kernel waits and asks again, as for an
+/// outage, rather than pausing the task (and its schedule) for a person to
+/// resume. Only a provider failure that persists suspends the run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rate_limit_is_retried_rather_than_pausing_the_task() {
+    // The first request is refused with a 429; asked again, the model works.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let then = steps(vec![contract_unchecked("say hello", "said"), fail("nothing to do")]);
+    let model = FakeModel::start(script(move |c| {
+        let (calls, then) = (calls.clone(), then.clone());
+        async move {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Reply::Status(429)
+            } else {
+                then(c).await
+            }
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default().model_retries(2), &model).await;
+    let alice = app.api("alice");
+    let id = alice.submit("Say hello.").await;
+    let t = alice.wait_settled(&id).await;
+    assert_eq!(t["status"], "failed", "a single 429 paused the task instead of being retried: {t}");
+    assert!(alice.inbox().await.iter().all(|i| i["details"]["reason"] != "usage_limit"), "a person was asked to resume after one 429");
+}
