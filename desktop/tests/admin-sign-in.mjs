@@ -51,7 +51,9 @@ const step = async (name, f) => {
   try { await f(); await shot(name); console.log(`ok   ${name}`); }
   catch (e) { await shot(`FAILED-${name}`); console.error(`FAIL ${name}: ${e.message}`); await browser.close(); process.exit(1); }
 };
-const T = 60_000;
+// A busy build box did not show "Only admins can enter" within 60s
+// (run 41960251290).
+const T = 120_000;
 // On a re-authentication (a step-up), Keycloak shows who is signing in as
 // fixed text and asks only for the password.
 const login = async (p = page) => {

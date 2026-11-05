@@ -211,3 +211,9 @@ async fn a_sign_in_the_provider_lets_through_without_a_password_is_no_step_up() 
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(r.json::<Value>().await.unwrap()["error"], "step_up_required");
 }
+
+#[test]
+fn the_console_sign_in_script_waits_two_minutes() {
+    let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests/admin-sign-in.mjs")).unwrap();
+    assert!(src.contains("const T = 120_000"), "{src}");
+}

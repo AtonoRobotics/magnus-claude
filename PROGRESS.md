@@ -8,6 +8,13 @@
 ## Check-tool labels: quoted expansions (2026-11-04)
 
 From #136's review: a check that only prints `${PATH:=...}` in single quotes, after a backslash or in a comment is no longer refused. An assignment bash makes through arithmetic on a variable's value, and one hidden by `\$` in `sh -c "..."`, now is (`sandbox/check_tools.py`, cases in `test_check_tools.py`).
+## The console sign-in script waits two minutes (2026-11-05)
+
+On build-box-beta the member's sign-in reached the provider and then did not show "Only admins can enter" within 60 seconds (run 41960251290, #139). `desktop/tests/admin-sign-in.mjs` now waits 120 seconds for each of those steps.
+
+## Desktop proxy paths (2026-11-04)
+
+The desktop app's proxy refused `/v1/sign-in…` by string prefix, but `/v1/./sign-in/device` passed and was normalised to the sign-in call, handing the page a session token. Paths are now judged as they will be sent (`desktop/src-tauri/src/lib.rs`).
 
 ## A schedule's end notice waits out a busy minute (2026-11-05)
 
