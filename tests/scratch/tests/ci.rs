@@ -149,13 +149,51 @@ exit 1
     assert!(workflow.contains("release/ensure-tauri.sh"), "release-checks installs tauri before it builds");
 }
 
-/// Signing needs the build box. beta has `magnus-linux` and no release key
-/// (run 41948685783). build-box-2 has `magnus-light` only.
+/// The release key is a file on the build box. A runner without it gets a
+/// throwaway key and must not publish. Requiring `magnus-light` as well
+/// matched no runner.
 #[test]
-fn release_checks_runs_where_the_release_key_is() {
+fn a_runner_without_the_release_key_signs_with_a_throwaway_and_does_not_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join(".magnus-release")).unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    std::fs::write(
+        &cargo,
+        r#"#!/bin/sh
+set -eu
+[ "${1:-}" = tauri ] && [ "${2:-}" = signer ] && [ "${3:-}" = generate ] || { echo "unexpected: $*" >&2; exit 1; }
+w=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = -w ]; then w=$2; shift; fi
+  shift
+done
+printf '%s\n' 'throwaway' > "$w"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cargo, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let script = repo().join("release/signing-key.sh");
+    let run = |key: &std::path::Path, dest: &std::path::Path| {
+        let out = std::process::Command::new(&script).arg(dest).env("HOME", &home).env("PATH", &path).env("MAGNUS_RELEASE_KEY", key).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let real = home.join(".magnus-release/update.key");
+    std::fs::write(&real, "release-key").unwrap();
+    let dest = dir.path().join("throw");
+    assert_eq!(run(&real, &dest), format!("{}\n1\n", real.display()));
+    assert!(!dest.join("key").exists(), "the release key was replaced");
+    let missing = dir.path().join("absent");
+    let made = dir.path().join("made");
+    assert_eq!(run(&missing, &made), format!("{}\n0\n", made.join("key").display()));
+    assert_eq!(std::fs::read_to_string(made.join("key")).unwrap(), "throwaway\n");
     let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
-    let job = workflow.split("release-checks:").nth(1).expect("release-checks job");
-    let runs_on = job.split("runs-on:").nth(1).unwrap().lines().next().unwrap();
-    assert!(runs_on.contains("magnus-linux") && runs_on.contains("magnus-light"), "{runs_on}");
-    assert!(workflow.contains("no release key"), "a runner without the key stops before it compiles");
+    assert!(workflow.contains("release/signing-key.sh"));
+    assert!(workflow.contains("env.MAGNUS_PUBLISH == '1'"), "publishing waits for the release key");
+    let runs_on = workflow.split("runs-on:").nth(1).unwrap().lines().next().unwrap();
+    assert!(runs_on.contains("magnus-linux") && !runs_on.contains("magnus-light"), "{runs_on}");
 }

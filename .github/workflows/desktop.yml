@@ -45,10 +45,11 @@ jobs:
     # and it starts again when the pull request is marked ready. A skipped
     # required check does not satisfy branch protection, so a draft cannot merge.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    # The build box has both labels and the release key. build-box-beta has
-    # magnus-linux only and no key, so signing failed there (run 41948685783:
-    # the path was decoded as the key). build-box-2 has magnus-light only.
-    runs-on: [self-hosted, linux, magnus-linux, magnus-light]
+    # magnus-linux is build-box and build-box-beta. beta has no release key.
+    # Requiring magnus-light as well matched no runner (run 41949170226 sat
+    # queued): build-box does not carry that label. A runner without the key
+    # builds with a throwaway key and does not publish (release/signing-key.sh).
+    runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 150
     steps:
       # Keep target/ between runs: a clean build of everything is long. The
@@ -123,23 +124,37 @@ jobs:
             echo "MAGNUS_BUILT=$b" >> "$GITHUB_ENV"
             echo "publishing the build that passed them: $(cat "$b/versions" | tr '\n' ' ')"
           fi
-      # The key stays on the build box (desktop/README.md). A runner without
-      # the file makes tauri decode the path as the key and fail at the first `.`.
-      - name: Release key
-        if: env.MAGNUS_BUILT == '' && env.MAGNUS_SELECT == 'full'
-        run: |
-          key="$HOME/.magnus-release/update.key"
-          [ -f "$key" ] || { echo "::error::no release key at $key; release-checks runs on the build box"; exit 1; }
       # cargo-tauri is a binary on PATH, not a rustup component. A runner that
       # has rustup and not this binary stops at `cargo tauri` before any test.
       - name: Tauri CLI
         if: env.MAGNUS_BUILT == '' && env.MAGNUS_SELECT == 'full'
         run: release/ensure-tauri.sh >> "$GITHUB_PATH"
+      # The release key is on the build box only. Another magnus-linux runner
+      # gets a throwaway key and MAGNUS_PUBLISH=0, so it can test and cannot
+      # replace the owner's app or the channels.
+      - name: Signing key
+        if: env.MAGNUS_SELECT == 'full'
+        run: |
+          real="${MAGNUS_RELEASE_KEY:-$HOME/.magnus-release/update.key}"
+          if [ -n "${MAGNUS_BUILT:-}" ]; then
+            if [ -f "$real" ]; then
+              echo "MAGNUS_SIGNING_KEY=$real" >> "$GITHUB_ENV"
+              echo "MAGNUS_PUBLISH=1" >> "$GITHUB_ENV"
+            else
+              echo "MAGNUS_PUBLISH=0" >> "$GITHUB_ENV"
+              echo "::notice::reused build on a runner with no release key; not publishing"
+            fi
+          else
+            out=$(release/signing-key.sh "$RUNNER_TEMP/signing")
+            echo "MAGNUS_SIGNING_KEY=$(printf '%s\n' "$out" | sed -n 1p)" >> "$GITHUB_ENV"
+            echo "MAGNUS_PUBLISH=$(printf '%s\n' "$out" | sed -n 2p)" >> "$GITHUB_ENV"
+            [ "$(printf '%s\n' "$out" | sed -n 2p)" = 1 ] || echo "::notice::no release key on this runner; the installers are signed with a throwaway key and not published"
+          fi
       - name: Installers
         if: env.MAGNUS_BUILT == '' && env.MAGNUS_SELECT == 'full'
         working-directory: desktop/src-tauri
         run: |
-          export TAURI_SIGNING_PRIVATE_KEY="$HOME/.magnus-release/update.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          export TAURI_SIGNING_PRIVATE_KEY="$MAGNUS_SIGNING_KEY" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
           c="{\"version\":\"$MAGNUS_VERSION\"}"
           cargo tauri build --bundles deb,appimage --config "$c"
           cargo tauri build --runner cargo --target x86_64-pc-windows-gnu --bundles nsis --config "$c"
@@ -234,7 +249,7 @@ jobs:
           mkdir -p "$d" && cp -r "$RUNNER_TEMP/shots/." "$d/" 2>/dev/null || true
           echo "screenshots: $d"
       - name: Pre-release with the tested installers
-        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        if: startsWith(github.ref, 'refs/tags/desktop-v') && env.MAGNUS_PUBLISH == '1'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -245,7 +260,7 @@ jobs:
           gh release create "$TAG" --verify-tag --prerelease --title "Desktop $v" --notes-from-tag \
             "dist/Magnus_${v}_amd64.deb" "dist/Magnus_${v}_amd64.AppImage" "dist/Magnus_${v}_x64-setup.exe"
       - name: Updates for the installed apps
-        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        if: startsWith(github.ref, 'refs/tags/desktop-v') && env.MAGNUS_PUBLISH == '1'
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -263,7 +278,7 @@ jobs:
       # the tests until an appliance missed its 30 s start (run 41265192814).
       # Only a run that tested everything keeps one.
       - name: Keep this build for master
-        if: github.event_name == 'pull_request' && env.MAGNUS_SELECT == 'full'
+        if: github.event_name == 'pull_request' && env.MAGNUS_SELECT == 'full' && env.MAGNUS_PUBLISH == '1'
         run: |
           cargo build --release --workspace --bins
           store="$HOME/magnus-ci/builds" && b="$store/$(git rev-parse HEAD^{tree})"
@@ -282,7 +297,7 @@ jobs:
       # Only a pull request that built and tested the installers (one that
       # changed desktop/ or the build) publishes to development.
       - name: Development build for the installed apps
-        if: github.event_name == 'pull_request' && env.MAGNUS_SELECT == 'full'
+        if: github.event_name == 'pull_request' && env.MAGNUS_SELECT == 'full' && env.MAGNUS_PUBLISH == '1'
         env:
           TITLE: ${{ github.event.pull_request.title }}
           PR: ${{ github.event.pull_request.number }}
@@ -301,7 +316,7 @@ jobs:
           fi
           release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist development
       - name: Test build for the installed apps
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && env.MAGNUS_PUBLISH == '1'
         run: |
           s=$(git log -1 --format=%s)
           case $s in "Merge pull request #"*) t=$(git log -1 --format=%b | head -1) ;; *) t=$s ;; esac
@@ -312,7 +327,7 @@ jobs:
       # appliance"): MAGNUS_APPLIANCE_VERSION, numbered like the app's; its
       # pull request's kept programs when there are, else built here.
       - name: Master on the build box's appliance
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && env.MAGNUS_PUBLISH == '1'
         run: |
           p=${MAGNUS_BUILT:+$MAGNUS_BUILT/appliance}
           [ -n "$p" ] || { cargo build --release --workspace --bins; p=target/release; }
@@ -322,7 +337,7 @@ jobs:
       # strix-alpha"), and Google's client secret into its vault when the
       # repository has it (owner, 2026-11-02).
       - name: The admin console on the build box's appliance
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && env.MAGNUS_PUBLISH == '1'
         env:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}
