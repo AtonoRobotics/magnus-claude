@@ -29,14 +29,14 @@ use tokio::net::{UnixListener, UnixStream};
 
 pub const CONTRACT: &str = "magnus.adapter/1";
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Envelope {
     pub contract: String,
     #[serde(flatten)]
     pub request: Request,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     /// Identify the adapter. Answered with one `hello` event.
@@ -63,7 +63,7 @@ pub enum Request {
     AuthRevoke { settings: Value, credential: String },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct CompleteParams {
     pub model: String,
     /// Adapter configuration from the owner, minus the credential name.
@@ -146,7 +146,7 @@ pub struct ModelInfo {
     pub context_window: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     Hello {
@@ -204,6 +204,42 @@ pub enum Event {
         detail: String,
     },
 }
+
+/// Messages that can carry a credential print as their JSON with every
+/// credential replaced: the kernel prints messages it did not expect into
+/// errors and tracing, which can reach the log.
+fn redacted(m: &impl Serialize, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn walk(v: &mut Value) {
+        match v {
+            Value::Object(o) => {
+                let is_credential_event = o.get("event").and_then(Value::as_str) == Some("credential");
+                for (k, x) in o.iter_mut() {
+                    if (k == "credential" || (is_credential_event && k == "value")) && !x.is_null() {
+                        *x = Value::String("[redacted]".into());
+                    } else {
+                        walk(x);
+                    }
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    let mut v = serde_json::to_value(m).map_err(|_| std::fmt::Error)?;
+    walk(&mut v);
+    write!(f, "{v}")
+}
+
+macro_rules! redacted_debug {
+    ($($t:ty),*) => {$(
+        impl std::fmt::Debug for $t {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                redacted(self, f)
+            }
+        }
+    )*};
+}
+redacted_debug!(Envelope, Request, CompleteParams, Event);
 
 /// Send events back to the kernel on one request's connection.
 pub struct Sink {
@@ -292,5 +328,35 @@ impl Call {
             Some(l) => Ok(Some(serde_json::from_str(&l)?)),
             None => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod redaction {
+    use super::*;
+
+    /// A credential never shows in what the kernel prints of a message:
+    /// "unexpected answer: {other:?}" reaches errors, tracing and the log.
+    #[test]
+    fn printing_a_message_never_shows_its_credential() {
+        let secret = "sk-live-0123456789";
+        let printed = [
+            format!("{:?}", Event::Credential { value: secret.into() }),
+            format!("{:?}", Event::AuthDone { credential: secret.into() }),
+            format!("{:?}", Request::Catalog { settings: Value::Null, credential: Some(secret.into()) }),
+            format!("{:?}", Request::AuthRevoke { settings: Value::Null, credential: secret.into() }),
+            format!(
+                "{:?}",
+                Envelope {
+                    contract: CONTRACT.into(),
+                    request: Request::Complete(CompleteParams { model: "m".into(), settings: Value::Null, credential: Some(secret.into()), system: String::new(), messages: vec![], tools: vec![], max_tokens: 1 }),
+                }
+            ),
+        ];
+        for p in &printed {
+            assert!(!p.contains(secret), "a credential was printed: {p}");
+        }
+        assert!(printed[0].contains("credential") && printed[1].contains("auth_done"), "{printed:?}");
+        assert!(format!("{:?}", Event::Text { text: "hello".into() }).contains("hello"));
     }
 }

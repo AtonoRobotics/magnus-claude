@@ -4,6 +4,10 @@
 
 `migrate` now strips a pre-existing kernel role's superuser-style attributes and refuses when it can still change the log through a grant or membership (`log.rs`, test in `log_review.rs`).
 
+## Adapter messages print without credentials (2026-11-04)
+
+Printing an unexpected adapter message could write a refreshed credential into an error, tracing or the log. The protocol's messages now print with credentials redacted (`adapter-proto`).
+
 ## Rate limits are retried (2026-11-04)
 
 A single 429 paused a task until a person resumed it. Rate limits are now retried with backoff (honouring `retry-after`), and only one the provider says lasts longer than the longest backoff suspends the run (`run/agent_loop.rs`, test in `models.rs`).
