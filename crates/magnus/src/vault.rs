@@ -61,6 +61,12 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// The mark of an entry encrypted bound to its name.
 const BOUND: &str = "2:";
+/// Present while the kill switch keeps the vault sealed, so a restart
+/// finds it sealed whatever the log says.
+const SEALED: &str = "sealed";
+/// The sign-ins the kill switch took out of the vault and has not yet seen
+/// revoked at their providers, as they were stored.
+const REVOKING: &str = "revoking.json";
 
 impl Vault {
     pub fn open(state_dir: &Path) -> Result<Vault> {
@@ -76,7 +82,10 @@ impl Vault {
         let key = std::fs::read(&key_path).context("read vault key")?;
         anyhow::ensure!(key.len() == 32, "vault key is corrupt");
         let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| anyhow::anyhow!("vault key"))?;
-        Ok(Vault { dir, cipher, lock: Mutex::new(()), sealed: Default::default() })
+        // Sealed by a kill switch that was not released: it stays sealed,
+        // even if the switch was never recorded (a crash before the record).
+        let sealed = dir.join(SEALED).exists();
+        Ok(Vault { dir, cipher, lock: Mutex::new(()), sealed: std::sync::atomic::AtomicBool::new(sealed) })
     }
 
     /// Entries written before each was bound to its name (or restored from
@@ -167,15 +176,20 @@ impl Vault {
 
     fn get_locked(&self, name: &str) -> Result<Option<Secret>> {
         let all = self.read_all()?;
-        let Some(b64) = all.get(name) else { return Ok(None) };
-        let b64 = b64.strip_prefix(BOUND).ok_or_else(|| anyhow::anyhow!("vault entry {name} is not bound to its name"))?;
+        let Some(stored) = all.get(name) else { return Ok(None) };
+        self.open_as(name, stored).map(Some)
+    }
+
+    /// An entry as stored, decrypted for its name.
+    fn open_as(&self, name: &str, stored: &str) -> Result<Secret> {
+        let b64 = stored.strip_prefix(BOUND).ok_or_else(|| anyhow::anyhow!("vault entry {name} is not bound to its name"))?;
         let blob = base64::engine::general_purpose::STANDARD.decode(b64)?;
         anyhow::ensure!(blob.len() > 24, "vault entry {name} is corrupt");
         let pt = self
             .cipher
             .decrypt(XNonce::from_slice(&blob[..24]), Payload { msg: &blob[24..], aad: name.as_bytes() })
             .map_err(|_| anyhow::anyhow!("vault entry {name} does not decrypt"))?;
-        Ok(Some(Secret(String::from_utf8(pt)?)))
+        Ok(Secret(String::from_utf8(pt)?))
     }
 
     pub fn names(&self) -> Result<Vec<String>> {
@@ -188,25 +202,73 @@ impl Vault {
     }
 
     pub fn unseal(&self) {
+        let _g = self.lock.lock().unwrap();
+        let _ = std::fs::remove_file(self.dir.join(SEALED));
         self.sealed.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Seal the vault and take the secrets named in `take` out of it,
     /// returning them once (for revocation at the provider). The rest stay,
     /// unreadable until the vault is unsealed.
+    ///
+    /// Those taken wait in the vault, sealed, until `revoked` says each was
+    /// revoked: first written there, then removed from the rest, so a crash
+    /// at any point leaves each one in one place or the other, never lost
+    /// unrevoked. With those an earlier switch took and did not see revoked.
     pub fn seal_and_take(&self, take: &[String]) -> Result<Vec<(String, Secret)>> {
         let _g = self.lock.lock().unwrap();
-        self.sealed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.seal_locked();
         let mut all = self.read_all()?;
-        let mut out = vec![];
+        let mut pending = self.read_pending()?;
         for n in take {
-            if let Some(v) = self.get_locked(n)? {
-                out.push((n.clone(), v));
+            if let Some(v) = all.get(n) {
+                pending.insert(n.clone(), v.clone());
             }
-            all.remove(n);
         }
+        write_private(&self.dir.join(REVOKING), &serde_json::to_vec(&pending)?)?;
+        all.retain(|n, _| !take.contains(n));
         write_private(&self.path(), &serde_json::to_vec(&all)?)?;
+        self.pending_locked(&pending)
+    }
+
+    /// The sign-ins taken out to be revoked and not yet seen revoked.
+    pub fn revoking(&self) -> Result<Vec<(String, Secret)>> {
+        let _g = self.lock.lock().unwrap();
+        let pending = self.read_pending()?;
+        self.pending_locked(&pending)
+    }
+
+    /// The provider answered for this sign-in (revoked or not): it no longer
+    /// waits.
+    pub fn revoked(&self, name: &str) -> Result<()> {
+        let _g = self.lock.lock().unwrap();
+        let mut pending = self.read_pending()?;
+        if pending.remove(name).is_some() {
+            write_private(&self.dir.join(REVOKING), &serde_json::to_vec(&pending)?)?;
+        }
+        Ok(())
+    }
+
+    fn read_pending(&self) -> Result<BTreeMap<String, String>> {
+        match std::fs::read(self.dir.join(REVOKING)) {
+            Ok(b) => Ok(serde_json::from_slice(&b)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn pending_locked(&self, pending: &BTreeMap<String, String>) -> Result<Vec<(String, Secret)>> {
+        let mut out = vec![];
+        for (n, stored) in pending {
+            out.push((n.clone(), self.open_as(n, stored)?));
+        }
         Ok(out)
+    }
+
+    fn seal_locked(&self) {
+        // Best effort: sealed in memory whatever the disk says.
+        let _ = write_private(&self.dir.join(SEALED), b"");
+        self.sealed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The vault's key and its encrypted contents as stored, for a backup.
@@ -227,9 +289,11 @@ impl Vault {
         Ok(old)
     }
 
-    /// Seal without emptying: a restart while the kill switch is engaged.
+    /// Seal without emptying: the kill switch, before it takes anything, or
+    /// a restart while it is engaged.
     pub fn seal(&self) {
-        self.sealed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _g = self.lock.lock().unwrap();
+        self.seal_locked();
     }
 }
 
@@ -341,5 +405,28 @@ mod tests {
         let again = Vault::open(dir.path()).unwrap();
         again.bind_unbound().unwrap();
         assert_eq!(again.get("connector_calendar__alice").unwrap().unwrap().expose(), "alice-token");
+    }
+
+    /// What the kill switch takes waits in the vault until revoked, and the
+    /// seal outlives a restart until the switch is released.
+    #[test]
+    fn a_taken_sign_in_waits_until_revoked_and_the_seal_outlives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = Vault::open(dir.path()).unwrap();
+        v.put("connector_calendar__alice", "alice-token").unwrap();
+        v.put("app_key", "key").unwrap();
+        let taken = v.seal_and_take(&["connector_calendar__alice".into()]).unwrap();
+        assert_eq!(taken.iter().map(|(n, s)| (n.as_str(), s.expose())).collect::<Vec<_>>(), vec![("connector_calendar__alice", "alice-token")]);
+        // A crash here: sealed again on opening, the sign-in still to revoke.
+        let v = Vault::open(dir.path()).unwrap();
+        assert!(v.is_sealed(), "a restart unsealed the vault");
+        assert_eq!(v.revoking().unwrap().len(), 1, "the taken sign-in was lost before it was revoked");
+        assert!(v.get("connector_calendar__alice").unwrap().is_none());
+        v.revoked("connector_calendar__alice").unwrap();
+        assert!(v.revoking().unwrap().is_empty());
+        v.unseal();
+        let v = Vault::open(dir.path()).unwrap();
+        assert!(!v.is_sealed(), "released, the vault stayed sealed");
+        assert_eq!(v.get("app_key").unwrap().unwrap().expose(), "key");
     }
 }
