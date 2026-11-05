@@ -30,6 +30,7 @@ import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { goto } from "./goto.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const { chromium } = createRequire(import.meta.url)(join(root, "browser/node_modules/playwright-core"));
@@ -63,7 +64,7 @@ const login = async (p = page) => {
 };
 
 await step("the console asks for a sign-in", async () => {
-  await page.goto(`${base}/`);
+  await goto(page, `${base}/`);
   await page.getByRole("link", { name: "Sign in" }).click();
   await page.locator("#username").waitFor({ timeout: T });
   if (new URL(page.url()).host === new URL(base).host) throw new Error("the password is asked on the console's page, not the provider's");
@@ -83,7 +84,7 @@ if (expect === "refused") {
   });
   if (process.env.MAGNUS_STEP_UP === "1") {
     await step("a step-up asks for the password again, and comes back", async () => {
-      await page.goto(`${base}/auth/step-up?then=/%23/security`);
+      await goto(page, `${base}/auth/step-up?then=/%23/security`);
       await page.locator("#password").waitFor({ timeout: T });
       await login();
       await page.waitForURL(u => new URL(u).host === new URL(base).host && u.toString().endsWith("/#/security"), { timeout: T });
@@ -95,7 +96,7 @@ if (expect === "refused") {
       // Sign in comes straight back: no password is typed.
       await page.waitForTimeout(2500);
       await ctx.clearCookies({ name: "__Host-magnus_admin" });
-      await page.goto(`${base}/auth/login`);
+      await goto(page, `${base}/auth/login`);
       await page.waitForURL(u => new URL(u).host === new URL(base).host, { timeout: T });
       await page.locator("#nav").waitFor({ state: "visible", timeout: T });
     });
@@ -107,7 +108,7 @@ if (process.env.MAGNUS_SHELL === "1" && expect === "admin") {
   const lapse = Number(env("MAGNUS_STEP_UP_SECONDS")) * 1000 + 1500;
   const csrf = async () => page.evaluate(async () => (await (await fetch("/api/v1/session")).json()).csrf);
   await step("the admin's menu sets the theme", async () => {
-    await page.goto(`${base}/#/overview`);
+    await goto(page, `${base}/#/overview`);
     await page.locator("#view h1").waitFor({ timeout: T });
     await page.locator("#me-btn").click();
     await page.getByRole("menuitemradio", { name: "Dark" }).click();
@@ -140,7 +141,7 @@ if (process.env.MAGNUS_SHELL === "1" && expect === "admin") {
     await page.getByText("Agents may run again.").waitFor({ timeout: T });
   });
   await step("a row opens its detail panel, and Escape closes it", async () => {
-    await page.goto(`${base}/#/users`);
+    await goto(page, `${base}/#/users`);
     await page.locator("#users-rows tr.click").first().waitFor({ timeout: T });
     await page.locator("#users-rows tr.click", { hasText: other }).click();
     await page.locator("#panel h2", { hasText: other }).waitFor({ timeout: T });
@@ -164,7 +165,7 @@ if (process.env.MAGNUS_SHELL === "1" && expect === "admin") {
 const visit = process.env.MAGNUS_VISIT;
 if (visit && expect === "admin") {
   await step(`${visit} renders in every look and at phone width`, async () => {
-    await page.goto(`${base}/${visit}`);
+    await goto(page, `${base}/${visit}`);
     await page.locator("#view h1").waitFor({ timeout: T });
     // Drawn: nothing on the screen is still loading.
     // (Polled with evaluate: waitForFunction compiles its predicate with

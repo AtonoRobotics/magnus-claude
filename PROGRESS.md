@@ -1,5 +1,9 @@
 # Progress
 
+## Console tests load a page again after a network change (2026-11-05)
+
+appliance-v0.2.4's release run (42032928589, #171) failed in its test step, not in publishing: two admin console tests died at their first page with `net::ERR_NETWORK_CHANGED`, while 330 other tests passed. Chromium cancels a load that is under way when the machine's network changes, and the console's sign-in script gave up instead of loading the page again. It now opens every page through `goto()` (`desktop/tests/goto.mjs`), which retries that one error up to three times (test `the_console_sign_in_script_loads_a_page_again_when_the_network_changes`). The 0.2.4 tag keeps the old script, so the appliance release goes out as the next version after this lands.
+
 ## Test consoles listen below the ephemeral range (2026-11-05)
 
 The admin console tests picked a port by binding port 0 and letting it go, then started the console on it later. With the suites running at once, another process could take that port, and the test talked to the wrong listener (`InvalidCertificate(BadSignature)` in `admin_operations` on #164). `admin::free_port` now picks a free port in 20000-31999, below the ephemeral range, and `admin_on_appliance` uses that helper (`admin.rs`). Test: `a_console_port_is_below_the_ephemeral_range`.

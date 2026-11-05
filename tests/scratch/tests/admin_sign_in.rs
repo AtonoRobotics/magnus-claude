@@ -212,6 +212,36 @@ async fn a_sign_in_the_provider_lets_through_without_a_password_is_no_step_up() 
     assert_eq!(r.json::<Value>().await.unwrap()["error"], "step_up_required");
 }
 
+/// A page load that the machine's network changing cut off is loaded again,
+/// at most three times; any other failure is still the test's at once.
+/// Release run 42032928589 (#171) failed two console tests at their first
+/// page with `net::ERR_NETWORK_CHANGED` on a shared build box.
+#[test]
+fn the_console_sign_in_script_loads_a_page_again_when_the_network_changes() {
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests");
+    let src = std::fs::read_to_string(tests.join("admin-sign-in.mjs")).unwrap();
+    assert!(!src.contains("page.goto("), "every page the script opens goes through goto(): {src}");
+    let helper = url::Url::from_file_path(tests.join("goto.mjs").canonicalize().expect("desktop/tests/goto.mjs")).unwrap();
+    let check = format!(
+        r#"
+const {{ goto }} = await import("{helper}");
+let a = 0;
+const flaky = {{ goto: async u => {{ if (++a === 1) throw new Error("page.goto: net::ERR_NETWORK_CHANGED at " + u); return "loaded " + u; }} }};
+const r = await goto(flaky, "https://console/");
+if (r !== "loaded https://console/" || a !== 2) throw new Error(`a network change: ${{r}} after ${{a}} loads`);
+let b = 0;
+const refused = {{ goto: async () => {{ b++; throw new Error("page.goto: net::ERR_CONNECTION_REFUSED"); }} }};
+await goto(refused, "https://console/").then(() => {{ throw new Error("a refusal passed"); }}, e => {{ if (!e.message.includes("REFUSED") || b !== 1) throw new Error(`a refusal: ${{e.message}} after ${{b}} loads`); }});
+let c = 0;
+const changing = {{ goto: async () => {{ c++; throw new Error("page.goto: net::ERR_NETWORK_CHANGED"); }} }};
+await goto(changing, "https://console/").then(() => {{ throw new Error("a network that never settles passed"); }}, e => {{ if (!e.message.includes("NETWORK_CHANGED") || c !== 3) throw new Error(`never settling: ${{e.message}} after ${{c}} loads`); }});
+console.log("ok");
+"#
+    );
+    let out = std::process::Command::new("node").args(["--input-type=module", "-e", &check]).output().expect("run node");
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
 #[test]
 fn the_console_sign_in_script_waits_two_minutes() {
     let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests/admin-sign-in.mjs")).unwrap();
