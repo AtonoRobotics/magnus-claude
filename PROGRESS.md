@@ -3,6 +3,10 @@
 ## Approvals keep their risk class (2026-11-04)
 
 An approval no longer covers its tool after the owner reclassifies the tool as riskier: it is matched on the class its item recorded (`state.rs`, `boundary.rs`, test in `connectors.rs`).
+
+## Inline content moved to the content store (2026-11-04)
+
+An appliance that ran before `migrate` made the content store still had those events' content in the log, where trash and erasure cannot delete it. `migrate` now moves it to the content store, one event per statement, and the walls' fill then names each row's person (`log::move_inline_content`). Test: `migrate_moves_content_written_into_the_log_to_the_content_store` (log_review.rs).
 ## CI throughput fixes (2026-11-04, branch `ci-throughput-fixes`)
 
 Pull requests stopped landing after the pull request process changed: agent sessions merged master into every open branch and reran failed runs, each merge restarted a 150-minute run, a hung browser sign-in held a runner to its time limit, and two full suites ran on one machine at once. The rules check now says not to merge master in for being behind, only for a conflict. A pull request runs only the tests its paths reach (`release/ci-select.sh`); master runs everything. Every test has a time limit (`.config/nextest.toml`), the sign-in and update-test waits are bounded, and each run clears test realms and mail sinks left for three hours (`release/ci-clean.sh`). The quick checks run on build-box-2 (`magnus-light`); the release and injection checks on build-box. The merge queue could not be turned on: the repository is private and owned by a person (DECISIONS.md, "CI throughput on the shared runner").
