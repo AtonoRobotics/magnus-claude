@@ -1,5 +1,9 @@
 # Progress
 
+## An app's tool is never the sandbox (2026-11-04)
+
+Classifying an app's tool as `sandbox` let it skip the contract and the Rule of Two. The classification is refused, and an older one is treated as unclassified (`connectors.rs`, `boundary.rs`, test in `connectors.rs`).
+
 ## The control socket listens before the network is answered (2026-11-05)
 
 The kernel bound its control socket in a task spawned just before it began answering on the network, so a caller that had seen it answer (the admin console after a restart, or the tests' harness) could still find the previous process's socket file and get "connection refused". `the_kill_switch_through_the_kernel_is_the_apps_own_and_outlives_a_restart` failed so in #159's CI. The socket is now bound (`control::bind`) before the network is served, and only its serving is spawned.

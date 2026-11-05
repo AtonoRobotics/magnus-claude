@@ -667,6 +667,7 @@ Ported from closed pull requests #1 (`review-fixes`), #5 (`scratch-port-zero`) a
 - Every change is audited before it is made, with before and after, and a credential appears in neither: only `{ kind, set }`.
 - The console passes on the kernel's refusals with their status (409, 400, 404), where before any kernel refusal showed as 502.
 - Test: `the_console_sets_rotates_and_revokes_the_organisations_credentials_and_never_shows_one` (admin_connectors.rs), against Keycloak:
+- An app's tool is never classed `sandbox`: the owner's classification refuses it, and one an older log classed so counts as unclassified, so it is not offered (review, 2026-11-04). Reason: `sandbox` means the appliance's own microVM and does not change state, so an app's tool classed so skipped the task contract, the Rule of Two and the audience rule, and the default policy ran it without asking, while it acted at the app. Test: `an_apps_tool_is_never_classed_as_the_sandbox` (connectors.rs).
   - Google's client secret set from the console serves Gmail and Drive, and the app's Library sees Google's client as complete;
   - an app added by its address with a key; who may use it set;
   - turned off, Gmail leaves the Library, and comes back when turned on;
