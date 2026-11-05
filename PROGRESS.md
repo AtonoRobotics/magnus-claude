@@ -2,7 +2,15 @@
 
 ## Appliance release 0.2.4, current with master (2026-11-05)
 
-Workspace version stays 0.2.4 so `appliance-v0.2.4` can be tagged. The branch was 36 commits behind master; master is merged in. Release-checks on this pull request (run 41912463362, 2 of 401) failed two scratch tests that master has since fixed, and those fixes are in this release. The console log said it was listening on `192.168.0.50`, and `the_console_answers_only_its_own_network_by_its_own_name_over_tls_1_3` still panicked with "the console listens on loopback": a connect to `127.0.0.1` on that port reached another test's listener. The check reads that process's own listen sockets (`admin_reach.rs`). `only_an_admin_signs_in_on_the_providers_page_and_the_session_holds_to_its_rules` returned a session for Alice with `stepped_up_until` null; the member was refused in the log. The step-up window counts from the password on the provider's page, and 30 seconds had already lapsed when the session was read. Those tests use 90 seconds (`admin_sign_in.rs`; the same null on master run 41949527809). Brokered manifests name the images built from this commit, Gmail 1.1.0 included. A `magnus-linux` runner without the Windows gnu target installs it before the installer build (`release/ensure-windows-target.sh`), which is where master runs 41958146895 and 41955875225 stopped.
+Workspace version stays 0.2.4 so `appliance-v0.2.4` can be tagged. Master is merged in, including the nonzero-exit check and the 180-second schedule notice. Release-checks on the previous head passed 417 of 417, installed-app tests included (run 41962520593). The two failures before that (run 41912463362) were already fixed on master: the console was listening on `192.168.0.50` and a connect to `127.0.0.1` on that port reached another test's listener, so the check reads that process's own sockets (`admin_reach.rs`); Alice's session had `stepped_up_until` null because the 30-second step-up had lapsed, and those tests use 90 seconds (`admin_sign_in.rs`). Brokered manifests name the images built from this commit, Gmail 1.1.0 included. A `magnus-linux` runner without the Windows gnu target installs it before the installer build (`release/ensure-windows-target.sh`).
+
+## A schedule's end notice waits out a busy minute (2026-11-05)
+
+`a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run` gave up at 90 seconds, three times, waiting for "A schedule ended itself" (runs 41949527809, 41957157578, 41960121035). That wait is now 180 seconds. The file already said a minute schedule needs longer than a quiet minute.
+
+## Checks expecting a nonzero exit (2026-11-04)
+
+A check expecting `/exit_code` 1 (for example `grep -q TODO` finding nothing) always failed, because a nonzero exit marked the result an error. The expected exit code now decides (`run/mod.rs`, test in `contract_freeze.rs`).
 
 ## Inline content moved to the content store (2026-11-04)
 
