@@ -84,6 +84,7 @@ pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) 
              GRANT SELECT, INSERT, DELETE ON public.content TO {role};"
         ))
         .await?;
+    move_inline_content(&admin).await.context("move content written into the log to the content store")?;
     admin.batch_execute(&content_walls_sql(&role)).await.context("wall the content store by person")?;
     // The knowledge base's index, filtered for each reader by row security.
     admin.batch_execute(&crate::knowledge::migrate_sql(&role)).await.context("create the knowledge index (pgvector must be installed)")?;
@@ -91,6 +92,41 @@ pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) 
         migrate_root(&admin, root, &db).await.context("the admin console's database role")?;
     }
     Ok(())
+}
+
+/// Move the content of events written whole, before the content store
+/// existed, out of the log and into the store, where trash and erasure can
+/// delete it, leaving the record with the content's hash as `split` does for
+/// every event now. Each event moves in one statement, so a crash leaves it
+/// either whole or moved; events already moved, or without content, are left.
+async fn move_inline_content(admin: &Client) -> Result<()> {
+    // Only kinds that carry content, and only records without the hash a
+    // split leaves: a record with it was split when written or moved
+    // before, and its content, if gone, was deleted on purpose.
+    let kinds: Vec<&str> = crate::events::CONTENT.iter().map(|(k, _)| *k).collect();
+    let mut after = 0i64;
+    loop {
+        let rows = admin
+            .query(
+                "SELECT e.seq, e.body FROM public.events e
+                 WHERE e.seq > $1 AND e.kind = ANY($2) AND NOT (e.body ? 'content')
+                 ORDER BY e.seq LIMIT 1000",
+                &[&after, &kinds],
+            )
+            .await?;
+        let Some(last) = rows.last() else { return Ok(()) };
+        after = last.get(0);
+        for r in &rows {
+            let (record, Some(content)) = split(r.get(1)) else { continue };
+            admin
+                .execute(
+                    "WITH moved AS (INSERT INTO public.content (seq, salt, body) VALUES ($1, $2, $3) RETURNING seq)
+                     UPDATE public.events SET body = $4 WHERE seq = (SELECT seq FROM moved)",
+                    &[&r.get::<_, i64>(0), &content.salt, &content.body, &record],
+                )
+                .await?;
+        }
+    }
 }
 
 /// The admin console's root role (admin console spec, Authority and audit):
