@@ -958,6 +958,7 @@ impl Kernel {
             pkce: true,
             redirect_uri: None,
             handoff: None,
+            destinations: Default::default(),
         };
         self.emit(actor, Ev::ConnectorAdded { connector: c }).await.map_err(failed)?;
         Ok(json!({ "name": name, "sign_in": oauth }))

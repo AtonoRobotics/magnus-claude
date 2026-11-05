@@ -247,3 +247,60 @@ async fn a_fetch_cannot_carry_private_data_out_after_untrusted_input() {
         w.web.hits()
     );
 }
+
+/// An approval holds for the email the person was shown, read from the
+/// draft and never from what the model wrote: a draft edited after its
+/// send was approved, even by one added Bcc, is another email and asks
+/// again, its card showing the change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_edited_after_approval_asks_again_including_an_added_bcc() {
+    let draft = |bcc: &str| json!({ "d1": { "to": "bob@corp.example", "bcc": bcc, "subject": "Q3", "body": "Confidential: revenue 41.7M" } });
+    let id_only = json!({ "type": "object", "properties": { "draft_id": { "type": "string" } } });
+    let drafts = FakeMcp::builder()
+        .world("drafts", draft(""))
+        .world("sent", json!([]))
+        .honor_idempotency(true)
+        .tool("get_draft", "Read a draft.", id_only.clone(), |w, a, _| {
+            let id = a["draft_id"].as_str().unwrap_or_default();
+            match w["drafts"].get(id) {
+                Some(d) => mcp::ok(json!({ "draft_id": id, "message": d })),
+                None => mcp::err("no such draft"),
+            }
+        })
+        .tool("send_draft", "Send a draft.", id_only, |w, a, _| {
+            let d = w["drafts"][a["draft_id"].as_str().unwrap_or_default()].clone();
+            w["sent"].as_array_mut().unwrap().push(d);
+            mcp::ok(json!({ "status": "sent" }))
+        })
+        .start()
+        .await;
+    let model = FakeModel::start(steps(vec![
+        contract_unchecked("send Bob the Q3 draft", "Bob has it"),
+        tool("drafts__get_draft", json!({ "draft_id": "d1" })),
+        tool("drafts__send_draft", json!({ "draft_id": "d1" })),
+        fail("stopping"),
+    ]))
+    .await;
+    let spec = Spec::default()
+        .app("drafts", &drafts, "public", "private+untrusted", &[("get_draft", "read"), ("send_draft", "irreversible")])
+        .destinations("drafts", "send_draft", "get_draft", "draft_id", &["/message/to", "/message/bcc"], &["/message/subject", "/message/body"]);
+    let app = Appliance::start(spec, &model).await;
+    let alice = app.api("alice");
+    assert!(alice.put_policy("org", &org_policy(&permit_execute("drafts__send_draft"))).await.is_success());
+    let id = alice.submit("Send Bob the Q3 draft.").await;
+
+    let first = alice.wait_item(&id, "approval").await;
+    assert!(!first.to_string().contains("evil.example"));
+    drafts.set_world("drafts", draft("eve@evil.example"));
+    assert!(alice.respond(first["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
+
+    let second = eventually("a new card for the edited draft", PATIENCE, || async {
+        alice.open_items(&id, "approval").await.into_iter().find(|i| i["id"] != first["id"])
+    })
+    .await;
+    assert_eq!(drafts.effects("send_draft"), 0, "the edited draft was sent on the approval of the one shown");
+    assert!(second.to_string().contains("eve@evil.example"), "the new card does not show the added Bcc: {second}");
+    assert!(alice.respond(second["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
+    eventually("the approved send ran", PATIENCE, || async { (drafts.effects("send_draft") == 1).then_some(()) }).await;
+    assert_eq!(drafts.world()["sent"][0]["bcc"], "eve@evil.example");
+}
