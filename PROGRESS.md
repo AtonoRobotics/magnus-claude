@@ -1,5 +1,9 @@
 # Progress
 
+## Test consoles listen below the ephemeral range (2026-11-05)
+
+The admin console tests picked a port by binding port 0 and letting it go, then started the console on it later; with hundreds of tests running at once, something else could take that port first, and the test then talked to it. It showed as `InvalidCertificate(BadSignature)` (another test's console) in `admin_operations` on #164, and is the likely cause of the console certificate wait timing out in `admin_on_appliance`. `admin::free_port` now picks below the system's ephemeral range, from a random start.
+
 ## Cancelling a browser sign-in ends it (2026-11-04)
 
 Cancel in the app's browser sign-in now ends the wait in the app, so a sign-in finished later in the browser leaves no session and never replaces the stored one (`desktop/src-tauri/src/lib.rs`, `desktop/ui/app.js`, `bridge.js`).

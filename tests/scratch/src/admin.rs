@@ -19,8 +19,21 @@ pub fn lan_ip() -> IpAddr {
     ip
 }
 
-fn free_port(ip: IpAddr) -> u16 {
-    std::net::TcpListener::bind((ip, 0)).unwrap().local_addr().unwrap().port()
+/// A port for a console to listen on, free when asked. Taken below the
+/// system's ephemeral range (32768 and up), from a random start: a port the
+/// system hands out (port 0, or any outgoing connection of the hundreds of
+/// tests running at once) can be taken again before the console binds it,
+/// and the test then talks to whatever holds it (another test's console,
+/// whose certificate fails as `BadSignature`). Here only another console
+/// picking the same port can, one chance in about 12,000.
+pub fn free_port(ip: IpAddr) -> u16 {
+    const LOW: u16 = 20000;
+    const SPAN: u16 = 12000;
+    let start = (uuid::Uuid::new_v4().as_u128() % SPAN as u128) as u16;
+    (0..SPAN)
+        .map(|i| LOW + (start + i) % SPAN)
+        .find(|&p| std::net::TcpListener::bind((ip, p)).is_ok())
+        .expect("a free port below the ephemeral range")
 }
 
 /// A console made ready to start: where it will listen, its config, and
