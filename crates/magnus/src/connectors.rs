@@ -889,6 +889,13 @@ impl Kernel {
         let s = |f: &str| b[f].as_str().map(str::trim).unwrap_or_default().to_string();
         let (mut name, url, audience, label) = (s("name"), s("url"), s("audience"), s("label"));
         let taken = |n: &str| self.all_connectors().iter().any(|(c, _)| c.name == n) || crate::tools::builtin_apps().contains(&n);
+        // Never a key or token in the address either (below): checked before
+        // the app is asked anything, so one is neither sent nor recorded.
+        match url::Url::parse(&url) {
+            Ok(u) if u.username().is_empty() && u.password().is_none() && u.query().is_none() && u.fragment().is_none() => {}
+            Ok(_) => return Err(refusal(StatusCode::BAD_REQUEST, "the app's address takes no user, password, query or fragment: Magnus never takes a key or token for an app, and each person signs in to it with their own account")),
+            Err(_) => return Err(refusal(StatusCode::BAD_REQUEST, "the app's address is not a URL")),
+        }
         // The address is the one field the owner fills in (connectors spec):
         // the name comes from the app. (The app's form sends what it returns
         // and what reaches it at their most guarded; they stay named here.)
