@@ -101,7 +101,7 @@ pub struct Run {
     pub contract_frozen: Option<u32>,
     /// The run's taint when the contract in force was written: its checks
     /// were written then, so the Rule of Two judges them by it. A version a
-    /// person approved carries none.
+    /// person approved keeps the taint the run had when they approved it.
     pub contract_taint: (bool, bool),
     /// Who approved the contract in force, when it was a change.
     pub contract_approved_by: Option<String>,
@@ -330,6 +330,9 @@ pub struct Approval {
     pub by: String,
     /// Why the approval was asked for: the rule, or `unknown_outcome`.
     pub reason: Option<String>,
+    /// The risk class the action had when it was approved (its item's): an
+    /// approval covers only that class.
+    pub risk: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1160,7 +1163,9 @@ impl State {
                 if let Some(c) = self.connectors.get_mut(connector) {
                     match risk {
                         Some(r) => {
-                            c.tools.insert(tool.clone(), crate::config::ToolClass { risk: r.clone(), label: None });
+                            // Its reach is what the tool is, whatever its class.
+                            let reach = c.tools.get(tool).and_then(|t| t.reach.clone());
+                            c.tools.insert(tool.clone(), crate::config::ToolClass { risk: r.clone(), label: None, reach });
                         }
                         None => {
                             c.tools.remove(tool);
@@ -1581,7 +1586,9 @@ impl State {
                     r.contract = Some(contract.clone());
                     r.contract_version = *version;
                     r.verified.clear();
-                    r.contract_taint = if approved_by.is_some() { (false, false) } else { (r.untrusted, r.private) };
+                    // An approved change keeps the run's taint: the person approved
+                    // what counts as done, not each send its checks make.
+                    r.contract_taint = (r.untrusted, r.private);
                     if approved_by.is_some() {
                         r.contract_frozen = Some(*version);
                     }
@@ -1744,7 +1751,7 @@ impl State {
                     }
                 }
             }
-            Ev::Approval { id, person, task, tool, input_hash, scope, until, reason, .. } => self.approvals.push(Approval {
+            Ev::Approval { id, item, person, task, tool, input_hash, scope, until, reason, risk } => self.approvals.push(Approval {
                 id: id.clone(),
                 person: person.clone(),
                 task: task.clone(),
@@ -1755,6 +1762,9 @@ impl State {
                 used: false,
                 by: e.actor.clone(),
                 reason: reason.clone(),
+                // Approvals written before the event kept it read it from
+                // their item; with that deleted, they ask again.
+                risk: risk.clone().or_else(|| self.items.get(item).and_then(|i| i.details["risk"].as_str()).map(String::from)),
             }),
             Ev::ApprovalUsed { id, .. } => {
                 if let Some(a) = self.approvals.iter_mut().find(|a| &a.id == id) {
