@@ -3,6 +3,9 @@
 ## Check-tool labels: quoted expansions (2026-11-04)
 
 From #136's review: a check that only prints `${PATH:=...}` in single quotes, after a backslash or in a comment is no longer refused. An assignment bash makes through arithmetic on a variable's value, and one hidden by `\$` in `sh -c "..."`, now is (`sandbox/check_tools.py`, cases in `test_check_tools.py`).
+## Embedding server timeout (2026-11-04)
+
+A silent embedding server stalled knowledge search and adds for ever. Requests now time out after `[knowledge.embeddings] timeout_s` (default 30) and search falls back to full-text (`knowledge.rs`, `config.rs`).
 ## A send shows and holds the draft it sends (2026-11-04, `send-reads-the-draft`)
 
 Approvals spec step 2. Gmail's `send_draft` card now shows the draft's To, Cc, Bcc, subject, text and attachments, read through `get_draft` at the gate. The approval holds only for that exact email: an edited draft asks again (`a_draft_changed_after_its_card_asks_again_showing_the_change`, gmail.rs). Gmail manifest 1.1.0. The protected test `a_draft_edited_after_approval_asks_again_including_an_added_bcc` (inv4_taint.rs) lands here, as the spec approved; the harness gains `Spec::destinations`. Step 1 (#145, `reach-in-manifests`) waits for this step: merge master into it, then set Gmail to 1.2.0. Steps 3–11 follow, one PR each.
