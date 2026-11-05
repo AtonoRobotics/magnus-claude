@@ -58,7 +58,26 @@ export async function open(wd, app, shots, prefix) {
   d.css = v => find("css selector", v);
   d.xpath = v => find("xpath", v);
   d.button = (label, within = "") => d.xpath(`${within}//button[normalize-space()='${label}']`);
-  d.click = el => on(el, id => call("POST", s(`/element/${id}/click`), {}));
+  // A click lands where the element was when the driver measured it. A card
+  // sizes its outcome frame once the frame has loaded (`data-sized`), which
+  // moves the buttons below it; on a busy runner the update test's Accept
+  // was clicked just before, landed on the frame, and nothing was accepted
+  // (runs 41969612463 and 42105845733, #207). So an element is clicked once
+  // no outcome frame in its card is still loading and it is where it was a
+  // tenth of a second before. A stale element goes back to `on` to be found
+  // again.
+  const settled = async id => {
+    const at = () => d.run("const c = arguments[0].closest('article'); if (c && c.querySelector('iframe.composed:not([data-sized])')) return null; const r = arguments[0].getBoundingClientRect(); return [r.x, r.y, r.width, r.height].join()", { [E]: id });
+    const end = Date.now() + T;
+    for (let last = await at(); ; ) {
+      await new Promise(r => setTimeout(r, 100));
+      const now = await at();
+      if (now !== null && now === last) return;
+      if (Date.now() > end) throw new Error(`timed out waiting for the element to stop moving (${now ?? "an outcome frame in its card is still loading"})`);
+      last = now;
+    }
+  };
+  d.click = el => on(el, async id => { await settled(id); return call("POST", s(`/element/${id}/click`), {}); });
   d.type = (el, text) => on(el, id => call("POST", s(`/element/${id}/value`), { text }));
   d.clear = el => on(el, id => call("POST", s(`/element/${id}/clear`), {}));
   d.text = el => on(el, id => call("GET", s(`/element/${id}/text`)));

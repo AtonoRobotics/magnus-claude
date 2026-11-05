@@ -3,6 +3,9 @@
 ## A sign-in waits for the provider to know a new client (2026-11-05)
 
 Master's rerun failed when gitlab.com said a client Magnus had just registered "does not exist" (#170). After registering, Magnus now checks that the provider's sign-in page knows the client, for up to ten seconds, before giving the address to the person. gitlab.com also allows only about ten registrations an hour per address, and Magnus registers on every sign-in. Reusing one client is #208. Still open from the same night: the installed-app update test's lost Accept (#207).
+## The installed-app driver clicks once a card has stopped moving (2026-11-05)
+
+The update test's Accept was lost twice on master (#207). A review card's outcome frame takes its height once loaded and pushes the buttons down, and the driver clicked before that, onto the frame. The app now marks a frame `data-sized` once it has its height. The driver clicks an element once its card's frames are sized and it has stopped moving.
 
 ## Reads of the person's own account stop asking (2026-11-05)
 

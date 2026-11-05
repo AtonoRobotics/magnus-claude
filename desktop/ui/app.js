@@ -1487,6 +1487,9 @@ async function fill(frame, view, taskId, task) {
       frame.style.height = h + "px";
       if (frame.dataset.shown) frameHeights[frame.dataset.shown] = h;
     } catch { /* sized by CSS */ }
+    // At its height: what is below it has stopped moving (the installed-app
+    // driver clicks once its card's frames are, #207).
+    frame.dataset.sized = "1";
   };
 }
 
