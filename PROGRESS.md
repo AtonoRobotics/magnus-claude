@@ -1,5 +1,13 @@
 # Progress
 
+## The console sign-in script waits two minutes (2026-11-05)
+
+On build-box-beta the member's sign-in reached the provider and then did not show "Only admins can enter" within 60 seconds (run 41960251290, #139). `desktop/tests/admin-sign-in.mjs` now waits 120 seconds for each of those steps.
+
+## Desktop proxy paths (2026-11-04)
+
+The desktop app's proxy refused `/v1/sign-in…` by string prefix, but `/v1/./sign-in/device` passed and was normalised to the sign-in call, handing the page a session token. Paths are now judged as they will be sent (`desktop/src-tauri/src/lib.rs`).
+
 ## A schedule's end notice waits out a busy minute (2026-11-05)
 
 `a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run` gave up at 90 seconds, three times, waiting for "A schedule ended itself" (runs 41949527809, 41957157578, 41960121035). That wait is now 180 seconds. The file already said a minute schedule needs longer than a quiet minute.
