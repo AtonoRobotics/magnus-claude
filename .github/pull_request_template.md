@@ -14,7 +14,7 @@
 
 - [ ] Branched from current master, into master
 - [ ] Not past the cap of 6 open agent pull requests (CLAUDE.md, "How work lands")
-- [ ] Started from a `ready` issue, or one the owner named; claimed `in-progress`; body has `Fixes #N` (CLAUDE.md, "How work lands")
+- [ ] Started from the one open `ready` issue, or from an extra the owner marked that does not share the hot files, or from an issue the owner named; `queue` alone was not the start; claimed it (`ready` off, `in-progress` on); body has `Fixes #N` (CLAUDE.md, "Work starts from an issue")
 - [ ] One concern; each fix has a test that fails without it
 - [ ] Every CI check green
 - [ ] DECISIONS.md and PROGRESS.md updated
