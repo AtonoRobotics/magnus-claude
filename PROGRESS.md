@@ -1,5 +1,8 @@
 # Progress
 
+## No secret in an app's address (2026-11-04)
+
+Adding an app now refuses an address with a user, password, query or fragment, before contacting it, so a token in the address is neither sent, logged nor listed (`connectors.rs`, test in `connectors.rs`).
 ## Approvals keep their risk class (2026-11-04)
 
 An approval no longer covers its tool after the owner reclassifies the tool as riskier: it is matched on the class its item recorded (`state.rs`, `boundary.rs`, test in `connectors.rs`).
