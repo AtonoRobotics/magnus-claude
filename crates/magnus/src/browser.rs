@@ -74,4 +74,14 @@ impl Browser {
             let _ = self.request(run, json!({ "op": "close" })).await;
         }
     }
+
+    /// Close every run's pages and the browser with them (the kill switch).
+    /// A run that goes on later gets a new browser and a blank page.
+    pub async fn close_all(&self) {
+        if self.cfg.is_some() && self.child.lock().unwrap().is_some() {
+            if let Err(e) = self.request("", json!({ "op": "close_all" })).await {
+                tracing::error!("closing the browser: {e:#}");
+            }
+        }
+    }
 }

@@ -12,8 +12,11 @@ const socket = arg('--socket');
 const executablePath = process.env.MAGNUS_CHROMIUM;
 if (!socket || !executablePath) { console.error('usage: MAGNUS_CHROMIUM=<chrome> node sidecar.js --socket <path>'); process.exit(2); }
 
-let browser;
+let browser; // a promise of the launched browser, while one is open
 const runs = new Map(); // run -> { context, page }
+// Counts close_all: a context made for a request that was already under way
+// when the browser closed is closed too, not kept.
+let epoch = 0;
 const MAX_TEXT = 40000;
 // A click on a busy build box used the whole 10s and failed
 // (browser_navigates_clicks_types_and_screenshots, runs 41930362272,
@@ -35,10 +38,18 @@ function visiblePage(p) {
 }
 
 async function page(run) {
-  if (!browser) browser = await chromium.launch({ executablePath, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+  const at = epoch;
+  if (!browser) {
+    // A launch that fails is tried again on the next request.
+    const launching = chromium.launch({ executablePath, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+    browser = launching;
+    launching.catch(() => { if (browser === launching) browser = undefined; });
+  }
+  const b = await browser;
   let r = runs.get(run);
   if (!r) {
-    const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, acceptDownloads: false });
+    const context = await b.newContext({ viewport: { width: 1280, height: 860 }, acceptDownloads: false });
+    if (at !== epoch) { await context.close().catch(() => {}); throw new Error('The browser was closed.'); }
     const p = await context.newPage();
     r = { context, page: p };
     runs.set(run, r);
@@ -95,6 +106,16 @@ function locate(p, target) {
 async function handle(req) {
   const { op, run } = req;
   if (op === 'close') { const r = runs.get(run); if (r) { await r.context.close(); runs.delete(run); } return { ok: true }; }
+  // The kill switch: every run's pages close, with the browser itself; the
+  // next request launches a new one.
+  if (op === 'close_all') {
+    epoch++;
+    const b = browser;
+    browser = undefined;
+    runs.clear();
+    if (b) await b.then(x => x.close()).catch(() => {});
+    return { ok: true };
+  }
   if (op === 'navigate') website(req.url);
   const p = await page(run);
   switch (op) {
