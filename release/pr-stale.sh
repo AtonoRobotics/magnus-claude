@@ -78,10 +78,12 @@ print(d.get("headRefName") or "")
   [ "$do_close" = 0 ] || do_comment=0
 
   waits=""
-  head=$(gh pr view "$n" --json headRefOid -q .headRefOid)
-  git fetch -q origin "pull/$n/head" || true
-  git merge-base --is-ancestor origin/master "$head" 2>/dev/null || waits="$waits
-- It does not hold master's current commit: merge master into it before merging."
+  # Behind master is not a reason to merge master in (CLAUDE.md, "How work
+  # lands"); a conflict is.
+  if [ "$(gh pr view "$n" --json mergeable -q .mergeable)" = CONFLICTING ]; then
+    waits="$waits
+- It conflicts with master: merge master into it to resolve the conflict."
+  fi
   checks=0
   gh pr checks "$n" >/dev/null 2>&1 || checks=$?
   case $checks in

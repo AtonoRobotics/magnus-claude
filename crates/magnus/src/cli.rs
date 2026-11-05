@@ -174,14 +174,18 @@ async fn run(cfg: Config) -> Result<()> {
     k.watch_sessions();
     crate::update::schedule(k.clone());
     tokio::spawn(k.clone().sweep());
-    // The admin console's way to the kernel: a local socket, never the network.
-    {
-        let (k, dir) = (k.clone(), k.cfg.appliance.state_dir.clone());
-        tokio::spawn(async move {
-            if let Err(e) = crate::control::serve(k, &dir).await {
-                tracing::error!("control socket: {e:#}");
-            }
-        });
+    // The admin console's way to the kernel: a local socket, never the
+    // network, listening before the network is answered.
+    match crate::control::bind(&k.cfg.appliance.state_dir) {
+        Ok(l) => {
+            let k = k.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::control::serve(k, l).await {
+                    tracing::error!("control socket: {e:#}");
+                }
+            });
+        }
+        Err(e) => tracing::error!("control socket: {e:#}"),
     }
     tracing::info!("magnus {} listening on http://{bound}", crate::update::version());
     let plain = axum::serve(plain, router(k.clone(), Transport::Plain).into_make_service_with_connect_info::<SocketAddr>());

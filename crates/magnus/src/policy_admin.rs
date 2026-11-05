@@ -64,7 +64,10 @@ pub fn check(text: &str) -> Vec<Value> {
 /// A layer an admin may write: the organisation's, a group's, or a known
 /// person's.
 pub fn layer_ok(k: &Kernel, layer: &str) -> bool {
-    layer == "org" || layer.strip_prefix("user/").is_some_and(|u| k.cfg.person(u).is_some()) || layer.strip_prefix("group/").is_some_and(|g| !g.is_empty() && !g.contains('/') && g.len() <= 100)
+    layer == "org"
+        || layer.strip_prefix("user/").is_some_and(|u| k.cfg.person(u).is_some())
+        || layer.strip_prefix("group/").is_some_and(|g| !g.is_empty() && !g.contains('/') && g.len() <= 100)
+        || layer.strip_prefix("task/").is_some_and(|t| k.read(|s| s.tasks.contains_key(t)))
 }
 
 impl Kernel {
@@ -97,7 +100,7 @@ impl Kernel {
     /// it is applied.
     pub async fn policy_draft(&self, actor: &str, layer: &str, cedar: Option<String>) -> Result<Value, Refusal> {
         if !layer_ok(self, layer) {
-            return Err((StatusCode::NOT_FOUND, "no such policy layer: org, group/<name> or user/<person>".into()));
+            return Err((StatusCode::NOT_FOUND, "no such policy layer: org, group/<name>, user/<person> or task/<task>".into()));
         }
         if cedar.as_ref().is_some_and(|c| c.len() > 256 * 1024) {
             return Err((StatusCode::BAD_REQUEST, "a policy set is at most 256 KB".into()));
@@ -163,8 +166,8 @@ impl Kernel {
                 }
             }
         }
-        let layers: Vec<String> = crate::policy::layers_for(&policies, &person).into_iter().map(|(l, _)| l).collect();
-        let outcome = crate::policy::decide(&policies, &person, &facts, b["untrusted"].as_bool().unwrap_or(false), b["private"].as_bool().unwrap_or(false)).map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+        let layers: Vec<String> = crate::policy::layers_for(&policies, &person, b["task"].as_str()).into_iter().map(|(l, _)| l).collect();
+        let outcome = crate::policy::decide(&policies, &person, b["task"].as_str(), &facts, b["untrusted"].as_bool().unwrap_or(false), b["private"].as_bool().unwrap_or(false)).map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
         let (decision, rule, reason) = match outcome {
             crate::policy::Outcome::Allow { rule } => ("allow", Some(rule), None),
             crate::policy::Outcome::Ask { rule } => ("ask", Some(rule), None),

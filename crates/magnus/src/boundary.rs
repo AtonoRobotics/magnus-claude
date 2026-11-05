@@ -75,6 +75,8 @@ pub struct Facts {
     pub audience: Audience,
     pub connector: Option<Connector>,
     pub remote: String,
+    /// It stays in the person's own account (`tools::REACH_SELF`).
+    pub reaches_self: bool,
 }
 
 /// Look up a tool by the name the model uses.
@@ -88,15 +90,20 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
             audience: b.audience,
             connector: None,
             remote: tool.into(),
+            reaches_self: false,
         });
     }
     let (app, remote) = tool.split_once("__")?;
     let c = k.connector(app)?;
     let class = c.tools.get(remote)?;
+    // Never the sandbox, which is the appliance's own: an older log may
+    // class an app's tool so, and it counts as unclassified.
+    let risk = Risk::parse(&class.risk).filter(|r| *r != Risk::Sandbox)?;
     Some(Facts {
         name: tool.into(),
         app: app.into(),
-        risk: Risk::parse(&class.risk)?,
+        risk,
+        reaches_self: class.reach.as_deref().is_some_and(|r| crate::tools::reach_fits(r, risk.as_str())),
         label: class.label.as_deref().and_then(Label::parse).or_else(|| Label::parse(&c.label))?,
         audience: Audience::parse(&c.audience)?,
         connector: Some(c),
@@ -148,6 +155,29 @@ pub fn canonical(v: &Value) -> String {
 pub fn input_hash(tool: &str, input: &Value) -> String {
     use sha2::Digest;
     hex::encode(&sha2::Sha256::digest(format!("{tool}\n{}", canonical(input)).as_bytes())[..16])
+}
+
+/// Where an action goes, read at the gate from what it acts on (approvals
+/// spec, Destination fields): each recipients field's addresses and each
+/// content field, by field name. Its card shows them, and an approval holds
+/// only for exactly these.
+pub struct Shown {
+    pub recipients: std::collections::BTreeMap<String, Vec<String>>,
+    pub content: std::collections::BTreeMap<String, Value>,
+}
+
+impl Shown {
+    pub fn details(&self) -> Value {
+        json!({ "recipients": self.recipients, "content": self.content })
+    }
+
+    /// The approval hash of this action going to exactly these recipients
+    /// with exactly this content: a draft changed after it was approved,
+    /// even by one added Bcc, is another action and asks again.
+    pub fn hash(&self, tool: &str, input: &Value) -> String {
+        use sha2::Digest;
+        hex::encode(&sha2::Sha256::digest(format!("{tool}\n{}\n{}", canonical(input), canonical(&self.details())).as_bytes())[..16])
+    }
 }
 
 /// Every model-facing error says what failed and whether a retry can help (K8).
@@ -281,6 +311,13 @@ impl Kernel {
             return Ok(Verdict::Suspended);
         }
 
+        // Where it goes, read from what it acts on before anything is decided
+        // about it. Nothing read here reaches the model.
+        let shown = match self.destinations(a, &f, &run.person).await {
+            Ok(s) => s,
+            Err(why) => return self.deny(a, "destinations", &why, true, None).await,
+        };
+
         // 4. Policy.
         let ask = match self.policy_stage(a, &run, &person, &f).await? {
             Ok(None) => None,
@@ -290,7 +327,7 @@ impl Kernel {
 
         // 5. Approval.
         if let Some((why, rule)) = ask {
-            if let Gate::Stop(v) = self.approval_stage(a, &run, &f, &why, rule).await? {
+            if let Gate::Stop(v) = self.approval_stage(a, &run, &f, &why, rule, shown.as_ref()).await? {
                 return Ok(v);
             }
         } else {
@@ -391,6 +428,10 @@ impl Kernel {
             // A reference file carries its own taint (M1, M2).
             let label = self.project_file(&a.run, a.input["name"].as_str().unwrap_or_default()).map_or(Label::PRINCIPAL, |f| f.label);
             (label, vec![f.app.clone()])
+        } else if is_chat_tool(&f) && (a.tool == "list_tasks" || a.tool == "list_schedules") {
+            // The summaries it lists carry what their runs read.
+            let d = out.as_ref().ok().and_then(|(_, _, d)| d.clone()).unwrap_or_default();
+            self.listed_taint(&d)
         } else {
             (f.label, vec![f.app.clone()])
         };
@@ -516,7 +557,7 @@ impl Kernel {
         let (untrusted, private) = if a.issuer == Issuer::Check { run.contract_taint } else { (run.untrusted, run.private) };
         let policies = self.read(|s| s.policies.clone());
         let facts = ToolFacts { name: &f.name, app: &f.app, risk: f.risk, audience: f.audience };
-        let outcome = policy::decide(&policies, person, &facts, untrusted, private)?;
+        let outcome = policy::decide(&policies, person, Some(&run.task), &facts, untrusted, private)?;
         let mut ask = match outcome {
             Outcome::Deny { reason, rule } => return Ok(Err(self.deny(a, "policy", &reason, false, rule).await?)),
             Outcome::Ask { rule } => Some((format!("policy asks before {}", a.tool), Some(rule))),
@@ -528,7 +569,8 @@ impl Kernel {
         // travel there even when it only reads).
         // Starting a task from chat sends nothing out: the task carries the
         // turn's taint, and the rules apply to what it sends.
-        let transmits = !is_chat_tool(f) && !own_memory && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private));
+        // A tool that stays in the person's own account sends nothing out.
+        let transmits = !is_chat_tool(f) && !own_memory && !f.reaches_self && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private));
         // These override a policy ask: the approval must then cover this exact
         // action, not a broader scope granted for policy reasons.
         if transmits && untrusted && private {
@@ -544,7 +586,7 @@ impl Kernel {
         }
         // Private content returning to the app it came from reaches no one new.
         let from_elsewhere = run.private_from.iter().any(|app| app != &f.app);
-        if !ask.as_ref().is_some_and(|(_, r)| matches!(r.as_deref(), Some("kernel:rule_of_two") | Some(WEB_LOOKUPS))) && f.risk.changes_state() && from_elsewhere && f.audience > Audience::Private {
+        if !ask.as_ref().is_some_and(|(_, r)| matches!(r.as_deref(), Some("kernel:rule_of_two") | Some(WEB_LOOKUPS))) && f.risk.changes_state() && !f.reaches_self && from_elsewhere && f.audience > Audience::Private {
             ask = Some((
                 format!("this task has read private data and {} reaches a {} audience", f.app, f.audience.as_str()),
                 Some("kernel:audience".into()),
@@ -553,11 +595,11 @@ impl Kernel {
         Ok(Ok(ask))
     }
 
-    async fn approval_stage(&self, a: &Action, run: &Run, f: &Facts, why: &str, rule: Option<String>) -> Result<Gate> {
+    async fn approval_stage(&self, a: &Action, run: &Run, f: &Facts, why: &str, rule: Option<String>, shown: Option<&Shown>) -> Result<Gate> {
         if a.issuer.reads_only() {
             return Ok(Gate::Stop(self.deny(a, "approval", "a contract check or the verifier cannot wait for approval", false, rule).await?));
         }
-        let hash = input_hash(&a.tool, &a.input);
+        let hash = shown.map_or_else(|| input_hash(&a.tool, &a.input), |s| s.hash(&a.tool, &a.input));
         let now = chrono::Utc::now();
         // A taint ask (Rule of Two, audience) is satisfied only by an approval
         // of this exact action; broader scopes cover policy asks only.
@@ -582,6 +624,8 @@ impl Kernel {
                 .filter(|ap| {
                     ap.person == run.person
                         && ap.tool == a.tool
+                        // Approved as the class it had then, not a riskier one since.
+                        && ap.risk.as_deref() == Some(f.risk.as_str())
                         && ap.reason.as_deref() != Some("unknown_outcome")
                         && (!kernel_ask || ap.scope == "once")
                         && match ap.scope.as_str() {
@@ -662,7 +706,8 @@ impl Kernel {
                             "call_id": a.call_id, "tool": a.tool, "input": a.input, "input_hash": hash,
                             "risk": f.risk.as_str(), "app": f.app, "audience": f.audience.as_str(),
                             "why": why, "rule": rule, "web_lookups": lookup.then_some(if chat_turn { "conversation" } else { "task" }),
-                            "taint": { "untrusted": run.untrusted, "private": run.private }
+                            "taint": { "untrusted": run.untrusted, "private": run.private },
+                            "destinations": shown.map(Shown::details),
                         }),
                     };
                 (id, Some(ev))
@@ -730,6 +775,66 @@ impl Kernel {
         Ok(Gate::Stop(Verdict::Suspended))
     }
 
+    /// Whether a brokered call may still send, checked once it has its
+    /// microVM: nothing was stopped since its token was taken, the kill
+    /// switch is off and the person is still signed in.
+    fn may_send(&self, c: &Connector, person: &str, stops: u64, app: &str) -> std::result::Result<(), String> {
+        if self.brokered.generation(&c.name, person) != stops {
+            return Err(format!("{app}'s microVM for {person} was stopped while this call waited. Nothing was sent"));
+        }
+        if self.read(|s| s.kill_switch) {
+            return Err("the kill switch is engaged. Nothing was sent".into());
+        }
+        if !self.connected(c, person) {
+            return Err(format!("{person} is no longer signed in to {app}. Nothing was sent"));
+        }
+        Ok(())
+    }
+
+    /// Read where an action goes from what it acts on, when its tool says
+    /// how (a draft's To, Cc and Bcc through `get_draft`, never the model's
+    /// words), with the person's own sign-in. Whatever stops the read stops
+    /// the action: nothing is sent to an address no one has seen.
+    async fn destinations(&self, a: &Action, f: &Facts, person: &str) -> std::result::Result<Option<Shown>, String> {
+        let Some((c, d)) = f.connector.as_ref().and_then(|c| c.destinations.get(&f.remote).map(|d| (c, d))) else { return Ok(None) };
+        let nothing = format!("Nothing was sent to {}.", f.app);
+        let Some(id) = a.input.get(&d.id).filter(|v| !v.is_null()) else {
+            return Err(format!("{} names no {}, so who it goes to cannot be read. {nothing}", a.tool, d.id));
+        };
+        if self.read(|s| s.turned_off.contains(person)) {
+            return Err(format!("{person}'s account is turned off at the organisation's sign-in. {nothing}"));
+        }
+        let stops = self.brokered.generation(&c.name, person);
+        let secret = match &c.credential {
+            Some(_) => match self.connector_secret(c, person).await {
+                Ok(Some(s)) => Some(s),
+                Ok(None) => return Err(format!("{} is not connected for the person this task is for (or their sign-in expired), so who {} goes to cannot be read. {nothing}", f.app, a.tool)),
+                Err(e) => return Err(format!("{e:#}. {nothing}")),
+            },
+            None => None,
+        };
+        let bearer = secret.as_ref().map(|s| s.expose());
+        let args = json!({ d.id.as_str(): id });
+        let out = if c.transport == crate::brokered::BROKERED {
+            let fence = || self.may_send(c, person, stops, &f.app);
+            self.brokered.call(c, person, bearer, &d.read, &args, &fence).await
+        } else {
+            self.mcp.call(&c.url, bearer, &d.read, &args, None).await
+        };
+        let read = match out {
+            Ok(o) if !o.is_error => o.structured.or_else(|| serde_json::from_str(&o.text).ok()).unwrap_or(Value::Null),
+            Ok(o) => return Err(format!("{} could not read {id} to see who {} goes to: {}. {nothing}", f.app, a.tool, o.text)),
+            Err(crate::apps::CallError::NotSent(m) | crate::apps::CallError::Unknown(m)) => return Err(format!("{} could not be read to see who {} goes to: {m}. {nothing}", f.app, a.tool)),
+            Err(crate::apps::CallError::NeedsScope(_)) => return Err(format!("{} wants more access to read who {} goes to. {nothing}", f.app, a.tool)),
+        };
+        let field = |p: &String| (p.rsplit('/').next().unwrap_or_default().to_string(), read.pointer(p).cloned().unwrap_or(Value::Null));
+        let recipients: std::collections::BTreeMap<String, Vec<String>> = d.recipients.iter().map(field).map(|(k, v)| (k, tools::addresses(&v))).collect();
+        if recipients.values().all(|v| v.is_empty()) {
+            return Err(format!("{id} names no recipients at {}, so {} would reach no one Magnus can show. {nothing}", f.app, a.tool));
+        }
+        Ok(Some(Shown { recipients, content: d.content.iter().map(field).collect() }))
+    }
+
     async fn call(self: &Arc<Self>, a: &Action, f: &Facts, bearer: Option<&str>, key: &str, stops: u64) -> std::result::Result<(String, bool, Option<Value>), CallFailure> {
         if let Some(c) = &f.connector {
             // A person turned off has no apps until they are back.
@@ -742,18 +847,7 @@ impl Kernel {
                 // Checked again once the call has its microVM, and before it
                 // sends: nothing was stopped since its token was taken, the
                 // kill switch is off and the person is still signed in.
-                let fence = || -> std::result::Result<(), String> {
-                    if self.brokered.generation(&c.name, &person) != stops {
-                        return Err(format!("{}'s microVM for {person} was stopped while this call waited. Nothing was sent", f.app));
-                    }
-                    if self.read(|s| s.kill_switch) {
-                        return Err("the kill switch is engaged. Nothing was sent".into());
-                    }
-                    if !self.connected(c, &person) {
-                        return Err(format!("{person} is no longer signed in to {}. Nothing was sent", f.app));
-                    }
-                    Ok(())
-                };
+                let fence = || self.may_send(c, &person, stops, &f.app);
                 self.brokered.call(c, &person, bearer, &f.remote, &a.input, &fence).await
             } else {
                 self.mcp.call(&c.url, bearer, &f.remote, &a.input, k).await
