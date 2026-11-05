@@ -28,7 +28,10 @@ decide() {
   touch "$seen"
   next="$seen.next"
   : > "$next"
-  while IFS= read -r name; do
+  # `read` returns failure at the last line when it has no newline. The
+  # decision test writes its names that way; dropping the line kept a realm
+  # that was old enough to delete (run 41929170386).
+  while IFS= read -r name || [ -n "${name:-}" ]; do
     # A test's realm: "t" and a UUID's 32 hex digits (keycloak.rs).
     printf '%s\n' "$name" | grep -Eqx 't[0-9a-f]{32}' || continue
     first=$(awk -v n="$name" '$1 == n { print $2; exit }' "$seen")

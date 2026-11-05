@@ -100,3 +100,51 @@ fn only_test_realms_left_for_three_hours_are_deleted() {
     assert!(decide(&seen, 1_000 + 20_000, &[]).is_empty());
     assert!(decide(&seen, 1_000 + 20_001, &[new]).is_empty());
 }
+
+/// A runner whose cargo has no `tauri` subcommand gets one, on the PATH the
+/// later steps keep. The second run does not install it again.
+#[test]
+fn a_runner_without_cargo_tauri_installs_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("cargo-home");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.path().join("installs");
+    let cargo = bin.join("cargo");
+    std::fs::write(
+        &cargo,
+        r#"#!/bin/sh
+set -eu
+if [ "${1:-}" = tauri ]; then exec "$CARGO_HOME/bin/cargo-tauri" "$@"; fi
+if [ "${1:-}" = install ]; then
+  echo install >> "$INSTALL_LOG"
+  dest="$CARGO_HOME/bin/cargo-tauri"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$dest"
+  chmod +x "$dest"
+  exit 0
+fi
+echo "unexpected: $*" >&2
+exit 1
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cargo, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let run = || {
+        let out = std::process::Command::new(repo().join("release/ensure-tauri.sh"))
+            .env("CARGO_HOME", &home)
+            .env("INSTALL_LOG", &log)
+            .env("PATH", &path)
+            .env("HOME", dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(run(), format!("{}\n", home.join("bin").display()));
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "install\n");
+    assert_eq!(run(), format!("{}\n", home.join("bin").display()));
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "install\n", "a runner that already has cargo-tauri is left alone");
+    let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
+    assert!(workflow.contains("release/ensure-tauri.sh"), "release-checks installs tauri before it builds");
+}

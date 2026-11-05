@@ -120,6 +120,12 @@ jobs:
             echo "MAGNUS_BUILT=$b" >> "$GITHUB_ENV"
             echo "publishing the build that passed them: $(cat "$b/versions" | tr '\n' ' ')"
           fi
+      # cargo-tauri is a binary on PATH, not a rustup component. build-box-beta
+      # has the magnus-linux label and rustup, and not this binary, so
+      # `cargo tauri` stopped the job before any test (2026-11-05).
+      - name: Tauri CLI
+        if: env.MAGNUS_BUILT == '' && env.MAGNUS_SELECT == 'full'
+        run: release/ensure-tauri.sh >> "$GITHUB_PATH"
       - name: Installers
         if: env.MAGNUS_BUILT == '' && env.MAGNUS_SELECT == 'full'
         working-directory: desktop/src-tauri
