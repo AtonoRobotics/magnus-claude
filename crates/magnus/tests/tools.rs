@@ -47,6 +47,35 @@ async fn browser_navigates_clicks_types_and_screenshots() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_cannot_read_the_appliances_files_or_execute_a_navigation_script() {
+    let chromium = std::env::var("MAGNUS_CHROMIUM").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/ms-playwright/chromium-1234/chrome-linux64/chrome")
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let canary = dir.path().join("private.txt");
+    std::fs::write(&canary, "PRIVATE-HOST-FILE-CANARY").unwrap();
+    let b = Browser::new(
+        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium }),
+        dir.path(),
+    );
+    let url = page_server().await;
+    b.request("r1", json!({ "op": "navigate", "url": url })).await.unwrap();
+    for forbidden in [
+        url::Url::from_file_path(&canary).unwrap().to_string(),
+        "javascript:document.body.textContent='SCRIPT-RAN'".into(),
+        "data:text/html,INLINE-DOCUMENT".into(),
+        "chrome://version".into(),
+    ] {
+        let result = b.request("r1", json!({ "op": "navigate", "url": forbidden })).await;
+        assert!(result.is_err(), "the browser accepted {forbidden}: {result:?}");
+    }
+    let v = b.request("r1", json!({ "op": "snapshot" })).await.unwrap();
+    let text = v["text"].as_str().unwrap();
+    assert!(text.contains("Welcome") && !text.contains("PRIVATE-HOST-FILE-CANARY") && !text.contains("SCRIPT-RAN"), "{text}");
+    b.close("r1").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sandbox_desktop_takes_screenshots_and_types() {
     let out = root().join("sandbox/out");
     let dir = tempfile::tempdir().unwrap();

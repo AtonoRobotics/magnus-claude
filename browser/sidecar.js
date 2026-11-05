@@ -16,6 +16,19 @@ let browser;
 const runs = new Map(); // run -> { context, page }
 const MAX_TEXT = 40000;
 
+// This browser reads websites. Host files, browser settings and executable
+// URLs are not websites, even when Chromium knows how to open them.
+function website(raw) {
+  const url = new URL(raw);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('The browser can only open http and https websites.');
+  }
+}
+
+function visiblePage(p) {
+  if (p.url() !== 'about:blank') website(p.url());
+}
+
 async function page(run) {
   if (!browser) browser = await chromium.launch({ executablePath, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   let r = runs.get(run);
@@ -30,6 +43,7 @@ async function page(run) {
 
 // Interactive elements get refs [e1], [e2] ... that later calls can target.
 async function snapshot(p) {
+  visiblePage(p);
   const tree = await p.evaluate(() => {
     let n = 0;
     const lines = [];
@@ -72,6 +86,7 @@ function locate(p, target) {
 async function handle(req) {
   const { op, run } = req;
   if (op === 'close') { const r = runs.get(run); if (r) { await r.context.close(); runs.delete(run); } return { ok: true }; }
+  if (op === 'navigate') website(req.url);
   const p = await page(run);
   switch (op) {
     case 'navigate': {
@@ -88,7 +103,7 @@ async function handle(req) {
     }
     case 'select': { await locate(p, req.target).selectOption(req.value, { timeout: 10000 }); return { text: await snapshot(p) }; }
     case 'back': { await p.goBack({ timeout: 15000 }).catch(() => {}); return { text: await snapshot(p) }; }
-    case 'screenshot': { const b = await p.screenshot({ type: 'png' }); return { image_b64: b.toString('base64'), text: `URL: ${p.url()}` }; }
+    case 'screenshot': { visiblePage(p); const b = await p.screenshot({ type: 'png' }); return { image_b64: b.toString('base64'), text: `URL: ${p.url()}` }; }
     default: return { error: `unknown op ${op}` };
   }
 }

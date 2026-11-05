@@ -23,6 +23,8 @@ One line per choice the brief left open, with its reason. The brief and the owne
 
 ## Boundary and policy
 
+- Browser navigation accepts only HTTP and HTTPS, and snapshots/screenshots refuse non-web pages except the initial blank page (2026-11-04, `browser-local-access-fix`). Reason: a model could navigate to an appliance-host file and read it as ordinary untrusted web content; executable and browser-internal URLs are not website navigation. The brokered-credential workspace redesign is separate work, not a reason to leave this direct read open.
+
 - Cedar actions: `execute` (act without asking) and `request_approval`. Outcome: Allow if `execute` is permitted, Ask if only `request_approval` is, otherwise Deny. Reason: Cedar has permit and forbid but no ask effect.
 - Cedar entities: `Person` in `Group`; `Tool::"<app>__<tool>"` in `App`, with attributes `risk` and `audience`; context carries the run's `untrusted` and `private` taint. Reason: these are the facts the boundary decides on (B4, B9, A6).
 - Layering: an action is permitted only if the organization layer permits it and no layer (org, each of the person's groups, user, task) forbids it. A permit in a lower layer never widens. Reason: E1 makes the organization the ceiling and lets lower layers only narrow; deny wins.
