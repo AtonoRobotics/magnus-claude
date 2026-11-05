@@ -9,6 +9,14 @@
 
 From #136's review: a check that only prints `${PATH:=...}` in single quotes, after a backslash or in a comment is no longer refused. An assignment bash makes through arithmetic on a variable's value, and one hidden by `\$` in `sh -c "..."`, now is (`sandbox/check_tools.py`, cases in `test_check_tools.py`).
 
+## A schedule's end notice waits out a busy minute (2026-11-05)
+
+`a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run` gave up at 90 seconds, three times, waiting for "A schedule ended itself" (runs 41949527809, 41957157578, 41960121035). That wait is now 180 seconds. The file already said a minute schedule needs longer than a quiet minute.
+
+## Checks expecting a nonzero exit (2026-11-04)
+
+A check expecting `/exit_code` 1 (for example `grep -q TODO` finding nothing) always failed, because a nonzero exit marked the result an error. The expected exit code now decides (`run/mod.rs`, test in `contract_freeze.rs`).
+
 ## Inline content moved to the content store (2026-11-04)
 
 An appliance that ran before `migrate` made the content store still had those events' content in the log, where trash and erasure cannot delete it. `migrate` now moves it to the content store, one event per statement, and the walls' fill then names each row's person (`log::move_inline_content`). Test: `migrate_moves_content_written_into_the_log_to_the_content_store` (log_review.rs).
