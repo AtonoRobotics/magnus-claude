@@ -186,6 +186,47 @@ async fn a_changed_tool_definition_waits_for_the_owner() {
     assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve" })).await.is_success());
 }
 
+/// The kill switch takes each sign-in out of the vault and revokes it at its
+/// app before anything is recorded, so it works when the log does not. A
+/// crash in between (the sign-in out of the vault, not yet revoked, the
+/// switch not yet recorded) is finished at the next start: the vault comes
+/// back sealed, the switch is recorded on, and the sign-in is revoked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kill_switch_cut_short_by_a_crash_is_finished_at_the_next_start() {
+    let cal = FakeOAuthApp::start(3600).await;
+    let m = FakeModel::start(steps(vec![fail("nothing to do")])).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (st, v) = alice.post("/v1/connectors", json!({ "name": "calendar", "url": cal.url, "audience": "private", "label": "private" })).await;
+    assert!(st.is_success(), "{v}");
+    let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    sign_in(&alice, "calendar", callback.local_addr().unwrap().port()).await;
+
+    // What the vault holds after the switch took the sign-in out, then the
+    // appliance died: sealed, the sign-in waiting to be revoked.
+    app.kill().await;
+    let vault = app.state_dir.join("vault");
+    let mut all: serde_json::Map<String, Value> = serde_json::from_slice(&std::fs::read(vault.join("secrets.json")).unwrap()).unwrap();
+    let entry = all.remove("connector_calendar__alice").expect("alice's sign-in is in the vault");
+    std::fs::write(vault.join("revoking.json"), serde_json::to_vec(&json!({ "connector_calendar__alice": entry })).unwrap()).unwrap();
+    std::fs::write(vault.join("secrets.json"), serde_json::to_vec(&all).unwrap()).unwrap();
+    std::fs::write(vault.join("sealed"), b"").unwrap();
+    app.restart().await;
+
+    // Engaged before the appliance answers anything: until then, scheduled
+    // and incoming work would run unchecked (review of #151).
+    let alice = app.api("alice");
+    let (_, first) = alice.get("/v1/kill-switch").await;
+    assert_eq!(first["engaged"], true, "the appliance answered before the cut-short switch was engaged again: {first}");
+    let ks = eventually("the cut-short switch is finished", PATIENCE, || async {
+        let (_, ks) = alice.get("/v1/kill-switch").await;
+        (ks["engaged"] == true && ks["revoked"]["connector_calendar__alice"]["at_provider"] == true).then_some(ks)
+    })
+    .await;
+    assert!(cal.state.lock().unwrap().revoked.iter().any(|t| t.starts_with("rt-")), "{ks}");
+    assert!(!vault.join("revoking.json").exists() || std::fs::read_to_string(vault.join("revoking.json")).unwrap().trim() == "{}", "a revoked sign-in is still waiting");
+}
+
 /// An approval covers the action as it was classed when given: the owner's
 /// standing approval of a tool that cannot be undone does not cover the
 /// same tool once the owner reclassifies it as one that moves money; that
