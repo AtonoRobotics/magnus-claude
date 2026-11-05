@@ -1,5 +1,9 @@
 # Progress
 
+## Reads of the person's own account stop asking (2026-11-05)
+
+Once a run had read one email, every further Gmail, Slack or Calendar read asked a Rule of Two card, because the kernel counted any read of a public-audience app as sending. A read through the person's own sign-in now sends nothing out: its query goes only to the provider that holds their data already. Web lookups, the browser and apps on the organisation's key still ask (#175, approvals spec build order 3). Next in the spec: recipient and content provenance at the send gate (#176).
+
 ## Master and release tags run on the build box (2026-11-05)
 
 Master went red on the merge of #202 (run 42097633195). The job ran on build-box-beta, which now has the release key and no appliance. It published the test build where no app reads it, then failed installing on an appliance that is not there. Now a run publishes only with the key and the appliance (`release/can-publish.sh`). Master and tags fail at once on a runner without them, and they run on build-box (`magnus-linux` + `magnus-light`), as `appliance.yml` does. Pull requests still take either machine. Next: master green on this merge, then tag `appliance-v0.2.5` (#171).

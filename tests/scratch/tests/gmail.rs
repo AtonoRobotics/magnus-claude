@@ -179,6 +179,37 @@ async fn having_read_mail_gmail_labels_and_drafts_without_asking_and_asks_only_b
     only_gmail(&app, &gmail, &provider);
 }
 
+/// Reading mail again sends it nowhere new: the search's query goes only to
+/// Gmail, which holds the mail already, through Alice's own sign-in. So once
+/// the run has read mail (untrusted and private) a second search runs
+/// without a card, and the web lookup, whose address could carry the mail
+/// anywhere, still asks (#175).
+#[tokio::test(flavor = "multi_thread")]
+async fn having_read_mail_gmail_searches_again_without_asking_and_a_web_lookup_still_asks() {
+    let gmail = StandInGmail::start().await;
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("find what Bob said about the plan", "the answer names Bob's plan"),
+            1 => tool("gmail__search_threads", json!({ "query": "from:bob plan" })),
+            2 => tool("gmail__search_threads", json!({ "query": "from:bob friday" })),
+            3 => tool("web_fetch", json!({ "url": "https://example.com/plan" })),
+            _ => complete("Bob's plan is Friday at ten"),
+        }
+    }))
+    .await;
+    let (app, provider, _image) = gmail_for_alice(&m, &gmail).await;
+    let alice = app.api("alice");
+    let get = |p: &str| ("GET".to_string(), p.to_string());
+
+    let task = alice.submit("What did Bob say about the plan?").await;
+    let ask = alice.wait_item(&task, "approval").await;
+    assert!(ask.to_string().contains("web_fetch") && !ask.to_string().contains("search_threads"), "a second read of Alice's own mail asked: {ask}");
+    assert_eq!(calls(&gmail), [get("/threads"), get("/threads")]);
+    let (_, t) = alice.get(&format!("/v1/tasks/{task}")).await;
+    assert_eq!(t["taint"], json!({ "untrusted": true, "private": true }), "{t}");
+    only_gmail(&app, &gmail, &provider);
+}
+
 /// An approval holds for the email as it was shown: a draft changed after
 /// its card went up (here a Bcc added, as anyone with the mailbox could) is
 /// another email, so approving the old card sends nothing and the new card
