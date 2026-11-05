@@ -856,6 +856,15 @@ pub struct Embeddings {
     /// The vault secret holding its API key, if it needs one.
     #[serde(default)]
     pub credential: Option<String>,
+    /// Seconds a request may take before the server counts as failed and
+    /// search falls back to its words.
+    #[serde(default = "embed_timeout")]
+    pub timeout_s: u64,
+}
+
+/// As long as the identity provider's requests may take.
+fn embed_timeout() -> u64 {
+    30
 }
 
 fn mcp_http() -> String {
