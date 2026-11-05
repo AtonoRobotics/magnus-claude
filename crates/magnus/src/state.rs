@@ -1532,9 +1532,16 @@ impl State {
                     r.tokens.cache_write += usage.cache_write_tokens;
                 }
             }
-            Ev::ModelError { run, .. } => {
+            Ev::ModelError { run, usage, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.model_errors += 1;
+                    if let Some(usage) = usage {
+                        r.usd += usage.cost_usd;
+                        r.tokens.input += usage.input_tokens;
+                        r.tokens.output += usage.output_tokens;
+                        r.tokens.cache_read += usage.cache_read_tokens;
+                        r.tokens.cache_write += usage.cache_write_tokens;
+                    }
                 }
             }
             Ev::Notice { run, step, text } => {
@@ -1952,6 +1959,21 @@ mod tests {
         // And when the firing is recorded, it is not counted twice.
         s.apply(&ev(3, "kernel", json!({ "kind": "schedule_fired", "id": "s1", "task": "t1" })));
         assert_eq!(s.schedules["s1"].started, 1);
+    }
+
+    /// A model call the provider charged for and then failed (a reply it
+    /// could not use) counts against the run's dollars and tokens.
+    #[test]
+    fn a_charged_call_that_failed_counts_against_the_budget() {
+        let mut s = State::default();
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        s.apply(&ev(1, "person:alice", json!({ "kind": "task_created", "task": "t1", "run": "r1", "person": "alice", "text": "Say hi.", "config": config })));
+        let usage = json!({ "input_tokens": 1000, "output_tokens": 200, "cost_usd": 0.25 });
+        s.apply(&ev(2, "kernel", json!({ "kind": "model_error", "run": "r1", "step": 0, "attempt": 0, "class": "malformed", "message": "no model named", "usage": usage })));
+        assert_eq!((s.runs["r1"].usd, s.runs["r1"].tokens.input, s.runs["r1"].tokens.output), (0.25, 1000, 200), "a charged failure was not counted");
+        // An error recorded before usage was kept still loads, and costs nothing.
+        s.apply(&ev(3, "kernel", json!({ "kind": "model_error", "run": "r1", "step": 0, "attempt": 1, "class": "unavailable", "message": "down" })));
+        assert_eq!(s.runs["r1"].usd, 0.25);
     }
 
     /// Dismissing the notice a stopped run waits on leaves the run waiting on
