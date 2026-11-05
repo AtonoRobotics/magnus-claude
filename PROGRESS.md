@@ -2,7 +2,11 @@
 
 ## Appliance release 0.2.4, current with master (2026-11-05)
 
-Workspace version stays 0.2.4 so `appliance-v0.2.4` can be tagged. Master is merged in, including the nonzero-exit check and the 180-second schedule notice. Release-checks on the previous head passed 417 of 417, installed-app tests included (run 41962520593). The two failures before that (run 41912463362) were already fixed on master: the console was listening on `192.168.0.50` and a connect to `127.0.0.1` on that port reached another test's listener, so the check reads that process's own sockets (`admin_reach.rs`); Alice's session had `stepped_up_until` null because the 30-second step-up had lapsed, and those tests use 90 seconds (`admin_sign_in.rs`). Brokered manifests name the images built from this commit, Gmail 1.1.0 included. A `magnus-linux` runner without the Windows gnu target installs it before the installer build (`release/ensure-windows-target.sh`).
+Workspace version stays 0.2.4 so `appliance-v0.2.4` can be tagged. Master is merged in, including the nonzero-exit check and the 180-second schedule notice. Release-checks on the previous head passed 417 of 417, installed-app tests included (run 41962520593). The two failures before that (run 41912463362) were already fixed on master: the console was listening on `192.168.0.50` and a connect to `127.0.0.1` on that port reached another test's listener, so the check reads that process's own sockets (`admin_reach.rs`); Alice's session had `stepped_up_until` null because the 30-second step-up had lapsed, and those tests use 90 seconds (`admin_sign_in.rs`). Brokered manifests name the images built from this commit, Gmail 1.1.0 included. A `magnus-linux` runner without the Windows gnu target installs it before the installer build (`release/ensure-windows-target.sh`). After the app updated, approving the task that waited timed out at 60 seconds looking for "Accepted." (run 41969612463, 12 of 13 installed-app tests passed). That step now waits 120 seconds.
+
+## Sharing keeps to where content came from (2026-11-04)
+
+Sharing a chat answer now also checks the apps its private content came from, not only the tools its runs called (`chat_actions.rs`, test in `chat_actions.rs`).
 
 ## The console sign-in script waits two minutes (2026-11-05)
 
