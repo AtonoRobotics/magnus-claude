@@ -9,6 +9,9 @@ The update test's Accept was lost twice on master (#207). A review card's outcom
 ## A send to someone the person named passes (2026-11-05)
 
 After a run reads mail, a send no longer asks when every recipient on the draft is an address the person wrote in their request or their chat messages (#176, approvals spec build order 4). An address that only an email named still asks. Next: sent mail (#210) and the directory (#211) as sources of the person's recipients; then the draft lock (#177).
+## Web lookups refuse mapped IPv4 addresses (2026-11-05)
+
+`::ffff:127.0.0.1` and other private IPv4 addresses written as IPv6 passed the web lookup's private-address check (#196). They are now judged as the IPv4 address they map.
 
 ## Reads of the person's own account stop asking (2026-11-05)
 
