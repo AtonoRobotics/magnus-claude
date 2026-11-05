@@ -224,6 +224,7 @@ fn the_windows_installer_adds_its_cross_target_first() {
 fn the_installed_app_tests_install_webkit_webdriver_first() {
     let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
     let driver = workflow.find("webkit2gtk-driver").expect("webkit driver");
+    let clip = workflow.find("xclip").expect("xclip");
     let tests = workflow.find("name: Installed-app tests").expect("installed-app tests");
-    assert!(driver < tests, "the installed-app tests run before WebKitWebDriver is installed");
+    assert!(driver < tests && clip < tests, "the installed-app tests run before WebKitWebDriver and xclip are installed");
 }

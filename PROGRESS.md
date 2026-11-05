@@ -2,7 +2,7 @@
 
 ## Windows cross target on every release-checks runner (2026-11-05)
 
-`build-box-beta` built the Linux installers and then failed the Windows one: rustup had no `x86_64-pc-windows-gnu` target (run 41957162011, #144). Adding the target, the compile then failed because `x86_64-w64-mingw32-dlltool` was not installed (run 41958793139). The workflow installs that target, and mingw and NSIS when those tools are missing. The Windows build then succeeded. Every installed-app test stopped because `WebKitWebDriver` is not installed (run 41959422399). The workflow installs `webkit2gtk-driver` and `tauri-driver` when they are missing.
+`build-box-beta` built the Linux installers and then failed the Windows one: rustup had no `x86_64-pc-windows-gnu` target (run 41957162011, #144). Adding the target, the compile then failed because `x86_64-w64-mingw32-dlltool` was not installed (run 41958793139). The workflow installs that target, and mingw and NSIS when those tools are missing. The Windows build then succeeded. Every installed-app test stopped because `WebKitWebDriver` is not installed (run 41959422399). The workflow installs `webkit2gtk-driver` and `tauri-driver` when they are missing. Twelve installed-app tests then passed. Copying an answer failed because `xclip` is not installed (run 41961388534). That package is installed with the driver when it is missing.
 
 
 ## Check-tool labels: quoted expansions (2026-11-04)

@@ -244,9 +244,13 @@ jobs:
       - name: Installed-app drivers
         if: env.MAGNUS_TESTED != '1' && env.MAGNUS_SELECT == 'full'
         run: |
-          if ! command -v WebKitWebDriver >/dev/null; then
+          pkgs=""
+          command -v WebKitWebDriver >/dev/null || pkgs=" webkit2gtk-driver"
+          command -v xclip >/dev/null || pkgs=" xclip"
+          if [ -n "" ]; then
             sudo -n apt-get update -qq
-            sudo -n apt-get install -y webkit2gtk-driver
+            # shellcheck disable=SC2086
+            sudo -n apt-get install -y 
           fi
           if ! command -v tauri-driver >/dev/null && [ ! -x "${CARGO_HOME:-$HOME/.cargo}/bin/tauri-driver" ]; then
             cargo install tauri-driver --locked
