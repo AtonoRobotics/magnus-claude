@@ -1,11 +1,14 @@
 # The pull request rules (CLAUDE.md, "How work lands"; release/pr-rules.sh):
 # an agent pull request past the cap fails, every pull request merges into
-# master, and a branch behind master or a large diff is a warning.
+# master, a large diff is a warning, and a branch behind master is a notice
+# (not a reason to merge master in).
 # The checkout GitHub builds for a pull request is its merge with master,
 # so this script is the one on master even when the branch has not merged
 # master in. The head commit is passed separately.
 # A merge queue run has already satisfied these rules on each pull request.
-# Same build box as the other checks (desktop/README.md, "Release checks").
+# On a light runner (magnus-light: build-box-2, and build-box), so it never
+# waits behind a release-checks run (owner, 2026-11-04: "Use build-box-2 for
+# quick checks only").
 name: pr-rules
 
 on:
@@ -23,7 +26,7 @@ permissions:
 
 jobs:
   rules:
-    runs-on: [self-hosted, linux, magnus-linux]
+    runs-on: [self-hosted, linux, magnus-light]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
