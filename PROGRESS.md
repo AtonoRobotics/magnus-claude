@@ -4,6 +4,10 @@
 
 Wrong passwords from the network no longer lock a name out on the appliance's own machine (`accounts.rs`, `api.rs`, test in `app.rs`). Open for the owner: counting the network's attempts per address instead of per name.
 
+## Browser navigation stays on websites (2026-11-04)
+
+The browser accepted `file://` URLs and returned appliance-host files to the model. It now accepts only HTTP and HTTPS navigation, and refuses snapshots or screenshots of other pages except its initial blank page. `browser_cannot_read_the_appliances_files_or_execute_a_navigation_script` first failed by returning a temporary private-file canary, then passed with the guard; the existing navigation, typing, click and screenshot test also passes. This closes the direct host-file read while the separately requested browser-workspace redesign is researched.
+
 ## A kill switch cut short by a crash is finished (2026-11-04)
 
 The vault keeps its seal and the sign-ins the switch took on disk until each is revoked, and the next start finishes a switch a crash cut short (`vault.rs`, `api.rs`, `kernel.rs`, tests in `connectors.rs` and `vault.rs`).
