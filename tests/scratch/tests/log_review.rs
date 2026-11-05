@@ -88,6 +88,45 @@ async fn a_restore_waits_for_no_kernel_and_a_rolled_back_log_still_backs_up() {
     assert_eq!(alice.task(&t).await["status"], "failed");
 }
 
+/// An event a kernel wrote whole, before `migrate` made the content store,
+/// keeps its content in the log, where nothing can delete it. `migrate`
+/// moves it to the content store, leaving the record with its hash, as the
+/// kernel writes events now; the event reads back as it was written, and a
+/// second `migrate` changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_moves_content_written_into_the_log_to_the_content_store() {
+    let db = pg::TestDb::create().await;
+    magnus::log::migrate(&db.admin_url(), &db.kernel_url(), None).await.expect("migrate");
+    let admin = db.admin().await;
+    let whole = json!({ "kind": "task_created", "task": "t1", "run": "r1", "person": "carol", "text": "Carol's private request.", "config": {} });
+    let seq: i64 = admin.query_one("INSERT INTO public.events (kind, actor, run_id, body) VALUES ('task_created', 'person:carol', 'r1', $1) RETURNING seq", &[&whole]).await.unwrap().get(0);
+
+    for _ in 0..2 {
+        magnus::log::migrate(&db.admin_url(), &db.kernel_url(), None).await.expect("migrate");
+        let record: serde_json::Value = admin.query_one("SELECT body FROM public.events WHERE seq = $1", &[&seq]).await.unwrap().get(0);
+        assert!(record.get("text").is_none() && record["content"]["sha256"].is_string(), "the content is still in the log: {record}");
+        let rows = admin.query("SELECT body, person FROM public.content WHERE seq = $1", &[&seq]).await.unwrap();
+        assert_eq!(rows.len(), 1, "the content was not moved, or moved twice");
+        let (content, person): (serde_json::Value, Option<String>) = (rows[0].get(0), rows[0].get(1));
+        assert_eq!((content["text"].as_str(), person.as_deref()), (Some("Carol's private request."), Some("carol")));
+        assert_eq!(magnus::log::join(record, Some(content)), whole, "the event no longer reads as written");
+    }
+}
+
+/// A password with characters a URL must escape (`@`, `:`, `/`, `%`) is
+/// given to the role as the kernel will send it, decoded, not as written in
+/// the URL, so the kernel can still sign in after `migrate`.
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_sets_the_password_the_kernel_signs_in_with() {
+    let db = pg::TestDb::create().await;
+    let mut u = url::Url::parse(&db.kernel_url()).unwrap();
+    u.set_password(Some("p@ss:w/rd%41'")).unwrap();
+    assert!(u.as_str().contains("%40"), "the URL escapes the password: {u}");
+    magnus::log::migrate(&db.admin_url(), u.as_str(), None).await.expect("migrate");
+    let kernel = magnus::log::connect(u.as_str()).await.expect("the kernel signs in with the password migrate set");
+    kernel.execute("SELECT 1", &[]).await.unwrap();
+}
+
 /// The log is append-only because the database says so (DECISIONS, Event
 /// log and state), whoever made the kernel's role. `migrate` takes away
 /// what a role made beforehand may hold (superuser and the like), and

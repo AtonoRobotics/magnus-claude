@@ -592,6 +592,10 @@ pub enum Ev {
         attempt: u32,
         class: ErrorClass,
         message: String,
+        /// What the provider charged before the call failed (it counts
+        /// against the budget like a reply's).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
     },
     /// Text the loop shows the model after a step (a malformed reply, a
     /// verification failure without a tool call to answer).
@@ -743,6 +747,11 @@ pub enum Ev {
         until: Option<chrono::DateTime<chrono::Utc>>,
         #[serde(default)]
         reason: Option<String>,
+        /// The risk class the action had when approved: the approval covers
+        /// only that class. Kept here, not only in the item, whose details
+        /// are deleted with the task. Absent from approvals written before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        risk: Option<String>,
     },
     ApprovalUsed {
         id: String,

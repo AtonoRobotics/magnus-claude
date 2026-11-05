@@ -33,6 +33,8 @@ fn model(page: String) -> Script {
             }
             let s = said(&c);
             match c.turn() {
+                0 if s.contains("What do I remember") => tool("memory_search", json!({ "query": "CRM record" })),
+                1 if s.contains("Remember the CRM record") => tool("memory_write", json!({ "fact": "The CRM record c1 belongs to Acme." })),
                 0 if s.contains("read the page") => tool("web_fetch", json!({ "url": page })),
                 0 if s.contains("CRM") => tool("crm__get_record", json!({ "id": "c1" })),
                 _ => Reply::Text(format!("Answer to: {s}")),
@@ -165,6 +167,25 @@ async fn sharing_reaches_the_other_persons_inbox_within_their_rights() {
     let (st, v) = act(&bob, &thread, &format!("a:{turn}"), "share", json!({ "person": "carol" })).await;
     assert_eq!(st, 403, "an answer from the CRM reached someone who may not use it: {v}");
     assert!(!carol.inbox().await.iter().any(|i| i["kind"] == "shared" && i["status"] == "open"));
+}
+
+/// What an answer recalls from memory came from wherever the memory did:
+/// a fact remembered from an app someone may not use is not shared with
+/// them from a later conversation either, though that conversation called
+/// only the memory.
+#[tokio::test(flavor = "multi_thread")]
+async fn sharing_a_recalled_fact_keeps_to_the_rights_of_the_app_it_came_from() {
+    let c = start().await;
+    let (bob, carol) = (c.app.api("bob"), c.app.api("carol"));
+    say(&bob, "Remember the CRM record", None).await;
+    let kept = bob.get("/v1/memory").await.1;
+    assert!(kept.to_string().contains("Acme"), "nothing was remembered: {kept}");
+    let (thread, turn) = say(&bob, "What do I remember about it?", None).await;
+    let recalled: String = c.m.requests().iter().filter(|r| said(r).contains("What do I remember")).flat_map(|r| r.last_results()).map(|r| r.text).collect();
+    assert!(recalled.contains("Acme"), "the fact was not recalled: {recalled}");
+    let (st, v) = act(&bob, &thread, &format!("a:{turn}"), "share", json!({ "person": "carol" })).await;
+    assert_eq!(st, 403, "a fact from the CRM reached someone who may not use it, through memory: {v}");
+    assert!(!carol.inbox().await.iter().any(|i| i["kind"] == "shared"));
 }
 
 /// Export gives the message as a file; save puts it in the library from

@@ -41,12 +41,19 @@ fn ident(s: &str) -> Result<&str> {
     Ok(s)
 }
 
+/// A URL's password as Postgres is to store it: percent-decoded, as the
+/// kernel sends it when it connects, and quoted for a SQL string.
+fn sql_password(in_url: &str) -> Result<String> {
+    let pw = percent_encoding::percent_decode_str(in_url).decode_utf8().context("the database password is not UTF-8")?;
+    Ok(pw.replace('\'', "''"))
+}
+
 /// Create the log table and the kernel role named in `kernel_url`, and,
 /// when the admin console is set up, its root role named in `root_url`.
 pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) -> Result<()> {
     let k = url::Url::parse(kernel_url).context("database.url")?;
     let role = ident(k.username())?.to_string();
-    let password = k.password().context("database.url has no password")?.replace('\'', "''");
+    let password = sql_password(k.password().context("database.url has no password")?)?;
     let db = ident(k.path().trim_start_matches('/'))?.to_string();
     let admin = connect(admin_url).await?;
     let exists = admin.query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role]).await?.is_some();
@@ -83,6 +90,7 @@ pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) 
              GRANT SELECT, INSERT, DELETE ON public.content TO {role};"
         ))
         .await?;
+    move_inline_content(&admin).await.context("move content written into the log to the content store")?;
     admin.batch_execute(&content_walls_sql(&role)).await.context("wall the content store by person")?;
     // The knowledge base's index, filtered for each reader by row security.
     admin.batch_execute(&crate::knowledge::migrate_sql(&role)).await.context("create the knowledge index (pgvector must be installed)")?;
@@ -102,6 +110,41 @@ pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) 
     Ok(())
 }
 
+/// Move the content of events written whole, before the content store
+/// existed, out of the log and into the store, where trash and erasure can
+/// delete it, leaving the record with the content's hash as `split` does for
+/// every event now. Each event moves in one statement, so a crash leaves it
+/// either whole or moved; events already moved, or without content, are left.
+async fn move_inline_content(admin: &Client) -> Result<()> {
+    // Only kinds that carry content, and only records without the hash a
+    // split leaves: a record with it was split when written or moved
+    // before, and its content, if gone, was deleted on purpose.
+    let kinds: Vec<&str> = crate::events::CONTENT.iter().map(|(k, _)| *k).collect();
+    let mut after = 0i64;
+    loop {
+        let rows = admin
+            .query(
+                "SELECT e.seq, e.body FROM public.events e
+                 WHERE e.seq > $1 AND e.kind = ANY($2) AND NOT (e.body ? 'content')
+                 ORDER BY e.seq LIMIT 1000",
+                &[&after, &kinds],
+            )
+            .await?;
+        let Some(last) = rows.last() else { return Ok(()) };
+        after = last.get(0);
+        for r in &rows {
+            let (record, Some(content)) = split(r.get(1)) else { continue };
+            admin
+                .execute(
+                    "WITH moved AS (INSERT INTO public.content (seq, salt, body) VALUES ($1, $2, $3) RETURNING seq)
+                     UPDATE public.events SET body = $4 WHERE seq = (SELECT seq FROM moved)",
+                    &[&r.get::<_, i64>(0), &content.salt, &content.body, &record],
+                )
+                .await?;
+        }
+    }
+}
+
 /// The admin console's root role (admin console spec, Authority and audit):
 /// it reads every person's content, past the walls between people
 /// (BYPASSRLS), and the log, which it can add to but never change or
@@ -109,7 +152,7 @@ pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) 
 async fn migrate_root(admin: &Client, root_url: &str, db: &str) -> Result<()> {
     let r = url::Url::parse(root_url).context("admin.database_url")?;
     let role = ident(r.username())?.to_string();
-    let password = r.password().context("admin.database_url has no password")?.replace('\'', "''");
+    let password = sql_password(r.password().context("admin.database_url has no password")?)?;
     let exists = admin.query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role]).await?.is_some();
     let verb = if exists { "ALTER" } else { "CREATE" };
     admin.batch_execute(&format!("{verb} ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS")).await?;

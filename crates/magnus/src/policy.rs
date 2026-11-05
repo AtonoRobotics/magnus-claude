@@ -86,8 +86,9 @@ fn eval(cedar: &str, layer: &str, req: &Request, ents: &Entities) -> Result<(boo
     Ok((resp.decision() == Decision::Allow, rules))
 }
 
-/// The layers that apply to `person`, top first: org, groups, user.
-pub fn layers_for(policies: &BTreeMap<String, String>, person: &Person) -> Vec<(String, String)> {
+/// The layers that apply to `person` in `task`, top first: org, groups,
+/// user, task.
+pub fn layers_for(policies: &BTreeMap<String, String>, person: &Person, task: Option<&str>) -> Vec<(String, String)> {
     let mut v = vec![("org".to_string(), policies.get("org").cloned().unwrap_or_else(|| DEFAULT_ORG.to_string()))];
     for g in &person.groups {
         let k = format!("group/{g}");
@@ -99,18 +100,22 @@ pub fn layers_for(policies: &BTreeMap<String, String>, person: &Person) -> Vec<(
     if let Some(p) = policies.get(&k) {
         v.push((k, p.clone()));
     }
+    if let Some(p) = task.map(|t| format!("task/{t}")).and_then(|k| policies.get(&k).map(|p| (k, p.clone()))) {
+        v.push(p);
+    }
     v
 }
 
 pub fn decide(
     policies: &BTreeMap<String, String>,
     person: &Person,
+    task: Option<&str>,
     tool: &ToolFacts,
     untrusted: bool,
     private: bool,
 ) -> Result<Outcome> {
     let ents = entities(person, tool)?;
-    let layers = layers_for(policies, person);
+    let layers = layers_for(policies, person, task);
     let ctx = Context::from_pairs([
         ("untrusted".to_string(), RestrictedExpression::new_bool(untrusted)),
         ("private".to_string(), RestrictedExpression::new_bool(private)),
