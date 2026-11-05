@@ -16,7 +16,7 @@ One line per choice the brief left open, with its reason. The brief and the owne
 - Edits to `tests/invariants/` are denied in `.claude/settings.json`. Reason: the owner approves changes there, and a permission rule enforces it structurally (X3).
 - Dev and test Postgres is the `magnus-claude-pg` container on 127.0.0.1:54340. Reason: other projects on this machine use 54329 and 54330.
 - Rust toolchain pinned to 1.99.1. Reason: the system cargo is 1.75, too old for current crates.
-- I write the agent loop, because the brief asks me to build the whole system (the record's X14 says the principal writes it). It lives in one module (`crates/magnus/src/run/loop.rs`); once the owner has reviewed it, edits to it are denied like the tests. Reason: the brief overrides the background record, and X14's protection still applies after review.
+- I write the agent loop, because the brief asks me to build the whole system (the record's X14 says the principal writes it). It lives in one module (`crates/magnus/src/run/agent_loop.rs`); once the owner has reviewed it, edits to it are denied like the tests. Reason: the brief overrides the background record, and X14's protection still applies after review.
 
 ## Event log and state
 
