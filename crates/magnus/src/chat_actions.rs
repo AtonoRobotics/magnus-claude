@@ -217,15 +217,19 @@ async fn share(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, S
             _ => x["task_id"].as_str().map(String::from).into_iter().collect(),
         })
         .collect();
-    let (tools, private_knowledge): (Vec<String>, bool) = k.read(|s| {
+    let (tools, sources, private_knowledge): (Vec<String>, Vec<String>, bool) = k.read(|s| {
         let runs: Vec<&crate::state::Run> = tasks.iter().filter_map(|t| s.tasks.get(t)).filter_map(|t| s.runs.get(&t.run_id)).collect();
         let tools = runs.iter().flat_map(|r| r.intents.values().map(|i| i.tool.clone())).collect();
+        // And the apps their private content came from, by whatever way it
+        // reached them (a memory, a thread it was carried from).
+        let sources = runs.iter().flat_map(|r| r.private_from.iter().cloned()).collect();
         // A knowledge search is private when an entry it returned is not for
         // everyone: whose it was is not kept, so it is not shared on.
         let private = runs.iter().any(|r| r.intents.values().any(|i| i.tool == "knowledge_search" && r.private_from.contains("knowledge")));
-        (tools, private)
+        (tools, sources, private)
     });
     let mut barred: Vec<String> = tools.iter().filter_map(|t| crate::boundary::facts(&k, t)).filter(|f| !crate::boundary::has_rights(&to, f)).map(|f| f.app).collect();
+    barred.extend(sources.iter().filter_map(|app| k.connector(app)).filter(|c| !crate::boundary::may_use(&to, c)).map(|c| c.name.clone()));
     if private_knowledge {
         barred.push("knowledge entries not everyone may read".into());
     }
