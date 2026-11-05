@@ -8,6 +8,9 @@
 ## Check-tool labels: quoted expansions (2026-11-04)
 
 From #136's review: a check that only prints `${PATH:=...}` in single quotes, after a backslash or in a comment is no longer refused. An assignment bash makes through arithmetic on a variable's value, and one hidden by `\$` in `sh -c "..."`, now is (`sandbox/check_tools.py`, cases in `test_check_tools.py`).
+## Approvals keep their risk class (2026-11-04)
+
+An approval no longer covers its tool after the owner reclassifies the tool as riskier: it is matched on the class its item recorded (`state.rs`, `boundary.rs`, test in `connectors.rs`).
 ## Sharing keeps to where content came from (2026-11-04)
 
 Sharing a chat answer now also checks the apps its private content came from, not only the tools its runs called (`chat_actions.rs`, test in `chat_actions.rs`).
