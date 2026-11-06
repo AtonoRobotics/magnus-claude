@@ -77,9 +77,7 @@ pub struct Observability {
 
 impl Default for Observability {
     fn default() -> Self {
-        Observability {
-            stall_minutes: stall_minutes(),
-        }
+        Observability { stall_minutes: stall_minutes() }
     }
 }
 
@@ -232,13 +230,7 @@ pub struct SignIn {
 
 impl Default for SignIn {
     fn default() -> Self {
-        SignIn {
-            session_days: session_days(),
-            max_failures: max_failures(),
-            lockout_minutes: lockout_minutes(),
-            min_password_length: min_password_length(),
-            oidc: None,
-        }
+        SignIn { session_days: session_days(), max_failures: max_failures(), lockout_minutes: lockout_minutes(), min_password_length: min_password_length(), oidc: None }
     }
 }
 
@@ -390,21 +382,13 @@ pub struct Budget {
 impl Budget {
     /// Each limit the lower of the two.
     pub fn within(&self, cap: &Budget) -> Budget {
-        Budget {
-            max_model_calls: self.max_model_calls.min(cap.max_model_calls),
-            max_actions: self.max_actions.min(cap.max_actions),
-            max_usd: self.max_usd.min(cap.max_usd),
-        }
+        Budget { max_model_calls: self.max_model_calls.min(cap.max_model_calls), max_actions: self.max_actions.min(cap.max_actions), max_usd: self.max_usd.min(cap.max_usd) }
     }
 }
 
 impl Default for Budget {
     fn default() -> Self {
-        Budget {
-            max_model_calls: 300,
-            max_actions: 500,
-            max_usd: 50.0,
-        }
+        Budget { max_model_calls: 300, max_actions: 500, max_usd: 50.0 }
     }
 }
 
@@ -445,13 +429,7 @@ fn keep_days() -> u32 {
 
 impl Default for Backup {
     fn default() -> Self {
-        Backup {
-            dir: None,
-            key_file: None,
-            every_hours: every_hours(),
-            keep_days: keep_days(),
-            databases: Vec::new(),
-        }
+        Backup { dir: None, key_file: None, every_hours: every_hours(), keep_days: keep_days(), databases: Vec::new() }
     }
 }
 
@@ -466,9 +444,7 @@ pub struct Trash {
 
 impl Default for Trash {
     fn default() -> Self {
-        Trash {
-            keep_days: keep_days(),
-        }
+        Trash { keep_days: keep_days() }
     }
 }
 
@@ -487,10 +463,7 @@ pub struct Schedules {
 
 impl Default for Schedules {
     fn default() -> Self {
-        Schedules {
-            pause_after_failures: pause_after_failures(),
-            min_every_minutes: min_every_minutes(),
-        }
+        Schedules { pause_after_failures: pause_after_failures(), min_every_minutes: min_every_minutes() }
     }
 }
 
@@ -543,9 +516,7 @@ pub struct Updates {
 }
 
 fn release_key() -> String {
-    include_str!("../../../release/update.pub")
-        .trim()
-        .to_string()
+    include_str!("../../../release/update.pub").trim().to_string()
 }
 fn yes() -> bool {
     true
@@ -558,33 +529,19 @@ fn check_minutes() -> u32 {
 
 impl Default for Updates {
     fn default() -> Self {
-        Updates {
-            dir: None,
-            public_key: release_key(),
-            automatic: true,
-            check_minutes: check_minutes(),
-        }
+        Updates { dir: None, public_key: release_key(), automatic: true, check_minutes: check_minutes() }
     }
 }
 
 impl Config {
     pub fn updates_dir(&self) -> std::path::PathBuf {
-        self.updates
-            .dir
-            .clone()
-            .unwrap_or_else(|| self.appliance.state_dir.join("updates"))
+        self.updates.dir.clone().unwrap_or_else(|| self.appliance.state_dir.join("updates"))
     }
     pub fn backup_dir(&self) -> std::path::PathBuf {
-        self.backup
-            .dir
-            .clone()
-            .unwrap_or_else(|| self.appliance.state_dir.join("backups"))
+        self.backup.dir.clone().unwrap_or_else(|| self.appliance.state_dir.join("backups"))
     }
     pub fn backup_key_file(&self) -> std::path::PathBuf {
-        self.backup
-            .key_file
-            .clone()
-            .unwrap_or_else(|| self.appliance.state_dir.join("backup.key"))
+        self.backup.key_file.clone().unwrap_or_else(|| self.appliance.state_dir.join("backup.key"))
     }
 }
 
@@ -636,11 +593,7 @@ impl Config {
     /// Each removable module on or off for a model, and where it escalates:
     /// per-model settings over the defaults. Lost-reset and escalation are
     /// on unless turned off: they act only on a run that is lost.
-    pub fn modules_for(
-        &self,
-        adapter: &str,
-        model: &str,
-    ) -> (std::collections::BTreeMap<String, bool>, Option<String>) {
+    pub fn modules_for(&self, adapter: &str, model: &str) -> (std::collections::BTreeMap<String, bool>, Option<String>) {
         let key = format!("{adapter}/{model}");
         let per = self.modules.model.iter().find(|m| m.model == key);
         let pick = |name: &str, default: bool| {
@@ -779,13 +732,7 @@ fn brokered_memory() -> u32 {
 
 impl Default for Brokered {
     fn default() -> Self {
-        Brokered {
-            images: None,
-            idle_s: brokered_idle(),
-            memory_mib: brokered_memory(),
-            resolve: Default::default(),
-            roots: vec![],
-        }
+        Brokered { images: None, idle_s: brokered_idle(), memory_mib: brokered_memory(), resolve: Default::default(), roots: vec![] }
     }
 }
 
@@ -908,26 +855,16 @@ impl Destination {
             return Some(format!("{tool} is a read: it goes nowhere"));
         }
         if risk(&self.read).as_deref() != Some("read") {
-            return Some(format!(
-                "{tool} reads its destinations with {}, which is not a read tool of the same app",
-                self.read
-            ));
+            return Some(format!("{tool} reads its destinations with {}, which is not a read tool of the same app", self.read));
         }
         if self.id.is_empty() || self.recipients.is_empty() {
             return Some(format!("{tool} names no id field or no recipients"));
         }
         let mut names = std::collections::BTreeSet::new();
-        for p in self
-            .recipients
-            .iter()
-            .chain(&self.content)
-            .chain(&self.bound)
-        {
+        for p in self.recipients.iter().chain(&self.content).chain(&self.bound) {
             let name = p.rsplit('/').next().unwrap_or_default();
             if !p.starts_with('/') || name.is_empty() || !names.insert(name) {
-                return Some(format!(
-                    "{tool}: {p:?} is not a JSON pointer ending in a field name of its own"
-                ));
+                return Some(format!("{tool}: {p:?} is not a JSON pointer ending in a field name of its own"));
             }
         }
         None
@@ -996,59 +933,31 @@ impl Config {
         anyhow::ensure!(cfg.backup.keep_days >= 1, "[backup] keep_days must be at least 1: with 0 every backup is deleted as soon as it is made");
         for c in &cfg.connectors {
             anyhow::ensure!(
-                !c.name.contains("__")
-                    && c.name
-                        .chars()
-                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),
+                !c.name.contains("__") && c.name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),
                 "connector name {:?} must be letters, digits, '-' or '_' and must not contain '__'",
                 c.name
             );
             for (t, class) in &c.tools {
-                anyhow::ensure!(
-                    crate::tools::Risk::parse(&class.risk).is_some(),
-                    "tool {}.{t}: unknown risk class {}",
-                    c.name,
-                    class.risk
-                );
+                anyhow::ensure!(crate::tools::Risk::parse(&class.risk).is_some(), "tool {}.{t}: unknown risk class {}", c.name, class.risk);
                 if let Some(r) = &class.reach {
                     anyhow::ensure!(crate::tools::reach_fits(r, &class.risk), "tool {}.{t}: reach {r:?} does not fit a {} tool; the only reach is \"self\", on a write that stays in the person's own account", c.name, class.risk);
                 }
             }
             for (t, d) in &c.destinations {
                 let risk = |t: &str| c.tools.get(t).map(|class| class.risk.clone());
-                anyhow::ensure!(
-                    risk(t).is_some(),
-                    "connector {}: destinations for {t}, which is not one of its tools",
-                    c.name
-                );
+                anyhow::ensure!(risk(t).is_some(), "connector {}: destinations for {t}, which is not one of its tools", c.name);
                 if let Some(why) = d.fault(t, risk) {
                     anyhow::bail!("connector {}: {why}", c.name);
                 }
             }
-            anyhow::ensure!(
-                crate::tools::Label::parse(&c.label).is_some(),
-                "connector {}: unknown label {}",
-                c.name,
-                c.label
-            );
-            anyhow::ensure!(
-                crate::tools::Audience::parse(&c.audience).is_some(),
-                "connector {}: unknown audience {}",
-                c.name,
-                c.audience
-            );
+            anyhow::ensure!(crate::tools::Label::parse(&c.label).is_some(), "connector {}: unknown label {}", c.name, c.label);
+            anyhow::ensure!(crate::tools::Audience::parse(&c.audience).is_some(), "connector {}: unknown audience {}", c.name, c.audience);
             if c.transport == crate::brokered::BROKERED {
                 for r in &cfg.brokered.roots {
-                    std::fs::read(r)
-                        .map_err(|e| anyhow::anyhow!("[brokered] roots: {}: {e}", r.display()))?;
+                    std::fs::read(r).map_err(|e| anyhow::anyhow!("[brokered] roots: {}: {e}", r.display()))?;
                 }
-                crate::brokered::digest(&c.url)
-                    .map_err(|e| anyhow::anyhow!("connector {}: {e}", c.name))?;
-                anyhow::ensure!(
-                    !c.hosts.is_empty(),
-                    "connector {}: a brokered connector names the provider hosts it may reach",
-                    c.name
-                );
+                crate::brokered::digest(&c.url).map_err(|e| anyhow::anyhow!("connector {}: {e}", c.name))?;
+                anyhow::ensure!(!c.hosts.is_empty(), "connector {}: a brokered connector names the provider hosts it may reach", c.name);
                 // Its calls carry no idempotency key to its server, so one
                 // whose outcome is unknown cannot be sent again blindly: the
                 // person is asked (`none`).
@@ -1069,19 +978,14 @@ impl Config {
     /// (the API checks where); the owner is read from this file, never from
     /// the provider. Without one, it is everyone's way in.
     pub fn may_use_password(&self, id: &str) -> bool {
-        self.person(id)
-            .is_some_and(|p| self.sign_in.oidc.is_none() || p.is_owner())
+        self.person(id).is_some_and(|p| self.sign_in.oidc.is_none() || p.is_owner())
     }
 
     pub fn person_by_token(&self, token: &str) -> Option<&Person> {
         use sha2::Digest;
         // Compare digests so the comparison time does not depend on the token.
         let want = sha2::Sha256::digest(token.as_bytes());
-        self.people.iter().find(|p| {
-            p.token
-                .as_ref()
-                .is_some_and(|t| sha2::Sha256::digest(t.as_bytes()) == want)
-        })
+        self.people.iter().find(|p| p.token.as_ref().is_some_and(|t| sha2::Sha256::digest(t.as_bytes()) == want))
     }
 }
 
@@ -1115,15 +1019,9 @@ mod tests {
     /// one that says nothing does not.
     #[test]
     fn a_brokered_connector_cannot_claim_to_deduplicate() {
-        let brokered = format!(
-            "transport = \"brokered\"\nurl = \"sha256:{}\"\nhosts = [\"api.example\"]\n",
-            "0a".repeat(32)
-        );
+        let brokered = format!("transport = \"brokered\"\nurl = \"sha256:{}\"\nhosts = [\"api.example\"]\n", "0a".repeat(32));
         let e = load(&format!("{brokered}idempotency = \"header\"\n")).unwrap_err();
-        assert!(
-            format!("{e:#}").contains("carry no idempotency key"),
-            "{e:#}"
-        );
+        assert!(format!("{e:#}").contains("carry no idempotency key"), "{e:#}");
         assert_eq!(load(&brokered).unwrap().connectors[0].idempotency, "none");
         // A remote app may say it honors the header.
         assert!(load("url = \"https://a.example/mcp\"\nidempotency = \"header\"\n").is_ok());
@@ -1134,27 +1032,12 @@ mod tests {
     /// unknown (approvals spec, The approval model).
     #[test]
     fn a_tool_reaches_self_only_as_a_write() {
-        let tool = |risk: &str, reach: &str| {
-            load(&format!("url = \"https://a.example/mcp\"\n[connectors.tools.draft]\nrisk = \"{risk}\"\nreach = \"{reach}\"\n"))
-        };
-        assert_eq!(
-            tool("reversible_write", "self").unwrap().connectors[0].tools["draft"]
-                .reach
-                .as_deref(),
-            Some("self")
-        );
+        let tool = |risk: &str, reach: &str| load(&format!("url = \"https://a.example/mcp\"\n[connectors.tools.draft]\nrisk = \"{risk}\"\nreach = \"{reach}\"\n"));
+        assert_eq!(tool("reversible_write", "self").unwrap().connectors[0].tools["draft"].reach.as_deref(), Some("self"));
         assert!(tool("irreversible", "self").is_ok());
-        for (risk, reach) in [
-            ("financial", "self"),
-            ("read", "self"),
-            ("prohibited", "self"),
-            ("reversible_write", "everyone"),
-        ] {
+        for (risk, reach) in [("financial", "self"), ("read", "self"), ("prohibited", "self"), ("reversible_write", "everyone")] {
             let e = tool(risk, reach).unwrap_err();
-            assert!(
-                format!("{e:#}").contains("does not fit"),
-                "{risk} {reach}: {e:#}"
-            );
+            assert!(format!("{e:#}").contains("does not fit"), "{risk} {reach}: {e:#}");
         }
     }
 }
