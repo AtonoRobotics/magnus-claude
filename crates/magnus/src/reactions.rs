@@ -38,31 +38,39 @@ const MAGNUS: &[&str] = &["answer", "turn", "result"];
 pub fn marked(s: &Projection, person: &str, thread: &str, mut entries: Vec<Value>) -> Vec<Value> {
     let Some(mine) = s.reactions.get(person) else { return entries };
     for e in &mut entries {
-        if let Some((r, _)) = e["id"].as_str().and_then(|id| mine.get(&(thread.to_string(), id.to_string()))) {
+        if let Some(r) = e["id"].as_str().and_then(|id| mine.get(&(thread.to_string(), id.to_string()))).and_then(|h| h.last()).and_then(|(r, _)| r.clone()) {
             e["reaction"] = json!(r);
         }
     }
     entries
 }
 
-/// The person's reactions given before `before`, newest first, each with
-/// the words of the message it is on, while their thread still shows it (a
-/// conversation, message or task in the trash, or a message deleted, is
-/// left out). A message written by a run that read content from outside
+/// The person's reactions as they stood at `before` (one changed or taken
+/// back later counts as it was then), newest first, each with the words of
+/// the message it is on, while their thread still shows it (a
+/// conversation, message or task in the trash, a message deleted, or a
+/// result of a deleted answer, is left out, as their thread leaves them
+/// out). A message written by a run that read content from outside
 /// the conversation is named without its words: they would bring its taint
 /// into every later run of theirs.
 pub(crate) fn reactions_before(s: &Projection, person: &str, before: DateTime<Utc>) -> Vec<(DateTime<Utc>, String)> {
     let Some(mine) = s.reactions.get(person) else { return vec![] };
     let mut out: Vec<(DateTime<Utc>, String)> = mine
         .iter()
-        .filter(|(_, (_, at))| *at < before)
-        .filter_map(|((thread, entry), (reaction, at))| {
-            let gone = s.trash.contains_key(thread) || s.removed_threads.contains(thread) || s.trash.contains_key(entry) || s.hidden.get(thread).is_some_and(|h| h.contains(entry));
-            let task = entry.split_once(':').map(|(_, t)| t).filter(|t| !s.trash.contains_key(*t))?;
-            let run = s.tasks.get(task).filter(|t| t.person == person).and_then(|t| s.runs.get(&t.run_id))?;
-            if gone {
+        .filter_map(|((thread, entry), history)| {
+            let (reaction, at) = history.iter().rev().find(|(_, at)| *at < before)?;
+            let reaction = reaction.as_ref()?;
+            let hidden = |id: &str| s.trash.contains_key(id) || s.hidden.get(thread).is_some_and(|h| h.contains(id));
+            if s.trash.contains_key(thread) || s.removed_threads.contains(thread) || hidden(entry) {
                 return None;
             }
+            let task = entry.split_once(':').map(|(_, t)| t).filter(|t| !s.trash.contains_key(*t)).and_then(|t| s.tasks.get(t)).filter(|t| t.person == person)?;
+            // A result goes with the answer that started its task (review of #252).
+            let origin = task.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| s.runs.get(f)).map(|o| format!("a:{}", o.task));
+            if origin.is_some_and(|o| hidden(&o)) {
+                return None;
+            }
+            let run = s.runs.get(&task.run_id)?;
             let said = REACTIONS.iter().find(|(k, _)| k == reaction).map_or(reaction.as_str(), |(_, said)| said);
             let words = if run.untrusted || run.private {
                 "(its words are not shown: the run that wrote it read content from outside the conversation)".to_string()
@@ -215,14 +223,25 @@ mod tests {
         ev(&mut s, 5, json!({ "kind": "disagreement_outcome", "id": "d1", "person": "carol", "run": "r1", "outcome": "It shipped fine." }));
         let at = |min: i64| t0 + chrono::Duration::minutes(min);
         assert_eq!(reactions_before(&s, "carol", at(4)), vec![(at(2), "that was great, on your message \"Hello there.\"".to_string())]);
-        assert!(reactions_before(&s, "carol", at(2)).is_empty(), "given after the run started");
+        assert!(reactions_before(&s, "carol", at(1)).is_empty(), "given after the run started");
+        // Review of #252: changed after the run started, it counts as it was then.
+        assert_eq!(reactions_before(&s, "carol", at(2)), vec![(at(1), "that was annoying, on your message \"Hello there.\"".to_string())]);
+        // Review of #252: a result whose answer was deleted drops out with it.
+        ev(&mut s, 0, json!({ "kind": "task_created", "task": "t2", "run": "r2", "person": "carol", "text": "Do it.", "config": config, "chat": { "thread": "th2", "turn": true } }));
+        ev(&mut s, 0, json!({ "kind": "completed", "run": "r2", "summary": "On it." }));
+        ev(&mut s, 0, json!({ "kind": "task_created", "task": "t3", "run": "r3", "person": "carol", "text": "Task.", "config": config, "chat": { "thread": "th2", "turn": false, "from_run": "r2" } }));
+        ev(&mut s, 0, json!({ "kind": "completed", "run": "r3", "summary": "Result words." }));
+        ev(&mut s, 1, json!({ "kind": "reacted", "person": "carol", "thread": "th2", "entry": "r:t3", "reaction": "great" }));
+        assert_eq!(reactions_before(&s, "carol", at(4)).len(), 2);
+        ev(&mut s, 1, json!({ "kind": "chat_hidden", "person": "carol", "thread": "th2", "entries": ["a:t2"] }));
+        assert_eq!(reactions_before(&s, "carol", at(4)).len(), 1, "the result of a deleted answer");
         assert!(reactions_before(&s, "bob", at(4)).is_empty());
         assert_eq!(open_before(&s, "carol", at(4)).len(), 1);
         assert!(open_before(&s, "carol", at(6)).is_empty(), "settled before the run started");
         ev(&mut s, 6, json!({ "kind": "chat_hidden", "person": "carol", "thread": "th", "entries": ["a:t1"] }));
         assert!(reactions_before(&s, "carol", at(7)).is_empty(), "its message was deleted");
         ev(&mut s, 7, json!({ "kind": "reacted", "person": "carol", "thread": "th", "entry": "a:t1" }));
-        assert!(s.reactions["carol"].is_empty(), "taken back");
+        assert!(marked(&s, "carol", "th", vec![json!({ "id": "a:t1" })])[0]["reaction"].is_null(), "taken back");
         ev(&mut s, 8, json!({ "kind": "reacted", "person": "carol", "thread": "th", "entry": "a:t1", "reaction": "great" }));
         ev(&mut s, 9, json!({ "kind": "person_erased", "person": "carol" }));
         assert!(!s.reactions.contains_key("carol") && s.disagreements.is_empty(), "erased with her");

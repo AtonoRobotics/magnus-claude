@@ -768,8 +768,9 @@ pub struct State {
     /// Entries people deleted from their threads, by thread.
     pub hidden: HashMap<String, std::collections::HashSet<String>>,
     /// Each person's reactions to Magnus's messages, by (thread, entry):
-    /// the reaction and when it was given.
-    pub reactions: HashMap<String, BTreeMap<(String, String), (String, DateTime<Utc>)>>,
+    /// every reaction given, oldest first, and when (None: taken back), so
+    /// a run sees them as they stood when it started.
+    pub reactions: HashMap<String, BTreeMap<(String, String), Vec<(Option<String>, DateTime<Utc>)>>>,
     /// The disagreements Magnus recorded, by id.
     pub disagreements: BTreeMap<String, Disagreement>,
     /// Threads branched from another, by thread.
@@ -1335,10 +1336,7 @@ impl State {
             }
             Ev::Reacted { person, thread, entry, reaction } => {
                 let mine = self.reactions.entry(person.clone()).or_default();
-                match reaction {
-                    Some(r) => mine.insert((thread.clone(), entry.clone()), (r.clone(), e.at)),
-                    None => mine.remove(&(thread.clone(), entry.clone())),
-                };
+                mine.entry((thread.clone(), entry.clone())).or_default().push((reaction.clone(), e.at));
             }
             Ev::DisagreementRecorded { id, person, position, decision, .. } => {
                 let d = Disagreement { id: id.clone(), person: person.clone(), position: position.clone(), decision: decision.clone(), at: e.at, outcome: None, outcome_at: None };
