@@ -78,3 +78,45 @@ async fn a_backup_restores_the_log_and_the_vault_after_both_are_lost() {
     let out = restore(&file);
     assert!(!out.status.success(), "a restore wrote over a live log");
 }
+
+/// The appliance's identity provider keeps its accounts in a database of its
+/// own (#290); a backup holds it too, so losing it with the log does not
+/// lose everyone's sign-in (#296).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_database_the_appliance_depends_on_comes_back_from_the_backup() {
+    let m = FakeModel::start(script(|_| async move { complete("done") })).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let idp = magnus_invariants::pg::TestDb::create().await;
+    idp.admin().await.batch_execute("CREATE TABLE realm (name text); INSERT INTO realm VALUES ('magnus')").await.unwrap();
+    let config = app.dir.path().join("magnus.toml");
+    let mut cfg: toml::Table = toml::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+    let mut backup = toml::Table::new();
+    backup.insert("databases".into(), toml::Value::Array(vec![idp.admin_url().into()]));
+    cfg.insert("backup".into(), backup.into());
+    std::fs::write(&config, toml::to_string(&cfg).unwrap()).unwrap();
+    app.restart().await;
+
+    let alice = app.api("alice");
+    let (st, b) = alice.post("/v1/backups", json!({})).await;
+    assert_eq!(st, 201, "{b}");
+    assert_eq!(b["restored"], true, "{b}");
+    assert!(b["detail"].as_str().unwrap_or_default().contains("1 databases read back"), "{b}");
+
+    // The disaster takes the log, the vault and the identity provider's data.
+    app.kill().await;
+    app.db.admin().await.batch_execute("DROP TABLE public.content, public.events").await.unwrap();
+    std::fs::remove_dir_all(app.state_dir.join("vault")).unwrap();
+    idp.admin().await.batch_execute("DROP TABLE realm").await.unwrap();
+
+    let file = app.state_dir.join("backups").join(b["file"].as_str().unwrap());
+    let out = std::process::Command::new(bin("magnus-appliance"))
+        .args(["restore", "--config"])
+        .arg(&config)
+        .args(["--admin-url", &app.db.admin_url(), "--from"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "restore failed: {}", String::from_utf8_lossy(&out.stderr));
+    let name: String = idp.admin().await.query_one("SELECT name FROM realm", &[]).await.unwrap().get(0);
+    assert_eq!(name, "magnus", "the identity provider's data did not come back");
+}

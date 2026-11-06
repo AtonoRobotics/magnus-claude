@@ -29,7 +29,10 @@ fn key(cfg: &Config, create: bool) -> Result<XChaCha20Poly1305> {
     let path = cfg.backup_key_file();
     if !path.exists() {
         if !create {
-            bail!("no backup key at {}: put the key kept with the backups there", path.display());
+            bail!(
+                "no backup key at {}: put the key kept with the backups there",
+                path.display()
+            );
         }
         let mut k = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut k);
@@ -38,7 +41,8 @@ fn key(cfg: &Config, create: bool) -> Result<XChaCha20Poly1305> {
         }
         crate::vault::write_private(&path, &k)?;
     }
-    let k = std::fs::read(&path).with_context(|| format!("read the backup key {}", path.display()))?;
+    let k =
+        std::fs::read(&path).with_context(|| format!("read the backup key {}", path.display()))?;
     anyhow::ensure!(k.len() == 32, "the backup key is not 32 bytes");
     XChaCha20Poly1305::new_from_slice(&k).map_err(|_| anyhow::anyhow!("backup key"))
 }
@@ -46,16 +50,24 @@ fn key(cfg: &Config, create: bool) -> Result<XChaCha20Poly1305> {
 fn seal(cipher: &XChaCha20Poly1305, plain: &[u8]) -> Result<Vec<u8>> {
     let mut nonce = [0u8; 24];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
-    let ct = cipher.encrypt(XNonce::from_slice(&nonce), plain).map_err(|_| anyhow::anyhow!("encrypt the backup"))?;
+    let ct = cipher
+        .encrypt(XNonce::from_slice(&nonce), plain)
+        .map_err(|_| anyhow::anyhow!("encrypt the backup"))?;
     Ok([MAGIC, &nonce[..], &ct].concat())
 }
 
 fn open(cipher: &XChaCha20Poly1305, file: &[u8]) -> Result<Value> {
     let body = file.strip_prefix(MAGIC).context("not a Magnus backup")?;
     anyhow::ensure!(body.len() > 24, "the backup is truncated");
-    let plain = cipher.decrypt(XNonce::from_slice(&body[..24]), &body[24..]).map_err(|_| anyhow::anyhow!("the backup does not decrypt with this key"))?;
+    let plain = cipher
+        .decrypt(XNonce::from_slice(&body[..24]), &body[24..])
+        .map_err(|_| anyhow::anyhow!("the backup does not decrypt with this key"))?;
     let v: Value = serde_json::from_slice(&plain)?;
-    anyhow::ensure!(v["format"] == FORMAT, "unknown backup format {}", v["format"]);
+    anyhow::ensure!(
+        v["format"] == FORMAT,
+        "unknown backup format {}",
+        v["format"]
+    );
     Ok(v)
 }
 
@@ -71,15 +83,158 @@ pub fn check(v: &Value) -> Result<(usize, i64)> {
         last = seq;
         // As the log loads it: its content put back, and a kind from a later
         // release skipped.
-        let body = crate::log::join(e["body"].clone(), Some(e["content"].clone()).filter(|c| !c.is_null()));
-        let Some(ev) = crate::log::parse_event(&body).with_context(|| format!("event {seq} does not parse"))? else { continue };
-        let at = chrono::DateTime::parse_from_rfc3339(e["at"].as_str().unwrap_or_default()).with_context(|| format!("event {seq} has no time"))?.with_timezone(&chrono::Utc);
-        state.apply(&crate::log::Event { seq, at, actor: e["actor"].as_str().unwrap_or_default().into(), ev });
+        let body = crate::log::join(
+            e["body"].clone(),
+            Some(e["content"].clone()).filter(|c| !c.is_null()),
+        );
+        let Some(ev) = crate::log::parse_event(&body)
+            .with_context(|| format!("event {seq} does not parse"))?
+        else {
+            continue;
+        };
+        let at = chrono::DateTime::parse_from_rfc3339(e["at"].as_str().unwrap_or_default())
+            .with_context(|| format!("event {seq} has no time"))?
+            .with_timezone(&chrono::Utc);
+        state.apply(&crate::log::Event {
+            seq,
+            at,
+            actor: e["actor"].as_str().unwrap_or_default().into(),
+            ev,
+        });
     }
-    anyhow::ensure!(v["through_seq"].as_i64() == Some(last), "the backup ends at {last}, not at {}", v["through_seq"]);
+    anyhow::ensure!(
+        v["through_seq"].as_i64() == Some(last),
+        "the backup ends at {last}, not at {}",
+        v["through_seq"]
+    );
     let vk = B64.decode(v["vault"]["key"].as_str().unwrap_or_default())?;
     crate::vault::check(&vk, v["vault"]["secrets"].as_str().unwrap_or("{}"))?;
+    // Each database the appliance depends on reads back whole (#296).
+    for d in v["databases"].as_array().into_iter().flatten() {
+        let name = d["name"].as_str().unwrap_or_default();
+        let dump = B64
+            .decode(d["dump"].as_str().unwrap_or_default())
+            .with_context(|| format!("the dump of {name}"))?;
+        pg_tool("pg_restore", &["--list"], &[], &dump)
+            .with_context(|| format!("the dump of {name} does not read back"))?;
+    }
     Ok((events.len(), last))
+}
+
+/// A database the backup holds: its name, its URL without the password (for
+/// the tools' command line, which others on the machine can read), and the
+/// password (given to them in the environment).
+fn database(url: &str) -> Result<(String, String, String)> {
+    let mut u =
+        url::Url::parse(url).context("[backup] databases holds a URL that does not parse")?;
+    let name = u.path().trim_start_matches('/').to_string();
+    anyhow::ensure!(
+        !name.is_empty() && u.scheme().starts_with("postgres"),
+        "[backup] databases: {} names no Postgres database",
+        u.host_str().unwrap_or_default()
+    );
+    let password =
+        url::form_urlencoded::parse(format!("p={}", u.password().unwrap_or_default()).as_bytes())
+            .next()
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
+    u.set_password(None)
+        .map_err(|_| anyhow::anyhow!("[backup] databases: {name} has no password to take out"))?;
+    Ok((name, u.to_string(), password))
+}
+
+/// Run `pg_dump` or `pg_restore`, with `input` on its stdin; its stdout.
+fn pg_tool(tool: &str, args: &[&str], env: &[(&str, &str)], input: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write;
+    let mut child = std::process::Command::new(tool)
+        .args(args)
+        .envs(env.iter().copied())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run {tool}"))?;
+    let mut stdin = child.stdin.take().context("stdin")?;
+    let input = input.to_vec();
+    let feed = std::thread::spawn(move || stdin.write_all(&input));
+    let out = child.wait_with_output()?;
+    let _ = feed.join();
+    anyhow::ensure!(
+        out.status.success(),
+        "{tool}: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(out.stdout)
+}
+
+/// Each configured database, dumped (custom format, no owners or grants:
+/// a restore makes them the restoring role's).
+fn dump_databases(cfg: &Config) -> Result<Vec<Value>> {
+    cfg.backup
+        .databases
+        .iter()
+        .map(|url| {
+            let (name, dsn, password) = database(url)?;
+            let dump = pg_tool(
+                "pg_dump",
+                &[
+                    "--format=custom",
+                    "--no-owner",
+                    "--no-privileges",
+                    "--dbname",
+                    &dsn,
+                ],
+                &[("PGPASSWORD", &password)],
+                &[],
+            )
+            .with_context(|| format!("back up the database {name}"))?;
+            Ok(json!({ "name": name, "dump": B64.encode(dump) }))
+        })
+        .collect()
+}
+
+/// Put each database the backup holds back, into the one `[backup]
+/// databases` names with that name; all are found before any is written.
+fn restore_databases(cfg: &Config, v: &Value) -> Result<usize> {
+    let mut plan = Vec::new();
+    for d in v["databases"].as_array().into_iter().flatten() {
+        let name = d["name"].as_str().unwrap_or_default();
+        let target = cfg
+            .backup
+            .databases
+            .iter()
+            .map(|u| database(u))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .find(|(n, ..)| n == name);
+        let Some((_, dsn, password)) = target else {
+            bail!("the backup holds the database {name}, which [backup] databases does not name")
+        };
+        plan.push((
+            name.to_string(),
+            dsn,
+            password,
+            B64.decode(d["dump"].as_str().unwrap_or_default())?,
+        ));
+    }
+    for (name, dsn, password, dump) in &plan {
+        pg_tool(
+            "pg_restore",
+            &[
+                "--clean",
+                "--if-exists",
+                "--no-owner",
+                "--no-privileges",
+                "--single-transaction",
+                "--dbname",
+                dsn,
+            ],
+            &[("PGPASSWORD", password)],
+            dump,
+        )
+        .with_context(|| format!("restore the database {name}"))?;
+    }
+    Ok(plan.len())
 }
 
 impl Kernel {
@@ -88,40 +243,87 @@ impl Kernel {
     pub async fn back_up(&self, actor: &str) -> Result<Value> {
         let _one = backing_up().lock().await;
         let mut rows = self.log.dump().await?;
-        let through = rows.last().map(|r| r["seq"].as_i64().unwrap_or(0)).unwrap_or(0);
+        let through = rows
+            .last()
+            .map(|r| r["seq"].as_i64().unwrap_or(0))
+            .unwrap_or(0);
         // Every removal in the dump applies to it: content whose deletion
         // was recorded but had not happened yet is left out, and the backup
         // says it has had them all (`scrub_backups`).
-        let removed: std::collections::HashSet<i64> = rows.iter().filter(|r| r["kind"] == "removed").flat_map(|r| r["body"]["seqs"].as_array().cloned().unwrap_or_default()).filter_map(|q| q.as_i64()).collect();
-        let scrubbed = rows.iter().filter(|r| r["kind"] == "removed").filter_map(|r| r["seq"].as_i64()).max().unwrap_or(0);
-        for r in rows.iter_mut().filter(|r| r["seq"].as_i64().is_some_and(|q| removed.contains(&q))) {
+        let removed: std::collections::HashSet<i64> = rows
+            .iter()
+            .filter(|r| r["kind"] == "removed")
+            .flat_map(|r| r["body"]["seqs"].as_array().cloned().unwrap_or_default())
+            .filter_map(|q| q.as_i64())
+            .collect();
+        let scrubbed = rows
+            .iter()
+            .filter(|r| r["kind"] == "removed")
+            .filter_map(|r| r["seq"].as_i64())
+            .max()
+            .unwrap_or(0);
+        for r in rows
+            .iter_mut()
+            .filter(|r| r["seq"].as_i64().is_some_and(|q| removed.contains(&q)))
+        {
             r["content"] = Value::Null;
             r["salt"] = Value::Null;
         }
         let (vault_key, secrets) = self.vault.raw()?;
+        let cfg = self.cfg.clone();
+        let databases = tokio::task::spawn_blocking(move || dump_databases(&cfg)).await??;
         let made = chrono::Utc::now();
         let doc = json!({
             "format": FORMAT, "made_at": made, "through_seq": through, "scrubbed_through": scrubbed, "events": rows,
             "vault": { "key": B64.encode(vault_key), "secrets": secrets },
+            "databases": databases,
         });
         let plain = serde_json::to_vec(&doc)?;
         let cipher = key(&self.cfg, true)?;
         let bytes = seal(&cipher, &plain)?;
         let dir = self.cfg.backup_dir();
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("magnus-{}.backup", made.format("%Y%m%dT%H%M%S%.3fZ")));
+        let path = dir.join(format!(
+            "magnus-{}.backup",
+            made.format("%Y%m%dT%H%M%S%.3fZ")
+        ));
         crate::vault::write_private(&path, &bytes)?;
         let file = path.file_name().unwrap().to_string_lossy().to_string();
-        self.emit(actor, Ev::BackupMade { file: file.clone(), through_seq: through, events: rows.len(), bytes: bytes.len() }).await?;
+        self.emit(
+            actor,
+            Ev::BackupMade {
+                file: file.clone(),
+                through_seq: through,
+                events: rows.len(),
+                bytes: bytes.len(),
+            },
+        )
+        .await?;
         // The restore test, on the file as written.
-        let checked = std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| open(&cipher, &b)).and_then(|v| check(&v));
+        let checked = std::fs::read(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|b| open(&cipher, &b))
+            .and_then(|v| check(&v));
         let (ok, detail) = match &checked {
-            Ok((n, last)) => (true, format!("restored in memory: {n} events through {last}, every secret decrypts")),
+            Ok((n, last)) => {
+                let dbs = doc["databases"].as_array().map(|d| d.len()).unwrap_or(0);
+                (true, format!("restored in memory: {n} events through {last}, every secret decrypts, {dbs} databases read back"))
+            }
             Err(e) => (false, format!("{e:#}")),
         };
-        self.emit("kernel", Ev::BackupChecked { file: file.clone(), ok, detail: detail.clone() }).await?;
+        self.emit(
+            "kernel",
+            Ev::BackupChecked {
+                file: file.clone(),
+                ok,
+                detail: detail.clone(),
+            },
+        )
+        .await?;
         let removed = prune(&dir, self.cfg.backup.keep_days)?;
-        Ok(json!({ "file": file, "through_seq": through, "events": rows.len(), "bytes": bytes.len(), "restored": ok, "detail": detail, "removed": removed }))
+        Ok(
+            json!({ "file": file, "through_seq": through, "events": rows.len(), "bytes": bytes.len(), "restored": ok, "detail": detail, "removed": removed }),
+        )
     }
 }
 
@@ -140,7 +342,9 @@ impl Kernel {
     /// content, until a later scrub rewrites it (`BackupsScrubbed`) (#195).
     pub async fn scrub_backups(&self) -> Result<usize> {
         let removals = self.log.removals().await?;
-        let Some(&(latest, _)) = removals.last() else { return Ok(0) };
+        let Some(&(latest, _)) = removals.last() else {
+            return Ok(0);
+        };
         // With no scrub left pending, every backup has had the removals up
         // to the one before the latest.
         let before = removals.iter().rev().nth(1).map_or(0, |r| r.0);
@@ -152,32 +356,47 @@ impl Kernel {
         let shown = dir.display().to_string();
         let _one = backing_up().lock().await;
         let cfg = self.cfg.clone();
-        let found = tokio::task::spawn_blocking(move || -> std::result::Result<(usize, Vec<(String, i64, String)>), String> {
-            // What has been removed, where a restore of a backup that
-            // could not be rewritten finds it (`restore`), and every
-            // removal recorded before, in this log's history or another's.
-            let gone = note_removals(&cfg, &removed);
-            let files = match try_list(&dir) {
-                Ok(files) => files,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound && !made => vec![],
-                Err(e) => return Err(format!("the backups directory {} cannot be read: {e}", dir.display())),
-            };
-            let cipher = match key(&cfg, false) {
-                Ok(c) => c,
-                Err(e) => return Ok((0, files.into_iter().map(|(name, _)| (name, 0, format!("{e:#}"))).collect())),
-            };
-            let mut rewritten = 0;
-            let mut left: Vec<(String, i64, String)> = vec![];
-            for (name, _) in files {
-                let mut done = 0;
-                match scrub_one(&cipher, &dir.join(&name), &gone, latest, &mut done) {
-                    Ok(true) => rewritten += 1,
-                    Ok(false) => {}
-                    Err(e) => left.push((name, done, format!("{e:#}"))),
+        let found = tokio::task::spawn_blocking(
+            move || -> std::result::Result<(usize, Vec<(String, i64, String)>), String> {
+                // What has been removed, where a restore of a backup that
+                // could not be rewritten finds it (`restore`), and every
+                // removal recorded before, in this log's history or another's.
+                let gone = note_removals(&cfg, &removed);
+                let files = match try_list(&dir) {
+                    Ok(files) => files,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound && !made => vec![],
+                    Err(e) => {
+                        return Err(format!(
+                            "the backups directory {} cannot be read: {e}",
+                            dir.display()
+                        ))
+                    }
+                };
+                let cipher = match key(&cfg, false) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return Ok((
+                            0,
+                            files
+                                .into_iter()
+                                .map(|(name, _)| (name, 0, format!("{e:#}")))
+                                .collect(),
+                        ))
+                    }
+                };
+                let mut rewritten = 0;
+                let mut left: Vec<(String, i64, String)> = vec![];
+                for (name, _) in files {
+                    let mut done = 0;
+                    match scrub_one(&cipher, &dir.join(&name), &gone, latest, &mut done) {
+                        Ok(true) => rewritten += 1,
+                        Ok(false) => {}
+                        Err(e) => left.push((name, done, format!("{e:#}"))),
+                    }
                 }
-            }
-            Ok((rewritten, left))
-        })
+                Ok((rewritten, left))
+            },
+        )
         .await?;
         let (rewritten, left) = match found {
             Ok(found) => found,
@@ -185,25 +404,55 @@ impl Kernel {
             // still hold. The backups already pending stay so; with none,
             // the directory is, for the latest removal.
             Err(detail) => {
-                let (from, files) = self.read(|s| s.scrub_pending.as_ref().map(|p| (p.from, p.files.clone()))).filter(|(_, f)| !f.is_empty()).unwrap_or((before, vec![shown]));
-                (0, files.into_iter().map(|f| (f, from, detail.clone())).collect())
+                let (from, files) = self
+                    .read(|s| s.scrub_pending.as_ref().map(|p| (p.from, p.files.clone())))
+                    .filter(|(_, f)| !f.is_empty())
+                    .unwrap_or((before, vec![shown]));
+                (
+                    0,
+                    files
+                        .into_iter()
+                        .map(|f| (f, from, detail.clone()))
+                        .collect(),
+                )
             }
         };
         if left.is_empty() {
             if self.read(|s| s.scrub_pending.is_some()) {
-                self.emit("kernel", Ev::BackupsScrubbed { through: latest }).await?;
+                self.emit("kernel", Ev::BackupsScrubbed { through: latest })
+                    .await?;
             }
             return Ok(rewritten);
         }
         let from = left.iter().map(|l| l.1).min().unwrap_or(0);
         let files: Vec<String> = left.iter().map(|l| l.0.clone()).collect();
-        let detail = left.iter().map(|(f, _, e)| format!("{f}: {e}")).collect::<Vec<_>>().join("; ");
+        let detail = left
+            .iter()
+            .map(|(f, _, e)| format!("{f}: {e}"))
+            .collect::<Vec<_>>()
+            .join("; ");
         // Once per change, not at every retry.
-        let same = self.read(|s| s.scrub_pending.as_ref().is_some_and(|p| (p.from, p.through, &p.files) == (from, latest, &files)));
+        let same = self.read(|s| {
+            s.scrub_pending
+                .as_ref()
+                .is_some_and(|p| (p.from, p.through, &p.files) == (from, latest, &files))
+        });
         if !same {
-            self.emit("kernel", Ev::BackupScrubPending { from, through: latest, files: files.clone(), detail: detail.clone() }).await?;
+            self.emit(
+                "kernel",
+                Ev::BackupScrubPending {
+                    from,
+                    through: latest,
+                    files: files.clone(),
+                    detail: detail.clone(),
+                },
+            )
+            .await?;
         }
-        bail!("{} backups still hold removed content: {detail}", files.len())
+        bail!(
+            "{} backups still hold removed content: {detail}",
+            files.len()
+        )
     }
 }
 
@@ -216,7 +465,13 @@ type Gone = std::collections::BTreeSet<(i64, chrono::DateTime<chrono::Utc>)>;
 /// by its number and its time, so a removal recorded before a restore
 /// still takes it, and an event the restored log later gave the same
 /// number is not taken with it.
-fn scrub_one(cipher: &XChaCha20Poly1305, path: &Path, gone: &Gone, latest: i64, done: &mut i64) -> Result<bool> {
+fn scrub_one(
+    cipher: &XChaCha20Poly1305,
+    path: &Path,
+    gone: &Gone,
+    latest: i64,
+    done: &mut i64,
+) -> Result<bool> {
     let mut v = open(cipher, &std::fs::read(path)?)?;
     *done = v["scrubbed_through"].as_i64().unwrap_or(0);
     let mut changed = *done < latest;
@@ -241,7 +496,10 @@ fn scrub_one(cipher: &XChaCha20Poly1305, path: &Path, gone: &Gone, latest: i64, 
 /// Whether a removal named this event; one without a readable time is
 /// taken by its number alone.
 fn named(gone: &Gone, seq: i64, at: &Value) -> bool {
-    match at.as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
+    match at
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    {
         Some(at) => gone.contains(&(seq, at.with_timezone(&chrono::Utc))),
         None => gone.iter().any(|(q, _)| *q == seq),
     }
@@ -267,7 +525,8 @@ fn read_removals(dir: &Path) -> Result<Gone> {
         .context("no removals")?
         .iter()
         .map(|r| {
-            let at = chrono::DateTime::parse_from_rfc3339(r[1].as_str().unwrap_or_default())?.with_timezone(&chrono::Utc);
+            let at = chrono::DateTime::parse_from_rfc3339(r[1].as_str().unwrap_or_default())?
+                .with_timezone(&chrono::Utc);
             Ok((r[0].as_i64().context("a removal without its event")?, at))
         })
         .collect()
@@ -298,7 +557,10 @@ fn record_removals(dirs: &[PathBuf], mut known: Gone) -> Gone {
 }
 
 fn note_removals(cfg: &Config, removed: &[(i64, chrono::DateTime<chrono::Utc>)]) -> Gone {
-    record_removals(&[cfg.appliance.state_dir.clone(), cfg.backup_dir()], removed.iter().copied().collect())
+    record_removals(
+        &[cfg.appliance.state_dir.clone(), cfg.backup_dir()],
+        removed.iter().copied().collect(),
+    )
 }
 
 /// Every event whose content was removed, as recorded in the state
@@ -307,10 +569,17 @@ fn note_removals(cfg: &Config, removed: &[(i64, chrono::DateTime<chrono::Utc>)])
 /// record that cannot be read stops the restore, which could otherwise
 /// bring back what it names.
 fn removed_events(cfg: &Config, from: &Path) -> Result<Gone> {
-    let dirs = [Some(cfg.appliance.state_dir.clone()), Some(cfg.backup_dir()), from.parent().map(Path::to_path_buf)];
+    let dirs = [
+        Some(cfg.appliance.state_dir.clone()),
+        Some(cfg.backup_dir()),
+        from.parent().map(Path::to_path_buf),
+    ];
     let mut all = Gone::new();
     for d in dirs.into_iter().flatten() {
-        all.extend(read_removals(&d).with_context(|| format!("read the removals recorded in {}", d.display()))?);
+        all.extend(
+            read_removals(&d)
+                .with_context(|| format!("read the removals recorded in {}", d.display()))?,
+        );
     }
     std::fs::create_dir_all(&cfg.appliance.state_dir)?;
     Ok(record_removals(&[cfg.appliance.state_dir.clone()], all))
@@ -341,12 +610,17 @@ fn prune(dir: &Path, keep_days: u32) -> Result<Vec<String>> {
 
 /// When the newest backup in `dir` was made, by its name.
 fn newest(dir: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
-    list(&dir.to_path_buf()).iter().filter_map(|(n, _)| made_at(n)).max()
+    list(&dir.to_path_buf())
+        .iter()
+        .filter_map(|(n, _)| made_at(n))
+        .max()
 }
 
 fn made_at(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let ts = name.strip_prefix("magnus-")?.strip_suffix(".backup")?;
-    chrono::NaiveDateTime::parse_from_str(ts, "%Y%m%dT%H%M%S%.3fZ").ok().map(|t| t.and_utc())
+    chrono::NaiveDateTime::parse_from_str(ts, "%Y%m%dT%H%M%S%.3fZ")
+        .ok()
+        .map(|t| t.and_utc())
 }
 
 /// Back up every `every_hours`, counted from the last backup, so a restart
@@ -389,40 +663,73 @@ pub fn schedule(k: Arc<Kernel>) {
 /// `magnus restore`: a backup into an empty event log and an empty vault.
 pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usize, i64)> {
     let cipher = key(cfg, false)?;
-    let v = open(&cipher, &std::fs::read(from).with_context(|| format!("read {}", from.display()))?)?;
+    let v = open(
+        &cipher,
+        &std::fs::read(from).with_context(|| format!("read {}", from.display()))?,
+    )?;
     let (n, last) = check(&v)?;
     // A backup that could not be rewritten after a removal (an erasure)
     // still holds what was removed: it is left out here too (#195).
     let removed = removed_events(cfg, from)?;
     let vault_dir = cfg.appliance.state_dir.join("vault");
     if vault_dir.join("secrets.json").exists() {
-        bail!("{} already holds secrets; restore into an empty state directory", vault_dir.display());
+        bail!(
+            "{} already holds secrets; restore into an empty state directory",
+            vault_dir.display()
+        );
     }
-    crate::log::migrate(admin_url, &cfg.database.url, cfg.admin.as_ref().and_then(|a| a.database_url.as_deref())).await?;
+    crate::log::migrate(
+        admin_url,
+        &cfg.database.url,
+        cfg.admin.as_ref().and_then(|a| a.database_url.as_deref()),
+    )
+    .await?;
     let admin = crate::log::connect(admin_url).await?;
     let mut db = admin;
     // No kernel may run on the log while it is restored: it would keep its
     // empty state and its vault key, and write over the restored ones.
-    crate::log::hold(&db).await.context("a kernel is running on this event log; stop it before restoring")?;
+    crate::log::hold(&db)
+        .await
+        .context("a kernel is running on this event log; stop it before restoring")?;
     let tx = db.transaction().await?;
-    let have: i64 = tx.query_one("SELECT (SELECT count(*) FROM public.events) + (SELECT count(*) FROM public.content)", &[]).await?.get(0);
+    let have: i64 = tx
+        .query_one(
+            "SELECT (SELECT count(*) FROM public.events) + (SELECT count(*) FROM public.content)",
+            &[],
+        )
+        .await?
+        .get(0);
     if have > 0 {
         bail!("the event log and its content already hold {have} rows; restore into empty ones");
     }
     for e in v["events"].as_array().into_iter().flatten() {
-        let at = chrono::DateTime::parse_from_rfc3339(e["at"].as_str().unwrap_or_default())?.with_timezone(&chrono::Utc);
+        let at = chrono::DateTime::parse_from_rfc3339(e["at"].as_str().unwrap_or_default())?
+            .with_timezone(&chrono::Utc);
         tx.execute(
             "INSERT INTO public.events (seq, at, kind, actor, run_id, body) OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, $5, $6)",
             &[&e["seq"].as_i64(), &at, &e["kind"].as_str(), &e["actor"].as_str(), &e["run_id"].as_str(), &e["body"]],
         )
         .await?;
-        if !e["content"].is_null() && !e["seq"].as_i64().is_some_and(|q| removed.contains(&(q, at))) {
-            let salt = hex::decode(e["salt"].as_str().unwrap_or_default()).with_context(|| format!("event {} has no salt", e["seq"]))?;
-            tx.execute("INSERT INTO public.content (seq, salt, body) VALUES ($1, $2, $3)", &[&e["seq"].as_i64(), &salt, &e["content"]]).await?;
+        if !e["content"].is_null()
+            && !e["seq"]
+                .as_i64()
+                .is_some_and(|q| removed.contains(&(q, at)))
+        {
+            let salt = hex::decode(e["salt"].as_str().unwrap_or_default())
+                .with_context(|| format!("event {} has no salt", e["seq"]))?;
+            tx.execute(
+                "INSERT INTO public.content (seq, salt, body) VALUES ($1, $2, $3)",
+                &[&e["seq"].as_i64(), &salt, &e["content"]],
+            )
+            .await?;
         }
     }
     if last > 0 {
-        tx.execute("SELECT setval(pg_get_serial_sequence('public.events', 'seq'), $1)", &[&last]).await?;
+        tx.execute(
+            "SELECT setval(pg_get_serial_sequence('public.events', 'seq'), $1)",
+            &[&last],
+        )
+        .await?;
     }
     // The backup does not say whose each row is; the events do.
     tx.batch_execute(crate::log::CONTENT_OWNERS).await?;
@@ -433,10 +740,21 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
         std::fs::create_dir_all(&vault_dir)?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&vault_dir, std::fs::Permissions::from_mode(0o700))?;
-        crate::vault::write_private(&vault_dir.join("key"), &B64.decode(v["vault"]["key"].as_str().unwrap_or_default())?)?;
-        crate::vault::write_private(&vault_dir.join("secrets.json"), v["vault"]["secrets"].as_str().unwrap_or("{}").as_bytes())?;
+        crate::vault::write_private(
+            &vault_dir.join("key"),
+            &B64.decode(v["vault"]["key"].as_str().unwrap_or_default())?,
+        )?;
+        crate::vault::write_private(
+            &vault_dir.join("secrets.json"),
+            v["vault"]["secrets"].as_str().unwrap_or("{}").as_bytes(),
+        )?;
         Ok(())
     };
+    // The databases the appliance depends on, while the log's transaction is
+    // still open: one that cannot be put back leaves the log empty, so the
+    // restore can be run again (#296).
+    let (c, w) = (cfg.clone(), v.clone());
+    tokio::task::spawn_blocking(move || restore_databases(&c, &w)).await??;
     let old_key = std::fs::read(vault_dir.join("key")).ok();
     let undo = || {
         let _ = std::fs::remove_file(vault_dir.join("secrets.json"));
