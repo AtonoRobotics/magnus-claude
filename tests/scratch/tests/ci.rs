@@ -476,6 +476,67 @@ fn the_installed_app_tests_install_webkit_webdriver_first() {
     assert!(driver < tests && clip < tests, "the installed-app tests run before WebKitWebDriver and xclip are installed");
 }
 
+/// The `run:` text of the desktop workflow's step with this name.
+fn step_run(name: &str) -> String {
+    let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
+    let step = workflow.split("      - name: ").find(|s| s.lines().next() == Some(name)).unwrap_or_else(|| panic!("no step {name}"));
+    let mut lines = step.lines().skip_while(|l| !l.trim_start().starts_with("run:"));
+    let run = lines.next().unwrap_or_else(|| panic!("{name} has no run"));
+    let inline = run.trim_start().trim_start_matches("run:").trim();
+    if inline != "|" {
+        return format!("{inline}\n");
+    }
+    let indent = run.len() - run.trim_start().len();
+    lines.take_while(|l| l.trim().is_empty() || l.len() - l.trim_start().len() > indent).map(|l| format!("{}\n", l.get(indent + 2..).unwrap_or(""))).collect()
+}
+
+/// The installed-app drivers step installed nothing: it tested `[ -n "" ]`
+/// and ran `apt-get install -y` with no packages, and the xclip check
+/// replaced the list instead of adding to it (#189). Run as CI runs it, with
+/// only these commands on the PATH: a runner without WebKitWebDriver and
+/// xclip asks for both in one install, and one with both installs nothing.
+#[test]
+fn the_installed_app_drivers_install_every_missing_package() {
+    let run_step = |present: &[&str]| {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = dir.path().join("sudo");
+        let stub = |name: &str, body: &str| {
+            let p = bin.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        };
+        stub("sudo", r#"echo "sudo $*" >> "$SUDO_LOG""#);
+        stub("cargo", r#"echo "cargo $*" >> "$SUDO_LOG""#);
+        for c in present {
+            stub(c, "exit 0");
+        }
+        let script = dir.path().join("step.sh");
+        std::fs::write(&script, step_run("Installed-app drivers")).unwrap();
+        let out = Command::new("/bin/bash")
+            .args(["--noprofile", "--norc", "-eo", "pipefail"])
+            .arg(&script)
+            .current_dir(repo())
+            .env("PATH", &bin)
+            .env("HOME", dir.path())
+            .env("CARGO_HOME", dir.path().join("cargo-home"))
+            .env("SUDO_LOG", &log)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        std::fs::read_to_string(&log).unwrap_or_default()
+    };
+    assert_eq!(
+        run_step(&["tauri-driver"]),
+        "sudo -n apt-get update -qq\nsudo -n apt-get install -y webkit2gtk-driver xclip\n",
+        "a runner without WebKitWebDriver and xclip gets both"
+    );
+    assert_eq!(run_step(&["WebKitWebDriver", "xclip", "tauri-driver"]), "", "a runner with both installs nothing");
+    // A change to the script runs everything, this test and the step included.
+    assert_eq!(select(&["release/ensure-packages.sh"]), "MAGNUS_SELECT=full\n");
+}
+
 /// Master's runs finish: a merge waits for master's run in progress instead
 /// of cancelling it, so with pull requests merging beside each other master
 /// is still tested in full and the owner's app still gets its build (#228;
