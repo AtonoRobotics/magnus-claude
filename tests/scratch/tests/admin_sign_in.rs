@@ -242,6 +242,50 @@ console.log("ok");
     assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
 }
 
+/// A network change Chromium answered with its error page is loaded again
+/// too: Playwright reports that load as interrupted by
+/// `chrome-error://chromewebdata/`, and only the page's own request names
+/// `net::ERR_NETWORK_CHANGED` (#218; runs 42139753250, 42146521203). Any
+/// other failed request is still reported at once, with its error named.
+#[test]
+fn a_network_change_shown_as_chromes_error_page_is_loaded_again() {
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests");
+    let helper = url::Url::from_file_path(tests.join("goto.mjs").canonicalize().expect("desktop/tests/goto.mjs")).unwrap();
+    let check = format!(
+        r#"
+const {{ goto }} = await import("{helper}");
+// A page as Playwright drives one: the main frame's request fails with
+// `error`, then the load is reported as interrupted by Chrome's error page.
+function page(error, failures) {{
+  const frame = {{}};
+  const on = new Map();
+  let loads = 0;
+  return {{
+    get loads() {{ return loads; }},
+    mainFrame: () => frame,
+    on: (ev, f) => on.set(ev, f),
+    off: ev => on.delete(ev),
+    goto: async u => {{
+      if (++loads > failures) return "loaded " + u;
+      on.get("requestfailed")?.({{ isNavigationRequest: () => true, frame: () => frame, failure: () => ({{ errorText: error }}) }});
+      throw new Error(`page.goto: Navigation to "${{u}}" is interrupted by another navigation to "chrome-error://chromewebdata/"`);
+    }},
+  }};
+}}
+const changed = page("net::ERR_NETWORK_CHANGED", 1);
+const r = await goto(changed, "https://console/");
+if (r !== "loaded https://console/" || changed.loads !== 2) throw new Error(`a network change shown as Chrome's error page: ${{r}} after ${{changed.loads}} loads`);
+const refused = page("net::ERR_CONNECTION_REFUSED", 9);
+await goto(refused, "https://console/").then(() => {{ throw new Error("a refusal passed"); }}, e => {{ if (!e.message.includes("net::ERR_CONNECTION_REFUSED") || refused.loads !== 1) throw new Error(`a refusal: ${{e.message}} after ${{refused.loads}} loads`); }});
+const never = page("net::ERR_NETWORK_CHANGED", 9);
+await goto(never, "https://console/").then(() => {{ throw new Error("a network that never settles passed"); }}, e => {{ if (never.loads !== 3) throw new Error(`never settling: ${{e.message}} after ${{never.loads}} loads`); }});
+console.log("ok");
+"#
+    );
+    let out = std::process::Command::new("node").args(["--input-type=module", "-e", &check]).output().expect("run node");
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
 #[test]
 fn the_console_sign_in_script_waits_two_minutes() {
     let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests/admin-sign-in.mjs")).unwrap();
