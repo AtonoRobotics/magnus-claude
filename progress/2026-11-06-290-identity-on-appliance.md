@@ -1,0 +1,6 @@
+# The appliance's own Keycloak (2026-11-06, #290)
+
+- What happened: the retired `magnus-product` deployment on strix-alpha ran an unauthorised backup to `zero` that looped every 20 s (#288). Removing that deployment, as the owner directed, also removed its Keycloak. The appliance's sign-in depended on it (`identity.pyrallon.ai`, realm `magnus`), and no copy of the realm survived.
+- New: `release/identity-on-appliance.sh`. On strix-alpha it made `magnus-appliance-kc` (Keycloak 26.8.1, production mode, `keycloak` database on `magnus-appliance-pg`, admin `https://127.0.0.1:19446`, tunnel origin `http://127.0.0.1:19447`), realm `magnus`, clients `magnus-claude`, `magnus-claude-status` (secret in the vault as `keycloak_status`), `magnus-admin`, `magnus-admin-svc`, accounts for each person (first passwords in `~/.magnus-appliance/identity/`), and gave `samuel` the realm role `admin`. A second run changes nothing it should not.
+- Changed: `config/keycloak-client.py` requires `--admin-url`, `--admin-file`, `--ca`, and creates the appliance client with the settings sign-in needs. Tests: `tests/scratch/tests/keycloak_client.rs`.
+- Left: `identity.pyrallon.ai` onto the `strix-alpha` tunnel (sign-in paths only) and its DNS, applied by the owner; then delete the retired `magnus-production` tunnel. People sign in again with the first password and set their own.

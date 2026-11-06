@@ -26,7 +26,7 @@ pub fn server_url() -> String {
 }
 
 /// The server's admin, as `dev/keycloak.sh` makes it.
-fn admin_login() -> (String, String) {
+pub fn admin_login() -> (String, String) {
     (
         std::env::var("MAGNUS_TEST_KEYCLOAK_ADMIN").unwrap_or_else(|_| "admin".into()),
         std::env::var("MAGNUS_TEST_KEYCLOAK_PASSWORD").unwrap_or_else(|_| "magnus_dev".into()),
@@ -147,6 +147,11 @@ impl Keycloak {
         let text = r.text().await.unwrap_or_default();
         assert!(status.is_success(), "Keycloak admin {method} {url}: {status} {text}");
         serde_json::from_str(&text).unwrap_or(Value::Null)
+    }
+
+    /// A client of this realm as the admin API shows it (Null when absent).
+    pub async fn client(&self, client_id: &str) -> Value {
+        self.admin(reqwest::Method::GET, &format!("/clients?clientId={client_id}"), None).await[0].clone()
     }
 
     async fn user_id(&self, username: &str) -> String {

@@ -2,7 +2,7 @@
 """Register the appliance as a client of a Keycloak realm, for sign-in with
 the device-code grant (RFC 8628). Run once, as root, on the Keycloak host:
 
-    sudo python3 -I config/keycloak-client.py
+    python3 -I config/keycloak-client.py --admin-url URL --admin-file FILE --ca CA
 
 It signs in to Keycloak's admin API with the administrator in --admin-file
 (JSON with "username" and "password"), then creates the client or updates it
@@ -31,10 +31,10 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-p.add_argument("--admin-url", default="https://127.0.0.1:19446", help="Keycloak's private administration origin")
-p.add_argument("--admin-file", default="/var/lib/magnus-production-operator/identity-admin.json")
+p.add_argument("--admin-url", required=True, help="Keycloak's private administration origin ([sign_in.oidc] status_admin_url)")
+p.add_argument("--admin-file", required=True, help="JSON with the administrator's username and password")
 p.add_argument("--admin-realm", default="master")
-p.add_argument("--ca", default="/etc/magnus-production-origin/ca.pem", help="CA that signed the administration origin's certificate")
+p.add_argument("--ca", required=True, help="CA that signed the administration origin's certificate ([sign_in.oidc] status_admin_ca)")
 p.add_argument("--realm", default="magnus")
 p.add_argument("--client-id", default="magnus-claude")
 p.add_argument("--name", default="Magnus appliance")
@@ -84,12 +84,15 @@ client = {
     "protocol": "openid-connect",
     "enabled": True,
     "publicClient": True,
-    # Only the device-code grant: no redirects, no passwords through the client.
-    "standardFlowEnabled": False,
+    # DECISIONS.md (2026-10-30): the device-code grant, a password typed in the
+    # app (Direct access grants), and Keycloak's page in the browser (Standard
+    # flow back to the app on loopback), all with PKCE S256.
+    "standardFlowEnabled": True,
     "implicitFlowEnabled": False,
-    "directAccessGrantsEnabled": False,
+    "directAccessGrantsEnabled": True,
     "serviceAccountsEnabled": False,
-    "attributes": {"oauth2.device.authorization.grant.enabled": "true"},
+    "redirectUris": ["http://127.0.0.1/*"],
+    "attributes": {"oauth2.device.authorization.grant.enabled": "true", "pkce.code.challenge.method": "S256"},
 }
 if a.admin_console:
     jwks = json.load(open(a.admin_console))
