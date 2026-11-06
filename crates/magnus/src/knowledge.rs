@@ -520,12 +520,6 @@ impl Kernel {
         Ok(item)
     }
 
-    /// The inbox card's decision "endorse": the entry becomes a company fact,
-    /// its source kept, and who did it is logged with the card.
-    pub(crate) async fn endorse(&self, actor: &str, by: &str, item: &str, entry: &str, note: Option<String>) -> Result<()> {
-        self.emit(actor, Ev::KnowledgeEndorsed { id: entry.into(), by: by.into(), item: Some(item.into()), note }).await?;
-        self.index_id(entry).await
-    }
 
     /// `knowledge_search`: what the asker may read, each entry marked with
     /// its integrity. The result is untrusted unless every entry is a

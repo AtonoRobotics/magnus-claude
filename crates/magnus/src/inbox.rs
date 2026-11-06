@@ -121,6 +121,14 @@ impl Kernel {
         let run = item.run.clone().unwrap_or_default();
         let call_id = item.details["call_id"].as_str().unwrap_or_default().to_string();
         let resolve = |scope: Option<String>| Ev::ItemResolved { id: item.id.clone(), decision: decision.clone(), scope, text: text.clone() };
+        // The decision and everything it causes go to the log in one write
+        // (#194): a crash leaves all of it or none, never a decided card
+        // whose grant, result or resumption is missing.
+        let mut evs: Vec<(&str, Ev)> = Vec::new();
+        // The run ends with this decision: its resources go once it is written.
+        let mut ended = false;
+        // An entry made a company fact is searched as one once it is written.
+        let mut endorsed = None;
 
         match (item.kind.as_str(), decision.as_str()) {
             ("approval", "approve") => {
@@ -148,8 +156,8 @@ impl Kernel {
                     _ => None,
                 };
                 let reason = if unknown { Some("unknown_outcome".to_string()) } else { item.details["rule"].as_str().map(String::from) };
-                self.emit(&actor, resolve(Some(scope.clone()))).await?;
-                self.emit(
+                evs.push((&actor, resolve(Some(scope.clone()))));
+                evs.push((
                     &actor,
                     Ev::Approval {
                         id: new_id("appr"),
@@ -163,12 +171,11 @@ impl Kernel {
                         reason,
                         risk: item.details["risk"].as_str().map(String::from),
                     },
-                )
-                .await?;
-                self.resume_after(&run).await?;
+                ));
+                evs.extend(self.resume(&run));
             }
             ("approval", "reject") => {
-                self.emit(&actor, resolve(None)).await?;
+                evs.push((&actor, resolve(None)));
                 let unknown = item.details["reason"] == "unknown_outcome";
                 let msg = if unknown {
                     format!("{} was treated as not done, by the person's decision. {}", item.details["tool"].as_str().unwrap_or_default(), text.clone().unwrap_or_default())
@@ -178,13 +185,13 @@ impl Kernel {
                         text.as_ref().map(|t| format!(": {t}")).unwrap_or_default()
                     )
                 };
-                self.reply(&run, &call_id, msg, true, Label::PRINCIPAL).await?;
-                self.resume_after(&run).await?;
+                evs.extend(reply(&run, &call_id, msg, true, Label::PRINCIPAL));
+                evs.extend(self.resume(&run));
             }
             ("review", "accept") => {
-                self.emit(&actor, resolve(None)).await?;
+                evs.push((&actor, resolve(None)));
                 for c in item.details["criteria"].as_array().cloned().unwrap_or_default() {
-                    self.emit(
+                    evs.push((
                         &actor,
                         Ev::Verification {
                             run: run.clone(),
@@ -193,11 +200,10 @@ impl Kernel {
                             evidence: json!({ "reviewed_by": p.id, "note": text }),
                             by: actor.clone(),
                         },
-                    )
-                    .await?;
+                    ));
                 }
-                self.reply(&run, &call_id, "The person reviewed the work and accepted it.", false, Label::PRINCIPAL).await?;
-                self.emit(
+                evs.extend(reply(&run, &call_id, "The person reviewed the work and accepted it.", false, Label::PRINCIPAL));
+                evs.push((
                     &actor,
                     Ev::Completed {
                         run: run.clone(),
@@ -205,40 +211,39 @@ impl Kernel {
                         view: item.details.get("view").filter(|v| !v.is_null()).cloned(),
                         spoken: item.details["spoken"].as_str().map(String::from),
                     },
-                )
-                .await?;
-                self.on_stop(&run, true).await;
+                ));
+                ended = true;
             }
             ("review", "reject") => {
-                self.emit(&actor, resolve(None)).await?;
+                evs.push((&actor, resolve(None)));
                 let msg = format!(
                     "The person reviewed the work and did not accept it{}. The task stays open; a retry without changes will not help.",
                     text.as_ref().map(|t| format!(": {t}")).unwrap_or_default()
                 );
-                self.reply(&run, &call_id, msg, true, Label::PRINCIPAL).await?;
-                self.resume_after(&run).await?;
+                evs.extend(reply(&run, &call_id, msg, true, Label::PRINCIPAL));
+                evs.extend(self.resume(&run));
             }
             ("contract_change", "approve") => {
                 let version = self.read(|s| s.runs.get(&run).map(|r| r.contract_version)).unwrap_or(0) + 1;
-                self.emit(&actor, resolve(None)).await?;
-                self.emit(&actor, Ev::Contract { run: run.clone(), version, contract: item.details["new"].clone(), approved_by: Some(actor.clone()) }).await?;
-                self.reply(&run, &call_id, format!("The person approved the contract change. Version {version} is in force, and frozen."), false, Label::PRINCIPAL).await?;
-                self.resume_after(&run).await?;
+                evs.push((&actor, resolve(None)));
+                evs.push((&actor, Ev::Contract { run: run.clone(), version, contract: item.details["new"].clone(), approved_by: Some(actor.clone()) }));
+                evs.extend(reply(&run, &call_id, format!("The person approved the contract change. Version {version} is in force, and frozen."), false, Label::PRINCIPAL));
+                evs.extend(self.resume(&run));
             }
             ("contract_change", "reject") => {
-                self.emit(&actor, resolve(None)).await?;
+                evs.push((&actor, resolve(None)));
                 let msg = format!(
                     "The person kept the contract (version {}){}. Its criteria still decide when the task is done: finish against them, or call task_fail.",
                     item.details["version"],
                     text.as_ref().map(|t| format!(": {t}")).unwrap_or_default()
                 );
-                self.reply(&run, &call_id, msg, true, Label::PRINCIPAL).await?;
-                self.resume_after(&run).await?;
+                evs.extend(reply(&run, &call_id, msg, true, Label::PRINCIPAL));
+                evs.extend(self.resume(&run));
             }
             ("question", "answer") => {
-                self.emit(&actor, resolve(None)).await?;
-                self.reply(&run, &call_id, format!("The person answered: {}", text.clone().unwrap_or_default()), false, Label::PRINCIPAL).await?;
-                self.resume_after(&run).await?;
+                evs.push((&actor, resolve(None)));
+                evs.extend(reply(&run, &call_id, format!("The person answered: {}", text.clone().unwrap_or_default()), false, Label::PRINCIPAL));
+                evs.extend(self.resume(&run));
             }
             ("policy_proposal", "accept") => {
                 let layer = item.details["layer"].as_str().unwrap_or_default().to_string();
@@ -250,16 +255,16 @@ impl Kernel {
                 if let Err(e) = crate::policy::validate(&next) {
                     return Ok(Answer::Invalid(format!("the combined policy does not parse: {e}")));
                 }
-                self.emit(&actor, resolve(None)).await?;
-                self.emit(&actor, Ev::PolicySet { layer, cedar: next }).await?;
+                evs.push((&actor, resolve(None)));
+                evs.push((&actor, Ev::PolicySet { layer, cedar: next }));
             }
             // A schedule a worker proposed runs within the proposing run's
             // limits and starts with its taint, as a chat card's does: it
             // cannot get more than the run that asked for it had.
             ("schedule_proposal", "accept") => {
                 let from = self.read(|s| item.run.as_ref().and_then(|r| s.runs.get(r)).map(|r| (r.config.budget.clone(), Label { untrusted: r.untrusted, private: r.private })));
-                self.emit(&actor, resolve(None)).await?;
-                self.emit(
+                evs.push((&actor, resolve(None)));
+                evs.push((
                     &actor,
                     Ev::ScheduleSet {
                         id: new_id("sched"),
@@ -277,8 +282,7 @@ impl Kernel {
                         max_runs: item.details["max_runs"].as_u64().map(|m| m as u32),
                         scope: None,
                     },
-                )
-                .await?;
+                ));
             }
             // An entry becomes a company fact; its source stays attached, and
             // who endorsed it, from which card, is in the log.
@@ -287,19 +291,20 @@ impl Kernel {
                 if self.read(|s| s.knowledge.get(&entry).map(|e| e.integrity.clone())).is_none() {
                     return Ok(Answer::Invalid("the entry no longer exists".into()));
                 }
-                self.emit(&actor, resolve(None)).await?;
-                self.endorse(&actor, &p.id, &item.id, &entry, text.clone()).await?;
+                evs.push((&actor, resolve(None)));
+                evs.push((&actor, Ev::KnowledgeEndorsed { id: entry.clone(), by: p.id.clone(), item: Some(item.id.clone()), note: text.clone() }));
+                endorsed = Some(entry);
             }
             ("endorsement", "decline") => {
-                self.emit(&actor, resolve(None)).await?;
+                evs.push((&actor, resolve(None)));
             }
             // The owner says what became of a request to delete someone's
             // data; the note tells the person.
             ("deletion_request", "done") | ("deletion_request", "decline") => {
-                self.emit(&actor, resolve(None)).await?;
+                evs.push((&actor, resolve(None)));
             }
             ("schedule_proposal", "reject") | ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("shared", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") => {
-                self.emit(&actor, resolve(None)).await?;
+                evs.push((&actor, resolve(None)));
             }
             // Only the kernel's own notices (which name a reason) can continue a
             // run; a message the agent wrote cannot.
@@ -315,25 +320,24 @@ impl Kernel {
                 if stopped && self.read(|s| s.kill_switch) {
                     return Ok(Answer::Conflict("the kill switch is engaged"));
                 }
-                self.emit(&actor, resolve(None)).await?;
+                evs.push((&actor, resolve(None)));
                 if stopped {
-                    self.emit(&actor, Ev::Resumed { run: run.clone() }).await?;
-                    self.wake(&run);
-                    return Ok(Answer::Ok);
-                }
-                if decision == "extend" {
-                    if let Some(mut b) = self.read(|s| s.runs.get(&run).map(|r| r.config.budget.clone())) {
-                        b.max_model_calls *= 2;
-                        b.max_actions *= 2;
-                        b.max_usd *= 2.0;
-                        self.emit(&actor, Ev::BudgetExtended { run: run.clone(), budget: b }).await?;
+                    evs.push((&actor, Ev::Resumed { run: run.clone() }));
+                } else {
+                    if decision == "extend" {
+                        if let Some(mut b) = self.read(|s| s.runs.get(&run).map(|r| r.config.budget.clone())) {
+                            b.max_model_calls *= 2;
+                            b.max_actions *= 2;
+                            b.max_usd *= 2.0;
+                            evs.push((&actor, Ev::BudgetExtended { run: run.clone(), budget: b }));
+                        }
                     }
+                    evs.extend(self.resume(&run));
                 }
-                self.resume_after(&run).await?;
             }
             ("tool_change", "approve") => {
-                self.emit(&actor, resolve(None)).await?;
-                self.emit(
+                evs.push((&actor, resolve(None)));
+                evs.push((
                     &actor,
                     Ev::ToolPinned {
                         tool: item.details["tool"].as_str().unwrap_or_default().into(),
@@ -342,17 +346,16 @@ impl Kernel {
                         input_schema: item.details["input_schema"].clone(),
                         approved: true,
                     },
-                )
-                .await?;
+                ));
             }
             ("tool_review", "approve") => {
-                self.emit(&actor, resolve(None)).await?;
+                evs.push((&actor, resolve(None)));
                 for t in item.details["tools"].as_array().cloned().unwrap_or_default() {
                     let name = t["tool"].as_str().unwrap_or_default().to_string();
                     // Approve only definitions that are still the pinned ones.
                     let current = self.read(|s| s.pins.get(&name).map(|p| p.hash.clone()));
                     if current.as_deref() == t["hash"].as_str() {
-                        self.emit(
+                        evs.push((
                             &actor,
                             Ev::ToolPinned {
                                 tool: name,
@@ -361,49 +364,56 @@ impl Kernel {
                                 input_schema: t["input_schema"].clone(),
                                 approved: true,
                             },
-                        )
-                        .await?;
+                        ));
                     }
                 }
             }
             (kind, d) => return Ok(Answer::Invalid(format!("{d:?} is not a decision for a {kind} item"))),
         }
+        // A run resumed here is driven from now. One whose driver a crash
+        // stopped is running in the log, and the kernel's sweep drives it.
+        let resumed = evs.iter().any(|(_, e)| matches!(e, Ev::Resumed { .. }));
+        self.emit_all(evs).await?;
+        if resumed {
+            self.wake(&run);
+        }
+        if ended {
+            self.on_stop(&run, true).await;
+        }
+        if let Some(entry) = endorsed {
+            self.index_id(&entry).await?;
+        }
         Ok(Answer::Ok)
     }
 
-    async fn reply(&self, run: &str, call_id: &str, text: impl Into<String>, is_error: bool, label: Label) -> Result<()> {
-        if run.is_empty() || call_id.is_empty() {
-            return Ok(());
-        }
-        self.emit(
-            "kernel",
-            Ev::ToolResult {
-                run: run.into(),
-                call_id: call_id.into(),
-                key: None,
-                status: if is_error { "failed".into() } else { "done".into() },
-                text: text.into(),
-                is_error,
-                label,
-                data: None,
-                sources: vec![],
-                check: false,
-            },
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Resume a run that was waiting on a person, unless the kill switch holds.
-    async fn resume_after(self: &Arc<Self>, run: &str) -> Result<()> {
+    /// A run waiting on a person goes on, unless the kill switch holds it.
+    fn resume(&self, run: &str) -> Option<(&'static str, Ev)> {
         if run.is_empty() {
-            return Ok(());
+            return None;
         }
         let (suspended, reason) = self.read(|s| s.runs.get(run).map(|r| (r.status == Status::Suspended, r.reason.clone()))).unwrap_or((false, None));
-        if suspended && reason.as_deref() != Some("kill_switch") && !self.read(|s| s.kill_switch) {
-            self.emit("kernel", Ev::Resumed { run: run.into() }).await?;
-            self.wake(run);
-        }
-        Ok(())
+        (suspended && reason.as_deref() != Some("kill_switch") && !self.read(|s| s.kill_switch)).then(|| ("kernel", Ev::Resumed { run: run.into() }))
     }
+}
+
+/// What the tool call waiting on the card is told of the decision.
+fn reply(run: &str, call_id: &str, text: impl Into<String>, is_error: bool, label: Label) -> Option<(&'static str, Ev)> {
+    if run.is_empty() || call_id.is_empty() {
+        return None;
+    }
+    Some((
+        "kernel",
+        Ev::ToolResult {
+            run: run.into(),
+            call_id: call_id.into(),
+            key: None,
+            status: if is_error { "failed".into() } else { "done".into() },
+            text: text.into(),
+            is_error,
+            label,
+            data: None,
+            sources: vec![],
+            check: false,
+        },
+    ))
 }

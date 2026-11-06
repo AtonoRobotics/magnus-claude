@@ -214,6 +214,8 @@ impl Kernel {
         let t = Instant::now();
         let owner = self.read(|s| s.content_owner(&ev, &HashMap::new()));
         let e = self.log.append(actor, &ev, owner.as_deref()).await?;
+        #[cfg(debug_assertions)]
+        self.crash_after(std::iter::once(&ev));
         let us = t.elapsed().as_micros() as u64;
         {
             let mut c = self.capture.lock().unwrap();
@@ -248,12 +250,32 @@ impl Kernel {
                 .collect::<Vec<_>>()
         });
         let es = self.log.append_all(&evs, &owners).await?;
+        #[cfg(debug_assertions)]
+        self.crash_after(evs.iter().map(|(_, e)| e));
         self.capture.lock().unwrap().appends += es.len() as u64;
         let mut s = self.state.lock().unwrap();
         for e in &es {
             s.apply(e);
         }
         Ok(es)
+    }
+
+    /// Debug builds only, for the crash tests: the process ends at once,
+    /// as a crash would, right after a write that put an event of the kind
+    /// named in `<state_dir>/crash-after` in the log, and before anything
+    /// else happens. The file goes first, so the next start runs clean.
+    /// Release builds, the only ones shipped, have none of this.
+    #[cfg(debug_assertions)]
+    fn crash_after<'a>(&self, mut evs: impl Iterator<Item = &'a Ev>) {
+        let path = self.cfg.appliance.state_dir.join("crash-after");
+        let Ok(kind) = std::fs::read_to_string(&path) else { return };
+        if evs.any(|e| serde_json::to_value(e).is_ok_and(|v| v["kind"] == kind.trim())) {
+            let _ = std::fs::remove_file(&path);
+            eprintln!("crash-after: ending the process after a {} was written", kind.trim());
+            // SAFETY: _exit ends the process without running anything more,
+            // which is the crash this stands for.
+            unsafe { libc::_exit(70) };
+        }
     }
 
     pub async fn run_events(&self, run: &str) -> Result<Vec<Event>> {
