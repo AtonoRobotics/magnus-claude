@@ -251,6 +251,62 @@ async fn a_draft_changed_after_its_card_asks_again_showing_the_change() {
     only_gmail(&app, &gmail, &provider);
 }
 
+/// An approval holds for every part of the email, not only what the card
+/// shows: a change to only the HTML part, or to only an attachment's bytes
+/// (same name, same size), is another email and asks again (#177).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_to_a_part_the_card_does_not_show_asks_again() {
+    let gmail = StandInGmail::with_drafts(1).await;
+    {
+        let mut d = gmail.draft.lock().unwrap();
+        d["html"] = json!("<p>Friday works.</p>");
+        d["attachment"] = json!({ "filename": "plan.pdf", "data": "%PDF plan v1" });
+    }
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("send Bo the draft I wrote", "Bo has it"),
+            1 => tool("gmail__send_draft", json!({ "draft_id": "d1" })),
+            _ => complete("sent Bo your draft"),
+        }
+    }))
+    .await;
+    let (app, provider, _image) = gmail_for_alice(&m, &gmail).await;
+    let alice = app.api("alice");
+    let send = ("POST".to_string(), "/drafts/send".to_string());
+    let task = alice.submit("Send Bo the draft I wrote.").await;
+    let next_card = |seen: Vec<Value>| {
+        let alice = &alice;
+        let task = &task;
+        async move {
+            eventually("a new card for the changed draft", std::time::Duration::from_secs(60), || async {
+                alice.open_items(task, "approval").await.into_iter().find(|i| !seen.iter().any(|s| s["id"] == i["id"]))
+            })
+            .await
+        }
+    };
+
+    let first = next_card(vec![]).await;
+    gmail.draft.lock().unwrap()["html"] = json!("<p>Friday works. <a href=\"https://evil.example\">Pay here</a></p>");
+    approve(&alice, &first).await;
+    let second = next_card(vec![first.clone()]).await;
+    assert_eq!(second["details"]["destinations"], first["details"]["destinations"], "the card shows what it showed: the HTML part is not on it");
+    assert_ne!(second["details"]["input_hash"], first["details"]["input_hash"]);
+    assert!(!calls(&gmail).contains(&send), "an email changed only in its HTML part was sent on the old approval");
+
+    gmail.draft.lock().unwrap()["attachment"]["data"] = json!("%PDF plan v2");
+    approve(&alice, &second).await;
+    let third = next_card(vec![first.clone(), second.clone()]).await;
+    assert_ne!(third["details"]["input_hash"], second["details"]["input_hash"]);
+    assert!(!calls(&gmail).contains(&send), "an email changed only in an attachment's bytes was sent on the old approval");
+
+    approve(&alice, &third).await;
+    let review = alice.wait_item(&task, "review").await;
+    assert!(alice.respond(review["id"].as_str().unwrap(), json!({ "decision": "accept" })).await.is_success());
+    assert_eq!(alice.wait_settled(&task).await["status"], "completed");
+    assert_eq!(calls(&gmail).iter().filter(|c| **c == send).count(), 1);
+    only_gmail(&app, &gmail, &provider);
+}
+
 /// Google's refusals reach the boundary as what they mean: a sign-in
 /// without Gmail's access asks the person for it with the app's card, and a
 /// send with no clear answer is an unknown outcome, never a failure that

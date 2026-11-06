@@ -164,6 +164,8 @@ pub fn input_hash(tool: &str, input: &Value) -> String {
 pub struct Shown {
     pub recipients: std::collections::BTreeMap<String, Vec<String>>,
     pub content: std::collections::BTreeMap<String, Value>,
+    /// What the approval also holds for, unshown (`bound`, #177).
+    pub bound: std::collections::BTreeMap<String, Value>,
 }
 
 impl Shown {
@@ -172,11 +174,13 @@ impl Shown {
     }
 
     /// The approval hash of this action going to exactly these recipients
-    /// with exactly this content: a draft changed after it was approved,
-    /// even by one added Bcc, is another action and asks again.
+    /// with exactly this content, every part of it: a draft changed after
+    /// it was approved, even by one added Bcc or only in its HTML part, is
+    /// another action and asks again.
     pub fn hash(&self, tool: &str, input: &Value) -> String {
         use sha2::Digest;
-        hex::encode(&sha2::Sha256::digest(format!("{tool}\n{}\n{}", canonical(input), canonical(&self.details())).as_bytes())[..16])
+        let held = json!({ "shown": self.details(), "bound": self.bound });
+        hex::encode(&sha2::Sha256::digest(format!("{tool}\n{}\n{}", canonical(input), canonical(&held)).as_bytes())[..16])
     }
 }
 
@@ -869,7 +873,7 @@ impl Kernel {
         if recipients.values().all(|v| v.is_empty()) {
             return Err(format!("{id} names no recipients at {}, so {} would reach no one Magnus can show. {nothing}", f.app, a.tool));
         }
-        Ok(Some(Shown { recipients, content: d.content.iter().map(field).collect() }))
+        Ok(Some(Shown { recipients, content: d.content.iter().map(field).collect(), bound: d.bound.iter().map(field).collect() }))
     }
 
     async fn call(self: &Arc<Self>, a: &Action, f: &Facts, bearer: Option<&str>, key: &str, stops: u64) -> std::result::Result<(String, bool, Option<Value>), CallFailure> {

@@ -1625,6 +1625,7 @@ dependencies = [
  "base64 0.22.1",
  "magnus-brokered-kit",
  "serde_json",
+ "sha2 0.10.9",
  "toml",
 ]
 

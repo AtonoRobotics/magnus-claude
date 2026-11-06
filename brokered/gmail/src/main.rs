@@ -233,7 +233,40 @@ fn list_drafts(a: &Value, t: &str) -> Result<Value, Failure> {
 
 fn get_draft(a: &Value, t: &str) -> Result<Value, Failure> {
     let r = gmail("GET", &format!("/drafts/{}?format=full", id(a, "draft_id")?), t, None)?;
-    Ok(json!({ "draft_id": r["id"], "message": message(&r["message"]) }))
+    let mut m = message(&r["message"]);
+    m["digest"] = json!(digest(&r["message"], t)?);
+    Ok(json!({ "draft_id": r["id"], "message": m }))
+}
+
+/// A digest of every part of a message as it would be sent: each part's
+/// type, file name and bytes, in order, an attachment's bytes fetched by
+/// its id (its id is not stable; its bytes are). The approval holds for it,
+/// so a change to a part the card does not show, such as the HTML part or
+/// an attachment's contents, asks again (#177).
+fn digest(m: &Value, t: &str) -> Result<String, Failure> {
+    use sha2::Digest;
+    fn walk(part: &Value, mid: &str, t: &str, h: &mut sha2::Sha256) -> Result<(), Failure> {
+        let bytes = match (part["body"]["data"].as_str(), part["body"]["attachmentId"].as_str()) {
+            (Some(d), _) => URL_SAFE.decode(d).or_else(|_| URL_SAFE_NO_PAD.decode(d)).unwrap_or_default(),
+            (None, Some(aid)) => {
+                let a = gmail("GET", &format!("/messages/{mid}/attachments/{aid}"), t, None)?;
+                let d = a["data"].as_str().unwrap_or_default();
+                URL_SAFE.decode(d).or_else(|_| URL_SAFE_NO_PAD.decode(d)).unwrap_or_default()
+            }
+            _ => vec![],
+        };
+        for field in [part["mimeType"].as_str().unwrap_or_default().as_bytes(), part["filename"].as_str().unwrap_or_default().as_bytes(), &bytes] {
+            h.update((field.len() as u64).to_be_bytes());
+            h.update(field);
+        }
+        for p in part["parts"].as_array().into_iter().flatten() {
+            walk(p, mid, t, h)?;
+        }
+        Ok(())
+    }
+    let mut h = sha2::Sha256::new();
+    walk(&m["payload"], m["id"].as_str().unwrap_or_default(), t, &mut h)?;
+    Ok(STANDARD.encode(h.finalize()))
 }
 
 fn create_draft(a: &Value, t: &str) -> Result<Value, Failure> {

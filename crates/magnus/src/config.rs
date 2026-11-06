@@ -806,6 +806,11 @@ pub struct Destination {
     pub recipients: Vec<String>,
     #[serde(default)]
     pub content: Vec<String>,
+    /// Fields the approval holds for but the card does not show: a digest
+    /// of every part of the message, so a change to a part the card does
+    /// not show (an HTML part, an attachment's bytes) asks again (#177).
+    #[serde(default)]
+    pub bound: Vec<String>,
 }
 
 impl Destination {
@@ -824,7 +829,7 @@ impl Destination {
             return Some(format!("{tool} names no id field or no recipients"));
         }
         let mut names = std::collections::BTreeSet::new();
-        for p in self.recipients.iter().chain(&self.content) {
+        for p in self.recipients.iter().chain(&self.content).chain(&self.bound) {
             let name = p.rsplit('/').next().unwrap_or_default();
             if !p.starts_with('/') || name.is_empty() || !names.insert(name) {
                 return Some(format!("{tool}: {p:?} is not a JSON pointer ending in a field name of its own"));
