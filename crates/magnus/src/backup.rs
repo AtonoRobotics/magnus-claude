@@ -131,41 +131,110 @@ impl Kernel {
     /// month later. Each backup records the last removal it has had applied
     /// (`scrubbed_through`); one made before that removal is rewritten, its
     /// removed events' content and salt dropped, and encrypted again. Run
-    /// after each removal and at start (for a removal cut short).
+    /// after each removal, at start (for a removal cut short) and hourly
+    /// while a backup could not be rewritten.
+    ///
+    /// A backup that cannot be read or rewritten does not stop the others;
+    /// it is recorded (`BackupScrubPending`) and the scrub fails, so an
+    /// erasure is not called complete while a backup still holds its
+    /// content, until a later scrub rewrites it (`BackupsScrubbed`) (#195).
     pub async fn scrub_backups(&self) -> Result<usize> {
         let removals = self.log.removals().await?;
         let Some(&(latest, _)) = removals.last() else { return Ok(0) };
         let dir = self.cfg.backup_dir();
-        if !dir.exists() {
-            return Ok(0);
-        }
         let _one = backing_up().lock().await;
-        let cfg = self.cfg.clone();
-        tokio::task::spawn_blocking(move || -> Result<usize> {
-            let cipher = key(&cfg, false)?;
-            let mut rewritten = 0;
-            for (name, _) in list(&dir) {
-                let path = dir.join(&name);
-                let mut v = open(&cipher, &std::fs::read(&path)?)?;
-                let done = v["scrubbed_through"].as_i64().unwrap_or(0);
-                if done >= latest {
-                    continue;
-                }
-                let gone: std::collections::HashSet<i64> = removals.iter().filter(|(at, _)| *at > done).flat_map(|(_, seqs)| seqs.iter().copied()).collect();
-                for e in v["events"].as_array_mut().into_iter().flatten() {
-                    if e["seq"].as_i64().is_some_and(|q| gone.contains(&q)) {
-                        e["content"] = Value::Null;
-                        e["salt"] = Value::Null;
+        let (rewritten, left) = if dir.exists() {
+            let cfg = self.cfg.clone();
+            tokio::task::spawn_blocking(move || {
+                // What has been removed, where a restore of a backup that
+                // could not be rewritten finds it (`restore`).
+                note_removals(&cfg, &removals);
+                let files = list(&dir);
+                let cipher = match key(&cfg, false) {
+                    Ok(c) => c,
+                    Err(e) => return (0, files.into_iter().map(|(name, _)| (name, 0, format!("{e:#}"))).collect()),
+                };
+                let mut rewritten = 0;
+                let mut left: Vec<(String, i64, String)> = vec![];
+                for (name, _) in files {
+                    let mut done = 0;
+                    match scrub_one(&cipher, &dir.join(&name), &removals, latest, &mut done) {
+                        Ok(true) => rewritten += 1,
+                        Ok(false) => {}
+                        Err(e) => left.push((name, done, format!("{e:#}"))),
                     }
                 }
-                v["scrubbed_through"] = json!(latest);
-                crate::vault::write_private(&path, &seal(&cipher, &serde_json::to_vec(&v)?)?)?;
-                rewritten += 1;
+                (rewritten, left)
+            })
+            .await?
+        } else {
+            (0, vec![])
+        };
+        if left.is_empty() {
+            if self.read(|s| s.scrub_pending.is_some()) {
+                self.emit("kernel", Ev::BackupsScrubbed { through: latest }).await?;
             }
-            Ok(rewritten)
-        })
-        .await?
+            return Ok(rewritten);
+        }
+        let from = left.iter().map(|l| l.1).min().unwrap_or(0);
+        let files: Vec<String> = left.iter().map(|l| l.0.clone()).collect();
+        let detail = left.iter().map(|(f, _, e)| format!("{f}: {e}")).collect::<Vec<_>>().join("; ");
+        // Once per change, not at every retry.
+        let same = self.read(|s| s.scrub_pending.as_ref().is_some_and(|p| (p.from, p.through, &p.files) == (from, latest, &files)));
+        if !same {
+            self.emit("kernel", Ev::BackupScrubPending { from, through: latest, files: files.clone(), detail: detail.clone() }).await?;
+        }
+        bail!("{} backups still hold removed content: {detail}", files.len())
     }
+}
+
+/// Take the removals after the backup's own out of one backup; whether it
+/// was rewritten. `done` is the last removal it had, once it is read.
+fn scrub_one(cipher: &XChaCha20Poly1305, path: &Path, removals: &[(i64, Vec<i64>)], latest: i64, done: &mut i64) -> Result<bool> {
+    let mut v = open(cipher, &std::fs::read(path)?)?;
+    *done = v["scrubbed_through"].as_i64().unwrap_or(0);
+    if *done >= latest {
+        return Ok(false);
+    }
+    let gone: std::collections::HashSet<i64> = removals.iter().filter(|(at, _)| *at > *done).flat_map(|(_, seqs)| seqs.iter().copied()).collect();
+    for e in v["events"].as_array_mut().into_iter().flatten() {
+        if e["seq"].as_i64().is_some_and(|q| gone.contains(&q)) {
+            e["content"] = Value::Null;
+            e["salt"] = Value::Null;
+        }
+    }
+    v["scrubbed_through"] = json!(latest);
+    crate::vault::write_private(path, &seal(cipher, &serde_json::to_vec(&v)?)?)?;
+    Ok(true)
+}
+
+/// The record of removals a restore reads: the events whose content was
+/// removed, by number only (no content, no names). Kept in the state
+/// directory, which the kernel can always write, and beside the backups,
+/// which go with them to another machine.
+const REMOVALS: &str = "removals.json";
+
+fn note_removals(cfg: &Config, removals: &[(i64, Vec<i64>)]) {
+    let doc = json!({ "removals": removals }).to_string();
+    for dir in [cfg.appliance.state_dir.clone(), cfg.backup_dir()] {
+        if let Err(e) = crate::vault::write_private(&dir.join(REMOVALS), doc.as_bytes()) {
+            tracing::warn!("recording the removals in {}: {e:#}", dir.display());
+        }
+    }
+}
+
+/// Every event whose content was removed, as recorded in the state
+/// directory, beside the backups and beside the backup being restored.
+fn removed_seqs(cfg: &Config, from: &Path) -> std::collections::HashSet<i64> {
+    let dirs = [Some(cfg.appliance.state_dir.clone()), Some(cfg.backup_dir()), from.parent().map(Path::to_path_buf)];
+    dirs.into_iter()
+        .flatten()
+        .filter_map(|d| std::fs::read(d.join(REMOVALS)).ok())
+        .filter_map(|b| serde_json::from_slice::<Value>(&b).ok())
+        .flat_map(|v| v["removals"].as_array().cloned().unwrap_or_default())
+        .flat_map(|r| r[1].as_array().cloned().unwrap_or_default())
+        .filter_map(|q| q.as_i64())
+        .collect()
 }
 
 fn backing_up() -> &'static tokio::sync::Mutex<()> {
@@ -243,6 +312,9 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
     let cipher = key(cfg, false)?;
     let v = open(&cipher, &std::fs::read(from).with_context(|| format!("read {}", from.display()))?)?;
     let (n, last) = check(&v)?;
+    // A backup that could not be rewritten after a removal (an erasure)
+    // still holds what was removed: it is left out here too (#195).
+    let removed = removed_seqs(cfg, from);
     let vault_dir = cfg.appliance.state_dir.join("vault");
     if vault_dir.join("secrets.json").exists() {
         bail!("{} already holds secrets; restore into an empty state directory", vault_dir.display());
@@ -265,7 +337,7 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
             &[&e["seq"].as_i64(), &at, &e["kind"].as_str(), &e["actor"].as_str(), &e["run_id"].as_str(), &e["body"]],
         )
         .await?;
-        if !e["content"].is_null() {
+        if !e["content"].is_null() && !e["seq"].as_i64().is_some_and(|q| removed.contains(&q)) {
             let salt = hex::decode(e["salt"].as_str().unwrap_or_default()).with_context(|| format!("event {} has no salt", e["seq"]))?;
             tx.execute("INSERT INTO public.content (seq, salt, body) VALUES ($1, $2, $3)", &[&e["seq"].as_i64(), &salt, &e["content"]]).await?;
         }

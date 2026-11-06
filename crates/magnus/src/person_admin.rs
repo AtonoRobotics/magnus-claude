@@ -195,11 +195,17 @@ impl Kernel {
             self.log.delete_content(&seqs).await.map_err(failed)?;
         }
         self.emit(actor, Ev::PersonErased { person: person.to_string() }).await.map_err(failed)?;
+        // Not complete while a backup still holds their content: the backups
+        // left are recorded and tried again until they are rewritten (#195).
+        let mut out = json!({ "runs_stopped": going.len(), "schedules_ended": schedules.len(), "sessions_ended": sessions, "sign_ins_revoked": sign_ins, "content_removed": n, "erasure": "complete" });
         if n > 0 {
             if let Err(e) = self.scrub_backups().await {
-                tracing::error!("taking {person}'s content out of the backups: {e:#}");
+                tracing::error!("erasing {person}: their content is still in backups: {e:#}");
+                out["erasure"] = json!("incomplete");
+                out["backups_pending"] = json!(self.read(|s| s.scrub_pending.as_ref().map(|p| p.files.clone())).unwrap_or_default());
+                out["detail"] = json!(format!("their content is still in backups, which are rewritten without it at the next try (hourly, and at start): {e:#}"));
             }
         }
-        Ok(json!({ "runs_stopped": going.len(), "schedules_ended": schedules.len(), "sessions_ended": sessions, "sign_ins_revoked": sign_ins, "content_removed": n }))
+        Ok(out)
     }
 }

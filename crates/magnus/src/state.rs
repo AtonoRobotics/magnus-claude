@@ -657,6 +657,28 @@ pub enum NotTrashable {
     Running,
 }
 
+/// Removed content still in backups kept, while it is (#195): the backups
+/// whose rewrite failed have had the removals up to `from`, not those after
+/// it through `through`.
+#[derive(Clone, Debug, Serialize)]
+pub struct ScrubPending {
+    pub from: i64,
+    pub through: i64,
+    pub files: Vec<String>,
+    pub detail: String,
+    pub at: DateTime<Utc>,
+}
+
+/// A person erased with content: the removal that took it, their provider
+/// subject then (the console's name for them), and whether a backup still
+/// holds it.
+#[derive(Clone, Debug)]
+pub struct Erasure {
+    pub removal: i64,
+    pub subject: Option<String>,
+    pub pending: bool,
+}
+
 /// An admin's settings for one of the organisation's apps: on or off, and
 /// who may use it (None: the app's own groups).
 #[derive(Clone, Debug, Default)]
@@ -691,6 +713,10 @@ pub struct State {
     pub turned_off: std::collections::BTreeSet<String>,
     /// The latest backup's restore check: file, whether it restored, detail, when.
     pub last_backup: Option<(String, bool, String, DateTime<Utc>)>,
+    /// Removed content some backups still hold, until they are rewritten.
+    pub scrub_pending: Option<ScrubPending>,
+    /// Each person erased with content, by their id then.
+    pub erasures: BTreeMap<String, Erasure>,
     /// An appliance update in progress: from, to, and whether it is a rollback.
     pub updating: Option<(String, String, bool)>,
     pub last_update: Option<Update>,
@@ -1010,6 +1036,25 @@ impl State {
     }
 
     /// A trashed item back where it was.
+    /// Which erasures a backup still holds, after a scrub's record: each
+    /// change is in the audit, as the console names the person (#195).
+    fn erasures_pending(&mut self, e: &Event) {
+        let pending = self.scrub_pending.clone();
+        for (person, er) in self.erasures.iter_mut() {
+            let now = pending.as_ref().is_some_and(|p| p.from < er.removal && er.removal <= p.through);
+            if now == er.pending {
+                continue;
+            }
+            er.pending = now;
+            let (action, after) = match &pending {
+                Some(p) if now => ("user_erasure_incomplete", serde_json::json!({ "backups": p.files, "detail": p.detail })),
+                _ => ("user_erasure_completed", serde_json::json!({ "backups": "every backup kept is rewritten without their content" })),
+            };
+            let target = er.subject.clone().unwrap_or_else(|| person.clone());
+            self.audit.push((e.seq, e.at, serde_json::json!({ "kind": "admin_action", "admin": "kernel", "name": "Magnus", "action": action, "target": target, "source": null, "before": null, "after": after })));
+        }
+    }
+
     fn put_back(&mut self, held: Held) {
         match held {
             Held::Task(t, r, items) => {
@@ -1133,6 +1178,16 @@ impl State {
             }
             Ev::BackupChecked { file, ok, detail } => {
                 self.last_backup = Some((file.clone(), *ok, detail.clone(), e.at));
+            }
+            Ev::BackupScrubPending { from, through, files, detail } => {
+                self.scrub_pending = Some(ScrubPending { from: *from, through: *through, files: files.clone(), detail: detail.clone(), at: e.at });
+                self.erasures_pending(e);
+            }
+            Ev::BackupsScrubbed { through } => {
+                if self.scrub_pending.as_ref().is_some_and(|p| p.through <= *through) {
+                    self.scrub_pending = None;
+                }
+                self.erasures_pending(e);
             }
             Ev::ConnectorAdded { connector } => {
                 if connector.credential.is_some() && connector.auth.as_deref() != Some(crate::connectors::OAUTH) {
@@ -1307,15 +1362,21 @@ impl State {
                     self.put_back(t.held);
                 }
             }
-            Ev::Removed { item, .. } => match self.trash.remove(item).map(|t| t.held) {
-                Some(Held::Entry { thread }) => {
-                    self.hidden.entry(thread).or_default().insert(item.clone());
+            Ev::Removed { item, .. } => {
+                // A person's erasure: their subject is still bound here.
+                if let Some(p) = item.strip_prefix("person:") {
+                    self.erasures.insert(p.to_string(), Erasure { removal: e.seq, subject: self.subjects.get(p).cloned(), pending: false });
                 }
-                Some(Held::Thread { id, .. }) => {
-                    self.removed_threads.insert(id);
+                match self.trash.remove(item).map(|t| t.held) {
+                    Some(Held::Entry { thread }) => {
+                        self.hidden.entry(thread).or_default().insert(item.clone());
+                    }
+                    Some(Held::Thread { id, .. }) => {
+                        self.removed_threads.insert(id);
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             Ev::KnowledgeAdded { id, title, readers, integrity, author, run, .. } => {
                 self.knowledge.insert(
                     id.clone(),
