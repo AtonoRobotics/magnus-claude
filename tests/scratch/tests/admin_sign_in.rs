@@ -291,3 +291,21 @@ fn the_console_sign_in_script_waits_two_minutes() {
     let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests/admin-sign-in.mjs")).unwrap();
     assert!(src.contains("const T = 120_000"), "{src}");
 }
+
+/// The console and Keycloak helpers' HTTP clients give up after
+/// `HTTP_PATIENCE`: a request that never answers fails its test, named,
+/// instead of holding it silently until the runner kills it at 600 s, as
+/// master's run 42152977968 was (#239).
+#[test]
+fn the_console_and_keycloak_helpers_never_wait_forever_on_an_answer() {
+    assert!(magnus_scratch::HTTP_PATIENCE < std::time::Duration::from_secs(600), "a request outlasts the runner's own limit");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for f in ["keycloak.rs", "admin.rs"] {
+        let text = std::fs::read_to_string(src.join(f)).unwrap();
+        assert!(!text.contains("Client::new()"), "{f} builds an HTTP client with no timeout");
+        for (i, _) in text.match_indices("Client::builder()") {
+            let statement = &text[i..i + text[i..].find(";").unwrap()];
+            assert!(statement.contains(".timeout("), "{f} builds an HTTP client with no timeout: {statement}");
+        }
+    }
+}

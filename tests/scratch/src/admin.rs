@@ -133,7 +133,7 @@ pub async fn start(app: &Appliance, allow: &[&str]) -> Console {
 /// certificate and finds the hostname at the console's address. It does
 /// not follow redirects, so a test sees where the console sends it.
 pub fn browser(c: &Console, max_tls12: bool) -> reqwest::Client {
-    let mut b = reqwest::Client::builder().add_root_certificate(c.ca.clone()).resolve(HOST, c.addr).no_proxy().redirect(reqwest::redirect::Policy::none());
+    let mut b = reqwest::Client::builder().timeout(crate::keycloak::HTTP_PATIENCE).add_root_certificate(c.ca.clone()).resolve(HOST, c.addr).no_proxy().redirect(reqwest::redirect::Policy::none());
     if max_tls12 {
         b = b.max_tls_version(reqwest::tls::Version::TLS_1_2);
     }
@@ -265,7 +265,7 @@ pub async fn presented(c: &Console, ca: reqwest::Certificate) -> Result<Vec<u8>,
 
 /// The same, for a console at `addr` named `host`.
 pub async fn presented_at(addr: SocketAddr, host: &str, ca: reqwest::Certificate) -> Result<Vec<u8>, String> {
-    let b = reqwest::Client::builder().add_root_certificate(ca).tls_built_in_root_certs(false).tls_info(true).resolve(host, addr).no_proxy().build().unwrap();
+    let b = reqwest::Client::builder().timeout(crate::keycloak::HTTP_PATIENCE).add_root_certificate(ca).tls_built_in_root_certs(false).tls_info(true).resolve(host, addr).no_proxy().build().unwrap();
     let r = b.get(format!("https://{host}:{}/status", addr.port())).send().await.map_err(|e| format!("{e:?}"))?;
     r.extensions().get::<reqwest::tls::TlsInfo>().and_then(|i| i.peer_certificate()).map(<[u8]>::to_vec).ok_or_else(|| "no certificate seen".to_string())
 }
