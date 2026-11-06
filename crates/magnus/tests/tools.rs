@@ -406,3 +406,76 @@ fn public_addresses_are_websites_and_special_purpose_ones_are_not() {
         assert_eq!(why.is_none(), public.contains(&ip.as_str()), "{ip}: {why:?}");
     }
 }
+
+/// A name with two allowed addresses whose first refuses connections, as a
+/// dual-stack site with an unreachable IPv6 endpoint: the browser reaches
+/// the site at the second address, as Chromium would without the proxy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_whose_first_allowed_address_refuses_is_reached_at_the_next() {
+    // `*.localhost` resolves to ::1 and 127.0.0.1 (RFC 6761).
+    let name = "dual-stack.localhost";
+    let ips: Vec<std::net::IpAddr> = tokio::net::lookup_host((name, 0)).await.unwrap().map(|a| a.ip()).collect();
+    assert!(ips.len() >= 2, "{name} resolves to {ips:?}, not two addresses");
+    let l = tokio::net::TcpListener::bind((ips[1], 0)).await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    assert!(tokio::net::TcpStream::connect((ips[0], port)).await.is_err(), "{}:{port} accepts connections", ips[0]);
+    let app = axum::Router::new().fallback(|| async { axum::response::Html("<html><body><p>SECOND-ADDRESS</p></body></html>") });
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let b = Browser::new(Some(sidecar(&[name.to_string()])), dir.path());
+    let v = b.request("r1", json!({ "op": "navigate", "url": format!("http://{name}:{port}/") })).await.unwrap();
+    assert!(v["text"].as_str().unwrap().contains("SECOND-ADDRESS"), "{ips:?}: {}", v["text"]);
+    b.close("r1").await;
+}
+
+/// An origin that promises 100 bytes and disconnects after a few: the
+/// page's request for it fails when the origin goes, instead of waiting for
+/// bytes that never come.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_whose_origin_disconnects_mid_body_fails_promptly() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    const PAGE: &str = "<html><body><h1>Cut</h1><script>fetch('/cut').then(r => r.text()).then(() => 'read', () => 'failed').then(x => fetch('/done?' + x));</script></body></html>";
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let site = format!("http://{}", l.local_addr().unwrap());
+    let (settled, mut outcome) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = l.accept().await.unwrap();
+            let settled = settled.clone();
+            tokio::spawn(async move {
+                loop {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => req.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let line = String::from_utf8_lossy(&req).lines().next().unwrap_or_default().to_string();
+                    if line.contains(" /cut ") {
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 100\r\n\r\nCUT").await;
+                        return; // the origin closes 97 bytes short
+                    }
+                    if line.contains(" /done?") {
+                        let _ = settled.send(line.clone());
+                    }
+                    let body = if line.contains(" / ") { PAGE } else { "" };
+                    let head = format!("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\n\r\n", body.len());
+                    if s.write_all(format!("{head}{body}").as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let b = Browser::new(Some(sidecar(&[site.trim_start_matches("http://").to_string()])), dir.path());
+    let started = std::time::Instant::now();
+    let v = b.request("r1", json!({ "op": "navigate", "url": format!("{site}/") })).await.unwrap();
+    assert!(v["text"].as_str().unwrap().contains("Cut"), "{}", v["text"]);
+    let line = tokio::time::timeout(std::time::Duration::from_secs(15), outcome.recv()).await;
+    let line = line.unwrap_or_else(|_| panic!("the page's request still waited {:?} after the origin disconnected mid-body", started.elapsed()));
+    assert!(line.unwrap().contains("/done?failed"), "the cut body was read as complete");
+    b.close("r1").await;
+}

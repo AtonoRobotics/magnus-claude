@@ -1,7 +1,7 @@
 // Where the browser may connect (#185). Every request Chromium makes, the
 // page it was told to open, each redirect and every image, script, fetch,
 // frame and WebSocket a page starts, goes through the egress proxy below. It
-// resolves the name once, checks every address, and connects to the address
+// resolves the name once, checks every address, and connects only to an address
 // it checked, so a name cannot pass as public and then be reached as private
 // (DNS rebinding).
 //
@@ -101,7 +101,8 @@ function policy(allowEntries) {
   const allowed = (name, ip, port) => allow.some(a => (a.port === null || a.port === port) &&
     (a.name ? a.name === name : within(unwrap(bytes(ip)), a.range)));
 
-  // The address to connect to for host:port, checked; throws Refused.
+  // The addresses host:port may be reached at, checked, in the resolver's
+  // order; throws Refused when there are none.
   async function destination(host, port) {
     const name = String(host).replace(/^\[|\]$/g, '').toLowerCase().replace(/\.$/, '');
     let addrs;
@@ -110,12 +111,27 @@ function policy(allowEntries) {
       try { addrs = (await dns.promises.lookup(name, { all: true, verbatim: true })).map(a => a.address); } catch { throw new Refused(`${name} does not resolve`); }
     }
     let why;
+    const ok = [];
     for (const ip of addrs) {
       const w = notPublic(ip);
-      if (!w || allowed(name, ip, port)) return ip;
-      why = why || `${name === ip ? name : `${name} (${ip})`} is ${w} address`;
+      if (!w || allowed(name, ip, port)) ok.push(ip);
+      else why = why || `${name === ip ? name : `${name} (${ip})`} is ${w} address`;
     }
+    if (ok.length) return ok;
     throw new Refused(`The browser opens only public websites: ${why}. An internal site opens only when the appliance's owner lists it in [browser] allow.`);
+  }
+
+  // A connection to the first of the checked addresses that accepts one,
+  // tried in order as Chromium would; never an address outside the list.
+  function connect(addrs, port, done) {
+    let i = 0;
+    const next = err => {
+      if (i >= addrs.length) { done(err); return; }
+      const s = net.connect(port, addrs[i++]);
+      s.once('error', next);
+      s.once('connect', () => { s.removeListener('error', next); done(null, s); });
+    };
+    next();
   }
 
   async function check(url) {
@@ -132,36 +148,44 @@ function policy(allowEntries) {
       try { u = new URL(req.url); } catch { res.writeHead(400).end(); return; }
       if (u.protocol !== 'http:') { res.writeHead(400).end(); return; }
       const port = Number(u.port) || 80;
-      let ip;
-      try { ip = await destination(u.hostname, port); } catch (e) {
+      let addrs;
+      try { addrs = await destination(u.hostname, port); } catch (e) {
         const body = Buffer.from(e.message);
         res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'content-length': body.length, 'x-magnus-refused': '1' }).end(body);
         return;
       }
-      const up = http.request({ host: ip, port, method: req.method, path: u.pathname + u.search, headers: keep(req.rawHeaders), setHost: false }, r => {
-        res.writeHead(r.statusCode, r.statusMessage, keep(r.rawHeaders));
-        r.pipe(res);
+      connect(addrs, port, (err, sock) => {
+        if (err) { res.writeHead(502).end(); return; }
+        const up = http.request({ createConnection: () => sock, method: req.method, path: u.pathname + u.search, headers: keep(req.rawHeaders), setHost: false }, r => {
+          res.writeHead(r.statusCode, r.statusMessage, keep(r.rawHeaders));
+          // An origin that stops before its body is complete: the browser
+          // sees the cut instead of waiting for bytes that never come.
+          r.on('close', () => { if (!r.complete) res.destroy(); });
+          r.pipe(res);
+        });
+        up.on('error', () => { if (!res.headersSent) res.writeHead(502).end(); else res.destroy(); });
+        req.pipe(up);
       });
-      up.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });
-      req.pipe(up);
     });
     // HTTPS and WebSockets: a tunnel to the checked address.
     server.on('connect', async (req, client, head) => {
       client.on('error', () => {});
       const m = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(req.url);
-      let ip;
-      try { if (!m) throw new Refused('bad CONNECT target'); ip = await destination(m[1], Number(m[2])); } catch (e) {
+      let addrs;
+      try { if (!m) throw new Refused('bad CONNECT target'); addrs = await destination(m[1], Number(m[2])); } catch (e) {
         client.end(`HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\ncontent-length: ${Buffer.byteLength(e.message)}\r\nconnection: close\r\n\r\n${e.message}`);
         return;
       }
-      const up = net.connect(Number(m[2]), ip, () => {
+      connect(addrs, Number(m[2]), (err, up) => {
+        if (err) { client.destroy(); return; }
+        if (client.destroyed) { up.destroy(); return; }
+        up.on('error', () => client.destroy());
+        client.on('close', () => up.destroy());
         client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head.length) up.write(head);
         up.pipe(client);
         client.pipe(up);
       });
-      up.on('error', () => client.destroy());
-      client.on('close', () => up.destroy());
     });
     server.on('upgrade', (req, socket) => socket.destroy());
     return server;
