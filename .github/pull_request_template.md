@@ -8,7 +8,7 @@
 
 ## Decisions
 
-<!-- The DECISIONS.md lines this adds or changes. -->
+<!-- The decisions/ file this adds, in a line. -->
 
 ## Before asking for a merge
 
@@ -17,4 +17,4 @@
 - [ ] Started from the one open `ready` issue, or from an extra the owner marked that does not share the hot files, or from an issue the owner named; `queue` alone was not the start; claimed it (`ready` off, `in-progress` on); body has `Fixes #N` (CLAUDE.md, "Work starts from an issue")
 - [ ] One concern; each fix has a test that fails without it
 - [ ] Every CI check green
-- [ ] DECISIONS.md and PROGRESS.md updated
+- [ ] A file in decisions/ and one in progress/

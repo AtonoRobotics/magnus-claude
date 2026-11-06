@@ -309,40 +309,32 @@ jobs:
           printf 'MAGNUS_VERSION=%s\nMAGNUS_APPLIANCE_VERSION=%s\n' "$MAGNUS_VERSION" "$MAGNUS_APPLIANCE_VERSION" > "$b.part/versions"
           rm -rf "$b" && mv -T "$b.part" "$b"
           ls -dt "$store"/*/ | tail -n +3 | xargs -r rm -rf
-      # A pull request's tested build goes to development, the owner's apps;
-      # once merged, master's goes to test, the testers'.
-      # The build there may be a pull request's that was closed without
-      # merging: its work was given up, so this one need only hold master's
-      # (release/publish.sh, MAGNUS_GIVEN_UP). Or it merged: its work is the
-      # master commit it landed as, even squashed (MAGNUS_LANDED).
-      # Only a pull request that built and tested the installers (one that
-      # changed desktop/ or the build) publishes to development.
-      - name: Development build for the installed apps
-        if: github.event_name == 'pull_request' && env.MAGNUS_SELECT == 'full' && env.MAGNUS_PUBLISH == '1'
+      # Only master publishes to the installed apps: to test, the testers',
+      # and to development, the owner's. A master build holds everything
+      # merged, so open pull requests never replace each other's work in the
+      # owner's app, and every merge reaches it whichever runner tested its
+      # pull request (2026-11-06, decisions/2026-11-06-parallel-prs.md).
+      - name: Test and development builds for the installed apps
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && env.MAGNUS_PUBLISH == '1'
         env:
-          TITLE: ${{ github.event.pull_request.title }}
-          PR: ${{ github.event.pull_request.number }}
-          MAGNUS_PR: ${{ github.event.pull_request.number }}
-          MAGNUS_COMMIT: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          printf '%s\n\nDevelopment build of pull request #%s.\n' "$TITLE" "$PR" > "$RUNNER_TEMP/notes"
+          s=$(git log -1 --format=%s)
+          case $s in "Merge pull request #"*) t=$(git log -1 --format=%b | head -1) ;; *) t=$s ;; esac
+          printf '%s\n\nTest build: master at %s.\n' "$t" "$(git rev-parse --short HEAD)" > "$RUNNER_TEMP/notes"
+          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist test
+          # The development channel may still hold a pull request's build
+          # from before only master published: one closed without merging is
+          # given up, and a merged one is held by the commit it landed as.
           there="${{ vars.MAGNUS_UPDATES_DIR }}/desktop/development/latest.json"
           prev=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("pr", ""))' "$there" 2>/dev/null || true)
-          if [ -n "$prev" ] && [ "$prev" != "$PR" ]; then
+          if [ -n "$prev" ]; then
             case $(gh pr view "$prev" --json state -q .state) in
             CLOSED) export MAGNUS_GIVEN_UP=$prev ;;
             MERGED) export MAGNUS_LANDED="$prev=$(gh pr view "$prev" --json mergeCommit -q .mergeCommit.oid)" ;;
             esac
           fi
           release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist development
-      - name: Test build for the installed apps
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && env.MAGNUS_PUBLISH == '1'
-        run: |
-          s=$(git log -1 --format=%s)
-          case $s in "Merge pull request #"*) t=$(git log -1 --format=%b | head -1) ;; *) t=$s ;; esac
-          printf '%s\n\nTest build: master at %s.\n' "$t" "$(git rev-parse --short HEAD)" > "$RUNNER_TEMP/notes"
-          release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist test
       # Master also runs on the build box's own appliance, which installs
       # it by itself (DECISIONS.md, "Master runs on the build box's
       # appliance"): MAGNUS_APPLIANCE_VERSION, numbered like the app's; its

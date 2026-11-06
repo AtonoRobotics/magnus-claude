@@ -2,12 +2,12 @@
 
 An autonomous digital worker shipped as an appliance. Start every session by reading:
 
-- `PROGRESS.md`: where things stand and how to resume.
-- `DECISIONS.md`: every choice made, one line each, with its reason.
+- `progress/` (newest file last), then `PROGRESS.md` (before 2026-11-06): where things stand and how to resume.
+- `decisions/`, then `DECISIONS.md` (before 2026-11-06): every choice made, with its reason.
 - `tests/invariants/`: the eight invariants as tests. Do not edit them without the owner's approval.
 - The one open issue labelled `ready`: the single next pull. Claim it before coding ("How work lands"). An issue labelled only `queue` is the backlog and is not pullable.
 
-Rules: record each new decision in DECISIONS.md, keep PROGRESS.md current, commit working states, and revert failed attempts instead of patching them.
+Rules: record each new decision as a file in `decisions/` and what changed as a file in `progress/` (`<date>-<issue>-<slug>.md`, one per pull request, so pull requests never edit the same lines), keep them current, commit working states, and revert failed attempts instead of patching them.
 
 ## How work lands
 
@@ -15,7 +15,7 @@ Pull requests that sit open while master moves on go stale, and a pile of them w
 
 ### Work starts from an issue
 
-An agent opens a product or fix pull request only for an open issue in this repository labelled `ready`, or for an issue the owner names in the session (#169). `ready` means the single next pull for work that shares the hot files. At most one open issue carries `ready`. The owner may explicitly mark additional issues `ready` only when they do not share those files: `PROGRESS.md`, `DECISIONS.md`, the release and tag paths (`release/`, an appliance or desktop tag, the workflows that publish), and live OAuth. Only the owner adds `ready`, apart from the agent who holds the one `in-progress` claim promoting the next issue as that claim finishes.
+An agent opens a product or fix pull request only for an open issue in this repository labelled `ready`, or for an issue the owner names in the session (#169). `ready` means the single next pull for work that shares the hot files. At most one open issue carries `ready`. The owner may explicitly mark additional issues `ready` only when they do not share those files: the release and tag paths (`release/`, an appliance or desktop tag, the workflows that publish), and live OAuth. Only the owner adds `ready`, apart from the agent who holds the one `in-progress` claim promoting the next issue as that claim finishes.
 
 A review finding, a failing test, a product idea or any other new finding is an issue first, and it gets `queue` only. `queue` alone is the backlog: it is not pullable. It stays `queue` until that promotion to `ready`.
 
@@ -33,7 +33,7 @@ Every change follows these, and CI checks the ones marked (`release/pr-rules.sh`
 2. Branch from current `origin/master` and merge into `master`; never stack a pull request on another branch. (CI)
 3. Do not merge master into a pull request because master moved, even when the rules check notes that the branch is behind: merge it in (`git merge origin/master`, never rebase a pushed branch) only to resolve a conflict. Each merge restarts that pull request's run on the shared runner; merging master into every open branch kept every run restarting and none finishing (owner, 2026-11-04). A pull request lands merged with current master, and master's own run tests the result in full. GitHub's merge queue is not available on this repository (a private repository owned by a person), so that run after the merge is the gate; a red master run is fixed before anything else lands. A development build is not published when it would replace the owner's app with one that lacks work the app already has; the pull request's checks still pass.
 4. One concern per pull request, small enough to review in one sitting (CI warns past 800 changed lines outside tests and documents). A review's fixes are their own pull request from master, never added to an older one.
-5. Done means: a test for each fix that fails without it, every suite green in CI, DECISIONS.md and PROGRESS.md updated in the same pull request, and the template's sections filled. Open as a draft while iterating, so the desktop and injection jobs do not run; mark it ready when it should be reviewed and merged.
+5. Done means: a test for each fix that fails without it, every suite green in CI, its `decisions/` and `progress/` files in the same pull request, and the template's sections filled. Open as a draft while iterating, so the desktop and injection jobs do not run; mark it ready when it should be reviewed and merged.
 6. The session that opens a pull request drives it to merged or closed: it watches CI, answers each review thread, and merges it itself once every check is green and no review thread waits on an answer (owner, 2026-11-01: "merge each PR yourself once green"), with a merge commit (`gh pr merge --merge`). With auto-merge on, `gh pr merge --auto --merge` lands it once its checks pass. Do not rerun a failed run without reading why it failed: a rerun of a hang or a broken test only holds the runner again; fix the cause in its own pull request from master. Then open the next, if the cap allows.
 7. A pull request with no activity for a day gets a comment; at three days it is labelled `stale`; at five days it is closed and its branch is kept. The `hold` label stops the close. Nothing is left open "for later".
 

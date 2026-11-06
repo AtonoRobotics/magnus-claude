@@ -1,5 +1,7 @@
 # Decisions
 
+From 2026-11-06 each pull request adds a file to `decisions/` instead of lines here; this file is the record before that.
+
 One line per choice the brief left open, with its reason. The brief and the owner's later instructions win over this file; the decision record (rationale) is background.
 
 ## Process
