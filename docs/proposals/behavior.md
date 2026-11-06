@@ -88,7 +88,9 @@ admin console.
      reads before it suggests again; a declined one comes back only when
      circumstances changed, saying what changed. Done (#253).
    - At cold start, and for each newly connected app, Magnus looks at what it
-     may see and proposes two or three things it could take over.
+     may see and proposes two or three things it could take over. Done (#255,
+     `decisions/2026-11-06-255-cold-start-proposals.md`): a conversation Magnus
+     opens itself, whose cards the empty Tasks and Schedules list.
 5. **Standing authority.**
    - A grant comes only from "Handle things like this" or the person asking
      in conversation; approving one proposal never creates one. The button

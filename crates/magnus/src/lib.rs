@@ -37,6 +37,7 @@ pub mod library;
 pub mod log;
 pub mod identity;
 pub mod oidc;
+pub mod openers;
 pub mod ops_admin;
 pub mod person_admin;
 pub mod policy;

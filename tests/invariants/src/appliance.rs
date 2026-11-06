@@ -254,6 +254,9 @@ impl Appliance {
             },
             "verifier": { "enabled": spec.verifier },
             "web": { "allow_private_networks": true },
+            // Openers (#255) run a model turn at a first sign-in and a first
+            // app connection; tests that want them turn them on.
+            "proposals": { "openers": false },
             "sandbox": {
                 "firecracker": firecracker,
                 "kernel_image": kernel,

@@ -735,6 +735,10 @@ pub struct State {
     pub signed_in_before: HashSet<String>,
     /// When each person last signed in here (the console's Users list).
     pub last_sign_in: HashMap<String, DateTime<Utc>>,
+    /// How many times each person has connected each app (by person, then
+    /// app): the first connection is the one Magnus opens a conversation
+    /// about, never a reconnection.
+    pub app_connections: HashMap<(String, String), u32>,
     /// People turned off at the identity provider or by an admin, until
     /// they sign in again: their apps answer no calls for them.
     pub turned_off: std::collections::BTreeSet<String>,
@@ -983,7 +987,10 @@ impl State {
             let t = self.tasks.get(task)?;
             let thread = t.chat.as_ref()?.thread.clone();
             // A message's title is what the person said, recalled when listed.
+            let opener = t.chat.as_ref().and_then(|c| c.opener.as_deref()).map(crate::openers::title);
             let (title, from) = match item.starts_with("m:") {
+                // Magnus's own opening: its text is the appliance's, not theirs.
+                true if opener.is_some() => (opener.unwrap_or_default(), None),
                 true => (String::new(), Some(TitleFrom::Text(t.seq))),
                 false => (self.runs.get(&t.run_id).and_then(|r| r.summary.clone()).unwrap_or_default(), None),
             };
@@ -1237,7 +1244,10 @@ impl State {
                 self.connector_settings.insert(name.clone(), ConnectorSetting { enabled: *enabled, access_groups: access_groups.clone(), blocked_groups: blocked_groups.clone() });
             }
             // The connection itself is in the vault; these are its record.
-            Ev::AppConnected { .. } | Ev::AppDisconnected { .. } => {}
+            Ev::AppConnected { app, person, .. } => {
+                *self.app_connections.entry((person.clone(), app.clone())).or_default() += 1;
+            }
+            Ev::AppDisconnected { .. } => {}
             Ev::CredentialSet { connector, set } => {
                 self.credential_changed.insert(connector.clone(), (*set, e.at));
             }
@@ -1331,6 +1341,7 @@ impl State {
                 self.attachments.retain(|t, _| !tasks.contains(t));
                 self.subjects.remove(person);
                 self.last_sign_in.remove(person);
+                self.app_connections.retain(|(p, _), _| p != person);
                 // The rights they held go with them: whoever is next known by
                 // their name starts from the organisation's config.
                 self.roles_set.remove(person);

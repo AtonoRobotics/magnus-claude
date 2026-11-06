@@ -19,6 +19,23 @@ pub struct ChatOrigin {
     /// For a task: the conversation that led to it, carried into its contract.
     #[serde(default)]
     pub conversation: Vec<Value>,
+    /// A turn Magnus started itself (behavior spec, cold start and a newly
+    /// connected app): its text is the appliance's instruction, never the
+    /// person's message. Absent in logs from before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opener: Option<Box<Opener>>,
+}
+
+/// Why Magnus opened a conversation itself: the person's cold start (no
+/// app), or their first connection of `app`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct Opener {
+    /// The app's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// The app as the person sees it named, when it was connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_title: Option<String>,
 }
 
 /// The project a task started in, as it stood then: the person's

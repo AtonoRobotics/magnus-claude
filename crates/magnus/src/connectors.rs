@@ -1482,7 +1482,11 @@ async fn sign_in_complete(AxState(k): K, h: HeaderMap, Path(name): Path<String>,
     };
     let (Some(state), Some(code)) = (b["state"].as_str(), b["code"].as_str()) else { return err(StatusCode::BAD_REQUEST, "state and code are required") };
     match k.connector_sign_in_complete(&name, &p.id, state, code, b["iss"].as_str()).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            // Connected for the first time: Magnus opens a conversation about it.
+            k.open_after_connect(&p.id, &name);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => err(StatusCode::BAD_REQUEST, &format!("{e:#}")),
     }
 }
