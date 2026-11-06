@@ -65,11 +65,12 @@ pub fn still_asks(allow: &[String]) -> Vec<&'static str> {
     v
 }
 
-/// The model cost of the tasks started under a grant in its current
-/// period: the runs created within it.
-pub fn spent(s: &Projection, g: &Grant, now: DateTime<Utc>) -> f64 {
+/// The model cost charged to a grant in its current period: every model
+/// call of its tasks within it, whether or not the task is still there
+/// (#280).
+pub fn spent(_s: &Projection, g: &Grant, now: DateTime<Utc>) -> f64 {
     let from = now - chrono::Duration::days(g.days());
-    s.tasks.values().filter(|t| t.grant.as_deref() == Some(g.id.as_str())).filter_map(|t| s.runs.get(&t.run_id)).filter(|r| r.created_at > from).map(|r| r.usd).sum()
+    g.charges.iter().filter(|(at, _)| *at > from).map(|(_, usd)| usd).sum()
 }
 
 /// A grant's fields, checked.

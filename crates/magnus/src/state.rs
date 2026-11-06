@@ -152,6 +152,9 @@ pub struct Run {
     /// The stronger model the escalation module moved this run to; its
     /// pinned configuration stays what it started with.
     pub escalated: Option<(String, String)>,
+    /// Its person resumed it after its grant's budget for the period was
+    /// spent: it goes on under its own budget alone (#280).
+    pub past_grant: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -508,6 +511,9 @@ pub struct Grant {
     pub revoked: Option<DateTime<Utc>>,
     /// The actions taken under it, oldest first.
     pub actions: Vec<GrantAction>,
+    /// What its tasks' model calls cost, as each was charged: kept with the
+    /// grant, so deleting a task gives none of it back (review of #278).
+    pub charges: Vec<(DateTime<Utc>, f64)>,
 }
 
 /// An action a grant covered.
@@ -1037,6 +1043,15 @@ impl State {
         }
     }
 
+    /// A model call's cost, charged to the grant the run's task runs
+    /// under, if any (#280).
+    fn charge_grant(&mut self, run: &str, at: DateTime<Utc>, usd: f64) {
+        let grant = self.runs.get(run).and_then(|r| self.tasks.get(&r.task)).and_then(|t| t.grant.clone());
+        if let Some(g) = grant.and_then(|g| self.grants.get_mut(&g)) {
+            g.charges.push((at, usd));
+        }
+    }
+
     /// Take an item out of every view, into the trash.
     fn take(&mut self, item: &str) -> Option<(String, Option<TitleFrom>, Held)> {
         if let Some((_, task)) = item.split_once(':') {
@@ -1503,6 +1518,7 @@ impl State {
                     edited: None,
                     revoked: None,
                     actions: vec![],
+                    charges: vec![],
                 });
                 if g.seq != e.seq {
                     g.edited = Some(e.at);
@@ -1759,6 +1775,7 @@ impl State {
                         cuts: vec![],
                         lost_since: 0,
                         escalated: None,
+                        past_grant: false,
                     },
                 );
             }
@@ -1768,6 +1785,7 @@ impl State {
                 }
             }
             Ev::ModelReply { run, step, blocks, state, usage, .. } => {
+                self.charge_grant(run, e.at, usage.cost_usd);
                 if let Some(r) = self.runs.get_mut(run) {
                     r.usd += usage.cost_usd;
                     r.tokens.input += usage.input_tokens;
@@ -1778,6 +1796,7 @@ impl State {
                 }
             }
             Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } | Ev::SpokenWritten { run, usage, .. } | Ev::KnowledgeExtraction { run, usage, .. } => {
+                self.charge_grant(run, e.at, usage.cost_usd);
                 if let Some(r) = self.runs.get_mut(run) {
                     if let Ev::SpokenWritten { script, .. } = &e.ev {
                         r.spoken = Some(script.clone());
@@ -1791,6 +1810,9 @@ impl State {
                 }
             }
             Ev::ModelError { run, usage, .. } => {
+                if let Some(u) = usage {
+                    self.charge_grant(run, e.at, u.cost_usd);
+                }
                 if let Some(r) = self.runs.get_mut(run) {
                     r.model_errors += 1;
                     if let Some(usage) = usage {
@@ -1949,6 +1971,9 @@ impl State {
             }
             Ev::Resumed { run } => {
                 if let Some(r) = self.runs.get_mut(run) {
+                    if r.reason.as_deref() == Some("grant_budget") {
+                        r.past_grant = true;
+                    }
                     if !r.status.terminal() {
                         r.status = Status::Running;
                         r.reason = None;

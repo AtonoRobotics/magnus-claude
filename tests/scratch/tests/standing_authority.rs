@@ -435,3 +435,46 @@ async fn a_grant_card_is_accepted_with_the_persons_changes_or_declined_with_a_re
     assert_eq!((&all[0]["apps"], &all[0]["title"]), (&json!(["team", "crm"]), &json!("Post the team's status and the CRM's")));
     assert!(all[0]["edited"].is_string());
 }
+
+/// A grant's budget holds across its tasks together: a task already running
+/// under it stops at its next model call once the grant's budget for the
+/// period is spent, until its person resumes it; and deleting a task under
+/// it gives none of what it spent back (review of #278, #280).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grants_budget_holds_across_its_tasks_and_deleting_one_gives_nothing_back() {
+    let w = world().await;
+    let alice = w.app.api("alice");
+    let g = grant(&alice, fields("Keep the CRM current", &["crm"], 5.0)).await;
+    let first = run(&alice, "update", Some(&g)).await.unwrap();
+    went_ahead(&alice, &w.crm, "update_record", 0, &first).await;
+    let spent = grant_of(&alice, &g).await["spent"].as_f64().unwrap();
+    assert!(spent > 0.0);
+
+    // Deleted, and removed for good: what it spent stays spent.
+    let (st, v) = alice.post("/v1/trash", json!({ "item": first })).await;
+    assert!(st.is_success(), "{v}");
+    let (st, v) = alice.send(reqwest::Method::DELETE, &format!("/v1/trash/{first}"), None).await;
+    assert!(st.is_success(), "{v}");
+    assert_eq!(grant_of(&alice, &g).await["spent"].as_f64(), Some(spent), "deleting a task gave its cost back to the grant");
+
+    // A task under it waits on an approval (the team chat is not in the
+    // grant) while the grant's budget runs out: it was started with what was
+    // left then, but goes no further once the grant's is spent.
+    let second = run(&alice, "post", Some(&g)).await.unwrap();
+    let item = asked(&alice, Some(&w.team), "post", &second).await;
+    let now = grant_of(&alice, &g).await["spent"].as_f64().unwrap();
+    assert!(alice.put(&format!("/v1/grants/{g}"), json!({ "max_usd": now / 2.0 })).await.0.is_success());
+    assert!(alice.respond(item["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
+    eventually("the approved post ran", PATIENCE, || async { (w.team.effects("post") == 1).then_some(()) }).await;
+    let stop = alice.wait_item(&second, "notice").await;
+    assert_eq!(stop["details"]["reason"], "grant_budget", "{stop}");
+    let calls = |m: &FakeModel| m.requests().into_iter().filter(|c| c.text().contains("plan=post") && !system(c).contains(CHAT)).count();
+    let before = calls(&w.m);
+    never("the task asked the model past its grant's budget", Duration::from_secs(2), || async { calls(&w.m) > before }).await;
+
+    // Its person resumes it: theirs to decide, it goes on under its own budget.
+    assert!(alice.respond(stop["id"].as_str().unwrap(), json!({ "decision": "resume" })).await.is_success());
+    eventually("the resumed task asked the model again", PATIENCE, || async { (calls(&w.m) > before).then_some(()) }).await;
+    alice.wait_settled(&second).await;
+    assert!(alice.open_items(&second, "notice").await.iter().all(|n| n["details"]["reason"] != "grant_budget"), "it stopped again after its person resumed it");
+}
