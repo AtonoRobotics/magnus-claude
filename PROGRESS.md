@@ -1,5 +1,9 @@
 # Progress
 
+## A draft being sent is changed by no other run (2026-11-06)
+
+The kernel leased a record only on an `id` or `record_id` field, so while one run sent a Gmail draft, another could change it by `draft_id` (#177). It now also leases on the id field the manifest names for sends. Still open in #177: the approval hash covers only the text or HTML part, and attachments only by name and size.
+
 ## Magnus registers once per app server (2026-11-05)
 
 Magnus registered a new client at GitLab on every sign-in, and gitlab.com allows about ten an hour per address (#208). Magnus now keeps the client it registers and reuses it for everyone's later sign-ins from any port on their computer, as RFC 8252 lets loopback redirects do. If the provider has dropped the client, Magnus registers again once. CI still registers once per GitLab test run, since each test starts a fresh appliance.
