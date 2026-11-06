@@ -491,7 +491,12 @@ impl Kernel {
     }
 
     async fn lease(&self, a: &Action, f: &Facts) -> Result<Gate> {
-        let id = a.input.get("id").or_else(|| a.input.get("record_id")).and_then(|v| v.as_str().map(String::from));
+        // The record it changes: its `id` or `record_id`, or the id field
+        // the app's manifest names for what its sends act on (Gmail's
+        // `draft_id`). A draft being sent is then changed by no other run
+        // from the gate, which reads it, to the send (#177).
+        let named = f.connector.iter().flat_map(|c| c.destinations.values().map(|d| d.id.as_str()));
+        let id = ["id", "record_id"].into_iter().chain(named).find_map(|k| a.input.get(k).and_then(|v| v.as_str().map(String::from)));
         let Some(id) = id else { return Ok(Gate::Pass) };
         let resource = format!("{}:{id}", f.app);
         let holder = {
