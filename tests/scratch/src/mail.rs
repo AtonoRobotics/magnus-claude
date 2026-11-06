@@ -64,21 +64,20 @@ impl Inbox {
         let (sink_mount, out_mount) = (format!("{}:/mail-sink:ro", sink.display()), format!("{}:/out", dir.path().display()));
         // `docker run` has not answered within the patience under parallel
         // suites (runs 42257501972, 42261795000, 42262894435): try again
-        // twice. A timed-out run may still have created the container, so
-        // each attempt names it and removes that name first.
-        let name = format!("mail-sink-{}", uuid::Uuid::new_v4().as_simple());
+        // twice, each attempt under a fresh name. A timed-out run may still
+        // have created its container late; the names cannot clash, the late
+        // one fails to bind the port the winner holds and exits (the sink
+        // panics when it cannot listen, `--rm` removes it), and anything
+        // left is stopped by release/ci-clean.sh.
         let mut container = Err("no attempt ran".to_string());
         for _ in 0..3 {
-            let _ = std::process::Command::new("timeout").arg(DOCKER_PATIENCE).arg("docker").args(["rm", "-f", &name]).output();
+            let name = format!("mail-sink-{}", uuid::Uuid::new_v4().as_simple());
             container = docker_result(&["run", "-d", "--rm", "--network", "container:magnus-claude-kc", "--name", &name, "-v", &sink_mount, "-v", &out_mount, "--entrypoint", "/mail-sink", &image, &port.to_string(), "/out"]);
             if container.is_ok() {
                 break;
             }
         }
-        let container = container.unwrap_or_else(|e| {
-            let _ = std::process::Command::new("timeout").arg(DOCKER_PATIENCE).arg("docker").args(["rm", "-f", &name]).output();
-            panic!("{e}")
-        });
+        let container = container.unwrap_or_else(|e| panic!("{e}"));
         let inbox = Inbox { addr: SocketAddr::from(([127, 0, 0, 1], port)), dir, container };
         for _ in 0..300 {
             if inbox.dir.path().join("ready").exists() {
