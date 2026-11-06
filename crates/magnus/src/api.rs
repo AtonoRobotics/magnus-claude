@@ -1145,12 +1145,13 @@ async fn timeline(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response
         Err(r) => return r,
     };
     let Some((_, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
-    Json(timeline_of(&run)).into_response()
+    Json(timeline_of(&run, false)).into_response()
 }
 
 /// A run's steps, each with its tool calls, the boundary's decisions and
-/// their results; its notices and verifications.
-pub(crate) fn timeline_of(run: &Run) -> Value {
+/// their results; its notices and verifications. With `redact_private`, the
+/// calls that are the person's alone keep their name but lose their words.
+pub(crate) fn timeline_of(run: &Run, redact_private: bool) -> Value {
     let mut steps = vec![];
     for reply in &run.replies {
         let mut calls = vec![];
@@ -1166,11 +1167,12 @@ pub(crate) fn timeline_of(run: &Run) -> Value {
                         .filter(|d| &d.call_id == id)
                         .map(|d| json!({ "stage": d.stage, "outcome": d.outcome, "rule": d.rule }))
                         .collect();
+                    let hidden = redact_private && crate::tools::person_only_tool(name);
                     calls.push(json!({
-                        "call_id": id, "tool": name, "input": input,
+                        "call_id": id, "tool": name, "input": if hidden { json!(crate::tools::REDACTED_CALL) } else { input.clone() },
                         "issuer": run.intents.get(id).map(|i| i.issuer.clone()).unwrap_or_else(|| "model".into()),
                         "decisions": decisions,
-                        "result": r.map(|r| r.text.chars().take(4000).collect::<String>()),
+                        "result": r.map(|r| if hidden { crate::tools::REDACTED_CALL.to_string() } else { r.text.chars().take(4000).collect::<String>() }),
                         "is_error": r.map(|r| r.is_error), "status": r.map(|r| r.status.clone()),
                     }));
                 }

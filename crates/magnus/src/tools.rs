@@ -205,6 +205,17 @@ pub fn builtin(name: &str) -> Option<&'static Builtin> {
     BUILTINS.iter().find(|b| b.name == name)
 }
 
+/// Tools whose calls are their person's alone: no other person's run, the
+/// owner, an admin or another developer sees their words (behavior spec,
+/// Per-user relationship; #232, #233). Reads served to anyone but the run's
+/// person redact these calls' inputs and results (#257).
+pub fn person_only_tool(name: &str) -> bool {
+    matches!(name, "relationship_note" | "disagreement")
+}
+
+/// What a redacted call's input and result say, so the call stays listed.
+pub const REDACTED_CALL: &str = "redacted: this call is the person's alone";
+
 /// The appliance's own apps; no added app may take one of their names.
 pub fn builtin_apps() -> Vec<&'static str> {
     let mut a: Vec<&str> = BUILTINS.iter().map(|b| b.app).collect();
