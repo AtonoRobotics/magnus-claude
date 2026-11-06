@@ -158,11 +158,22 @@ struct ReadOnly(std::path::PathBuf);
 
 impl ReadOnly {
     fn new(dir: &std::path::Path) -> ReadOnly {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let held = ReadOnly(dir.to_path_buf());
+        let held = ReadOnly::mode(dir, 0o555);
         assert!(std::fs::write(dir.join("probe"), b"").is_err(), "{} is still writable (as root?): the test cannot make a backup fail", dir.display());
         held
+    }
+
+    /// Not even listed, as a disk that cannot be read.
+    fn unreadable(dir: &std::path::Path) -> ReadOnly {
+        let held = ReadOnly::mode(dir, 0o000);
+        assert!(std::fs::read_dir(dir).is_err(), "{} can still be listed (as root?): the test cannot make it unreadable", dir.display());
+        held
+    }
+
+    fn mode(dir: &std::path::Path, mode: u32) -> ReadOnly {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        ReadOnly(dir.to_path_buf())
     }
 }
 
@@ -280,5 +291,109 @@ async fn a_backup_left_holding_an_erased_persons_content_does_not_restore_it() {
         .unwrap();
     assert!(out.status.success(), "restore failed: {}", String::from_utf8_lossy(&out.stderr));
     assert!(!app.db.dump().await.contains(BOB_WORDS), "bob's words came back from a backup the erasure could not rewrite");
+    app.restart().await;
+}
+
+/// A task of Alice's, deleted from the trash: a removal, and the scrub of
+/// the backups it runs before it answers.
+async fn remove_a_task(alice: &Api, words: &str) {
+    let t = alice.submit(words).await;
+    let review = alice.wait_item(&t, "review").await;
+    assert_eq!(alice.respond(review["id"].as_str().unwrap(), json!({ "decision": "accept" })).await.as_u16(), 200);
+    alice.wait_settled(&t).await;
+    let (st, v) = alice.post("/v1/trash", json!({ "item": t })).await;
+    assert!(st.is_success(), "{v}");
+    let (st, v) = alice.send(reqwest::Method::DELETE, &format!("/v1/trash/{t}"), None).await;
+    assert!(st.is_success(), "{v}");
+}
+
+/// The disaster: the log, its content and the vault are gone, and `file`
+/// is restored into empty ones.
+async fn restore_from(app: &mut Appliance, file: &std::path::Path) {
+    app.kill().await;
+    app.db.admin().await.batch_execute("DROP TABLE public.content, public.events").await.unwrap();
+    std::fs::remove_dir_all(app.state_dir.join("vault")).unwrap();
+    let out = std::process::Command::new(magnus_invariants::appliance::bin("magnus-appliance"))
+        .args(["restore", "--config"])
+        .arg(app.dir.path().join("magnus.toml"))
+        .args(["--admin-url", &app.db.admin_url(), "--from"])
+        .arg(file)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "restore of {} failed: {}", file.display(), String::from_utf8_lossy(&out.stderr));
+}
+
+/// A backups directory gone (a disk not mounted) or unreadable while an
+/// erasure waits on a backup in it is not one without backups: the backup
+/// is out of reach, not rewritten, so the erasure stays incomplete and the
+/// scrub pending (#243 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_erasure_stays_incomplete_while_the_backups_directory_is_out_of_reach() {
+    let m = FakeModel::start(writer()).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let kc = Keycloak::start().await;
+    let (file, _, v, stuck) = erased_while_a_backup_is_stuck(&mut app, &kc).await;
+    assert_eq!(v["erasure"], "incomplete", "{v}");
+    let name = file.file_name().unwrap().to_str().unwrap().to_string();
+    let dir = file.parent().unwrap().to_path_buf();
+    drop(stuck);
+    let alice = app.api("alice");
+
+    // Gone: the next scrub, after a removal, finds no directory.
+    let away = dir.with_file_name("backups-away");
+    std::fs::rename(&dir, &away).unwrap();
+    remove_a_task(&alice, "Write about the gone directory.").await;
+    let (_, b) = alice.get("/v1/backups").await;
+    assert_eq!(b["scrub_pending"]["files"], json!([name]), "a missing backups directory was taken for one without backups: {b}");
+
+    // Back, but unreadable: the scrub cannot list it.
+    std::fs::rename(&away, &dir).unwrap();
+    let hidden = ReadOnly::unreadable(&dir);
+    remove_a_task(&alice, "Write about the unreadable directory.").await;
+    let (_, b) = alice.get("/v1/backups").await;
+    assert_eq!(b["scrub_pending"]["files"], json!([name]), "an unreadable backups directory was taken for one without backups: {b}");
+    assert!(audited(&app, "user_erasure_completed").await.is_empty(), "the erasure was reported complete while its backup was out of reach");
+    drop(hidden);
+}
+
+fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// A restore of a backup older than an erasure, whose log does not have
+/// it, and a scrub after it do not forget the erasure: a later restore of a
+/// backup the erasure could not rewrite still leaves the person's content
+/// out (#243 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_of_an_older_backup_does_not_forget_a_later_erasure() {
+    let m = FakeModel::start(writer()).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let kc = Keycloak::start().await;
+    let alice = app.api("alice");
+    // An earlier removal, so the log restored has one, then the older
+    // backup (Y).
+    remove_a_task(&alice, "Write about an earlier removal.").await;
+    let (st, y) = alice.post("/v1/backups", json!({})).await;
+    assert_eq!(st, 201, "{y}");
+    let older = app.state_dir.join("backups").join(y["file"].as_str().unwrap());
+    // Bob's words in a later backup (X) that his erasure cannot rewrite.
+    let (later, _, v, stuck) = erased_while_a_backup_is_stuck(&mut app, &kc).await;
+    assert_eq!(v["erasure"], "incomplete", "{v}");
+
+    // Y restored; the backups writable again, and a scrub runs at start.
+    restore_from(&mut app, &older).await;
+    drop(stuck);
+    let record = app.state_dir.join("backups").join("removals.json");
+    let was = modified(&record);
+    app.restart().await;
+    eventually("a scrub after the restore records the removals", PATIENCE, || {
+        let record = record.clone();
+        async move { (modified(&record) != was).then_some(()) }
+    })
+    .await;
+
+    // Then X restored: Bob's words stay out.
+    restore_from(&mut app, &later).await;
+    assert!(!app.db.dump().await.contains(BOB_WORDS), "bob's words came back from a backup his erasure could not rewrite, after a restore of an older one");
     app.restart().await;
 }

@@ -141,34 +141,53 @@ impl Kernel {
     pub async fn scrub_backups(&self) -> Result<usize> {
         let removals = self.log.removals().await?;
         let Some(&(latest, _)) = removals.last() else { return Ok(0) };
+        // With no scrub left pending, every backup has had the removals up
+        // to the one before the latest.
+        let before = removals.iter().rev().nth(1).map_or(0, |r| r.0);
+        let removed = self.log.removed_events().await?;
         let dir = self.cfg.backup_dir();
+        // A directory backups were made in that is gone now (a disk not
+        // mounted) is not one without backups: they are only out of reach.
+        let made = self.read(|s| s.last_backup.is_some() || s.scrub_pending.is_some());
+        let shown = dir.display().to_string();
         let _one = backing_up().lock().await;
-        let (rewritten, left) = if dir.exists() {
-            let cfg = self.cfg.clone();
-            tokio::task::spawn_blocking(move || {
-                // What has been removed, where a restore of a backup that
-                // could not be rewritten finds it (`restore`).
-                note_removals(&cfg, &removals);
-                let files = list(&dir);
-                let cipher = match key(&cfg, false) {
-                    Ok(c) => c,
-                    Err(e) => return (0, files.into_iter().map(|(name, _)| (name, 0, format!("{e:#}"))).collect()),
-                };
-                let mut rewritten = 0;
-                let mut left: Vec<(String, i64, String)> = vec![];
-                for (name, _) in files {
-                    let mut done = 0;
-                    match scrub_one(&cipher, &dir.join(&name), &removals, latest, &mut done) {
-                        Ok(true) => rewritten += 1,
-                        Ok(false) => {}
-                        Err(e) => left.push((name, done, format!("{e:#}"))),
-                    }
+        let cfg = self.cfg.clone();
+        let found = tokio::task::spawn_blocking(move || -> std::result::Result<(usize, Vec<(String, i64, String)>), String> {
+            // What has been removed, where a restore of a backup that
+            // could not be rewritten finds it (`restore`), and every
+            // removal recorded before, in this log's history or another's.
+            let gone = note_removals(&cfg, &removed);
+            let files = match try_list(&dir) {
+                Ok(files) => files,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && !made => vec![],
+                Err(e) => return Err(format!("the backups directory {} cannot be read: {e}", dir.display())),
+            };
+            let cipher = match key(&cfg, false) {
+                Ok(c) => c,
+                Err(e) => return Ok((0, files.into_iter().map(|(name, _)| (name, 0, format!("{e:#}"))).collect())),
+            };
+            let mut rewritten = 0;
+            let mut left: Vec<(String, i64, String)> = vec![];
+            for (name, _) in files {
+                let mut done = 0;
+                match scrub_one(&cipher, &dir.join(&name), &gone, latest, &mut done) {
+                    Ok(true) => rewritten += 1,
+                    Ok(false) => {}
+                    Err(e) => left.push((name, done, format!("{e:#}"))),
                 }
-                (rewritten, left)
-            })
-            .await?
-        } else {
-            (0, vec![])
+            }
+            Ok((rewritten, left))
+        })
+        .await?;
+        let (rewritten, left) = match found {
+            Ok(found) => found,
+            // Not looked at, so not rewritten: whatever they held, they
+            // still hold. The backups already pending stay so; with none,
+            // the directory is, for the latest removal.
+            Err(detail) => {
+                let (from, files) = self.read(|s| s.scrub_pending.as_ref().map(|p| (p.from, p.files.clone()))).filter(|(_, f)| !f.is_empty()).unwrap_or((before, vec![shown]));
+                (0, files.into_iter().map(|f| (f, from, detail.clone())).collect())
+            }
         };
         if left.is_empty() {
             if self.read(|s| s.scrub_pending.is_some()) {
@@ -188,53 +207,113 @@ impl Kernel {
     }
 }
 
-/// Take the removals after the backup's own out of one backup; whether it
-/// was rewritten. `done` is the last removal it had, once it is read.
-fn scrub_one(cipher: &XChaCha20Poly1305, path: &Path, removals: &[(i64, Vec<i64>)], latest: i64, done: &mut i64) -> Result<bool> {
+/// Every event whose content was removed, by its number and time (#195).
+type Gone = std::collections::BTreeSet<(i64, chrono::DateTime<chrono::Utc>)>;
+
+/// Take every removed event's content out of one backup, and mark it as
+/// having had the removals through `latest`; whether it was rewritten.
+/// `done` is the last removal it had, once it is read. An event is matched
+/// by its number and its time, so a removal recorded before a restore
+/// still takes it, and an event the restored log later gave the same
+/// number is not taken with it.
+fn scrub_one(cipher: &XChaCha20Poly1305, path: &Path, gone: &Gone, latest: i64, done: &mut i64) -> Result<bool> {
     let mut v = open(cipher, &std::fs::read(path)?)?;
     *done = v["scrubbed_through"].as_i64().unwrap_or(0);
-    if *done >= latest {
-        return Ok(false);
-    }
-    let gone: std::collections::HashSet<i64> = removals.iter().filter(|(at, _)| *at > *done).flat_map(|(_, seqs)| seqs.iter().copied()).collect();
+    let mut changed = *done < latest;
     for e in v["events"].as_array_mut().into_iter().flatten() {
-        if e["seq"].as_i64().is_some_and(|q| gone.contains(&q)) {
+        if e["content"].is_null() && e["salt"].is_null() {
+            continue;
+        }
+        if e["seq"].as_i64().is_some_and(|q| named(gone, q, &e["at"])) {
             e["content"] = Value::Null;
             e["salt"] = Value::Null;
+            changed = true;
         }
     }
-    v["scrubbed_through"] = json!(latest);
+    if !changed {
+        return Ok(false);
+    }
+    v["scrubbed_through"] = json!(latest.max(*done));
     crate::vault::write_private(path, &seal(cipher, &serde_json::to_vec(&v)?)?)?;
     Ok(true)
 }
 
+/// Whether a removal named this event; one without a readable time is
+/// taken by its number alone.
+fn named(gone: &Gone, seq: i64, at: &Value) -> bool {
+    match at.as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
+        Some(at) => gone.contains(&(seq, at.with_timezone(&chrono::Utc))),
+        None => gone.iter().any(|(q, _)| *q == seq),
+    }
+}
+
 /// The record of removals a restore reads: the events whose content was
-/// removed, by number only (no content, no names). Kept in the state
-/// directory, which the kernel can always write, and beside the backups,
-/// which go with them to another machine.
+/// removed, by number and time only (no content, no names). Kept in the
+/// state directory, which the kernel can always write, and beside the
+/// backups, which go with them to another machine.
 const REMOVALS: &str = "removals.json";
 
-fn note_removals(cfg: &Config, removals: &[(i64, Vec<i64>)]) {
-    let doc = json!({ "removals": removals }).to_string();
-    for dir in [cfg.appliance.state_dir.clone(), cfg.backup_dir()] {
+/// The removals recorded in `dir`: none if it has no record, an error if
+/// it has one that cannot be read.
+fn read_removals(dir: &Path) -> Result<Gone> {
+    let bytes = match std::fs::read(dir.join(REMOVALS)) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Gone::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let v: Value = serde_json::from_slice(&bytes)?;
+    v["removed"]
+        .as_array()
+        .context("no removals")?
+        .iter()
+        .map(|r| {
+            let at = chrono::DateTime::parse_from_rfc3339(r[1].as_str().unwrap_or_default())?.with_timezone(&chrono::Utc);
+            Ok((r[0].as_i64().context("a removal without its event")?, at))
+        })
+        .collect()
+}
+
+/// Add `known` to the record in each of `dirs` and return all of them. A
+/// record is only added to, never replaced: a removal recorded once stays
+/// recorded through any restore of a backup older than it, whose log does
+/// not have it (#195). A record that cannot be read is left as it is.
+fn record_removals(dirs: &[PathBuf], mut known: Gone) -> Gone {
+    let mut writable = vec![];
+    for dir in dirs.iter().filter(|d| d.is_dir()) {
+        match read_removals(dir) {
+            Ok(had) => {
+                known.extend(had);
+                writable.push(dir);
+            }
+            Err(e) => tracing::warn!("reading the removals recorded in {}: {e:#}", dir.display()),
+        }
+    }
+    let doc = json!({ "removed": known.iter().map(|(q, at)| json!([q, at.to_rfc3339()])).collect::<Vec<_>>() }).to_string();
+    for dir in writable {
         if let Err(e) = crate::vault::write_private(&dir.join(REMOVALS), doc.as_bytes()) {
             tracing::warn!("recording the removals in {}: {e:#}", dir.display());
         }
     }
+    known
+}
+
+fn note_removals(cfg: &Config, removed: &[(i64, chrono::DateTime<chrono::Utc>)]) -> Gone {
+    record_removals(&[cfg.appliance.state_dir.clone(), cfg.backup_dir()], removed.iter().copied().collect())
 }
 
 /// Every event whose content was removed, as recorded in the state
-/// directory, beside the backups and beside the backup being restored.
-fn removed_seqs(cfg: &Config, from: &Path) -> std::collections::HashSet<i64> {
+/// directory, beside the backups and beside the backup being restored;
+/// all of them recorded in the state directory too, for later restores. A
+/// record that cannot be read stops the restore, which could otherwise
+/// bring back what it names.
+fn removed_events(cfg: &Config, from: &Path) -> Result<Gone> {
     let dirs = [Some(cfg.appliance.state_dir.clone()), Some(cfg.backup_dir()), from.parent().map(Path::to_path_buf)];
-    dirs.into_iter()
-        .flatten()
-        .filter_map(|d| std::fs::read(d.join(REMOVALS)).ok())
-        .filter_map(|b| serde_json::from_slice::<Value>(&b).ok())
-        .flat_map(|v| v["removals"].as_array().cloned().unwrap_or_default())
-        .flat_map(|r| r[1].as_array().cloned().unwrap_or_default())
-        .filter_map(|q| q.as_i64())
-        .collect()
+    let mut all = Gone::new();
+    for d in dirs.into_iter().flatten() {
+        all.extend(read_removals(&d).with_context(|| format!("read the removals recorded in {}", d.display()))?);
+    }
+    std::fs::create_dir_all(&cfg.appliance.state_dir)?;
+    Ok(record_removals(&[cfg.appliance.state_dir.clone()], all))
 }
 
 fn backing_up() -> &'static tokio::sync::Mutex<()> {
@@ -314,7 +393,7 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
     let (n, last) = check(&v)?;
     // A backup that could not be rewritten after a removal (an erasure)
     // still holds what was removed: it is left out here too (#195).
-    let removed = removed_seqs(cfg, from);
+    let removed = removed_events(cfg, from)?;
     let vault_dir = cfg.appliance.state_dir.join("vault");
     if vault_dir.join("secrets.json").exists() {
         bail!("{} already holds secrets; restore into an empty state directory", vault_dir.display());
@@ -337,7 +416,7 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
             &[&e["seq"].as_i64(), &at, &e["kind"].as_str(), &e["actor"].as_str(), &e["run_id"].as_str(), &e["body"]],
         )
         .await?;
-        if !e["content"].is_null() && !e["seq"].as_i64().is_some_and(|q| removed.contains(&q)) {
+        if !e["content"].is_null() && !e["seq"].as_i64().is_some_and(|q| removed.contains(&(q, at))) {
             let salt = hex::decode(e["salt"].as_str().unwrap_or_default()).with_context(|| format!("event {} has no salt", e["seq"]))?;
             tx.execute("INSERT INTO public.content (seq, salt, body) VALUES ($1, $2, $3)", &[&e["seq"].as_i64(), &salt, &e["content"]]).await?;
         }
@@ -382,15 +461,20 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
 }
 
 pub fn list(dir: &PathBuf) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let n = e.file_name().to_string_lossy().to_string();
-            (n.starts_with("magnus-") && n.ends_with(".backup")).then(|| (n, e.metadata().map(|m| m.len()).unwrap_or(0)))
-        })
-        .collect();
+    try_list(dir).unwrap_or_default()
+}
+
+/// The backups in `dir`, or why it could not be read: a directory that is
+/// missing or unreadable is not one without backups (#195).
+fn try_list(dir: &Path) -> std::io::Result<Vec<(String, u64)>> {
+    let mut out = vec![];
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        let n = e.file_name().to_string_lossy().to_string();
+        if n.starts_with("magnus-") && n.ends_with(".backup") {
+            out.push((n, e.metadata().map(|m| m.len()).unwrap_or(0)));
+        }
+    }
     out.sort();
-    out
+    Ok(out)
 }

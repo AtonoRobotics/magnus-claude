@@ -645,6 +645,15 @@ impl Log {
         Ok(rows.iter().map(|r| (r.get::<_, i64>(0), serde_json::from_value(r.get::<_, Value>(1)).unwrap_or_default())).collect())
     }
 
+    /// Every event a removal named, by its number and its time: the two
+    /// together name it in this log's history only, not an event a restore
+    /// of an older backup later gave the same number (#195).
+    pub async fn removed_events(&self) -> Result<Vec<(i64, DateTime<Utc>)>> {
+        let sql = "SELECT seq, at FROM public.events WHERE seq IN (SELECT jsonb_array_elements_text(body->'seqs')::bigint FROM public.events WHERE kind = 'removed') ORDER BY seq";
+        let rows = self.client().await?.query(sql, &[]).await?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
     /// Finish removals that stopped after their record: delete the content
     /// of every event a `removed` event names. Run at start.
     pub async fn finish_removals(&self) -> Result<u64> {
