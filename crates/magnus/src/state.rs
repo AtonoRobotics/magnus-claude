@@ -533,6 +533,50 @@ impl Grant {
     }
 }
 
+/// Something the person or Magnus said they would do (#236). Its words
+/// (what, for whom, the quote, notes) are recalled from its events, by
+/// `steps`; the rest is here. Overdue is never stored: it is open with
+/// `by` past (`commitments::overdue`).
+#[derive(Clone, Debug)]
+pub struct Commitment {
+    pub id: String,
+    pub person: String,
+    /// `person` or `magnus`.
+    pub who: String,
+    pub source: Value,
+    /// The taint of the run that recorded it.
+    pub label: Label,
+    /// When it was recorded, and by whom (as the log names them).
+    pub at: DateTime<Utc>,
+    pub by_actor: String,
+    /// When it last changed.
+    pub changed: DateTime<Utc>,
+    /// Its recording event.
+    pub seq: i64,
+    pub status: String,
+    pub by: Option<String>,
+    /// Each event of it, oldest first, with its status and date after it:
+    /// what it was as a run that started at any point saw it.
+    pub steps: Vec<CommitmentStep>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommitmentStep {
+    pub seq: i64,
+    pub status: String,
+    pub by: Option<String>,
+}
+
+impl Commitment {
+    /// Its status and date as they stood before the event `seq`, and the
+    /// events that made it so; None when it was recorded after.
+    pub fn before(&self, seq: i64) -> Option<(&str, Option<&str>, Vec<i64>)> {
+        let steps: Vec<&CommitmentStep> = self.steps.iter().filter(|s| s.seq < seq).collect();
+        let last = steps.last()?;
+        Some((last.status.as_str(), last.by.as_deref(), steps.iter().map(|s| s.seq).collect()))
+    }
+}
+
 /// A thread branched from another at one of its entries.
 #[derive(Clone, Debug)]
 pub struct Branch {
@@ -856,6 +900,8 @@ pub struct State {
     pub schedules: BTreeMap<String, Schedule>,
     /// Each person's grants (#235), revoked ones among them, by id.
     pub grants: BTreeMap<String, Grant>,
+    /// Each person's commitment ledger (#236), by id.
+    pub commitments: BTreeMap<String, Commitment>,
     /// Cards from chat (schedules and suggestions) the person answered, by
     /// card id: with the cards in their turns' results, the suggestion
     /// ledger (`suggestions::ledger`).
@@ -1396,6 +1442,8 @@ impl State {
                 self.schedules.retain(|_, x| &x.person != person);
                 // Their grants: none covers whoever is next known by their name.
                 self.grants.retain(|_, g| &g.person != person);
+                // Their commitments, whose words went with theirs (#236).
+                self.commitments.retain(|_, c| &c.person != person);
                 self.memory.retain(|m| &m.person != person);
                 // Their own documents (their relationship memory among
                 // them) and their versions, whose content went with theirs
@@ -1546,6 +1594,40 @@ impl State {
                     g.actions.push(GrantAction { tool: tool.clone(), task: task.clone(), run: run.clone(), call_id: call_id.clone(), at: e.at });
                 }
             }
+            Ev::CommitmentRecorded { id, person, who, by, source, label, .. } => {
+                let by = by.clone().filter(|b| !b.is_empty());
+                self.commitments.entry(id.clone()).or_insert_with(|| Commitment {
+                    id: id.clone(),
+                    person: person.clone(),
+                    who: who.clone(),
+                    source: source.clone(),
+                    label: *label,
+                    at: e.at,
+                    by_actor: e.actor.clone(),
+                    changed: e.at,
+                    seq: e.seq,
+                    status: "open".into(),
+                    by: by.clone(),
+                    steps: vec![CommitmentStep { seq: e.seq, status: "open".into(), by }],
+                });
+            }
+            Ev::CommitmentChanged { id, person, by, status, .. } => {
+                if let Some(c) = self.commitments.get_mut(id).filter(|c| &c.person == person) {
+                    if let Some(b) = by {
+                        c.by = Some(b.clone()).filter(|b| !b.is_empty());
+                    }
+                    if let Some(s) = status {
+                        c.status = s.clone();
+                    }
+                    c.changed = e.at;
+                    c.steps.push(CommitmentStep { seq: e.seq, status: c.status.clone(), by: c.by.clone() });
+                }
+            }
+            Ev::CommitmentRemoved { id, person } => {
+                if self.commitments.get(id).is_some_and(|c| &c.person == person) {
+                    self.commitments.remove(id);
+                }
+            }
             Ev::CardDeclined { card, person, reason } => {
                 self.cards.insert(card.clone(), CardState { answer: Answer::Declined(reason.clone()), at: e.at, person: person.clone() });
             }
@@ -1684,6 +1766,10 @@ impl State {
                 // runs that wrote them (I2, M1), and a task from chat that of
                 // the turn that started it.
                 let pb = self.playbook_at(person, config.playbook).into_iter().fold(label.unwrap_or_default(), |l, i| l.join(i.label));
+                // So do the person's open commitments, which its context
+                // carries as they stand now (#236): words read in a mailbox
+                // do not enter a clean run untainted.
+                let pb = self.commitments.values().filter(|c| &c.person == person && c.status == "open").fold(pb, |l, c| l.join(c.label));
                 let uploads = !attachments.is_empty() || !files.is_empty();
                 // A schedule's run counts against it as it is created.
                 if let Some(s) = e.actor.strip_prefix("schedule:").and_then(|id| self.schedules.get_mut(id)) {

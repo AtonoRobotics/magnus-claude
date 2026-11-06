@@ -1125,6 +1125,8 @@ impl Kernel {
                 "bundle_read" | "bundle_search" | "bundle_write" => Ok(self.bundle_tool(&a.run, &a.tool, &a.input).await?),
                 "relationship_note" => Ok(self.relationship_tool(&a.run, &a.input).await?),
                 "disagreement" => Ok(self.disagreement_tool(&a.run, &a.input).await?),
+                "record_commitment" => Ok(self.record_commitment_tool(a, key).await?),
+                "update_commitment" => Ok(self.update_commitment_tool(&a.run, &a.input).await?),
                 "knowledge_add" => Ok(self.knowledge_add(&a.run, &a.input).await?),
                 "project_read" => {
                     let name = s("name");

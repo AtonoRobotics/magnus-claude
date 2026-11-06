@@ -19,6 +19,7 @@ pub mod bundle;
 pub mod catalog;
 pub mod chat;
 pub mod chat_actions;
+pub mod commitments;
 pub mod cli;
 pub mod compose;
 pub mod config;

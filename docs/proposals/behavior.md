@@ -123,7 +123,12 @@ admin console.
    whom, by when, from where, and its status (open, done, overdue,
    released), recognised by the model in conversations and connected data.
    It is in context for the review and the wakes it bears on; the person can
-   see, correct and remove entries.
+   see, correct and remove entries. Done (#236,
+   `decisions/2026-11-06-236-commitments.md`): `record_commitment` records
+   one only when its quote is found in the person's own words or in an app
+   read it names; every run carries the open ones and their taint; overdue
+   is derived from the date, and raising it is step 7's; Settings, "What you
+   and Magnus said you'd do".
 7. **The proactive loop.**
    - The kernel wakes a review run for each person every 60 minutes in their
      working hours and once overnight, and on events: a task done or failed,

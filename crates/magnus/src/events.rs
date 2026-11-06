@@ -599,6 +599,53 @@ pub enum Ev {
         call_id: String,
         tool: String,
     },
+    /// Something the person or Magnus said they would do (behavior spec,
+    /// the commitment ledger; #236), recognised by Magnus in a run of the
+    /// person's: `who` (`person` or `magnus`) will do `what`, for `to`, by
+    /// `by` (a date or a time). `quote` is the words it was recognised
+    /// from, found verbatim in the person's own words of the run or in the
+    /// result of a call it read (`source`). `label` is the run's taint.
+    CommitmentRecorded {
+        id: String,
+        person: String,
+        who: String,
+        #[serde(default)]
+        what: String,
+        #[serde(default)]
+        to: Option<String>,
+        #[serde(default)]
+        by: Option<String>,
+        /// `{kind: conversation, thread, task}` or `{kind: app, app, tool, task, call}`.
+        #[serde(default)]
+        source: Value,
+        #[serde(default)]
+        quote: String,
+        #[serde(default)]
+        label: Label,
+    },
+    /// A commitment corrected (its words, for whom, by when) or its status
+    /// changed (`open`, `done`, `released`), by the person or by Magnus.
+    /// What is given replaces what it had; an empty `to` or `by` clears it.
+    CommitmentChanged {
+        id: String,
+        person: String,
+        #[serde(default)]
+        what: Option<String>,
+        #[serde(default)]
+        to: Option<String>,
+        #[serde(default)]
+        by: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    /// The person removed a commitment; the content of its events is
+    /// deleted with a `removed` event that follows.
+    CommitmentRemoved {
+        id: String,
+        person: String,
+    },
     /// A due schedule could not start its task.
     ScheduleFailed {
         id: String,
@@ -1116,6 +1163,8 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("card_declined", &["reason"]),
     ("schedule_ended", &["reason"]),
     ("grant_set", &["title"]),
+    ("commitment_recorded", &["what", "to", "quote"]),
+    ("commitment_changed", &["what", "to", "note"]),
 ];
 
 /// The content fields of one kind of event; none for most.
