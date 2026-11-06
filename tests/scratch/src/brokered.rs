@@ -170,7 +170,14 @@ impl ProviderApi {
             let auth = head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("authorization")).map(|(_, v)| v.trim().to_string())).unwrap_or_default();
             // A path under `/json/` is answered with JSON that is valid but
             // names nothing a tool's answer must (no `id`).
-            let body = if path.starts_with("/json/") { r#"{"done":true}"# } else { "hello from the provider" };
+            // `/json/named-by-token` answers with the caller's own token as
+            // a property name beside the answer it should give, as a provider
+            // echoing it in an odd place would.
+            let body = match path.as_str() {
+                "/json/named-by-token" => format!(r#"{{"id":"sent","{}":true}}"#, auth.trim_start_matches("Bearer ")),
+                p if p.starts_with("/json/") => r#"{"done":true}"#.to_string(),
+                _ => "hello from the provider".to_string(),
+            };
             seen.lock().unwrap().push((path, auth));
             let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
             let _ = s.shutdown().await;

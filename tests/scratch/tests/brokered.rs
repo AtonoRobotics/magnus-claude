@@ -246,7 +246,7 @@ async fn disconnecting_erasing_and_the_kill_switch_stop_the_persons_microvm() {
 /// happened: its outcome is unknown and the person is asked, as after a
 /// crash. It is never failed as if nothing happened, so the model's retry
 /// never reaches the provider a second time.
-async fn a_write_whose_answer_breaks_its_schema(tool: &'static str) {
+async fn a_write_whose_answer_breaks_its_schema(tool: &'static str, write: &'static str) -> (Appliance, Vec<(String, String)>) {
     let api = ProviderApi::start().await;
     let host = api.host.clone();
     let m = FakeModel::start(script(move |c| {
@@ -256,9 +256,9 @@ async fn a_write_whose_answer_breaks_its_schema(tool: &'static str) {
             match c.turn() {
                 0 => contract_unchecked("send the report", "the report is sent"),
                 1 => call("testread", "/json/read"),
-                2 => call("testapp", "/json/write"),
+                2 => call("testapp", write),
                 // A model told the send failed sends it again.
-                3 => call("testapp", "/json/write"),
+                3 => call("testapp", write),
                 _ => complete("sent"),
             }
         }
@@ -291,7 +291,7 @@ async fn a_write_whose_answer_breaks_its_schema(tool: &'static str) {
 
     let seen = api.seen.lock().unwrap().clone();
     let count = |p: &str| seen.iter().filter(|(path, _)| path == p).count();
-    assert_eq!(count("/json/write"), 1, "the write reached the provider again after its answer broke its schema: {seen:?}");
+    assert_eq!(count(write), 1, "the write reached the provider again after its answer broke its schema: {seen:?}");
     assert_eq!(count("/json/read"), 1, "{seen:?}");
     // The read failed as any read does, and the run went on.
     let r = results(&m, "Send the report");
@@ -302,14 +302,29 @@ async fn a_write_whose_answer_breaks_its_schema(tool: &'static str) {
     assert!(item["details"]["tool"].as_str().is_some_and(|t| t.ends_with(tool)), "{item}");
     assert_eq!(alice.task(&task).await["status"], "suspended");
     assert_eq!(r.len(), 2, "the model was told the write failed: {r:?}");
+    (app, seen)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_write_whose_answer_breaks_its_schema_at_the_server_is_unknown_never_sent_again() {
-    a_write_whose_answer_breaks_its_schema("send").await
+    a_write_whose_answer_breaks_its_schema("send", "/json/write").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_write_whose_answer_breaks_its_schema_at_the_appliance_is_unknown_never_sent_again() {
-    a_write_whose_answer_breaks_its_schema("send_unchecked").await
+    a_write_whose_answer_breaks_its_schema("send_unchecked", "/json/write").await;
+}
+
+/// The appliance's own check names what is wrong with an answer, a property
+/// name too; when the provider put the caller's token there, the message
+/// says the token nowhere: not in the logs, the person's card or the task.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_answer_that_names_the_token_never_shows_it() {
+    let (app, seen) = a_write_whose_answer_breaks_its_schema("send_unchecked", "/json/named-by-token").await;
+    let token = seen.iter().find(|(p, _)| p == "/json/named-by-token").map(|(_, a)| a.trim_start_matches("Bearer ").to_string()).unwrap();
+    assert!(!token.is_empty());
+    let alice = app.api("alice");
+    let shown = format!("{}\n{}", serde_json::to_string(&alice.inbox().await).unwrap(), serde_json::to_string(&alice.tasks().await).unwrap());
+    assert!(!app.logs().contains(&token), "the appliance logged the provider's token from a bad answer");
+    assert!(!shown.contains(&token), "the token from a bad answer was shown: {shown}");
 }

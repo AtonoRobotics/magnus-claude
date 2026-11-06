@@ -340,7 +340,7 @@ impl Brokered {
                 None => Some("it gave no structured content".into()),
             };
             if let Some(e) = problem {
-                return Err(CallError::BadAnswer(format!("{tool}: the answer does not match its schema: {e}")));
+                return Err(CallError::BadAnswer(Mcp::clean(&format!("{tool}: the answer does not match its schema: {e}"), Some(token))));
             }
         }
         Ok(CallOutput { text: Mcp::clean(&text, Some(token)), structured: structured.map(|v| Mcp::clean_value(v, Some(token))), is_error })

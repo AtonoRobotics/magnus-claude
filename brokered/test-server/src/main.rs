@@ -76,7 +76,7 @@ const UNCHECKED: &str = "send_unchecked";
 
 fn main() {
     let host = json!({ "type": "object", "required": ["host"], "additionalProperties": false, "properties": { "host": { "type": "string" }, "path": { "type": "string" } } });
-    let sent = json!({ "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } });
+    let sent = json!({ "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "string" } } });
     let tools = vec![
         Tool { name: "fetch", description: "Get a path from the provider with the call's access token.", input: host.clone(), output: json!({ "type": "object", "required": ["status", "body", "instance"], "properties": { "status": { "type": "integer" }, "body": { "type": "string" }, "instance": { "type": "string" } } }), run: fetch },
         Tool { name: "probe", description: "Try every way out of the microVM.", input: host.clone(), output: json!({ "type": "object", "required": ["through_proxy", "direct", "other_port"] }), run: probe },
