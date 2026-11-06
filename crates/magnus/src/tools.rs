@@ -154,6 +154,8 @@ pub const BUILTINS: &[Builtin] = &[
     // The person's relationship memory (behavior spec, Per-user
     // relationship): their own notes, on the appliance, versioned.
     Builtin { name: "relationship_note", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    // The person's disagreement log (behavior spec): theirs, on the appliance.
+    Builtin { name: "disagreement", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // The company knowledge base. A search's result carries the taint of
     // what it returns; filing research changes nothing outside the appliance.
     Builtin { name: "knowledge_search", app: "knowledge", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -430,6 +432,14 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             name: "relationship_note".into(),
             description: d("relationship_note"),
             input_schema: obj(json!({ "action": { "type": "string", "enum": ["add", "change", "remove"] }, "note": { "type": "string" }, "text": { "type": "string" } }), &["action"]),
+        },
+        ToolSpec {
+            name: "disagreement".into(),
+            description: d("disagreement"),
+            input_schema: obj(
+                json!({ "action": { "type": "string", "enum": ["record", "outcome"] }, "position": { "type": "string" }, "decision": { "type": "string" }, "id": { "type": "string" }, "outcome": { "type": "string" } }),
+                &["action"],
+            ),
         },
         ToolSpec { name: "bundle_read".into(), description: d("bundle_read"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
         ToolSpec {

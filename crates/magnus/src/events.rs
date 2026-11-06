@@ -348,6 +348,37 @@ pub enum Ev {
         thread: String,
         entries: Vec<String>,
     },
+    /// The person's reaction to one of Magnus's messages in their thread
+    /// (behavior spec, Per-user relationship): `great` ("that was great"),
+    /// `annoying` ("that was annoying"), or none, taken back. The latest
+    /// counts. It names the message, not its words.
+    Reacted {
+        person: String,
+        thread: String,
+        entry: String,
+        #[serde(default)]
+        reaction: Option<String>,
+    },
+    /// Magnus advised one thing and the person decided otherwise: its
+    /// position and their decision, recorded by Magnus in a run of theirs
+    /// (`disagreement`).
+    DisagreementRecorded {
+        id: String,
+        person: String,
+        run: String,
+        #[serde(default)]
+        position: String,
+        #[serde(default)]
+        decision: String,
+    },
+    /// How a disagreement turned out, recorded later.
+    DisagreementOutcome {
+        id: String,
+        person: String,
+        run: String,
+        #[serde(default)]
+        outcome: String,
+    },
     /// A person branched a thread at an entry: a new thread starts with the
     /// conversation up to there, as it was then.
     ThreadBranched {
@@ -999,6 +1030,8 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("bundle_written", &["frontmatter", "body"]),
     ("knowledge_extraction", &["reply"]),
     ("spoken_written", &["script"]),
+    ("disagreement_recorded", &["position", "decision"]),
+    ("disagreement_outcome", &["outcome"]),
     ("schedule_ended", &["reason"]),
 ];
 

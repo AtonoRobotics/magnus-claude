@@ -132,7 +132,7 @@ pub fn section(notes: &[String], recent: &[(chrono::DateTime<chrono::Utc>, Strin
 /// (each bullet whole, its date and marker counted), then shown in order.
 /// A message cut short is cut at a character; when not one more character
 /// fits, nothing more is added.
-fn recent_lines(recent: &[(chrono::DateTime<chrono::Utc>, String)]) -> String {
+pub(crate) fn recent_lines(recent: &[(chrono::DateTime<chrono::Utc>, String)]) -> String {
     let mut kept = vec![];
     let mut left = BUDGET;
     for (at, text) in recent {
@@ -219,7 +219,9 @@ impl Kernel {
         let (notes, version) = self.relationship(&run.person).await?;
         let thread = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.as_ref().map(|c| c.thread.clone())));
         let recent = self.recent_to(&run.person, thread.as_deref(), run.created_at).await?;
-        Ok((section(&notes, &recent), (!notes.is_empty()).then_some(version)))
+        // Their reactions and open disagreements, as they stood when it started (#233).
+        let (reactions, open) = self.read(|s| (crate::reactions::reactions_before(s, &run.person, run.created_at), crate::reactions::open_before(s, &run.person, run.created_at)));
+        Ok((format!("{}{}", section(&notes, &recent), crate::reactions::section(&reactions, &open)), (!notes.is_empty()).then_some(version)))
     }
 }
 

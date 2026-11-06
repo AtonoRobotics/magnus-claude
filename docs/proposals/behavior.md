@@ -65,9 +65,9 @@ admin console.
    - The model sees its recent messages to the person, so it does not repeat
      itself. Done (#232).
    - Any message can get a "that was great" or "that was annoying" reaction,
-     logged.
+     logged. Done (#233, `decisions/2026-11-06-233-reactions-disagreements.md`).
    - Disagreements are logged: Magnus's position, the person's decision, and
-     later the outcome.
+     later the outcome. Done (#233).
 4. **Suggestions and proposals.**
    - Two schema-validated cards. An automation suggestion: title, plan,
      evidence, permissions; Accept (creates the task or schedule), Not now,
