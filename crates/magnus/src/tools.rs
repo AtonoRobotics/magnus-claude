@@ -580,6 +580,29 @@ pub fn addresses(v: &Value) -> Vec<String> {
     out
 }
 
+/// The email addresses written in free text, lowercased. Each is a whole
+/// run of the characters an address can hold (RFC 5322 atext, `.` and `@`),
+/// so none is ever a piece cut from a longer one: `o'connor@corp.example`
+/// and `!alerts@corp.example` stay what they are (review of #213). Only
+/// what follows the domain is dropped (`bob@x.example).` reads as
+/// `bob@x.example`); the domain must be letters, digits, `-` and dots.
+/// Anything else reads as no address, and the send asks.
+pub fn addresses_in(text: &str) -> Vec<String> {
+    let in_address = |c: char| c.is_alphanumeric() || "!#$%&'*+-/=?^_`{|}~.@".contains(c);
+    text.split(|c: char| !in_address(c))
+        .map(|w| w.trim_end_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .filter(|w| match w.split_once('@') {
+            Some((name, domain)) => {
+                !name.is_empty()
+                    && domain.contains('.')
+                    && !domain.starts_with('.')
+                    && domain.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '.')
+            }
+            None => false,
+        })
+        .collect()
+}
+
 /// One address from `Name <a@x>` or a bare `a@x`.
 fn address(part: &str) -> Option<String> {
     let inner = match (part.rfind('<'), part.rfind('>')) {
@@ -592,8 +615,28 @@ fn address(part: &str) -> Option<String> {
 
 #[cfg(test)]
 mod address_tests {
-    use super::addresses;
+    use super::{addresses, addresses_in};
     use serde_json::json;
+
+    #[test]
+    fn addresses_are_read_from_what_a_person_wrote() {
+        let said = "Send Bob (Bob@Corp.example) the Q3 draft, cc <ann@x.example>; not @handle, me@, a@b or a@b. or \"quoted@q.example\".";
+        assert_eq!(addresses_in(said), ["bob@corp.example", "ann@x.example", "quoted@q.example"]);
+        assert!(addresses_in("Reply to Bob about Friday.").is_empty());
+    }
+
+    /// An address is never read as a piece of a longer one: the person who
+    /// named `o'connor@` did not name `connor@` (review of #213).
+    #[test]
+    fn an_address_is_read_whole_never_as_a_piece_of_another() {
+        assert_eq!(addresses_in("Send it to o'connor@corp.example."), ["o'connor@corp.example"]);
+        assert_eq!(addresses_in("cc !alerts@corp.example!"), ["!alerts@corp.example"]);
+        assert_eq!(addresses_in("to a+tag@corp.example, b.c@corp.example?"), ["a+tag@corp.example", "b.c@corp.example"]);
+        for said in ["o'connor@corp.example", "!alerts@corp.example", "x.connor@corp.example", "'connor@corp.example"] {
+            assert_eq!(addresses_in(said), [said], "a piece of {said} was read as an address");
+        }
+        assert!(addresses_in("\"john doe\"@corp.example and a@b'c.example").is_empty());
+    }
 
     #[test]
     fn a_recipients_field_reads_as_exact_lowercased_addresses() {

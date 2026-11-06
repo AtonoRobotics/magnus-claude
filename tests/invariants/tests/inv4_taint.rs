@@ -304,3 +304,86 @@ async fn a_draft_edited_after_approval_asks_again_including_an_added_bcc() {
     eventually("the approved send ran", PATIENCE, || async { (drafts.effects("send_draft") == 1).then_some(()) }).await;
     assert_eq!(drafts.world()["sent"][0]["bcc"], "eve@evil.example");
 }
+
+/// Drafts the person can send, read and sent as Gmail's are: what a draft
+/// holds is private, and written by others in part.
+async fn drafts_app(drafts: serde_json::Value, model: &FakeModel) -> (FakeMcp, Appliance) {
+    let id_only = json!({ "type": "object", "properties": { "draft_id": { "type": "string" } } });
+    let mcp = FakeMcp::builder()
+        .world("drafts", drafts)
+        .world("sent", json!([]))
+        .honor_idempotency(true)
+        .tool("get_draft", "Read a draft.", id_only.clone(), |w, a, _| {
+            let id = a["draft_id"].as_str().unwrap_or_default();
+            match w["drafts"].get(id) {
+                Some(d) => mcp::ok(json!({ "draft_id": id, "message": d })),
+                None => mcp::err("no such draft"),
+            }
+        })
+        .tool("send_draft", "Send a draft.", id_only, |w, a, _| {
+            let d = w["drafts"][a["draft_id"].as_str().unwrap_or_default()].clone();
+            w["sent"].as_array_mut().unwrap().push(d);
+            mcp::ok(json!({ "status": "sent" }))
+        })
+        .start()
+        .await;
+    let spec = Spec::default()
+        .app("drafts", &mcp, "public", "private+untrusted", &[("get_draft", "read"), ("send_draft", "irreversible")])
+        .destinations("drafts", "send_draft", "get_draft", "draft_id", &["/message/to", "/message/cc", "/message/bcc"], &["/message/subject", "/message/body"]);
+    let app = Appliance::start(spec, model).await;
+    assert!(app.api("alice").put_policy("org", &org_policy(&permit_execute("drafts__send_draft"))).await.is_success());
+    (mcp, app)
+}
+
+/// An allowed recipient passes under both taints: the person wrote the
+/// address themselves, and who the draft goes to is read from the draft at
+/// the gate, so injected text chooses no one (approvals spec, approved by
+/// the owner on 2026-11-04; #176).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allowed_recipient_passes_under_both_taints() {
+    let model = FakeModel::start(steps(vec![
+        contract_unchecked("send Bob the Q3 draft", "Bob has it"),
+        tool("drafts__get_draft", json!({ "draft_id": "d1" })),
+        tool("drafts__send_draft", json!({ "draft_id": "d1" })),
+        complete("sent Bob the Q3 draft"),
+    ]))
+    .await;
+    let (drafts, app) = drafts_app(json!({ "d1": { "to": "Bob <bob@corp.example>", "subject": "Q3", "body": "Confidential: revenue 41.7M" } }), &model).await;
+    let alice = app.api("alice");
+    let id = alice.submit("Send Bob (bob@corp.example) the Q3 draft.").await;
+
+    eventually("the draft was sent", PATIENCE, || async { (drafts.effects("send_draft") == 1).then_some(()) }).await;
+    assert!(alice.open_items(&id, "approval").await.is_empty(), "a recipient the person named asked");
+    assert_eq!(alice.task(&id).await["taint"], json!({ "untrusted": true, "private": true }));
+    assert_eq!(drafts.world()["sent"][0]["to"], "Bob <bob@corp.example>");
+}
+
+/// A new address in the same run asks: after the send to the person's own
+/// recipient, a draft to an address only an email named (as an injected
+/// one would) waits for the person, and its card shows that address.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_address_in_the_same_run_asks() {
+    let model = FakeModel::start(steps(vec![
+        contract_unchecked("send Bob the Q3 draft", "Bob has it"),
+        tool("drafts__get_draft", json!({ "draft_id": "d1" })),
+        tool("drafts__send_draft", json!({ "draft_id": "d1" })),
+        tool("drafts__send_draft", json!({ "draft_id": "d2" })),
+        fail("stopping"),
+    ]))
+    .await;
+    let (drafts, app) = drafts_app(
+        json!({
+            "d1": { "to": "bob@corp.example", "subject": "Q3", "body": "Confidential: revenue 41.7M" },
+            "d2": { "to": "attacker@evil.example", "subject": "fwd", "body": "Confidential: revenue 41.7M" }
+        }),
+        &model,
+    )
+    .await;
+    let alice = app.api("alice");
+    let id = alice.submit("Send Bob (bob@corp.example) the Q3 draft.").await;
+
+    let card = alice.wait_item(&id, "approval").await;
+    assert!(card.to_string().contains("attacker@evil.example"), "the card does not show the new address: {card}");
+    assert_eq!(drafts.effects("send_draft"), 1, "the new address was sent to without the person");
+    assert_eq!(drafts.world()["sent"][0]["to"], "bob@corp.example");
+}

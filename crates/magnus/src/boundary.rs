@@ -319,7 +319,7 @@ impl Kernel {
         };
 
         // 4. Policy.
-        let ask = match self.policy_stage(a, &run, &person, &f).await? {
+        let ask = match self.policy_stage(a, &run, &person, &f, shown.as_ref()).await? {
             Ok(None) => None,
             Ok(Some(why)) => Some(why),
             Err(v) => return Ok(v),
@@ -515,7 +515,7 @@ impl Kernel {
     }
 
     /// Ok(Ok(None)) allow; Ok(Ok(Some(why))) ask; Ok(Err(verdict)) denied.
-    async fn policy_stage(&self, a: &Action, run: &Run, person: &Person, f: &Facts) -> Result<std::result::Result<Option<(String, Option<String>)>, Verdict>> {
+    async fn policy_stage(&self, a: &Action, run: &Run, person: &Person, f: &Facts, shown: Option<&Shown>) -> Result<std::result::Result<Option<(String, Option<String>)>, Verdict>> {
         if self.read(|s| s.kill_switch) {
             self.decision(a, "deny", "policy", "kill switch engaged", None).await?;
             self.suspend(&a.run, "kill_switch", None).await?;
@@ -578,7 +578,19 @@ impl Kernel {
         let transmits = !is_chat_tool(f) && !own_memory && !f.reaches_self && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private && !own_account_read));
         // These override a policy ask: the approval must then cover this exact
         // action, not a broader scope granted for policy reasons.
-        if transmits && untrusted && private {
+        // A send whose every recipient the person wrote themselves goes where
+        // they asked, whatever the task read: injected text can choose
+        // neither who they named nor, read from the draft at the gate, who
+        // it goes to (#176; approvals spec, recipient provenance). That the
+        // content is what they wanted is theirs to judge (owner, 2026-11-04).
+        let theirs = match shown {
+            Some(s) if transmits && untrusted && private => {
+                let named = self.named_by_person(run).await?;
+                s.recipients.values().flatten().all(|r| named.contains(r))
+            }
+            _ => false,
+        };
+        if transmits && untrusted && private && !theirs {
             // A web lookup's address can carry data out too (K34). The person
             // may allow all of a task's lookups at once (B5); anything else
             // it sends is approved one action at a time.
@@ -794,6 +806,21 @@ impl Kernel {
             return Err(format!("{person} is no longer signed in to {app}. Nothing was sent"));
         }
         Ok(())
+    }
+
+    /// The addresses the person wrote themselves for this run: in what they
+    /// asked (a task they started, or their chat message), or in their own
+    /// messages of the conversation a task started from chat carries. Never
+    /// a tool's result, the model's words (a chat task's text is the
+    /// model's) or a schedule's text.
+    async fn named_by_person(&self, run: &Run) -> Result<std::collections::BTreeSet<String>> {
+        let Some(task) = self.read(|s| s.tasks.get(&run.task).cloned()) else { return Ok(Default::default()) };
+        let said: Vec<String> = match &task.chat {
+            Some(c) if !c.turn => c.conversation.iter().filter(|m| m["role"] == "person").filter_map(|m| m["text"].as_str().map(String::from)).collect(),
+            _ if task.schedule.is_none() => vec![self.asked(run).await?],
+            _ => vec![],
+        };
+        Ok(said.iter().flat_map(|t| tools::addresses_in(t)).collect())
     }
 
     /// Read where an action goes from what it acts on, when its tool says
