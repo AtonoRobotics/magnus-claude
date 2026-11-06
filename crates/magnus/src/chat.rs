@@ -9,7 +9,7 @@ use crate::boundary::Action;
 use crate::events::{ChatOrigin, Ev};
 use crate::kernel::{new_id, Kernel, NewRun};
 use std::collections::HashSet;
-use crate::state::{CardState, Run, Status, Task};
+use crate::state::{Run, Status, Task};
 use crate::tools::Label;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -185,17 +185,16 @@ impl Kernel {
                         out.push((t.created_at, seq, e));
                         continue;
                     }
-                    let (state, schedule) = match self.read(|s| s.cards.get(&card).cloned()) {
-                        Some(CardState::Confirmed(id)) => ("confirmed", Some(id)),
-                        Some(CardState::Declined) => ("declined", None),
-                        None => ("open", None),
-                    };
+                    // Its answer: the schedule or task it made, or the reason it was declined.
+                    let (state, made) = crate::suggestions::state_of(self.read(|s| s.cards.get(&card).cloned()).as_ref());
                     let mut e = d.clone();
                     e["id"] = json!(format!("c:{card}"));
                     e["task_id"] = json!(t.task_id);
-                    e["kind"] = json!("schedule_card");
+                    e["kind"] = json!(if d["suggestion"] == true { "suggestion_card" } else { "schedule_card" });
                     e["state"] = json!(state);
-                    e["schedule"] = json!(schedule);
+                    e["schedule"] = made["schedule"].clone();
+                    e["started"] = made["started"].clone();
+                    e["reason"] = made["reason"].clone();
                     e["acts_for"] = json!(t.person);
                     e["taint"] = json!({ "untrusted": r.untrusted, "private": r.private });
                     out.push((t.created_at, seq, e));
@@ -305,7 +304,11 @@ impl Kernel {
                     "answer" => ("you", text("text")),
                     "tasks" => ("you", format!("Started tasks: {}", e["tasks"].as_array().into_iter().flatten().map(|t| format!("{} ({})", t["title"].as_str().unwrap_or_default(), t["text"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("; "))),
                     "result" => ("task result", format!("{} ({}): {}", text("title"), text("status"), text("summary"))),
-                    "schedule_card" => ("you", format!("Proposed a schedule ({}): {}", text("state"), text("text"))),
+                    "schedule_card" => ("you", format!("Proposed a schedule ({}): {}", answered(&e), text("text"))),
+                    "suggestion_card" => {
+                        let changed = e["changed"].as_str().map(|c| format!(" (again: {c})")).unwrap_or_default();
+                        ("you", format!("Suggested {} ({}, card {}): {}{changed}", text("title"), answered(&e), text("card"), text("plan")))
+                    }
                     "connector_card" => ("you", format!("Offered the app {} ({}): {}", text("title"), text("state"), text("why"))),
                     _ => return None,
                 };
@@ -326,27 +329,38 @@ impl Kernel {
         let Some((task, run)) = self.read(|s| s.runs.get(&a.run).and_then(|r| s.tasks.get(&r.task).map(|t| (t.clone(), r.clone())))) else {
             anyhow::bail!("unknown run {}", a.run)
         };
-        let Some(chat) = task.chat.clone().filter(|c| c.turn) else {
+        if !task.is_chat_turn() {
             return Ok(("create_task is for chat.".into(), true, None));
-        };
+        }
+        let task_id = self.task_from_turn(&format!("chat:{}", a.run), &task, &run, key, text.clone(), title.clone(), NewRun::default()).await?;
+        Ok((format!("Started task {task_id} ({title}): {text}. It is in the person's Tasks and will post its result to this thread."), false, Some(json!({ "task": task_id }))))
+    }
+
+    /// A task started from a chat turn, once for `key`: for the turn's
+    /// person, with the conversation, the turn's taint and model, the
+    /// message's files and the thread's project; it posts its result to
+    /// the thread. `more` sets anything else it starts with.
+    #[allow(clippy::too_many_arguments)]
+    async fn task_from_turn(self: &Arc<Self>, actor: &str, task: &Task, run: &Run, key: &str, text: String, title: String, more: NewRun) -> Result<String> {
+        let Some(chat) = task.chat.clone() else { anyhow::bail!("task {} is not from chat", task.task_id) };
         let (task_id, run_id) = (derived("task", key), derived("run", key));
         if !self.read(|s| s.tasks.contains_key(&task_id)) {
             let mut conversation = chat.conversation.clone();
-            conversation.push(json!({ "role": "person", "text": self.asked(&run).await? }));
+            conversation.push(json!({ "role": "person", "text": self.asked(run).await? }));
             let o = NewRun {
-                chat: Some(ChatOrigin { thread: chat.thread.clone(), turn: false, from_run: Some(a.run.clone()), conversation }),
+                chat: Some(ChatOrigin { thread: chat.thread.clone(), turn: false, from_run: Some(run.id.clone()), conversation }),
                 label: Some(Label { untrusted: run.untrusted, private: run.private }),
                 ids: Some((task_id.clone(), run_id)),
                 model: Some((run.config.adapter.clone(), run.config.model.clone())),
-                title: Some(title.clone()),
+                title: Some(title),
                 // The files of the message that started it, and the thread's project.
                 files: task.files.clone(),
                 project: self.read(|s| s.project_of(&chat.thread)),
-                ..Default::default()
+                ..more
             };
-            self.create_run(&format!("chat:{}", a.run), &run.person, text.clone(), vec![], o).await?;
+            self.create_run(actor, &run.person, text, vec![], o).await?;
         }
-        Ok((format!("Started task {task_id} ({title}): {text}. It is in the person's Tasks and will post its result to this thread."), false, Some(json!({ "task": task_id }))))
+        Ok(task_id)
     }
 
     /// `create_schedule` from a chat turn: a card in the thread with the
@@ -375,13 +389,16 @@ impl Kernel {
         };
         let card = derived("card", key);
         let title = a.input["title"].as_str().map(str::trim).filter(|t| !t.is_empty());
-        let data = json!({ "card": card, "text": text, "title": title, "every_minutes": every, "daily_at": daily, "until": until, "max_runs": max_runs, "scope": scope, "budget": budget });
+        // A suggestion too (#253): its plan, permissions, and the request it answers as its evidence.
+        let turn = self.read(|s| s.runs.get(&a.run).map(|r| r.task.clone())).unwrap_or_default();
+        let evidence = json!([{ "task": turn, "shows": "you asked for it" }]);
+        let data = json!({ "card": card, "text": text, "title": title, "every_minutes": every, "daily_at": daily, "until": until, "max_runs": max_runs, "scope": scope, "budget": budget, "plan": text, "permissions": [scope], "evidence": evidence });
         (format!("A card for this schedule ({card}) is in the thread. Nothing is scheduled until the person confirms it."), false, Some(data))
     }
 
     /// A schedule's budget per run: the appliance's, tightened where the
     /// model asked, never loosened.
-    fn card_budget(&self, b: &Value) -> std::result::Result<crate::config::Budget, String> {
+    pub(crate) fn card_budget(&self, b: &Value) -> std::result::Result<crate::config::Budget, String> {
         let mut out = self.cfg.budget.clone();
         if b.is_null() {
             return Ok(out);
@@ -403,10 +420,12 @@ impl Kernel {
         Ok(out)
     }
 
-    /// The person who started the thread confirms or declines a schedule
-    /// card. A confirmed schedule acts for them (K54), within the card's
-    /// budget, and its runs start with the taint the turn had.
-    pub async fn decide_card(&self, person: &str, card: &str, decision: &str) -> Result<std::result::Result<Value, CardRefusal>> {
+    /// The person who started the thread answers a card: accept (or
+    /// confirm), later ("Not now"), or decline with their reason. An
+    /// accepted schedule acts for them (K54), within the card's budget, and
+    /// its runs start with the taint the turn had; an accepted suggestion
+    /// without timing starts a task for them as `create_task` would.
+    pub async fn decide_card(self: &Arc<Self>, person: &str, card: &str, decision: &str, reason: Option<&str>) -> Result<std::result::Result<Value, CardRefusal>> {
         let _decide = self.decide.lock().await;
         let found = self.read(|s| {
             s.runs.values().find_map(|r| {
@@ -421,7 +440,14 @@ impl Kernel {
         }
         let actor = format!("person:{person}");
         match decision {
-            "confirm" => {
+            "confirm" | "accept" if !crate::suggestions::timed(&d) => {
+                let (plan, title) = (d["plan"].as_str().unwrap_or_default().to_string(), d["title"].as_str().unwrap_or_default().to_string());
+                let more = NewRun { budget: serde_json::from_value(d["budget"].clone()).ok(), scope: d["scope"].as_str().map(String::from), ..Default::default() };
+                let started = self.task_from_turn(&actor, &task, &run, &format!("card:{card}"), plan, title, more).await?;
+                self.emit(&actor, Ev::CardAccepted { card: card.into(), person: person.into(), task: started.clone() }).await?;
+                Ok(Ok(json!({ "task": started })))
+            }
+            "confirm" | "accept" => {
                 let id = new_id("sched");
                 let budget = serde_json::from_value(d["budget"].clone()).ok();
                 self.emit(
@@ -449,12 +475,28 @@ impl Kernel {
                 }
                 Ok(Ok(json!({ "schedule": id })))
             }
-            "decline" => {
-                self.emit(&actor, Ev::CardDeclined { card: card.into() }).await?;
+            "later" => {
+                self.emit(&actor, Ev::CardDeferred { card: card.into(), person: Some(person.into()) }).await?;
                 Ok(Ok(json!({})))
             }
-            other => Ok(Err(CardRefusal::Invalid(format!("decision is confirm or decline, not {other}")))),
+            "decline" => {
+                let Some(reason) = reason.map(str::trim).filter(|r| !r.is_empty()) else {
+                    return Ok(Err(CardRefusal::Invalid("a decline needs the person's reason".into())));
+                };
+                self.emit(&actor, Ev::CardDeclined { card: card.into(), person: Some(person.into()), reason: Some(reason.into()) }).await?;
+                Ok(Ok(json!({})))
+            }
+            other => Ok(Err(CardRefusal::Invalid(format!("decision is accept (or confirm), later or decline, not {other}")))),
         }
+    }
+}
+
+/// A card's answer as the model reads it in the conversation.
+fn answered(e: &Value) -> String {
+    match (e["state"].as_str().unwrap_or_default(), e["reason"].as_str()) {
+        ("declined", Some(r)) => format!("declined: \"{r}\""),
+        ("later", _) => "not now".into(),
+        (s, _) => s.into(),
     }
 }
 

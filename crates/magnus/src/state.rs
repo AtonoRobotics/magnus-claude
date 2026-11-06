@@ -490,11 +490,25 @@ pub struct Branch {
     pub at: DateTime<Utc>,
 }
 
-/// What became of a schedule proposed in chat.
+/// The person's answer to a card proposed in chat (a schedule or a
+/// suggestion), when they gave it and whose card it was.
 #[derive(Clone, Debug, PartialEq)]
-pub enum CardState {
+pub struct CardState {
+    pub answer: Answer,
+    pub at: DateTime<Utc>,
+    pub person: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Answer {
+    /// Accepted: the schedule it made.
     Confirmed(String),
-    Declined,
+    /// Accepted: the task it started.
+    Started(String),
+    /// "Not now".
+    Later,
+    /// Declined, with their reason.
+    Declined(Option<String>),
 }
 
 impl Schedule {
@@ -776,7 +790,9 @@ pub struct State {
     /// Threads branched from another, by thread.
     pub branches: HashMap<String, Branch>,
     pub schedules: BTreeMap<String, Schedule>,
-    /// Schedule cards from chat the person answered, by card id.
+    /// Cards from chat (schedules and suggestions) the person answered, by
+    /// card id: with the cards in their turns' results, the suggestion
+    /// ledger (`suggestions::ledger`).
     pub cards: HashMap<String, CardState>,
     pub model: Option<(String, String)>,
     pub pins: HashMap<String, Pin>,
@@ -1026,7 +1042,10 @@ impl State {
         Some(match &self.trash.get(item)?.held {
             Held::Task(t, _, items) => Holding { runs: vec![t.run_id.clone()], except: OWN.to_vec(), matches: theirs(&t.task_id, &mut items.iter()), ..Default::default() },
             Held::Thread { id, turns, .. } => {
-                let matches = turns.iter().flat_map(|(t, _)| theirs(&t.task_id, &mut items_of(&t.task_id).iter())).collect();
+                let mut matches: Vec<_> = turns.iter().flat_map(|(t, _)| theirs(&t.task_id, &mut items_of(&t.task_id).iter())).collect();
+                // The reasons the person gave declining the cards in it.
+                let cards = turns.iter().filter_map(|(_, r)| r.as_ref()).flat_map(|r| r.results.values().filter_map(|x| x.data.as_ref()?["card"].as_str().map(String::from)));
+                matches.extend(cards.map(|c| ("card_declined", "card", c)));
                 Holding { runs: turns.iter().map(|(t, _)| t.run_id.clone()).collect(), except: OWN.to_vec(), matches, ..named(vec!["thread_branched"], "thread", id) }
             }
             Held::Entry { .. } => match item.split_once(':')? {
@@ -1304,6 +1323,8 @@ impl State {
                 // Their reactions and disagreements, whose words went with theirs.
                 self.reactions.remove(person);
                 self.disagreements.retain(|_, d| &d.person != person);
+                // Their answers to cards, a decline's reason among them.
+                self.cards.retain(|_, c| c.person.as_ref() != Some(person));
                 // Their branched threads (the entries as shown then) and
                 // what their tasks had attached go too.
                 self.branches.retain(|_, b| &b.person != person);
@@ -1387,11 +1408,17 @@ impl State {
                     },
                 );
                 if let Some(c) = card {
-                    self.cards.insert(c.clone(), CardState::Confirmed(id.clone()));
+                    self.cards.insert(c.clone(), CardState { answer: Answer::Confirmed(id.clone()), at: e.at, person: Some(person.clone()) });
                 }
             }
-            Ev::CardDeclined { card } => {
-                self.cards.insert(card.clone(), CardState::Declined);
+            Ev::CardDeclined { card, person, reason } => {
+                self.cards.insert(card.clone(), CardState { answer: Answer::Declined(reason.clone()), at: e.at, person: person.clone() });
+            }
+            Ev::CardDeferred { card, person } => {
+                self.cards.insert(card.clone(), CardState { answer: Answer::Later, at: e.at, person: person.clone() });
+            }
+            Ev::CardAccepted { card, person, task } => {
+                self.cards.insert(card.clone(), CardState { answer: Answer::Started(task.clone()), at: e.at, person: Some(person.clone()) });
             }
             Ev::MemoryForgotten { id } => self.memory.retain(|m| &m.id != id),
             Ev::Trashed { item, person } => {

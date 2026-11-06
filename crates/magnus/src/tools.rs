@@ -184,6 +184,9 @@ pub const BUILTINS: &[Builtin] = &[
     // confirm. Neither leaves the appliance; the task carries the turn's taint.
     Builtin { name: "create_task", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "create_schedule", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // An automation suggestion: a card the person accepts (a task or a
+    // schedule starts), puts off or declines. Nothing happens until they accept.
+    Builtin { name: "suggest", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     // Control of the person's own tasks and schedules, as the app's buttons
     // (behavior spec, Tasks and schedules in conversation).
     Builtin { name: "list_tasks", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -281,6 +284,24 @@ pub fn chat_specs() -> Vec<ToolSpec> {
             input_schema: obj(
                 json!({ "title": { "type": "string" }, "text": { "type": "string" }, "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" }, "until": { "type": "string" }, "max_runs": { "type": "integer" }, "scope": { "type": "string" }, "budget": budget }),
                 &["title", "text", "scope"],
+            ),
+        },
+        ToolSpec {
+            name: "suggest".into(),
+            description: d("suggest"),
+            input_schema: obj(
+                json!({
+                    "title": { "type": "string" },
+                    "plan": { "type": "string" },
+                    "evidence": { "type": "array", "minItems": 1, "description": d("suggest.evidence"), "items": { "type": "object", "properties": {
+                        "call": { "type": "string" }, "task": { "type": "string" }, "shows": { "type": "string" }
+                    }, "required": ["shows"] } },
+                    "permissions": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                    "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" }, "until": { "type": "string" }, "max_runs": { "type": "integer" },
+                    "budget": budget,
+                    "again": { "type": "string" }, "changed": { "type": "string" }
+                }),
+                &["title", "plan", "evidence", "permissions"],
             ),
         },
         ToolSpec { name: "list_tasks".into(), description: d("list_tasks"), input_schema: obj(json!({}), &[]) },
