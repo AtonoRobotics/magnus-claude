@@ -1271,6 +1271,11 @@ impl State {
                 self.items.retain(|_, i| &i.person != person && i.run.as_ref().is_none_or(|r| !runs.contains(r)));
                 self.schedules.retain(|_, x| &x.person != person);
                 self.memory.retain(|m| &m.person != person);
+                // Their own documents (their relationship memory among
+                // them) and their versions, whose content went with theirs
+                // (org-context.md, the owner's ruling on erasure). A path
+                // counts its versions on, as through any removal.
+                self.bundle.retain(|_, d| d.owner_user.as_deref() != Some(person.as_str()));
                 self.turned_off.remove(person);
                 self.files.retain(|_, f| &f.person != person);
                 self.projects.retain(|_, x| &x.person != person);

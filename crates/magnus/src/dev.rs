@@ -303,7 +303,8 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
                 st.insert("context".into(), json!({
                     "through_seq": context.through_seq,
                     "instructions": context.instructions,
-                    "instructions_match_build": context.instructions == instructions_now,
+                    // The run's own instructions, whatever of its person the call carried besides.
+                    "instructions_match_build": run.config.instructions == instructions_now,
                     "tools_hash": context.tools_hash,
                     "tools_match_now": context.tools_hash == tools_now.0,
                     "sources": sources,

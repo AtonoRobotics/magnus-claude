@@ -42,6 +42,7 @@ pub mod person_admin;
 pub mod policy;
 pub mod policy_admin;
 pub mod recall;
+pub mod relationship;
 pub mod run;
 pub mod sandbox;
 pub mod settings;

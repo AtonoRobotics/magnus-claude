@@ -1085,6 +1085,7 @@ impl Kernel {
                 // memory_search is answered in execute(), with its taint from the same lookup.
                 "knowledge_search" => Ok(self.knowledge_search(&a.run, &s("query")).await?),
                 "bundle_read" | "bundle_search" | "bundle_write" => Ok(self.bundle_tool(&a.run, &a.tool, &a.input).await?),
+                "relationship_note" => Ok(self.relationship_tool(&a.run, &a.input).await?),
                 "knowledge_add" => Ok(self.knowledge_add(&a.run, &a.input).await?),
                 "project_read" => {
                     let name = s("name");

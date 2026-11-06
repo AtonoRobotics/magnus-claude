@@ -151,6 +151,9 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "computer_scroll", app: "sandbox", risk: Risk::Sandbox, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_write", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "memory_search", app: "memory", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // The person's relationship memory (behavior spec, Per-user
+    // relationship): their own notes, on the appliance, versioned.
+    Builtin { name: "relationship_note", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // The company knowledge base. A search's result carries the taint of
     // what it returns; filing research changes nothing outside the appliance.
     Builtin { name: "knowledge_search", app: "knowledge", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -422,6 +425,11 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             name: "memory_write".into(),
             description: d("memory_write"),
             input_schema: obj(json!({ "fact": { "type": "string" }, "topic": { "type": "string" } }), &["fact"]),
+        },
+        ToolSpec {
+            name: "relationship_note".into(),
+            description: d("relationship_note"),
+            input_schema: obj(json!({ "action": { "type": "string", "enum": ["add", "change", "remove"] }, "note": { "type": "string" }, "text": { "type": "string" } }), &["action"]),
         },
         ToolSpec { name: "bundle_read".into(), description: d("bundle_read"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
         ToolSpec {

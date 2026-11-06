@@ -159,7 +159,9 @@ async fn a_persons_memory_is_recalled_from_the_content_store_for_them() {
             match c.turn() {
                 0 if !pass && first.contains("Remember that") => tool("memory_write", json!({ "fact": format!("Carol's code name is {said}.") })),
                 0 if !pass && first.contains("code name") => tool("memory_search", json!({ "query": "code name" })),
-                _ if !pass && first.contains("code name") => Reply::Text(format!("Found: {}", c.text())),
+                // What the search returned, not the whole request: the request also
+                // holds Magnus's earlier messages to her, which name the fact as it was.
+                _ if !pass && first.contains("code name") => Reply::Text(format!("Found: {}", c.last_results().iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("\n"))),
                 _ => Reply::Text("Noted.".into()),
             }
         }
