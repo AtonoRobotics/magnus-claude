@@ -46,6 +46,63 @@ fn a_pull_request_runs_only_the_tests_its_changes_reach() {
     }
 }
 
+/// The terms of the filter `select` printed (none for no tests).
+fn terms(selected: &str) -> Vec<String> {
+    selected.lines().find_map(|l| l.strip_prefix("MAGNUS_FILTER=")).map(|f| f.split(" | ").map(String::from).collect()).unwrap_or_default()
+}
+
+/// Every Markdown file a tracked source compiles in with `include_str!`,
+/// with the source that names it, both as paths from the root.
+fn compiled_markdown() -> Vec<(String, String)> {
+    let root = repo().canonicalize().unwrap();
+    let out = Command::new("git").arg("-C").arg(&root).args(["ls-files", "*.rs"]).output().unwrap();
+    assert!(out.status.success());
+    let mut found = Vec::new();
+    for src in String::from_utf8(out.stdout).unwrap().lines() {
+        let Ok(text) = std::fs::read_to_string(root.join(src)) else { continue };
+        for part in text.split("include_str!(\"").skip(1) {
+            let Some(arg) = part.split('"').next().filter(|a| a.ends_with(".md")) else { continue };
+            let Ok(md) = root.join(src).parent().unwrap().join(arg).canonicalize() else { continue };
+            found.push((md.strip_prefix(&root).unwrap().to_string_lossy().into_owned(), src.to_string()));
+        }
+    }
+    found
+}
+
+/// The agent's and the chat's instructions are compiled into the kernel
+/// (`run/mod.rs`), so a change to one reaches what a change to the kernel
+/// does; the selection took them for documents and ran nothing (#190).
+#[test]
+fn a_compiled_prompt_runs_the_tests_of_the_code_that_compiles_it() {
+    let compiled = compiled_markdown();
+    for prompt in ["crates/magnus/instructions/agent.md", "crates/magnus/instructions/chat.md", "crates/magnus/instructions/character.md"] {
+        assert!(compiled.iter().any(|(md, _)| md == prompt), "{prompt} is not found compiled in: {compiled:?}");
+    }
+    for (md, src) in &compiled {
+        assert_eq!(select(&[md.as_str(), "README.md"]), select(&[src.as_str()]), "{md}, compiled in by {src}");
+    }
+}
+
+/// The Google connectors share one client (`brokered/google`), so a change
+/// to it runs every connector whose Cargo.toml depends on it, with that
+/// connector's own tests; Google Chat's were left out (#190).
+#[test]
+fn a_change_to_the_shared_google_client_runs_every_connector_built_on_it() {
+    let shared = terms(&select(&["brokered/google/src/lib.rs"]));
+    let mut consumers = Vec::new();
+    for dir in std::fs::read_dir(repo().join("brokered")).unwrap() {
+        let dir = dir.unwrap().path();
+        let Ok(manifest) = std::fs::read_to_string(dir.join("Cargo.toml")) else { continue };
+        if manifest.lines().any(|l| l.trim_start().starts_with("magnus-brokered-google ") || l.trim_start().starts_with("magnus-brokered-google=")) {
+            consumers.push(dir.file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    consumers.sort();
+    assert!(consumers.contains(&"chat".to_string()) && consumers.contains(&"calendar".to_string()), "{consumers:?}");
+    let missing: Vec<String> = consumers.iter().flat_map(|c| terms(&select(&[&format!("brokered/{c}/src/main.rs")]))).filter(|t| !shared.contains(t)).collect();
+    assert!(missing.is_empty(), "a change to the shared Google client does not run {missing:?}; it runs {shared:?}");
+}
+
 #[test]
 fn every_test_has_a_time_limit() {
     let config: toml::Value = toml::from_str(&std::fs::read_to_string(repo().join(".config/nextest.toml")).unwrap()).unwrap();
