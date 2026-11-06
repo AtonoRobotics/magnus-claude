@@ -273,11 +273,17 @@ async fn unknown(authorize: &str) -> bool {
     }
 }
 
-/// The provider's sign-in refuses the address outright (a client error),
-/// as it does for a client it no longer knows: GitLab.com answers 401
-/// invalid_client before anyone signs in. Redirects are not followed.
+/// The provider's sign-in says it does not know the client: a 400 or 401
+/// whose answer names the client, as GitLab.com answers 401 invalid_client
+/// before anyone signs in and Cloudflare's provider library answers
+/// invalid_request "Invalid client_id". A 429, a 403 or a server error says
+/// nothing about the client, and the kept one stays (review of #215).
+/// Redirects are not followed.
 async fn refused(authorize: &str) -> bool {
-    no_redirects().get(authorize).send().await.is_ok_and(|r| r.status().is_client_error())
+    match no_redirects().get(authorize).send().await {
+        Ok(r) if matches!(r.status().as_u16(), 400 | 401) => r.text().await.unwrap_or_default().to_lowercase().contains("client"),
+        _ => false,
+    }
 }
 
 /// Where the client Magnus registered at `registration` for a redirect is

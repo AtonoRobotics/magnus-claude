@@ -70,6 +70,8 @@ pub struct AppState {
     known: HashSet<String>,
     /// How many clients have registered.
     pub registrations: usize,
+    /// Its sign-in answers 429, as a provider does under load.
+    pub sign_in_throttled: bool,
     n: usize,
 }
 
@@ -228,6 +230,13 @@ async fn authorize(State((base, st)): S, Query(q): Query<HashMap<String, String>
             .header("content-type", "application/json")
             .body(Body::from(json!({ "error": "invalid_client", "error_description": "The requested OAuth 2.0 Client does not exist." }).to_string()))
             .unwrap();
+    }
+    if s.sign_in_throttled {
+        return oauth_error(429, "temporarily_unavailable");
+    }
+    // A client it does not know, answered as GitLab.com answers one.
+    if !s.clients.contains_key(&g("client_id")) {
+        return oauth_error(401, "invalid_client");
     }
     if !s.clients.get(&g("client_id")).is_some_and(|r| redirect_registered(r, &g("redirect_uri"))) || g("code_challenge_method") != "S256" || g("response_type") != "code" {
         return oauth_error(400, "invalid_request");
