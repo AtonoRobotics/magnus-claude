@@ -66,7 +66,8 @@ impl Kernel {
         };
         let (task, run, thread) = (derived("task", &key), derived("run", &key), derived("thread", &key));
         let _one = STARTING.lock().await;
-        if self.read(|s| s.tasks.contains_key(&task)) {
+        // Started before, even if its conversation was deleted since.
+        if self.read(|s| s.tasks.contains_key(&task) || s.openers.contains(&(person.to_string(), task.clone()))) {
             return Ok(());
         }
         let app_title = app.map(|a| self.all_connectors().into_iter().find(|(c, _)| c.name == a).and_then(|(c, _)| c.title).unwrap_or_else(|| crate::connectors::title(a)));

@@ -739,6 +739,9 @@ pub struct State {
     /// app): the first connection is the one Magnus opens a conversation
     /// about, never a reconnection.
     pub app_connections: HashMap<(String, String), u32>,
+    /// The conversations Magnus opened, by person then task: each starts
+    /// once ever, so deleting one does not start it again (review of #274).
+    pub openers: std::collections::BTreeSet<(String, String)>,
     /// People turned off at the identity provider or by an admin, until
     /// they sign in again: their apps answer no calls for them.
     pub turned_off: std::collections::BTreeSet<String>,
@@ -1008,9 +1011,14 @@ impl State {
             let mut turns: Vec<(Task, Option<Run>)> = ids.iter().filter_map(|id| self.tasks.remove(id)).map(|t| { let r = self.runs.remove(&t.run_id); (t, r) }).collect();
             turns.sort_by_key(|(t, _)| t.created_at);
             let branch = self.branches.remove(item);
-            // A conversation's title is its first message, recalled when listed.
+            // A conversation's title is its first message, recalled when
+            // listed; one Magnus opened is called what the app calls it, not
+            // by the appliance's instruction (review of #274).
             let (title, from) = match turns.first() {
-                Some((t, _)) => (String::new(), Some(TitleFrom::Text(t.seq))),
+                Some((t, _)) => match t.chat.as_ref().and_then(|c| c.opener.as_deref()) {
+                    Some(o) => (crate::openers::title(o), None),
+                    None => (String::new(), Some(TitleFrom::Text(t.seq))),
+                },
                 None => (branch.as_ref()?.title.clone(), None),
             };
             return Some((title, from, Held::Thread { id: item.into(), turns, branch }));
@@ -1342,6 +1350,7 @@ impl State {
                 self.subjects.remove(person);
                 self.last_sign_in.remove(person);
                 self.app_connections.retain(|(p, _), _| p != person);
+                self.openers.retain(|(p, _)| p != person);
                 // The rights they held go with them: whoever is next known by
                 // their name starts from the organisation's config.
                 self.roles_set.remove(person);
@@ -1569,6 +1578,9 @@ impl State {
                 }
                 if !attachments.is_empty() {
                     self.attachments.insert(task.clone(), attachments.clone());
+                }
+                if chat.as_ref().is_some_and(|c| c.opener.is_some()) {
+                    self.openers.insert((person.clone(), task.clone()));
                 }
                 self.tasks.insert(
                     task.clone(),
