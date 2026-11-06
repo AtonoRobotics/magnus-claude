@@ -1,11 +1,12 @@
-//! Invariant 6: autonomy comes from policy the owner writes. The agent can
-//! propose policy changes, never grant them.
+//! Invariant 6: autonomy comes from policy: the owner's for the
+//! organisation, each person's own grants over their own work within it.
+//! The agent can propose policy and grants, never grant them.
 //!
 //! Prevents: an agent enabling its own auto-approve (CVE-2025-53773), and
 //! autonomy that grows without anyone deciding it.
 
 use magnus_invariants::{mcp, *};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::time::Duration;
 
 fn send(body: &str) -> Reply {
@@ -133,4 +134,104 @@ async fn people_set_policy_only_within_their_role() {
         assert!(st == 401 || st == 403, "{layer} accepted a policy from someone without the role: {st}");
     }
     assert!(bob.put_policy("user/bob", r#"forbid(principal, action, resource == Tool::"mail__send");"#).await.is_success());
+}
+
+const CHAT: &str = "talking with the person you work for in a chat";
+const PASS: &str = "You keep the person's long-term memory";
+
+/// In chat, `grant` asks for a grant over sending mail (sends and what
+/// cannot be undone lifted), and `run <id>` starts a task under grant
+/// `id`; a task emails bob hello. The memory pass writes nothing.
+fn grants_model() -> model::Script {
+    script(|c| async move {
+        let sys = match &c.body["system"] {
+            Value::String(s) => s.clone(),
+            Value::Array(a) => a.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"),
+            other => other.to_string(),
+        };
+        if sys.contains(PASS) {
+            return Reply::Text(String::new());
+        }
+        if !sys.contains(CHAT) {
+            return match c.turn() {
+                0 => contract_unchecked("say hi", "said"),
+                1 => send("hello"),
+                _ => fail("done"),
+            };
+        }
+        if c.turn() > 0 {
+            return Reply::Text("Done.".into());
+        }
+        let said = c.messages().first().and_then(|m| m["content"].as_array().and_then(|b| b.last()).and_then(|b| b["text"].as_str()).map(String::from)).unwrap_or_default();
+        match said.strip_prefix("run ") {
+            Some(g) => tool("create_task", json!({ "title": "Email bob", "text": "Email bob hello.", "grant": g })),
+            None => tool(
+                "propose_grant",
+                json!({ "title": "Emailing bob", "apps": ["mail"], "allow": ["send", "irreversible"], "period": "week", "max_usd": 5.0, "why": "You asked me to email bob without asking." }),
+            ),
+        }
+    })
+}
+
+/// The person writes in a new conversation; its entries once the turn settled.
+async fn chat_entries(who: &Api, text: &str) -> Vec<Value> {
+    let (st, v) = who.post("/v1/chat", json!({ "text": text })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    who.wait_settled(v["task_id"].as_str().unwrap()).await;
+    let (_, t) = who.get(&format!("/v1/chat/{}", v["thread"].as_str().unwrap())).await;
+    t["entries"].as_array().cloned().unwrap_or_default()
+}
+
+/// The task a `run` message started, if one did.
+async fn run_under(who: &Api, grant: &str) -> Option<String> {
+    let entries = chat_entries(who, &format!("run {grant}")).await;
+    entries.iter().find(|e| e["kind"] == "tasks").and_then(|e| e["tasks"][0]["task_id"].as_str().map(String::from))
+}
+
+async fn grants_of(who: &Api) -> Vec<Value> {
+    who.get("/v1/grants").await.1["grants"].as_array().cloned().unwrap_or_default()
+}
+
+/// A person's grant over their own work (owner's ruling, 2026-11-02; #235):
+/// the agent's proposal alone grants nothing (a send still asks), only that
+/// person's accept sets one, no one else can accept it, and it never covers
+/// what its person could not approve themselves.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_proposes_a_grant_and_only_its_person_grants_what_they_could_approve() {
+    let model = FakeModel::start(grants_model()).await;
+    let (mail, app) = mail_app(&model).await;
+    let (alice, bob, carol) = (app.api("alice"), app.api("bob"), app.api("carol"));
+
+    // Carol (no approver role) asks; the agent's card alone grants nothing.
+    let card = chat_entries(&carol, "grant").await.into_iter().find(|e| e["kind"] == "grant_card").expect("no grant card");
+    let card = card["card"].as_str().unwrap().to_string();
+    assert!(grants_of(&carol).await.is_empty(), "a proposal took effect by itself");
+    assert_eq!(run_under(&carol, &card).await, None, "a task started under a card nobody accepted");
+    let id = carol.submit("Email bob hello.").await;
+    carol.wait_item(&id, "approval").await;
+
+    // Only Carol accepts it.
+    for who in [&alice, &bob] {
+        let (st, _) = who.post(&format!("/v1/chat/cards/{card}"), json!({ "decision": "accept" })).await;
+        assert_eq!(st.as_u16(), 404, "someone else accepted carol's grant");
+    }
+    assert!(grants_of(&carol).await.is_empty());
+    let (st, v) = carol.post(&format!("/v1/chat/cards/{card}"), json!({ "decision": "accept" })).await;
+    assert!(st.is_success(), "{v}");
+    let grant = v["grant"].as_str().unwrap().to_string();
+
+    // Her grant lifts sends and what cannot be undone, but she cannot
+    // approve an irreversible send herself: under it, the send still asks.
+    let task = run_under(&carol, &grant).await.expect("no task under carol's grant");
+    carol.wait_item(&task, "approval").await;
+    never("a grant covered what its person could not approve", Duration::from_secs(3), || async { mail.effects("send") > 0 }).await;
+
+    // The owner's own grant, accepted by her, covers it for her.
+    let card = chat_entries(&alice, "grant").await.into_iter().find(|e| e["kind"] == "grant_card").expect("no grant card");
+    let (st, v) = alice.post(&format!("/v1/chat/cards/{}", card["card"].as_str().unwrap()), json!({ "decision": "accept" })).await;
+    assert!(st.is_success(), "{v}");
+    let task = run_under(&alice, v["grant"].as_str().unwrap()).await.expect("no task under alice's grant");
+    alice.wait_settled(&task).await;
+    assert_eq!(mail.effects("send"), 1, "the owner's grant did not cover her send");
+    assert!(alice.open_items(&task, "approval").await.is_empty());
 }
