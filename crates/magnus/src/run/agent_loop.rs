@@ -126,7 +126,7 @@ impl Kernel {
         // The tools first: asking an app for them is how Magnus learns it
         // refuses, which the context's app index then says.
         let tools = self.tools_for(&run).await;
-        let (system, messages, relationship) = self.context_with(&run).await?;
+        let (system, messages, relationship, personal) = self.context_with(&run).await?;
         let chat = self.is_chat_turn(&run);
         let tools_hash = {
             use sha2::Digest;
@@ -148,7 +148,7 @@ impl Kernel {
                     run: run_id.into(),
                     step,
                     attempt,
-                    context: ContextRef { through_seq: run.last_seq, instructions: super::sent_version(&run.config.instructions, &system), tools_hash: tools_hash.clone(), relationship },
+                    context: ContextRef { through_seq: run.last_seq, instructions: super::sent_version(&run.config.instructions, &system), tools_hash: tools_hash.clone(), relationship, personal },
                 },
             )
             .await?;
