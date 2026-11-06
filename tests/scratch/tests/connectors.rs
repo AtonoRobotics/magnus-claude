@@ -63,7 +63,11 @@ async fn a_sign_in_waits_for_a_new_client_ten_seconds_at_most() {
     let (st, v) = alice.post("/v1/connectors/calendar/sign-in", json!({ "redirect_uri": format!("http://127.0.0.1:{}/callback", callback.local_addr().unwrap().port()) })).await;
     let waited = started.elapsed();
     assert!(st.is_success() && v["authorize_url"].is_string(), "{v}");
-    assert!(waited < std::time::Duration::from_secs(12), "the person waited {waited:?} for the sign-in page");
+    // Twelve seconds broke twice under overlapping full suites (runs
+    // 42261795000 and 42262894435: 12.6 s, 14.0 s). The product still waits
+    // ten seconds at most; the #209 regression this guards would take about
+    // twenty, so eighteen keeps catching it.
+    assert!(waited < std::time::Duration::from_secs(18), "the person waited {waited:?} for the sign-in page");
 }
 
 /// Magnus registers at an app's authorization server once: every later
