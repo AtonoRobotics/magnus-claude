@@ -64,7 +64,7 @@ impl Kernel {
         // runs that wrote it, as their tasks would (I2).
         let label = self.thread_label(person, &thread, None);
         let o = NewRun {
-            chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation }),
+            chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation, opener: None }),
             label: (label != Label::PRINCIPAL).then_some(label),
             model,
             experiment,
@@ -90,12 +90,19 @@ impl Kernel {
 
     fn threads_with(&self, person: &str, w: &crate::recall::Words) -> Vec<Value> {
         let mut by: std::collections::BTreeMap<String, (DateTime<Utc>, DateTime<Utc>, String)> = Default::default();
+        // The conversations Magnus opened, with the turn that opened them.
+        let mut opened: std::collections::HashMap<String, (crate::events::Opener, String)> = Default::default();
         self.read(|s| {
             for t in s.tasks.values().filter(|t| t.person == person) {
                 let Some(c) = t.chat.as_ref() else { continue };
-                let e = by.entry(c.thread.clone()).or_insert((t.created_at, t.created_at, w.text(t.seq).to_string()));
+                // An opener is titled by why Magnus opened it, not by its instruction.
+                let first = || c.opener.as_deref().map(crate::openers::title).unwrap_or_else(|| w.text(t.seq).to_string());
+                if let Some(o) = c.opener.as_deref().filter(|_| c.turn) {
+                    opened.insert(c.thread.clone(), (o.clone(), t.task_id.clone()));
+                }
+                let e = by.entry(c.thread.clone()).or_insert_with(|| (t.created_at, t.created_at, first()));
                 if t.created_at < e.0 && c.turn {
-                    (e.0, e.2) = (t.created_at, w.text(t.seq).to_string());
+                    (e.0, e.2) = (t.created_at, first());
                 }
                 e.1 = e.1.max(t.created_at);
             }
@@ -112,8 +119,25 @@ impl Kernel {
         v.into_iter()
             .map(|(id, (started, updated, first))| {
                 let project = self.read(|s| s.project_of(&id).and_then(|p| s.projects.get(&p)).map(|p| json!({ "id": p.id, "name": p.name })));
-                json!({ "thread": id, "title": first.chars().take(80).collect::<String>(), "started_at": started, "updated_at": updated, "project": project })
+                let mut t = json!({ "thread": id, "title": first.chars().take(80).collect::<String>(), "started_at": started, "updated_at": updated, "project": project });
+                if let Some((o, turn)) = opened.get(&id) {
+                    t["opener"] = json!({ "app": o.app, "app_title": o.app_title });
+                    t["open_cards"] = json!(self.open_cards(person, &id, turn));
+                }
+                t
             })
+            .collect()
+    }
+
+    /// The cards an opener put to the person that still wait on their
+    /// answer, as the thread shows them (one deleted from it is not here):
+    /// what the empty Tasks and Schedules offer.
+    fn open_cards(&self, person: &str, thread: &str, turn: &str) -> Vec<Value> {
+        let entries = self.entries_with(person, thread, &Default::default()).unwrap_or_default();
+        entries
+            .iter()
+            .filter(|e| e["task_id"] == turn && e["state"] == "open" && matches!(e["kind"].as_str(), Some("suggestion_card" | "proposal_card" | "schedule_card")))
+            .map(|e| json!({ "card": e["card"], "kind": e["kind"], "title": e["title"].as_str().filter(|t| !t.is_empty()).or(e["text"].as_str()) }))
             .collect()
     }
 
@@ -170,9 +194,14 @@ impl Kernel {
         for (t, r) in &runs {
             let turn = t.is_chat_turn();
             let status = crate::api::status_str(r.status);
-            if turn {
+            if let Some(o) = t.chat.as_ref().and_then(|c| c.opener.as_deref()).filter(|_| turn) {
+                // Magnus opened it: the appliance's instruction is not shown as anyone's message.
+                out.push((t.created_at, 0, json!({ "id": format!("m:{}", t.task_id), "kind": "opener", "app": o.app, "app_title": o.app_title, "text": crate::openers::title(o), "at": t.created_at, "task_id": t.task_id })));
+            } else if turn {
                 let files: Vec<Value> = self.read(|s| t.files.iter().filter_map(|id| s.files.get(id)).map(|f| json!({ "id": f.id, "name": f.name, "media_type": f.media_type, "size": f.size })).collect());
                 out.push((t.created_at, 0, json!({ "id": format!("m:{}", t.task_id), "kind": "message", "text": w.text(t.seq), "at": t.created_at, "task_id": t.task_id, "files": files })));
+            }
+            if turn {
                 let mut cards: Vec<_> = r.results.values().filter_map(|res| res.data.as_ref().filter(|d| d["card"].is_string()).map(|d| (res.seq, d.clone()))).collect();
                 cards.sort_by_key(|(seq, _)| *seq);
                 for (seq, d) in cards {
@@ -260,7 +289,7 @@ impl Kernel {
         let mut tasks: Vec<String> = vec![];
         for e in &entries[..end] {
             match e["kind"].as_str() {
-                Some("message") | None => {}
+                Some("message" | "opener") | None => {}
                 Some("tasks") => tasks.extend(e["tasks"].as_array().into_iter().flatten().filter_map(|t| t["task_id"].as_str().map(String::from))),
                 _ => tasks.extend(e["task_id"].as_str().map(String::from)),
             }
@@ -299,6 +328,8 @@ impl Kernel {
                 let text = |k: &str| e[k].as_str().unwrap_or_default().to_string();
                 let (role, said) = match e["kind"].as_str()? {
                     "message" => ("person", text("text")),
+                    // Its instruction was the appliance's: only that Magnus opened it.
+                    "opener" => ("you", format!("(You opened this conversation yourself: {}.)", text("text"))),
                     // What the answer showed below its text is part of what it said.
                     "answer" if e["view"].is_array() => ("you", format!("{}\n[Shown below the answer: {}]", text("text"), e["view"])),
                     "answer" => ("you", text("text")),
@@ -350,9 +381,12 @@ impl Kernel {
         let (task_id, run_id) = (derived("task", key), derived("run", key));
         if !self.read(|s| s.tasks.contains_key(&task_id)) {
             let mut conversation = chat.conversation.clone();
-            conversation.push(json!({ "role": "person", "text": self.asked(run).await? }));
+            // An opener's text is the appliance's instruction, not something the person asked.
+            if chat.opener.is_none() {
+                conversation.push(json!({ "role": "person", "text": self.asked(run).await? }));
+            }
             let o = NewRun {
-                chat: Some(ChatOrigin { thread: chat.thread.clone(), turn: false, from_run: Some(run.id.clone()), conversation }),
+                chat: Some(ChatOrigin { thread: chat.thread.clone(), turn: false, from_run: Some(run.id.clone()), conversation, opener: None }),
                 label: Some(Label { untrusted: run.untrusted, private: run.private }),
                 ids: Some((task_id.clone(), run_id)),
                 model: Some((run.config.adapter.clone(), run.config.model.clone())),

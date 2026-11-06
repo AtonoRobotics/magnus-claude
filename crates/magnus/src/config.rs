@@ -26,6 +26,8 @@ pub struct Config {
     #[serde(default)]
     pub schedules: Schedules,
     #[serde(default)]
+    pub proposals: Proposals,
+    #[serde(default)]
     pub updates: Updates,
     /// The file this was read from: a new release is checked against it.
     #[serde(skip)]
@@ -466,6 +468,26 @@ fn pause_after_failures() -> u32 {
 
 fn min_every_minutes() -> u32 {
     5
+}
+
+/// What Magnus proposes by itself (behavior spec, Suggestions and proposals).
+#[derive(Deserialize, Clone, Debug)]
+pub struct Proposals {
+    /// At a person's cold start, and when they connect an app for the first
+    /// time, Magnus opens a conversation and proposes what it could take
+    /// over (`openers.rs`). On unless set to false.
+    #[serde(default = "openers")]
+    pub openers: bool,
+}
+
+impl Default for Proposals {
+    fn default() -> Self {
+        Proposals { openers: openers() }
+    }
+}
+
+fn openers() -> bool {
+    true
 }
 
 /// Signed updates of the appliance and of the desktop app (gate item 5).

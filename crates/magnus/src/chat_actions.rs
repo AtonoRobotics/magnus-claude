@@ -115,6 +115,7 @@ async fn resend(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, 
         Some("answer") | Some("turn") => {
             let mine = format!("m:{}", e["task_id"].as_str().unwrap_or_default());
             match entries[..at].iter().rposition(|m| m["id"] == mine.as_str()) {
+                Some(i) if entries[i]["kind"] == "opener" => return err(StatusCode::BAD_REQUEST, "Magnus opened this conversation itself, so there is no message of yours to send again"),
                 Some(i) => (i, text_of(&entries[i])),
                 None => return err(StatusCode::CONFLICT, "the message this answers is deleted; write it again"),
             }
@@ -317,7 +318,7 @@ async fn task(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, St
     // The files the message came with go with the task made from it.
     let files = k.read(|s| e["task_id"].as_str().and_then(|t| s.tasks.get(t)).filter(|_| e["kind"] == "message").map(|t| t.files.clone()).unwrap_or_default());
     let o = NewRun {
-        chat: Some(ChatOrigin { thread: thread.clone(), turn: false, from_run, conversation: Kernel::transcript_of(entries[..=at].to_vec()) }),
+        chat: Some(ChatOrigin { thread: thread.clone(), turn: false, from_run, conversation: Kernel::transcript_of(entries[..=at].to_vec()), opener: None }),
         files,
         label: (label != Label::PRINCIPAL).then_some(label),
         project: k.read(|s| s.project_of(&thread)),

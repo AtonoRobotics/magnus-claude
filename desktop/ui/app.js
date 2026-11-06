@@ -726,7 +726,18 @@ function tasksView() {
     return `<section class="tsec" data-section="${sec.state}"><h3>${esc(sec.label)} <span class="count">${n}</span></h3>
       ${sec.groups.slice(0, cap).map(g => groupBlock(g, sec.state)).join("")}
       ${left ? `<button class="link small" data-more="${sec.state}">Show ${left} more</button>` : ""}</section>`;
-  }).join("") : `<p class="empty">No tasks yet. Ask for something in a conversation.</p>`;
+  }).join("") : offered("No tasks yet. Ask for something in a conversation.");
+}
+
+// An empty Tasks or Schedules: what Magnus offered to take over when it
+// opened a conversation itself (at the first sign-in, or for a newly
+// connected app) and the person has not answered, each linking to its
+// conversation, in Magnus's voice. With none, the plain line.
+function offered(none) {
+  const cards = App.threads.filter(t => t.opener).flatMap(t => (t.open_cards || []).map(c => ({ ...c, thread: t.thread })));
+  if (!cards.length) return `<p class="empty">${esc(none)}</p>`;
+  return `<div class="empty" data-offered><p>Nothing here yet. I had a look around, and these are mine to take off your hands as soon as you say so:</p>
+    <ul class="tlist">${cards.map(c => `<li class="trow" data-offer="${esc(c.card)}"><a href="#/chat/${enc(c.thread)}"><span class="ttl">${esc(c.title)}</span></a></li>`).join("")}</ul></div>`;
 }
 
 // A schedule's next run and its last result, in one line.
@@ -757,7 +768,7 @@ function schedulesView() {
       ${scheduleFacts(sc)}
       <div class="small muted" data-last>${scheduleState(sc)}</div>
       ${sc.runs.some(r => r.needs_you) ? `<ul class="tlist">${sc.runs.filter(r => r.needs_you).map(taskRow).join("")}</ul>` : ""}</div>`).join("")
-    : `<p class="empty">No schedules yet. Ask in a conversation for something done every day or every week.</p>`;
+    : offered("No schedules yet. Ask in a conversation for something done every day or every week.");
 }
 
 // One schedule: what it does, when, how its runs went, and a way to stop it.
@@ -1255,6 +1266,7 @@ function entry(e, ui = {}) {
       ? `<div class="msg me editing"><label class="sr" for="edit-${esc(e.id)}">Edit and resend</label><textarea id="edit-${esc(e.id)}" rows="3" data-draft="edit-${esc(e.id)}"></textarea>
         <div class="row small"><button class="primary" data-msg-act="edit-send">Send</button><button class="link" data-msg-act="edit-cancel">Cancel</button></div></div>`
       : `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div>${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}</div>`;
+    case "opener": return `<div class="msg magnus" data-opener><div class="small faint">Magnus · ${esc(when(e.at))}</div><div class="small muted">${e.app_title ? `You connected ${esc(e.app_title)}, so I had a look at what I could take over there.` : "You are new here, so I had a look at what I could take over for you."}</div></div>`;
     case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div>${e.view ? shownFrame(e.id, "What Magnus showed") : ""}${verdictBar(e.task_id, e.verdict)}</div>`;
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`

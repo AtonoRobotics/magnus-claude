@@ -227,7 +227,7 @@ fn over_tls(k: &Kernel, t: Transport, peer: SocketAddr) -> Result<(), Response> 
 
 /// Open a session for a person and hand it over: to the app as a token,
 /// to a browser as an HttpOnly cookie the page cannot read.
-async fn issue(k: &Kernel, t: Transport, person: &str, app: bool, device: Option<&str>) -> Response {
+async fn issue(k: &Arc<Kernel>, t: Transport, person: &str, app: bool, device: Option<&str>) -> Response {
     let Some(p) = k.person(person) else { return err(StatusCode::FORBIDDEN, format!("{person} is not a person on this appliance.")) };
     let client = if app { "app" } else { "browser" };
     let (session, token) = match k.accounts.open_session(person, client, device) {
@@ -238,6 +238,8 @@ async fn issue(k: &Kernel, t: Transport, person: &str, app: bool, device: Option
     if let Err(e) = k.emit(&format!("person:{person}"), ev).await {
         return internal(e);
     }
+    // Their cold start: Magnus opens a conversation, in the background.
+    k.open_after_sign_in(person);
     let mut body = json!({
         "person": { "id": p.id, "name": p.name, "roles": p.roles, "groups": p.groups },
         "session": { "id": session.id, "expires": session.expires },
@@ -588,7 +590,7 @@ async fn device_poll(State(k): K, Extension(t): Extension<Transport>, ConnectInf
 
 /// What the identity provider answered about a sign-in: wait, a session for
 /// a person of this appliance with the rights the provider gives, or no.
-async fn provider_answered(k: &Kernel, t: Transport, label: String, polled: crate::identity::Polled, device: Option<String>) -> Response {
+async fn provider_answered(k: &Arc<Kernel>, t: Transport, label: String, polled: crate::identity::Polled, device: Option<String>) -> Response {
     use crate::identity::Polled;
     match polled {
         Polled::Pending => (StatusCode::ACCEPTED, Json(json!({ "pending": true }))).into_response(),

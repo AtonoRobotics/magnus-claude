@@ -642,7 +642,7 @@ impl Kernel {
                             // Each run posts to the schedule's own thread,
                             // so recurring output does not bury the
                             // conversation it was set up in (behavior spec).
-                            chat: Some(crate::events::ChatOrigin { thread: crate::chat::schedule_thread(&sc.id), turn: false, from_run: None, conversation: vec![] }),
+                            chat: Some(crate::events::ChatOrigin { thread: crate::chat::schedule_thread(&sc.id), turn: false, from_run: None, conversation: vec![], opener: None }),
                             // A confirmed schedule runs on its own: the
                             // verifier judges the criteria no code checks,
                             // and only what it cannot judge goes to its

@@ -35,8 +35,15 @@ pub fn instructions_version() -> String {
     version_of("agent.md", INSTRUCTIONS)
 }
 
+/// What Magnus opens a conversation with by itself (`openers.rs`): at the
+/// person's cold start, and for an app they connected (`{app}` its name).
+pub const OPENER: &str = include_str!("../../instructions/opener.md");
+pub const OPENER_APP: &str = include_str!("../../instructions/opener-app.md");
+
+/// A chat turn's instructions, the openings a turn may start with included,
+/// so a turn's version names the text it opened with.
 pub fn chat_instructions_version() -> String {
-    version_of("chat.md", CHAT_INSTRUCTIONS)
+    version_of("chat.md", &[CHAT_INSTRUCTIONS, OPENER, OPENER_APP].concat())
 }
 
 /// The instructions a model call was sent, as each call logs them: the
