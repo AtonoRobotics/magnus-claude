@@ -120,10 +120,12 @@ fn changing() -> &'static tokio::sync::Mutex<()> {
 }
 
 /// Remove what is due, hourly from the appliance's start: an item is gone
-/// within the hour after its `keep_days`.
+/// within the hour after its `keep_days`. Backups that still hold removed
+/// content are rewritten at start and tried again each hour (#195).
 pub fn schedule(k: Arc<Kernel>) {
     tokio::spawn(async move {
-        // A removal cut short before its backups were scrubbed.
+        // A removal cut short before its backups were scrubbed, or a scrub
+        // that failed before the restart.
         if let Err(e) = k.scrub_backups().await {
             tracing::error!("taking removed content out of the backups: {e:#}");
         }
@@ -132,6 +134,11 @@ pub fn schedule(k: Arc<Kernel>) {
             t.tick().await;
             if let Err(e) = k.purge_trash().await {
                 tracing::error!("emptying the trash: {e:#}");
+            }
+            if k.read(|s| s.scrub_pending.is_some()) {
+                if let Err(e) = k.scrub_backups().await {
+                    tracing::error!("taking removed content out of the backups: {e:#}");
+                }
             }
         }
     });

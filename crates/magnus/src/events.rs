@@ -193,6 +193,20 @@ pub enum Ev {
         ok: bool,
         detail: String,
     },
+    /// Removed content is still in backups kept: rewriting `files` failed
+    /// (why, in `detail`). Those have had the removals up to `from` only;
+    /// every removal after it, through `through`, is not yet out of them.
+    /// Tried again at start and hourly until `BackupsScrubbed` (#195).
+    BackupScrubPending {
+        from: i64,
+        through: i64,
+        files: Vec<String>,
+        detail: String,
+    },
+    /// Every backup kept has had the removals through `through`.
+    BackupsScrubbed {
+        through: i64,
+    },
     /// An appliance update began (or a rollback, to the release before):
     /// running tasks are suspended ("update") until a version is running again.
     UpdateStarted {

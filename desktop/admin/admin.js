@@ -1094,7 +1094,9 @@ function userDelete(pane, u, id, view) {
   $("#u-delete", pane).onclick = async () => {
     if (!(await UI.confirm({ title: `Delete ${u.name} for good?`, body: "Their account and all of their data go, and nothing brings them back.", verb: "Delete", danger: true, typed: u.email }))) return;
     act("DELETE", `/users/${id}`, { email: u.email }, v => {
-      UI.toast(`${u.name} is deleted: ${v?.runs_stopped ?? 0} tasks stopped, ${v?.schedules_ended ?? 0} schedules ended, ${v?.content_removed ?? 0} records removed.`);
+      UI.toast(v?.erasure === "incomplete"
+        ? `${u.name} is deleted, but not fully erased: ${(v.backups_pending || []).length} backups still hold their data. Magnus tries again every hour and at start; the audit log says when it is done.`
+        : `${u.name} is deleted: ${v?.runs_stopped ?? 0} tasks stopped, ${v?.schedules_ended ?? 0} schedules ended, ${v?.content_removed ?? 0} records removed.`);
       location.hash = "#/users";
       loadUsers(view);
     });
