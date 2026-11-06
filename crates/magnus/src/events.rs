@@ -110,6 +110,11 @@ pub struct ContextRef {
     /// its system context (`relationship.rs`); none when they have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relationship: Option<u32>,
+    /// Whether the call carried anything of its person's (notes, recent
+    /// messages, reactions, commitments): what the run then writes for
+    /// others is theirs (#258, #301).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub personal: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -85,7 +85,7 @@ impl Kernel {
     /// It only grows at the end, so provider prompt caches stay valid (C1).
     /// The library files it was given are recalled for its person.
     pub async fn context(&self, run: &Run) -> anyhow::Result<(String, Vec<Message>)> {
-        self.context_with(run).await.map(|(system, msgs, _)| (system, msgs))
+        self.context_with(run).await.map(|(system, msgs, _, _)| (system, msgs))
     }
 
     /// The context, and the version of the person's relationship notes it
@@ -96,7 +96,7 @@ impl Kernel {
     /// and chat turn of theirs. The kernel's own passes (the memory pass,
     /// the verifier, knowledge extraction) have prompts of their own and
     /// speak for no one, so they carry neither, as they carry no character.
-    pub async fn context_with(&self, run: &Run) -> anyhow::Result<(String, Vec<Message>, Option<u32>)> {
+    pub async fn context_with(&self, run: &Run) -> anyhow::Result<(String, Vec<Message>, Option<u32>, bool)> {
         let given = self.given_files(&run.task).await?;
         let (task, attachments, refs) = self.read(|s| {
             let task = s.tasks.get(&run.task).cloned();
@@ -225,7 +225,8 @@ impl Kernel {
         }
         let system = if chat.is_some_and(|c| c.turn) { CHAT_INSTRUCTIONS } else { INSTRUCTIONS };
         let (person, relationship) = self.person_context(run).await?;
-        Ok((format!("{system}{person}"), msgs, relationship))
+        let personal = !person.is_empty();
+        Ok((format!("{system}{person}"), msgs, relationship, personal))
     }
 
     /// A task from chat keeps the conversation it came from with its

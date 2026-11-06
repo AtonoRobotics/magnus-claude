@@ -155,6 +155,9 @@ pub struct Run {
     /// Its person resumed it after its grant's budget for the period was
     /// spent: it goes on under its own budget alone (#280).
     pub past_grant: bool,
+    /// A model call of the run carried its person's relationship context
+    /// (`ContextRef::personal`), so what it writes for others is theirs.
+    pub personal: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1862,12 +1865,14 @@ impl State {
                         lost_since: 0,
                         escalated: None,
                         past_grant: false,
+                        personal: false,
                     },
                 );
             }
-            Ev::ModelCall { run, .. } => {
+            Ev::ModelCall { run, context, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.model_calls += 1;
+                    r.personal |= context.personal;
                 }
             }
             Ev::ModelReply { run, step, blocks, state, usage, .. } => {

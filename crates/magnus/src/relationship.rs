@@ -232,12 +232,13 @@ impl Kernel {
         Ok((sections, (!notes.is_empty()).then_some(version)))
     }
 
-    /// Whether the run's context carries anything of its person's (notes,
-    /// recent messages, reactions, disagreements, commitments): what it
-    /// writes for others to read may carry it, so it is the person's, as
-    /// private content it read is (#258).
+    /// Whether a model call of the run carried anything of its person's
+    /// (notes, recent messages, reactions, disagreements, commitments):
+    /// what it writes for others to read may carry it, so it is the
+    /// person's, as private content it read is (#258). Recorded with each
+    /// call as it was sent, so a note removed since still counts (#301).
     pub(crate) async fn carries_person(&self, run: &Run) -> anyhow::Result<bool> {
-        Ok(!self.person_context(run).await?.0.is_empty())
+        Ok(run.personal)
     }
 }
 
