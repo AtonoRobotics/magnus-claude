@@ -1232,6 +1232,11 @@ impl State {
                 // their name starts from the organisation's config.
                 self.roles_set.remove(person);
                 self.provider_rights.remove(person);
+                // So do the approvals given for their actions: none covers
+                // whoever is next known by their name (#191). Those they gave
+                // others stay, as given; the gate still asks whether their
+                // approver may give a lasting one.
+                self.approvals.retain(|a| &a.person != person);
             }
             Ev::RolesSet { person, roles } => {
                 self.roles_set.insert(person.clone(), roles.clone());
