@@ -17,6 +17,8 @@ const BOB: &str = "Look up Acme in the bundle.";
 const PAY: &str = "Note the team's pay in the bundle.";
 const BOB_PAY: &str = "Look up the team's pay in the bundle.";
 const BOB_REWRITES: &str = "Rewrite the finance page for everyone.";
+const VENDORS: &str = "Note what we know of our vendors in the bundle.";
+const BOB_VENDORS: &str = "Look up our vendors in the bundle.";
 
 fn gen() -> Value {
     json!({ "by": "magnus/0.2.4", "at": "2026-11-02T10:00:00+00:00" })
@@ -174,6 +176,42 @@ async fn an_org_document_from_private_content_is_its_writers_alone_whatever_it_c
     let (st, d) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/people/finance.md", Value::Null).await;
     assert_eq!(st, 200, "{d}");
     assert_eq!(d["writer"], "alice", "the admin's edit lost whose run read its sources: {d}");
+}
+
+/// A run carries its person's relationship memory in its context, so an
+/// org document it writes may carry it: though it read nothing private and
+/// cites only Alice, it is hers alone (#258).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_org_document_written_with_its_persons_memory_in_context_is_theirs_alone() {
+    let vendors = || json!({ "type": "Area", "title": "Vendors", "owner": "human:alice", "ask_channel": "#ops", "scope": "org", "sources": [{ "resource": "human:alice" }] });
+    let m = FakeModel::start(script(move |c| async move {
+        let body = c.body.to_string();
+        let steps: Vec<Reply> = if body.contains(BOB_VENDORS) {
+            vec![contract_unchecked("look up vendors", "found or not"), tool("bundle_read", json!({ "path": "/people/vendors.md" })), complete("Looked.")]
+        } else if body.contains(VENDORS) {
+            vec![contract_unchecked("note vendors", "it is noted"), tool("bundle_write", json!({ "path": "/people/vendors.md", "frontmatter": vendors(), "body": "Alice is wary of Acme since her complaint." })), complete("Noted.")]
+        } else {
+            vec![]
+        };
+        steps.get(c.turn()).cloned().unwrap_or_else(|| Reply::Text(String::new()))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (alice, bob) = (app.api("alice"), app.api("bob"));
+    let (st, v) = alice.post("/v1/relationship", json!({ "action": "add", "text": "Alice is wary of Acme since her complaint (relnote-acme)." })).await;
+    assert!(st.is_success(), "{v}");
+    let a = alice.submit(VENDORS).await;
+    alice.wait_item(&a, "review").await;
+    let wrote = m.requests().into_iter().find(|c| c.body.to_string().contains(VENDORS) && c.turn() == 2).map(|c| c.last_results()[0].clone()).unwrap();
+    assert!(!wrote.is_error && wrote.text.contains("wrote /people/vendors.md"), "{}", wrote.text);
+
+    let b = bob.submit(BOB_VENDORS).await;
+    bob.wait_item(&b, "review").await;
+    let read = m.requests().into_iter().find(|c| c.body.to_string().contains(BOB_VENDORS) && c.turn() == 2).map(|c| c.last_results()[0].clone()).unwrap();
+    assert!(read.is_error && read.text.contains("no such document"), "bob read what alice's run wrote with her notes in its context: {}", read.text);
+    let (st, d) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/people/vendors.md", Value::Null).await;
+    assert_eq!(st, 200, "{d}");
+    assert_eq!((d["writer"].clone(), d["sources"].as_array().is_some_and(|s| s.contains(&json!("private:memory")))), (json!("alice"), true), "{d}");
 }
 
 /// A document drawn from Alice's own file, removed by an admin, comes back
