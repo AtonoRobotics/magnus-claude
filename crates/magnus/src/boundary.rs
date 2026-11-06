@@ -10,7 +10,7 @@ use crate::config::{Connector, Person};
 use crate::events::Ev;
 use crate::kernel::{new_id, Kernel};
 use crate::policy::{self, Outcome, ToolFacts};
-use crate::state::{Intent, Run};
+use crate::state::{Intent, Run, Status};
 use crate::tools::{self, Audience, Label, Risk};
 use crate::vault::redact;
 use anyhow::{anyhow, Result};
@@ -459,6 +459,13 @@ impl Kernel {
             Err(CallFailure::NotDone(m)) => {
                 self.record(a, Some(key), "failed", err_text(&format!("{} failed: {}.", a.tool, clean(&m)), true), true, f.label, None).await
             }
+            // A resend held back: the attempt before it may have reached
+            // the app, so its outcome stays unknown, never "not sent".
+            Err(CallFailure::Stopped(m)) if resend => {
+                let text = err_text(&format!("{}: an earlier attempt may have reached {}, so its outcome is unknown; it was not sent again: {}.", a.tool, f.app, clean(&m)), false);
+                self.record(a, Some(key), "unknown", text, true, f.label, None).await
+            }
+            Err(CallFailure::Stopped(m)) => self.record(a, Some(key), "failed", err_text(&format!("{} was not sent: {}.", a.tool, clean(&m)), false), true, f.label, None).await,
             Err(CallFailure::Unknown(m)) => {
                 // The request may have reached the app. Resolve as after a crash.
                 tracing::warn!("{}: outcome unknown: {m}", a.tool);
@@ -471,7 +478,7 @@ impl Kernel {
                                 self.record(a, Some(key), if is_error { "failed" } else { "done" }, clean(&text), is_error, f.label, data).await
                             }
                             Err(e) => {
-                                let m = match e { CallFailure::NotDone(m) | CallFailure::Unknown(m) => m };
+                                let m = match e { CallFailure::NotDone(m) | CallFailure::Unknown(m) | CallFailure::Stopped(m) => m };
                                 self.record(a, Some(key), "unknown", err_text(&format!("{}: the outcome is unknown ({}).", a.tool, clean(&m)), false), true, f.label, None).await
                             }
                         }
@@ -824,6 +831,17 @@ impl Kernel {
         Ok(())
     }
 
+    /// Whether the run an action is for is still running, read live as its
+    /// call goes out: a run cancelled or suspended while its gate waited on
+    /// the pin, the destination read or the sign-in sends nothing (#187).
+    fn still_running(&self, run: &str, app: &str) -> std::result::Result<(), String> {
+        match self.read(|s| s.runs.get(run).map(|r| r.status)) {
+            Some(Status::Running) => Ok(()),
+            Some(st) => Err(format!("the task was {} before it went out. Nothing was sent to {app}", crate::api::status_str(st))),
+            None => Err(format!("the task is gone. Nothing was sent to {app}")),
+        }
+    }
+
     /// The addresses the person wrote themselves for this run: in what they
     /// asked (a task they started, or their chat message), or in their own
     /// messages of the conversation a task started from chat carries. Never
@@ -891,17 +909,24 @@ impl Kernel {
                 return Err(CallFailure::NotDone(format!("{person}'s account is turned off at the organisation's sign-in, so their apps answer no calls for them until they are back. Nothing was sent to {}.", f.app)));
             }
             let k = (c.idempotency == "header").then_some(key);
+            // The last fence: the run, read live, is still running. The
+            // gate's copy of it was taken before the awaits that led here.
+            if let Err(m) = self.still_running(&a.run, &f.app) {
+                return Err(CallFailure::Stopped(m));
+            }
             let out = if c.transport == crate::brokered::BROKERED {
                 // Checked again once the call has its microVM, and before it
                 // sends: nothing was stopped since its token was taken, the
-                // kill switch is off and the person is still signed in.
-                let fence = || self.may_send(c, &person, stops, &f.app);
+                // kill switch is off, the person is still signed in and the
+                // run is still running.
+                let fence = || self.may_send(c, &person, stops, &f.app).and_then(|()| self.still_running(&a.run, &f.app));
                 self.brokered.call(c, &person, bearer, &f.remote, &a.input, &fence).await
             } else {
                 self.mcp.call(&c.url, bearer, &f.remote, &a.input, k).await
             };
             return match out {
                 Ok(o) => Ok((o.text, o.is_error, o.structured)),
+                Err(crate::apps::CallError::NotSent(m)) if self.still_running(&a.run, &f.app).is_err() => Err(CallFailure::Stopped(m)),
                 Err(crate::apps::CallError::NotSent(m)) => Err(CallFailure::NotDone(m)),
                 Err(crate::apps::CallError::Unknown(m)) => Err(CallFailure::Unknown(m)),
                 // The app wants more access for this (connectors spec,
@@ -1179,6 +1204,8 @@ fn memory_text(hits: &[crate::recall::Remembered]) -> String {
 enum CallFailure {
     NotDone(String),
     Unknown(String),
+    /// Not sent: the run stopped before the call went out.
+    Stopped(String),
 }
 
 fn shell_quote(s: &str) -> String {

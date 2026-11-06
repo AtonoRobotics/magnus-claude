@@ -77,3 +77,82 @@ async fn a_draft_being_sent_is_changed_by_no_other_run() {
     send.release();
     assert_eq!(drafts.world()["sent"], json!([{ "to": "bob@corp.example", "subject": "Q3", "body": "Revenue 41.7M" }]), "what went out is not the draft the gate read");
 }
+
+/// The call `tool` made in `task`, once it has a result.
+async fn settled_call(p: &Api, task: &str, tool: &str) -> serde_json::Value {
+    eventually(&format!("{tool} in {task} has a result"), PATIENCE, || async {
+        let (_, t) = p.get(&format!("/v1/tasks/{task}/timeline")).await;
+        t["steps"].as_array()?.iter().flat_map(|s| s["calls"].as_array().cloned().unwrap_or_default()).find(|c| c["tool"] == tool && !c["status"].is_null())
+    })
+    .await
+}
+
+/// A task cancelled while its gate reads the draft it sends sends nothing:
+/// the run is read again, live, right before the call goes out, not taken
+/// from the copy the gate made before it waited (#187).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_whose_task_is_cancelled_while_the_gate_reads_the_draft_sends_nothing() {
+    let model = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("send Bob the Q3 draft", "Bob has it"),
+            1 => tool("drafts__send_draft", json!({ "draft_id": "d1" })),
+            _ => complete("sent"),
+        }
+    }))
+    .await;
+    let (drafts, app) = drafts_app(&model).await;
+    let alice = app.api("alice");
+
+    let read = drafts.hold("get_draft");
+    let task = alice.submit("Send Bob the Q3 draft.").await;
+    tokio::time::timeout(PATIENCE, read.received()).await.expect("the gate never read the draft");
+    let (st, v) = alice.post(&format!("/v1/tasks/{task}/cancel"), json!({})).await;
+    assert!(st.is_success(), "cancel: {st} {v}");
+    alice.wait_status(&task, &["cancelled"]).await;
+    read.release();
+
+    let send = settled_call(&alice, &task, "drafts__send_draft").await;
+    assert_eq!(drafts.effects("send_draft"), 0, "a cancelled task's send went out: {send}");
+    assert_eq!(drafts.world()["sent"], json!([]));
+    assert_eq!(send["status"], "failed", "{send}");
+    assert!(send["result"].as_str().is_some_and(|t| t.contains("was not sent") && t.contains("cancelled")), "{send}");
+    assert_eq!(alice.task(&task).await["status"], "cancelled");
+}
+
+/// A resend held back because its task was cancelled is reported as
+/// unknown, never as not sent: the send before the appliance stopped may
+/// have gone out (#187).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resend_held_back_for_a_cancelled_task_is_reported_as_unknown() {
+    let model = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("send Bob the Q3 draft", "Bob has it"),
+            1 => tool("drafts__send_draft", json!({ "draft_id": "d1" })),
+            _ => complete("sent"),
+        }
+    }))
+    .await;
+    let (drafts, mut app) = drafts_app(&model).await;
+    let alice = app.api("alice");
+
+    // The send goes out, and its answer is lost with the appliance.
+    let send = drafts.hold("send_draft");
+    let task = alice.submit("Send Bob the Q3 draft.").await;
+    tokio::time::timeout(PATIENCE, send.received()).await.expect("the send never reached the app");
+    let read = drafts.hold("get_draft");
+    app.kill().await;
+    app.restart().await;
+
+    // Resumed, its gate reads the draft again; the task is cancelled meanwhile.
+    let alice = app.api("alice");
+    tokio::time::timeout(PATIENCE, read.received()).await.expect("the resumed gate never read the draft");
+    let (st, v) = alice.post(&format!("/v1/tasks/{task}/cancel"), json!({})).await;
+    assert!(st.is_success(), "cancel: {st} {v}");
+    alice.wait_status(&task, &["cancelled"]).await;
+    read.release();
+
+    let resend = settled_call(&alice, &task, "drafts__send_draft").await;
+    assert_eq!(drafts.calls_to("send_draft").len(), 1, "a cancelled task's send was dispatched again: {resend}");
+    assert_eq!(resend["status"], "unknown", "{resend}");
+    assert!(resend["result"].as_str().is_some_and(|t| t.contains("may have reached")), "{resend}");
+}
