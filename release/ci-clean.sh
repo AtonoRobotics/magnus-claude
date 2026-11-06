@@ -16,6 +16,21 @@
 # ~/magnus-ci/keycloak-realms-seen). Nothing else is touched: not the
 # master realm, not the appliance's own Keycloak. It never fails the run.
 #
+# It also frees the disk the runs share (#203: the build box filled, and
+# Chromium crashed mid-suite): the AppImage extractions
+# (`appimage_extracted_<md5>`, about 260 MB each) an AppImage run with
+# APPIMAGE_EXTRACT_AND_RUN leaves in /tmp when it is stopped, unpacked that
+# long ago, this user's, and run by no process; and the Docker build cache no
+# build has used for that long. Images are kept: a run may be using one.
+#
+#   release/ci-clean.sh --extractions DIR NOW
+#
+# The decision alone: prints the extractions in DIR to remove at NOW.
+#
+#   release/ci-clean.sh --build-cache
+#
+# The build cache alone.
+#
 #   release/ci-clean.sh --decide SEEN NOW
 #
 # The decision alone: the realm names on standard input; prints those to
@@ -44,10 +59,49 @@ decide() {
   mv "$next" "$seen"
 }
 
-if [ "${1:-}" = --decide ]; then
-  decide "$2" "$3"
-  exit 0
-fi
+# Whether a running process's program or working directory is under $1.
+# The processes are read once: hundreds of extractions were left (#203).
+in_use() {
+  [ -n "${running+x}" ] || running=$(find /proc/[0-9]*/exe /proc/[0-9]*/cwd -maxdepth 0 -printf '%l\n' 2>/dev/null)
+  printf '%s\n' "$running" | awk -v d="$1" '$0 == d || index($0, d "/") == 1 { f = 1 } END { exit !f }'
+}
+
+# The extractions in $1 to remove at time $2, one per line.
+extractions_due() {
+  for d in "$1"/appimage_extracted_*; do
+    # The runtime's name: the prefix and the AppImage's MD5.
+    printf '%s\n' "${d##*/}" | grep -Eqx 'appimage_extracted_[0-9a-f]{32}' || continue
+    [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || continue
+    # Unpacked when the directory last changed; running from it does not
+    # change it.
+    unpacked=$(stat -c %Y "$d" 2>/dev/null) || continue
+    [ $(($2 - unpacked)) -ge "$age" ] || continue
+    in_use "$d" && continue
+    echo "$d"
+  done
+}
+
+clear_extractions() {
+  n=0
+  for d in $(extractions_due /tmp "$now"); do
+    rm -rf "$d" && n=$((n + 1))
+  done
+  echo "AppImage extractions: removed $n unpacked $((age / 3600))h or more ago"
+}
+
+clear_build_cache() {
+  # --all: the cache an image build left, not only the dangling records;
+  # until: only what no build has used for that long (a running build's
+  # cache is in use and kept).
+  out=$(docker builder prune --all --force --filter "until=${age}s" 2>&1) || out="not cleared: $out"
+  echo "Docker build cache unused for $((age / 3600))h or more: $(printf '%s\n' "$out" | tail -n 1)"
+}
+
+case ${1:-} in
+  --decide) decide "$2" "$3"; exit 0 ;;
+  --extractions) extractions_due "$2" "$3"; exit 0 ;;
+  --build-cache) clear_build_cache; exit 0 ;;
+esac
 
 now=$(date +%s)
 kc=${MAGNUS_TEST_KEYCLOAK:-http://127.0.0.1:54380}
@@ -86,4 +140,6 @@ if [ -n "$kc_id" ]; then
   done
 fi
 echo "mail sinks: stopped $n left for $((age / 3600))h or more"
+clear_extractions
+clear_build_cache
 exit 0

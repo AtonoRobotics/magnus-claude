@@ -44,6 +44,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { clean: false }
+      # Short of disk, the run stops here saying so (#203; release/ci-disk.sh).
+      - name: Free disk
+        run: release/ci-disk.sh
       # Postgres and Keycloak, which the tests and the deploy use, up and
       # answering (they may still be starting after a reboot).
       - name: Build box services

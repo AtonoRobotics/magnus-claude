@@ -91,8 +91,8 @@ fn app_bin() -> PathBuf {
 }
 
 /// tauri-driver under a virtual display, for a fresh user: its own home,
-/// settings and Downloads, and no keyring, so the session goes to the
-/// private file.
+/// settings, Downloads and temporary directory, and no keyring, so the
+/// session goes to the private file.
 struct Driver {
     wd: String,
     home: tempfile::TempDir,
@@ -102,7 +102,60 @@ struct Driver {
 impl Drop for Driver {
     fn drop(&mut self) {
         if let Some(pid) = self._driver.id() {
-            let _ = std::process::Command::new("kill").args(["--", &format!("-{pid}")]).status();
+            end_group(pid);
+        }
+        // Then `home` is removed, with what the session left in its
+        // temporary directory.
+    }
+}
+
+/// `program` under a virtual display for the user whose home is `home`, in
+/// its own process group, so the driver, the app and whatever the app opens
+/// (the sign-in page in a browser) end with it. Its temporary directory is in
+/// that home: an AppImage run with APPIMAGE_EXTRACT_AND_RUN unpacks itself,
+/// about 260 MB, under TMPDIR and removes that only when it exits on its own;
+/// the tests stop it, and each run left one in /tmp until the build box's
+/// disk was full (#203).
+fn session(home: &Path, program: &Path) -> tokio::process::Command {
+    let tmp = home.join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let mut c = tokio::process::Command::new("xvfb-run");
+    c.args(["-a", "-s", "-screen 0 1280x900x24"])
+        .arg(program)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("TMPDIR", &tmp)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .env("NO_AT_BRIDGE", "1")
+        .stdout(Stdio::null())
+        .process_group(0)
+        .kill_on_drop(true);
+    c
+}
+
+/// Whether a process of group `group`, other than one that has exited and
+/// waits for its parent, still runs.
+fn group_runs(group: u32) -> bool {
+    let group = group.to_string();
+    std::fs::read_dir("/proc").unwrap().filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok()).any(|pid| {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        // After the parenthesised name: state, parent, process group.
+        let f: Vec<&str> = stat.rsplit(')').next().unwrap_or_default().split_whitespace().take(3).collect();
+        f.len() == 3 && f[0] != "Z" && f[2] == group
+    })
+}
+
+/// Ends process group `root` and waits until none of it runs, so nothing
+/// still writes in the session's home when the home is removed.
+fn end_group(root: u32) {
+    for (signal, wait) in [("-TERM", 10), ("-KILL", 5)] {
+        let _ = std::process::Command::new("kill").args([signal, "--", &format!("-{root}")]).status();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+        while group_runs(root) && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !group_runs(root) {
+            return;
         }
     }
 }
@@ -138,24 +191,13 @@ impl Driver {
         for _ in 0..3 {
             let (port, native_port) = (listener_port(), listener_port());
             let log = home.path().join("tauri-driver.log");
-            let mut child = tokio::process::Command::new("xvfb-run")
-                .args(["-a", "-s", "-screen 0 1280x900x24"])
-                .arg(&driver)
+            let mut child = session(home.path(), &driver)
                 .args(["--port", &port.to_string(), "--native-port", &native_port.to_string(), "--native-driver"])
                 .arg(&native)
-                .env("HOME", home.path())
-                .env("XDG_CONFIG_HOME", &config)
-                .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
                 .env("MAGNUS_SIGN_IN_AS", home.path().join("sign-in-as"))
                 .env("MAGNUS_CHROMIUM", chromium())
-                .env("NO_AT_BRIDGE", "1")
                 .envs(envs.iter().copied())
-                .stdout(Stdio::null())
                 .stderr(std::fs::File::create(&log).unwrap())
-                // Its own process group, so the driver, the app and whatever
-                // the app opens (the sign-in page in a browser) end with it.
-                .process_group(0)
-                .kill_on_drop(true)
                 .spawn()
                 .expect("start tauri-driver");
             let root = child.id().expect("tauri-driver's pid");
@@ -176,7 +218,7 @@ impl Driver {
             };
             if let Some(why) = lost {
                 // End its process group, as Drop does, and pick again.
-                let _ = std::process::Command::new("kill").args(["--", &format!("-{root}")]).status();
+                end_group(root);
                 tries.push(why);
                 continue;
             }
@@ -596,6 +638,38 @@ fn processes_of(path: &Path) -> Vec<i32> {
             cmd.split(|b| *b == 0).next() == Some(path.as_os_str().as_encoded_bytes()) || env.split(|b| *b == 0).any(|v| v == mark.as_bytes())
         })
         .collect()
+}
+
+/// The update tests run the app as an AppImage that unpacks itself
+/// (APPIMAGE_EXTRACT_AND_RUN) into `appimage_extracted_<md5>` under TMPDIR,
+/// about 260 MB, and stop it; stopped, it never removed that, and 296 runs
+/// left 75 GB in /tmp (#203). Started and ended as every test's session is,
+/// it leaves nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an AppImage build (MAGNUS_UPDATE_BUILDS) and xvfb-run"]
+async fn an_appimage_a_test_stops_leaves_no_extraction_behind() {
+    let builds = PathBuf::from(std::env::var("MAGNUS_UPDATE_BUILDS").expect("MAGNUS_UPDATE_BUILDS: old.AppImage"));
+    let app = builds.join("old.AppImage");
+    let sum = std::process::Command::new("md5sum").arg(&app).output().expect("md5sum");
+    assert!(sum.status.success(), "{}", String::from_utf8_lossy(&sum.stderr));
+    let name = format!("appimage_extracted_{}", String::from_utf8_lossy(&sum.stdout).split_whitespace().next().unwrap());
+    // Where it unpacks without a TMPDIR of the session's own.
+    let shared = std::env::temp_dir().join(&name);
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let before = modified(&shared);
+    let unpacked_there = move || modified(&shared).is_some_and(|m| Some(m) != before);
+
+    let home = tempfile::tempdir().unwrap();
+    let mine = home.path().join("tmp").join(&name);
+    let child = session(home.path(), &app).env("APPIMAGE_EXTRACT_AND_RUN", "1").stderr(Stdio::null()).spawn().expect("start the AppImage");
+    eventually("the AppImage unpacked and running", PATIENCE, || {
+        let found = mine.join("AppRun").exists() || unpacked_there();
+        async move { found.then_some(()) }
+    })
+    .await;
+    drop(Driver { wd: String::new(), home, _driver: child });
+    assert!(!unpacked_there(), "the stopped AppImage left {name} in {}", std::env::temp_dir().display());
+    assert!(!mine.exists(), "the session's temporary directory outlived it: {}", mine.display());
 }
 
 /// Requested with the update (owner, 2026-10-29): an update downloads,

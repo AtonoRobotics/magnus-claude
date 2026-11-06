@@ -89,6 +89,10 @@ jobs:
       # appliance's).
       - name: Clear what earlier tests left
         run: release/ci-clean.sh
+      # Short of disk, the run stops here saying so, not with browsers
+      # crashing mid-suite (#203; release/ci-disk.sh says what a run needs).
+      - name: Free disk
+        run: release/ci-disk.sh
       - name: Version
         env:
           TAG: ${{ startsWith(github.ref, 'refs/tags/') }}

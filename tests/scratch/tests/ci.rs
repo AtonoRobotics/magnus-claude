@@ -101,6 +101,89 @@ fn only_test_realms_left_for_three_hours_are_deleted() {
     assert!(decide(&seen, 1_000 + 20_001, &[new]).is_empty());
 }
 
+/// An AppImage stopped mid-run leaves its extraction, about 260 MB, and 296
+/// of them filled the build box with the Docker build cache (#203). Those
+/// unpacked three hours ago or more go, unless a process still runs from one;
+/// newer ones and anything else in the directory stay.
+#[test]
+fn appimage_extractions_left_for_three_hours_are_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = std::time::SystemTime::now();
+    let make = |name: &str| {
+        let d = dir.path().join(name);
+        std::fs::create_dir_all(d.join("usr/bin")).unwrap();
+        std::fs::write(d.join("AppRun"), "").unwrap();
+        d
+    };
+    let unpacked = |d: &Path, hours_ago: u64| std::fs::File::open(d).unwrap().set_modified(now - std::time::Duration::from_secs(hours_ago * 3600)).unwrap();
+    let old = make("appimage_extracted_0123456789abcdef0123456789abcdef");
+    let new = make("appimage_extracted_fedcba9876543210fedcba9876543210");
+    let other = make("appimage_extracted_by_someone");
+    let running = make("appimage_extracted_00000000000000000000000000000000");
+    std::fs::copy("/bin/sleep", running.join("usr/bin/sleep")).unwrap();
+    for (d, hours) in [(&old, 4), (&new, 2), (&other, 4), (&running, 4)] {
+        unpacked(d, hours);
+    }
+    let mut app = Command::new(running.join("usr/bin/sleep")).arg("60").spawn().unwrap();
+    let secs = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let out = Command::new(repo().join("release/ci-clean.sh")).args(["--extractions", dir.path().to_str().unwrap(), &secs.to_string()]).env_remove("MAGNUS_CLEAN_AGE").output().unwrap();
+    let _ = app.kill();
+    let _ = app.wait();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // Only the one four hours old that nothing runs from.
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("{}\n", old.display()));
+    let script = std::fs::read_to_string(repo().join("release/ci-clean.sh")).unwrap();
+    assert!(script.contains("for d in $(extractions_due /tmp \"$now\"); do\n    rm -rf \"$d\""), "the run removes what the decision names in /tmp");
+    let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
+    assert!(workflow.contains("run: release/ci-clean.sh"), "release-checks clears what earlier runs left");
+}
+
+/// The build cache goes once no build has used it for three hours; images
+/// stay, since another run may be using one (#203).
+#[test]
+fn docker_build_cache_unused_for_three_hours_is_pruned() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.path().join("docker-calls");
+    let docker = bin.join("docker");
+    std::fs::write(&docker, "#!/bin/sh\necho \"$*\" >> \"$DOCKER_LOG\"\necho 'Total:\t1.2GB'\n").unwrap();
+    std::fs::set_permissions(&docker, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let out = Command::new(repo().join("release/ci-clean.sh"))
+        .arg("--build-cache")
+        .env_remove("MAGNUS_CLEAN_AGE")
+        .env("DOCKER_LOG", &log)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "Docker build cache unused for 3h or more: Total:\t1.2GB\n");
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "builder prune --all --force --filter until=10800s\n", "only the build cache, by its age");
+}
+
+/// With 1.3 GB free, Chromium crashed in four tests and the update test could
+/// not unpack its release (#203). Short of disk, a run fails as it starts and
+/// says why; every workflow checks before it builds.
+#[test]
+fn a_run_short_of_disk_fails_at_its_start_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |need: &str| Command::new(repo().join("release/ci-disk.sh")).arg(dir.path()).env("MAGNUS_CI_FREE_GB", need).output().unwrap();
+    let out = run("0");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = run("1000000000");
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(!out.status.success() && err.contains("GB free on") && err.contains("a run needs 1000000000 GB"), "{err}");
+    let script = std::fs::read_to_string(repo().join("release/ci-disk.sh")).unwrap();
+    assert!(script.contains("need=${MAGNUS_CI_FREE_GB:-25}"), "the threshold the decision names");
+    for (file, first_build) in [("desktop.yml", "name: Version"), ("injection.yml", "name: Sandbox image"), ("appliance.yml", "name: Sandbox image")] {
+        let workflow = std::fs::read_to_string(repo().join(".github/workflows").join(file)).unwrap();
+        let check = workflow.find("run: release/ci-disk.sh").unwrap_or_else(|| panic!("{file} does not check its disk"));
+        assert!(check < workflow.find(first_build).unwrap(), "{file} builds before it checks its disk");
+    }
+    let desktop = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
+    assert!(desktop.find("run: release/ci-clean.sh").unwrap() < desktop.find("run: release/ci-disk.sh").unwrap(), "the check comes after what earlier runs left is cleared");
+}
+
 /// A runner whose cargo has no `tauri` subcommand gets one, on the PATH the
 /// later steps keep. The second run does not install it again.
 #[test]
