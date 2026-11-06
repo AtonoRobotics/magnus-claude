@@ -998,14 +998,15 @@ async function showThread(main, thread) {
     // Decline asks for the reason first; Magnus reads it before suggesting again.
     if (decision === "decline-open" || decision === "decline-cancel") { ui.declining = decision === "decline-open" ? card : null; return draw(); }
     const body = { decision };
-    if (decision === "decline") {
+    const no = decision === "decline" || decision === "dismiss";
+    if (no) {
       body.reason = ($(`#why-${CSS.escape(card)}`, main)?.value || "").trim();
       if (!body.reason) return toast("Say why, so Magnus knows.");
     }
     b.disabled = true;
     try {
       const r = await api("POST", `/v1/chat/cards/${enc(card)}`, body);
-      toast(decision === "decline" ? "Declined." : decision === "later" ? "Not now." : r.task ? "Started." : "Scheduled.");
+      toast(no ? (decision === "dismiss" ? "Dismissed." : "Declined.") : decision === "later" ? "Not now." : r.task ? "Started." : "Scheduled.");
       ui.declining = null; delete drafts[`why-${card}`];
       await refresh();
     } catch (err) { toast(err.message); b.disabled = false; }
@@ -1105,18 +1106,26 @@ function scheduleText(sc) {
   return `${sc.paused ? `Paused: ${sc.paused}` : `Next run ${until(sc.next)}`} · ${sc.last_failed ? `Last firing could not start: ${sc.last_failed.error}` : last ? `Last result: ${(STATUS[last.status] || ["", last.status])[1]}, ${when(last.ended_at || last.created_at)}` : "No results yet"}`;
 }
 // A card's answers: accept, Not now, or Decline, which asks for the reason.
-function cardActs(e, ui, accept, more = "") {
+// A task proposal is approved or dismissed (with the reason), not put off.
+function cardActs(e, ui, accept, more = "", proposal = false) {
+  const no = proposal ? "Dismiss" : "Decline";
   if (ui.declining === e.card) return `<div class="row cc-act decline-why"><label class="sr" for="why-${esc(e.card)}">Why not?</label>
-    <input id="why-${esc(e.card)}" data-draft="why-${esc(e.card)}" placeholder="Why not? Magnus reads this before suggesting again">
-    <button class="primary" data-decide="decline">Decline</button><button class="link" data-decide="decline-cancel">Cancel</button></div>`;
-  return `<div class="row cc-act"><button class="primary" data-decide="confirm">${esc(accept)}</button>${more}<button data-decide="later">Not now</button><button class="link" data-decide="decline-open">Decline</button></div>`;
+    <input id="why-${esc(e.card)}" data-draft="why-${esc(e.card)}" placeholder="Why not? Magnus reads this before ${proposal ? "proposing" : "suggesting"} again">
+    <button class="primary" data-decide="${no.toLowerCase()}">${no}</button><button class="link" data-decide="decline-cancel">Cancel</button></div>`;
+  return `<div class="row cc-act"><button class="primary" data-decide="${proposal ? "approve" : "confirm"}">${esc(accept)}</button>${more}${proposal ? "" : `<button data-decide="later">Not now</button>`}<button class="link" data-decide="decline-open">${no}</button></div>`;
+}
+
+// What a card rests on: each item, and the tool or task it points at.
+function evidenceList(e, label) {
+  return `<div class="sugg-part"><span class="small muted">${label}</span><ul class="sugg-list">${(e.evidence || []).map(x => `<li>${esc(x.shows)} <span class="small muted">(${x.call ? `from ${esc(x.tool)}` : `task: ${esc(x.title || "your request")}`})</span></li>`).join("")}</ul></div>`;
 }
 
 // What became of a card that is no longer open, other than a schedule it made.
 function cardOutcome(e) {
-  if (e.state === "declined") return `<p class="small"><span class="chip">Declined</span> ${esc(e.title || "")}${e.reason ? ` <span class="muted">· ${esc(e.reason)}</span>` : ""}</p>`;
+  const p = e.kind === "proposal_card";
+  if (e.state === "declined") return `<p class="small"><span class="chip">${p ? "Dismissed" : "Declined"}</span> ${esc(e.title || "")}${e.reason ? ` <span class="muted">· ${esc(e.reason)}</span>` : ""}</p>`;
   if (e.state === "later") return `<p class="small"><span class="chip">Not now</span> ${esc(e.title || "")}</p>`;
-  if (e.started) return `<p class="small"><span class="chip ok">Accepted</span> ${esc(e.title || "")} <a href="#/task/${enc(e.started)}" data-open="task:${esc(e.started)}">See the task</a></p>`;
+  if (e.started) return `<p class="small"><span class="chip ok">${p ? "Approved" : "Accepted"}</span> ${esc(e.title || "")} <a href="#/task/${enc(e.started)}" data-open="task:${esc(e.started)}">See the task</a></p>`;
   return "";
 }
 
@@ -1267,11 +1276,24 @@ function entry(e, ui = {}) {
       return `<div class="confirm chatcard suggestion" data-card="${esc(e.card)}"><div class="cc-head"><span class="st sch">${icon(timed ? "calendar" : "tasks")}</span><strong>${esc(e.title)}</strong></div>
         <p class="cc-text">${esc(e.plan)}</p>
         ${e.changed ? `<p class="small"><strong>What changed:</strong> ${esc(e.changed)}</p>` : ""}
-        <div class="sugg-part"><span class="small muted">Why</span><ul class="sugg-list">${(e.evidence || []).map(x => `<li>${esc(x.shows)} <span class="small muted">(${x.call ? `from ${esc(x.tool)}` : `task: ${esc(x.title || "your request")}`})</span></li>`).join("")}</ul></div>
+        ${evidenceList(e, "Why")}
         <div class="sugg-part"><span class="small muted">What it may do</span><ul class="sugg-list">${(e.permissions || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>
         ${timed ? `<div class="tiles"><div><span>When</span><strong>${esc(rule(e))}</strong></div><div><span>Ends</span><strong>${esc(ends(e))}</strong></div></div>` : ""}
         <p class="small muted">It acts for you (${esc(e.acts_for)}), with your access; what it needs from you shows under Needs you.</p>${taintNote(e.taint)}
         ${cardActs(e, ui, "Accept")}</div>`;
+    }
+    case "proposal_card": {
+      if (e.state !== "open") return `<div data-card="${esc(e.card)}">${cardOutcome(e)}</div>`;
+      const n = e.needs || {}, part = (label, html) => `<div class="sugg-part"><span class="small muted">${label}</span>${html}</div>`;
+      return `<div class="confirm chatcard suggestion proposal" data-card="${esc(e.card)}"><div class="cc-head"><span class="st sch">${icon("tasks")}</span><strong>${esc(e.title)}</strong></div>
+        ${part("Noticed", `<p class="cc-text">${esc(e.noticed?.what)} <span class="small muted">(${esc(e.noticed?.where)})</span></p>`)}
+        ${part("Outcome", `<p class="cc-text">${esc(e.outcome)}</p>`)}
+        ${part("Why now", `<p class="cc-text">${esc(e.why_now)}</p>`)}
+        ${e.changed ? `<p class="small"><strong>What changed:</strong> ${esc(e.changed)}</p>` : ""}
+        ${part("Needs", `<ul class="sugg-list">${(n.permissions || []).map(x => `<li>${esc(x)}</li>`).join("")}<li class="num">Up to $${esc(n.estimated_cost_usd)}</li>${n.input ? `<li>From you: ${esc(n.input)}</li>` : ""}</ul>`)}
+        ${evidenceList(e, "Seen in")}
+        <p class="small muted">It acts for you (${esc(e.acts_for)}), with your access, and spends no more than this; what it needs from you shows under Needs you.</p>${taintNote(e.taint)}
+        ${cardActs(e, ui, "Approve", "", true)}</div>`;
     }
     case "schedule_card": {
       const b = e.budget || {};

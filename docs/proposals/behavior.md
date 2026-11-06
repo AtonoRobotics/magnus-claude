@@ -76,12 +76,14 @@ admin console.
      (starts the task), Dismiss with a reason, Handle things like this
      (opens a standing-authority grant). The automation suggestion is done
      (#253, `decisions/2026-11-06-253-suggestion-cards.md`); the task proposal
-     is next.
+     is done with Approve and Dismiss (#254,
+     `decisions/2026-11-06-254-task-proposals.md`). Its "Handle things like
+     this" opens a grant, so it is built in step 5.
    - The validator refuses a card whose evidence does not point at something
      real: an event in the log, or an item in a connected app that Magnus
      actually read (recorded when read). Schedule cards become suggestions.
-     Done for suggestions (#253): a tool result the turn read, or a task of
-     the person's.
+     Done for suggestions (#253) and task proposals (#254): a tool result
+     the turn read, or a task of the person's.
    - Every card and its answer go in the suggestion ledger, which the model
      reads before it suggests again; a declined one comes back only when
      circumstances changed, saying what changed. Done (#253).
@@ -89,7 +91,9 @@ admin console.
      may see and proposes two or three things it could take over.
 5. **Standing authority.**
    - A grant comes only from "Handle things like this" or the person asking
-     in conversation; approving one proposal never creates one.
+     in conversation; approving one proposal never creates one. The button
+     goes on the task proposal card here, with grants (moved from step 4,
+     #254).
    - A grant is a Cedar policy in the person's layer: a category of work, a
      budget per period (spend and model cost), and excluded actions that
      still need approval. Excluded by default: sending on the person's

@@ -870,6 +870,8 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool, words
         v["criteria"] = json!(criteria);
         v["model"] = json!({ "adapter": run.config.adapter, "name": run.config.model });
         v["usage"] = json!({ "model_calls": run.model_calls, "actions": run.actions, "cost_usd": run.usd });
+        // What the run may spend: for a task from a proposal, the estimate the person approved (#254).
+        v["budget"] = json!(run.config.budget);
         v["taint"] = json!({ "untrusted": run.untrusted, "private": run.private });
         v["outputs"] = json!(run.outputs.iter().map(|(id, name, mt, size)| json!({ "id": id, "name": name, "media_type": mt, "size": size })).collect::<Vec<_>>());
         v["plan"] = run.plan.clone().unwrap_or(Value::Null);

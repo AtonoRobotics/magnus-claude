@@ -111,8 +111,8 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
     })
 }
 
-/// The appliance's own chat tools (`create_task`, `create_schedule`, `suggest`, the
-/// task and schedule controls), never
+/// The appliance's own chat tools (`create_task`, `create_schedule`, `suggest`,
+/// `propose_task`, the task and schedule controls), never
 /// a connector's, whatever the connector is called.
 /// The Rule of Two asks before a web lookup; one approval covers a task's
 /// lookups (or a conversation's).
@@ -960,6 +960,7 @@ impl Kernel {
                 "create_task" => self.chat_task(a, key).await,
                 "create_schedule" => Ok(self.chat_card(a, key)),
                 "suggest" => self.suggest(a, key).await,
+                "propose_task" => self.propose_task(a, key).await,
                 "find_tools" => {
                     let Some(run) = self.read(|s| s.runs.get(&a.run).cloned()) else { return Ok(("no such run".into(), true, None)) };
                     let v = self.find_tools(&run, a.input["query"].as_str().unwrap_or_default()).await;
