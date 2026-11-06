@@ -318,7 +318,9 @@ async fn the_kill_switch_closes_every_runs_pages() {
     .await;
     let mut app = Appliance::start(Spec::default(), &m).await;
     reconfigure(&mut app, |cfg| {
-        let browser = json!({ "command": ["node", workspace_root().join("browser/sidecar.js")], "chromium": chromium() });
+        // The test's pages are on this machine's loopback: an internal site the
+        // owner allows (#185).
+        let browser = json!({ "command": ["node", workspace_root().join("browser/sidecar.js")], "chromium": chromium(), "allow": ["127.0.0.1"] });
         cfg.insert("browser".into(), toml::Value::try_from(browser).unwrap());
     })
     .await;

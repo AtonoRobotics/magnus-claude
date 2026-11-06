@@ -605,6 +605,11 @@ pub struct Web {
 pub struct Browser {
     pub command: Vec<String>,
     pub chromium: PathBuf,
+    /// Internal sites the browser may open: a name or address, with or
+    /// without `:port`, or a range (`10.1.0.0/16`). Every other loopback,
+    /// link-local, private or reserved address is refused (#185).
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
