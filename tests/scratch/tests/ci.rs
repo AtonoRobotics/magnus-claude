@@ -300,6 +300,9 @@ fn only_master_publishes_to_the_installed_apps() {
     }
     let master = steps.iter().find(|s| s.contains("refs/heads/master") && s.contains("dist test")).expect("master publishes to test");
     assert!(master.contains("dist development"), "master does not publish to the owner's app");
+    // A pull request's build still there from before is given up or held by
+    // where it landed, or master would be refused there for good (review of #219).
+    assert!(master.contains("MAGNUS_GIVEN_UP") && master.contains("MAGNUS_LANDED") && master.contains("GH_TOKEN"), "master does not reconcile a pull request's build in development");
 }
 
 /// The two update AppImages compile after the suite. Beside it, they took

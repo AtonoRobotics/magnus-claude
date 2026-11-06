@@ -316,11 +316,24 @@ jobs:
       # pull request (2026-11-06, decisions/2026-11-06-parallel-prs.md).
       - name: Test and development builds for the installed apps
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && env.MAGNUS_PUBLISH == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           s=$(git log -1 --format=%s)
           case $s in "Merge pull request #"*) t=$(git log -1 --format=%b | head -1) ;; *) t=$s ;; esac
           printf '%s\n\nTest build: master at %s.\n' "$t" "$(git rev-parse --short HEAD)" > "$RUNNER_TEMP/notes"
           release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist test
+          # The development channel may still hold a pull request's build
+          # from before only master published: one closed without merging is
+          # given up, and a merged one is held by the commit it landed as.
+          there="${{ vars.MAGNUS_UPDATES_DIR }}/desktop/development/latest.json"
+          prev=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("pr", ""))' "$there" 2>/dev/null || true)
+          if [ -n "$prev" ]; then
+            case $(gh pr view "$prev" --json state -q .state) in
+            CLOSED) export MAGNUS_GIVEN_UP=$prev ;;
+            MERGED) export MAGNUS_LANDED="$prev=$(gh pr view "$prev" --json mergeCommit -q .mergeCommit.oid)" ;;
+            esac
+          fi
           release/publish.sh desktop "$MAGNUS_VERSION" "${{ vars.MAGNUS_UPDATES_DIR }}" "$RUNNER_TEMP/notes" dist development
       # Master also runs on the build box's own appliance, which installs
       # it by itself (DECISIONS.md, "Master runs on the build box's
