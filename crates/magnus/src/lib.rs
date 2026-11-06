@@ -41,6 +41,7 @@ pub mod ops_admin;
 pub mod person_admin;
 pub mod policy;
 pub mod policy_admin;
+pub mod reactions;
 pub mod recall;
 pub mod relationship;
 pub mod run;

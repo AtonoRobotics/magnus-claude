@@ -952,6 +952,7 @@ async function showThread(main, thread) {
       case "save": await api("POST", path(id, "save"), {}); return toast("Saved to Files.");
       case "listen": { b.disabled = true; try { await readAloud((await api("POST", path(id, "spoken"), {})).script); } finally { b.disabled = false; } return; }
       case "hush": return hush();
+      case "great": case "annoying": b.disabled = true; await api("POST", path(id, "reaction"), { reaction: e.reaction === act ? null : act }); return draw();
       case "task": { const r = await api("POST", path(id, "task"), {}); toast("Started a task."); await refresh(); return r; }
       case "delete":
         if (!await ask("Delete this message? It leaves this chat and what Magnus reads next, and waits in the trash until it is gone for good.", "Delete")) return;
@@ -1193,22 +1194,27 @@ const ICONS = {
   export: '<path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/>', // download
   save: '<path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>', // folder-plus
   task: '<path d="M16 5H3"/><path d="M11 12H3"/><path d="M16 19H3"/><path d="M18 9v6"/><path d="M21 12h-6"/>', // list-plus
+  great: '<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" x2="9.01" y1="9" y2="9"/><line x1="15" x2="15.01" y1="9" y2="9"/>', // smile
+  annoying: '<circle cx="12" cy="12" r="10"/><path d="M16 16s-1.5-2-4-2-4 2-4 2"/><line x1="9" x2="9.01" y1="9" y2="9"/><line x1="15" x2="15.01" y1="9" y2="9"/>', // frown
   delete: '<path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>', // trash-2
 };
 
 // What a person can do with each entry. Edit is for their own messages,
 // Retry for Magnus's answers, and Read aloud for an answer, from a script
-// written for listening; the rest for every entry. Each is an icon, named
+// written for listening; a reaction (great or annoying, pressed again to
+// take it back) for each of Magnus's messages; the rest for every entry. Each is an icon, named
 // by its tooltip and, for screen readers, by hidden text.
 function msgActions(e, ui) {
   if (!e.id) return "";
-  const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn";
-  const acts = [["copy", "Copy"], mine && ["edit", "Edit"], magnus && ["retry", "Retry"], e.kind === "answer" && ["listen", "Read aloud"], e.kind === "answer" && ["hush", "Stop"], ["branch", "Branch"], ["share", "Share"],
+  const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn", said = magnus || e.kind === "result";
+  const acts = [["copy", "Copy"], mine && ["edit", "Edit"], magnus && ["retry", "Retry"], e.kind === "answer" && ["listen", "Read aloud"], e.kind === "answer" && ["hush", "Stop"],
+    said && ["great", "That was great"], said && ["annoying", "That was annoying"], ["branch", "Branch"], ["share", "Share"],
     ["export", "Export"], ["save", "Save to Files"], ["task", "Make a task"], ["delete", "Delete"]].filter(Boolean);
   const share = ui.sharing === e.id ? `<div class="row small share-to"><label class="sr" for="share-${esc(e.id)}">Share with</label>
     <select id="share-${esc(e.id)}" data-share-to>${ui.people.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>
     <button class="primary" data-msg-act="share-send">Share</button><button class="link" data-msg-act="share-cancel">Cancel</button></div>` : "";
-  return `<div class="msg-actions small" role="toolbar" aria-label="Actions">${acts.map(([a, l]) => `<button class="icon" data-msg-act="${a}" title="${l}"><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[a]}</svg><span class="sr">${l}</span></button>`).join("")}</div>${share}`;
+  const pressed = a => a === "great" || a === "annoying" ? ` aria-pressed="${e.reaction === a}"` : "";
+  return `<div class="msg-actions small" role="toolbar" aria-label="Actions">${acts.map(([a, l]) => `<button class="icon${e.reaction === a ? " on" : ""}" data-msg-act="${a}" title="${l}"${pressed(a)}><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[a]}</svg><span class="sr">${l}</span></button>`).join("")}</div>${share}`;
 }
 
 function entry(e, ui = {}) {
@@ -2428,7 +2434,7 @@ async function dataSection(el) {
   // The person's relationship notes as last drawn: each row names its note by them.
   let notes = [];
   const draw = async () => {
-    const [prefs, { requests }, backups, rel] = await Promise.all([api("GET", "/v1/preferences"), api("GET", "/v1/deletion-requests"), isOwner() ? api("GET", "/v1/backups").catch(() => null) : null, api("GET", "/v1/relationship")]);
+    const [prefs, { requests }, backups, rel, { disagreements }] = await Promise.all([api("GET", "/v1/preferences"), api("GET", "/v1/deletion-requests"), isOwner() ? api("GET", "/v1/backups").catch(() => null) : null, api("GET", "/v1/relationship"), api("GET", "/v1/disagreements")]);
     App.prefs = prefs;
     notes = rel.notes;
     const STATE = { done: ["ok", "done"], decline: ["bad", "declined"] };
@@ -2439,6 +2445,9 @@ async function dataSection(el) {
       <div class="card" data-relationship><p class="small muted">What you told Magnus about working with you: tone, what you delegated, standing decisions. Every task and chat of yours carries it; no one else sees it.</p>
         ${notes.map((n, i) => `<div class="row" data-note="${i}" style="margin-top:6px"><input aria-label="Note" value="${esc(n)}" style="flex:1"><button data-act="note-save">Save</button><button data-act="note-remove">Remove</button></div>`).join("") || `<p class="small faint">Nothing yet.</p>`}
         <div class="row" style="margin-top:8px"><input id="newnote" aria-label="New note" style="flex:1" placeholder="For example: fewer jokes"><button data-act="note-add">Add</button></div></div>
+      <h3>Where you decided otherwise</h3>
+      <div class="card" data-disagreements><p class="small muted">When Magnus advised one thing and you decided another, it notes both, and later how it turned out. Only your own tasks and chats see these.</p>
+        ${disagreements.map(d => `<p class="small"><span class="faint">${esc(when(d.at))}</span> Magnus advised: ${esc(d.position)} You decided: ${esc(d.decision)} ${d.outcome ? `Outcome: ${esc(d.outcome)}` : `<span class="faint">Outcome not known yet.</span>`}</p>`).join("") || `<p class="small faint">None.</p>`}</div>
       <h3>Delete my data</h3>
       <div class="card"><p class="small muted">The owner is asked, and has 30 days to act. What is deleted leaves every backup within that time.</p>
         <label for="delwhat">What to delete</label><input id="delwhat" data-draft="delwhat" style="width:100%" placeholder="all of my data">

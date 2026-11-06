@@ -164,6 +164,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .merge(crate::update::router())
         .merge(crate::settings::router())
         .merge(crate::relationship::router())
+        .merge(crate::reactions::router())
         .merge(crate::knowledge::router())
         .merge(crate::chat_actions::router())
         .merge(crate::trash::router())
@@ -1074,7 +1075,9 @@ async fn chat_thread(State(k): K, h: HeaderMap, Path(thread): Path<String>) -> R
         Err(r) => return r,
     };
     match k.thread_entries(&p.id, &thread).await {
-        Ok(Some(entries)) => Json(json!({ "thread": thread, "entries": entries })).into_response(),
+        // Their reactions shown on Magnus's messages: to them alone, not in
+        // the thread as anyone else may read it.
+        Ok(Some(entries)) => Json(json!({ "thread": thread, "entries": k.read(|s| crate::reactions::marked(s, &p.id, &thread, entries)) })).into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "no such thread"),
         Err(e) => internal(e),
     }

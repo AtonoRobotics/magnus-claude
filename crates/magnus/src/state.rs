@@ -251,6 +251,19 @@ pub struct Verdict {
     pub at: DateTime<Utc>,
 }
 
+/// A disagreement Magnus recorded: what it advised, what the person
+/// decided, and later how it turned out.
+#[derive(Clone, Debug, Serialize)]
+pub struct Disagreement {
+    pub id: String,
+    pub person: String,
+    pub position: String,
+    pub decision: String,
+    pub at: DateTime<Utc>,
+    pub outcome: Option<String>,
+    pub outcome_at: Option<DateTime<Utc>>,
+}
+
 /// The verdicts a person can give, best first.
 /// A secret the kill switch took out: `at_provider` is None until the
 /// provider answered.
@@ -754,6 +767,12 @@ pub struct State {
     pub preferences: HashMap<String, Value>,
     /// Entries people deleted from their threads, by thread.
     pub hidden: HashMap<String, std::collections::HashSet<String>>,
+    /// Each person's reactions to Magnus's messages, by (thread, entry):
+    /// every reaction given, oldest first, and when (None: taken back), so
+    /// a run sees them as they stood when it started.
+    pub reactions: HashMap<String, BTreeMap<(String, String), Vec<(Option<String>, DateTime<Utc>)>>>,
+    /// The disagreements Magnus recorded, by id.
+    pub disagreements: BTreeMap<String, Disagreement>,
     /// Threads branched from another, by thread.
     pub branches: HashMap<String, Branch>,
     pub schedules: BTreeMap<String, Schedule>,
@@ -1282,6 +1301,9 @@ impl State {
                 self.trash.retain(|_, t| &t.person != person);
                 self.preferences.remove(person);
                 self.hidden.remove(person);
+                // Their reactions and disagreements, whose words went with theirs.
+                self.reactions.remove(person);
+                self.disagreements.retain(|_, d| &d.person != person);
                 // Their branched threads (the entries as shown then) and
                 // what their tasks had attached go too.
                 self.branches.retain(|_, b| &b.person != person);
@@ -1311,6 +1333,21 @@ impl State {
             }
             Ev::ChatHidden { thread, entries, .. } => {
                 self.hidden.entry(thread.clone()).or_default().extend(entries.iter().cloned());
+            }
+            Ev::Reacted { person, thread, entry, reaction } => {
+                let mine = self.reactions.entry(person.clone()).or_default();
+                mine.entry((thread.clone(), entry.clone())).or_default().push((reaction.clone(), e.at));
+            }
+            Ev::DisagreementRecorded { id, person, position, decision, .. } => {
+                let d = Disagreement { id: id.clone(), person: person.clone(), position: position.clone(), decision: decision.clone(), at: e.at, outcome: None, outcome_at: None };
+                self.disagreements.insert(id.clone(), d);
+            }
+            Ev::DisagreementOutcome { id, outcome, .. } => {
+                // The first outcome stands.
+                if let Some(d) = self.disagreements.get_mut(id).filter(|d| d.outcome.is_none()) {
+                    d.outcome = Some(outcome.clone());
+                    d.outcome_at = Some(e.at);
+                }
             }
             Ev::ThreadBranched { person, thread, from, upto, entries, title } => {
                 self.branches.insert(thread.clone(), Branch { person: person.clone(), from: from.clone(), upto: upto.clone(), entries: entries.clone(), title: title.clone(), at: e.at });
