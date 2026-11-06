@@ -247,6 +247,9 @@ console.log("ok");
 /// `chrome-error://chromewebdata/`, and only the page's own request names
 /// `net::ERR_NETWORK_CHANGED` (#218; runs 42139753250, 42146521203). Any
 /// other failed request is still reported at once, with its error named.
+/// Playwright can reject the load before it reports that failure, or not
+/// report it: the failure is waited for, and an error page with no cause
+/// named is loaded again too (#248; run 42164847174).
 #[test]
 fn a_network_change_shown_as_chromes_error_page_is_loaded_again() {
     let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests");
@@ -256,7 +259,9 @@ fn a_network_change_shown_as_chromes_error_page_is_loaded_again() {
 const {{ goto }} = await import("{helper}");
 // A page as Playwright drives one: the main frame's request fails with
 // `error`, then the load is reported as interrupted by Chrome's error page.
-function page(error, failures) {{
+// `when` is "late" when the failure is reported after the load was
+// rejected, and "never" when it is not reported at all (#248).
+function page(error, failures, when = "first") {{
   const frame = {{}};
   const on = new Map();
   let loads = 0;
@@ -267,7 +272,10 @@ function page(error, failures) {{
     off: ev => on.delete(ev),
     goto: async u => {{
       if (++loads > failures) return "loaded " + u;
-      on.get("requestfailed")?.({{ isNavigationRequest: () => true, frame: () => frame, failure: () => ({{ errorText: error }}) }});
+      const fail = on.get("requestfailed");
+      const report = () => fail?.({{ isNavigationRequest: () => true, frame: () => frame, failure: () => ({{ errorText: error }}) }});
+      if (when === "first") report();
+      if (when === "late") setTimeout(report, 200);
       throw new Error(`page.goto: Navigation to "${{u}}" is interrupted by another navigation to "chrome-error://chromewebdata/"`);
     }},
   }};
@@ -279,6 +287,16 @@ const refused = page("net::ERR_CONNECTION_REFUSED", 9);
 await goto(refused, "https://console/").then(() => {{ throw new Error("a refusal passed"); }}, e => {{ if (!e.message.includes("net::ERR_CONNECTION_REFUSED") || refused.loads !== 1) throw new Error(`a refusal: ${{e.message}} after ${{refused.loads}} loads`); }});
 const never = page("net::ERR_NETWORK_CHANGED", 9);
 await goto(never, "https://console/").then(() => {{ throw new Error("a network that never settles passed"); }}, e => {{ if (never.loads !== 3) throw new Error(`never settling: ${{e.message}} after ${{never.loads}} loads`); }});
+const late = page("net::ERR_NETWORK_CHANGED", 1, "late");
+const r2 = await goto(late, "https://console/");
+if (r2 !== "loaded https://console/" || late.loads !== 2) throw new Error(`a network change reported after the load failed: ${{r2}} after ${{late.loads}} loads`);
+const lateRefusal = page("net::ERR_CONNECTION_REFUSED", 9, "late");
+await goto(lateRefusal, "https://console/").then(() => {{ throw new Error("a late refusal passed"); }}, e => {{ if (!e.message.includes("net::ERR_CONNECTION_REFUSED") || lateRefusal.loads !== 1) throw new Error(`a late refusal: ${{e.message}} after ${{lateRefusal.loads}} loads`); }});
+const unsaid = page("", 1, "never");
+const r3 = await goto(unsaid, "https://console/");
+if (r3 !== "loaded https://console/" || unsaid.loads !== 2) throw new Error(`Chrome's error page with no failure named: ${{r3}} after ${{unsaid.loads}} loads`);
+const silent = page("", 9, "never");
+await goto(silent, "https://console/").then(() => {{ throw new Error("an error page that never clears passed"); }}, e => {{ if (!e.message.includes("named no failure") || silent.loads !== 3) throw new Error(`never clearing: ${{e.message}} after ${{silent.loads}} loads`); }});
 console.log("ok");
 "#
     );
