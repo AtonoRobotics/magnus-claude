@@ -2,7 +2,8 @@
 //! `execute()`, write every step to the log. The loop holds no state: each
 //! step starts from the log, so a new loop resumes any run.
 //!
-//! Code here only limits: it stops at the model-call budget, retries an
+//! Code here only limits: it stops at the model-call and dollar budget (and
+//! on a cancel, suspension or the kill switch) before each request, retries an
 //! unavailable provider a bounded number of times, and suspends with a notice.
 //! What to do next is always the model's decision.
 
@@ -26,6 +27,44 @@ pub enum Flow {
 }
 
 impl Kernel {
+    /// Whether the run may make another paid model request, read from the
+    /// run as it is now. When not, the run is stopped the way the loop and
+    /// the boundary's budget stage stop it, and nothing is asked.
+    async fn may_ask_model(self: &Arc<Self>, run_id: &str) -> Result<bool> {
+        let Some(run) = self.read(|s| s.runs.get(run_id).cloned()) else { return Ok(false) };
+        // Cancelled, suspended or ended: whoever stopped it has said why.
+        if run.status != Status::Running {
+            return Ok(false);
+        }
+        if self.read(|s| s.kill_switch) {
+            self.suspend(run_id, "kill_switch", None).await?;
+            return Ok(false);
+        }
+        if self.read(|s| s.updating.is_some()) {
+            self.suspend(run_id, "update", None).await?;
+            return Ok(false);
+        }
+        let budget = &run.config.budget;
+        if run.model_calls >= budget.max_model_calls {
+            self.suspend_with_notice(
+                run_id,
+                "budget",
+                format!("Stopped after {} model calls, the task's limit.", run.model_calls),
+                json!({ "model_calls": run.model_calls, "limit": budget.max_model_calls, "usd": run.usd }),
+            )
+            .await?;
+            return Ok(false);
+        }
+        // Dollars are spent by model calls, failed ones too: one past the
+        // limit stops the run before the next is paid for.
+        if run.usd >= budget.max_usd {
+            let why = crate::boundary::budget_used(&run);
+            self.suspend_with_notice(run_id, "budget", format!("Stopped: {why}."), json!({ "actions": run.actions, "usd": run.usd })).await?;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     pub async fn drive(self: Arc<Self>, run: &str) -> Result<()> {
         loop {
             match self.step(run).await? {
@@ -72,15 +111,7 @@ impl Kernel {
         }
 
         // Ask the model for the next step.
-        let budget = &run.config.budget;
-        if run.model_calls >= budget.max_model_calls {
-            self.suspend_with_notice(
-                run_id,
-                "budget",
-                format!("Stopped after {} model calls, the task's limit.", run.model_calls),
-                json!({ "model_calls": run.model_calls, "limit": budget.max_model_calls, "usd": run.usd }),
-            )
-            .await?;
+        if !self.may_ask_model(run_id).await? {
             return Ok(Flow::Stop);
         }
         // The tools first: asking an app for them is how Magnus learns it
@@ -96,15 +127,10 @@ impl Kernel {
         let (adapter, model) = run.model();
         let mut attempt = 0u32;
         loop {
-            let calls = self.read(|s| s.runs.get(run_id).map(|r| r.model_calls)).unwrap_or(0);
-            if calls >= budget.max_model_calls {
-                self.suspend_with_notice(
-                    run_id,
-                    "budget",
-                    format!("Stopped after {calls} model calls, the task's limit."),
-                    json!({ "model_calls": calls, "limit": budget.max_model_calls }),
-                )
-                .await?;
+            // Each attempt, a retry too, reads the run as it is now: a failed
+            // call may have been charged, and a person may have cancelled or
+            // the owner stopped everything while it waited.
+            if !self.may_ask_model(run_id).await? {
                 return Ok(Flow::Stop);
             }
             self.emit(
