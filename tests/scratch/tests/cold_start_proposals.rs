@@ -272,3 +272,39 @@ async fn nothing_opens_while_the_kill_switch_is_on() {
     let (t, _) = the_opened(&carol).await;
     assert_eq!(t["title"], "What I could take over", "{t}");
 }
+
+/// Deleting the conversation Magnus opened neither starts it again nor shows
+/// its instruction in the trash: it is listed by its title, and a later
+/// sign-in, a restart and removing it for good open nothing (review of #274).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_opener_conversation_is_listed_by_its_title_and_does_not_open_again() {
+    let m = FakeModel::start(model()).await;
+    let mut app = start(&m).await;
+    let carol = app.api("carol");
+    assert!(set_password(&app, "carol", PASSWORD));
+    sign_in(&app, "carol").await;
+    let (t, _) = the_opened(&carol).await;
+    let thread = t["thread"].as_str().unwrap().to_string();
+    let turns = m.requests().into_iter().filter(opening).count();
+
+    let (st, v) = carol.post("/v1/trash", json!({ "item": thread })).await;
+    assert!(st.is_success(), "{v}");
+    let (st, trash) = carol.get("/v1/trash").await;
+    assert!(st.is_success(), "{trash}");
+    let held = trash["items"].as_array().unwrap().iter().find(|i| i["item"] == thread.as_str()).cloned().unwrap_or_else(|| panic!("not in the trash: {trash}"));
+    assert_eq!(held["title"], "What I could take over", "{held}");
+    assert!(!trash.to_string().contains(OPENS), "the trash shows the opener's instruction: {trash}");
+
+    sign_in(&app, "carol").await;
+    a_moment().await;
+    app.restart().await;
+    sign_in(&app, "carol").await;
+    a_moment().await;
+    let (st, v) = carol.send(reqwest::Method::DELETE, &format!("/v1/trash/{thread}"), None).await;
+    assert!(st.is_success(), "{v}");
+    app.restart().await;
+    sign_in(&app, "carol").await;
+    a_moment().await;
+    assert!(opened(&carol).await.is_empty(), "a conversation opened again");
+    assert_eq!(m.requests().into_iter().filter(opening).count(), turns, "the opener ran again after its conversation was deleted");
+}
