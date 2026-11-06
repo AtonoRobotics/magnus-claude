@@ -190,7 +190,7 @@ impl Kernel {
                     let mut e = d.clone();
                     e["id"] = json!(format!("c:{card}"));
                     e["task_id"] = json!(t.task_id);
-                    e["kind"] = json!(if d["suggestion"] == true { "suggestion_card" } else { "schedule_card" });
+                    e["kind"] = json!(if d["proposal"] == true { "proposal_card" } else if d["suggestion"] == true { "suggestion_card" } else { "schedule_card" });
                     e["state"] = json!(state);
                     e["schedule"] = made["schedule"].clone();
                     e["started"] = made["started"].clone();
@@ -309,6 +309,10 @@ impl Kernel {
                         let changed = e["changed"].as_str().map(|c| format!(" (again: {c})")).unwrap_or_default();
                         ("you", format!("Suggested {} ({}, card {}): {}{changed}", text("title"), answered(&e), text("card"), text("plan")))
                     }
+                    "proposal_card" => {
+                        let changed = e["changed"].as_str().map(|c| format!(" (again: {c})")).unwrap_or_default();
+                        ("you", format!("Proposed the task {} ({}, card {}): {} Outcome: {}{changed}", text("title"), answered(&e), text("card"), text("text"), text("outcome")))
+                    }
                     "connector_card" => ("you", format!("Offered the app {} ({}): {}", text("title"), text("state"), text("why"))),
                     _ => return None,
                 };
@@ -424,7 +428,9 @@ impl Kernel {
     /// confirm), later ("Not now"), or decline with their reason. An
     /// accepted schedule acts for them (K54), within the card's budget, and
     /// its runs start with the taint the turn had; an accepted suggestion
-    /// without timing starts a task for them as `create_task` would.
+    /// without timing starts a task for them as `create_task` would. A task
+    /// proposal is approved (it starts as such a suggestion does) or
+    /// dismissed with their reason; it is not put off (#254).
     pub async fn decide_card(self: &Arc<Self>, person: &str, card: &str, decision: &str, reason: Option<&str>) -> Result<std::result::Result<Value, CardRefusal>> {
         let _decide = self.decide.lock().await;
         let found = self.read(|s| {
@@ -439,9 +445,16 @@ impl Kernel {
             return Ok(Err(CardRefusal::Decided));
         }
         let actor = format!("person:{person}");
+        let decision = match (d["proposal"] == true, decision) {
+            (true, "approve" | "accept" | "confirm") => "accept",
+            (true, "dismiss" | "decline") => "decline",
+            (true, other) => return Ok(Err(CardRefusal::Invalid(format!("a task proposal is approved or dismissed (with a reason), not {other}")))),
+            (false, d) => d,
+        };
         match decision {
             "confirm" | "accept" if !crate::suggestions::timed(&d) => {
-                let (plan, title) = (d["plan"].as_str().unwrap_or_default().to_string(), d["title"].as_str().unwrap_or_default().to_string());
+                let plan = d["plan"].as_str().or(d["text"].as_str()).unwrap_or_default().to_string();
+                let title = d["title"].as_str().unwrap_or_default().to_string();
                 let more = NewRun { budget: serde_json::from_value(d["budget"].clone()).ok(), scope: d["scope"].as_str().map(String::from), ..Default::default() };
                 let started = self.task_from_turn(&actor, &task, &run, &format!("card:{card}"), plan, title, more).await?;
                 self.emit(&actor, Ev::CardAccepted { card: card.into(), person: person.into(), task: started.clone() }).await?;
@@ -481,7 +494,7 @@ impl Kernel {
             }
             "decline" => {
                 let Some(reason) = reason.map(str::trim).filter(|r| !r.is_empty()) else {
-                    return Ok(Err(CardRefusal::Invalid("a decline needs the person's reason".into())));
+                    return Ok(Err(CardRefusal::Invalid("a decline or dismissal needs the person's reason".into())));
                 };
                 self.emit(&actor, Ev::CardDeclined { card: card.into(), person: Some(person.into()), reason: Some(reason.into()) }).await?;
                 Ok(Ok(json!({})))

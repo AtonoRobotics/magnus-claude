@@ -188,6 +188,7 @@ svg.chev { width: 16px; height: 16px; color: var(--chev); stroke-width: 1.8; }
 .cc-act { margin: 0; }
 .sugg-part { display: flex; flex-direction: column; gap: 2px; }
 .sugg-list { margin: 0; padding-left: 18px; }
+.proposal .sugg-list .num { font-weight: 600; }
 .decline-why input { flex: 1; min-width: 0; min-height: 44px; }
 .cc-act button:not(.link), .item button[data-item], .verdict button[data-verdict] { min-height: 44px; border-radius: 12px; padding: 0 18px; font-weight: 500; }
 .cc-act button.primary, .item button.primary[data-item] { font-weight: 600; }

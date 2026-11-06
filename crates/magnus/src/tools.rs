@@ -187,6 +187,9 @@ pub const BUILTINS: &[Builtin] = &[
     // An automation suggestion: a card the person accepts (a task or a
     // schedule starts), puts off or declines. Nothing happens until they accept.
     Builtin { name: "suggest", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // A task proposal: a card for one task the person approves (it starts,
+    // within the cost they approved) or dismisses. Nothing starts until then.
+    Builtin { name: "propose_task", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     // Control of the person's own tasks and schedules, as the app's buttons
     // (behavior spec, Tasks and schedules in conversation).
     Builtin { name: "list_tasks", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -271,6 +274,9 @@ pub fn chat_specs() -> Vec<ToolSpec> {
     let budget = json!({ "type": "object", "description": d("create_schedule.budget"), "properties": {
         "max_usd": { "type": "number" }, "max_model_calls": { "type": "integer" }, "max_actions": { "type": "integer" }
     } });
+    let evidence = json!({ "type": "array", "minItems": 1, "description": d("suggest.evidence"), "items": { "type": "object", "properties": {
+        "call": { "type": "string" }, "task": { "type": "string" }, "shows": { "type": "string" }
+    }, "required": ["shows"] } });
     vec![
         ToolSpec {
             name: "show".into(),
@@ -293,15 +299,34 @@ pub fn chat_specs() -> Vec<ToolSpec> {
                 json!({
                     "title": { "type": "string" },
                     "plan": { "type": "string" },
-                    "evidence": { "type": "array", "minItems": 1, "description": d("suggest.evidence"), "items": { "type": "object", "properties": {
-                        "call": { "type": "string" }, "task": { "type": "string" }, "shows": { "type": "string" }
-                    }, "required": ["shows"] } },
+                    "evidence": evidence.clone(),
                     "permissions": { "type": "array", "minItems": 1, "items": { "type": "string" } },
                     "every_minutes": { "type": "integer" }, "daily_at": { "type": "string" }, "until": { "type": "string" }, "max_runs": { "type": "integer" },
                     "budget": budget,
                     "again": { "type": "string" }, "changed": { "type": "string" }
                 }),
                 &["title", "plan", "evidence", "permissions"],
+            ),
+        },
+        ToolSpec {
+            name: "propose_task".into(),
+            description: d("propose_task"),
+            input_schema: obj(
+                json!({
+                    "title": { "type": "string" },
+                    "text": { "type": "string" },
+                    "noticed": { "type": "object", "properties": { "what": { "type": "string" }, "where": { "type": "string" } }, "required": ["what", "where"] },
+                    "outcome": { "type": "string" },
+                    "why_now": { "type": "string" },
+                    "needs": { "type": "object", "properties": {
+                        "permissions": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                        "estimated_cost_usd": { "type": "number" },
+                        "input": { "type": "string" }
+                    }, "required": ["permissions", "estimated_cost_usd"] },
+                    "evidence": evidence,
+                    "again": { "type": "string" }, "changed": { "type": "string" }
+                }),
+                &["title", "text", "noticed", "outcome", "why_now", "needs", "evidence"],
             ),
         },
         ToolSpec { name: "list_tasks".into(), description: d("list_tasks"), input_schema: obj(json!({}), &[]) },
