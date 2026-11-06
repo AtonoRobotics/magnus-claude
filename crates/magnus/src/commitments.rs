@@ -388,9 +388,14 @@ impl Kernel {
         let c = self.own_commitment(who, id)?;
         let failed = |e: anyhow::Error| Refused::Failed(format!("{e:#}"));
         let actor = format!("person:{}", who.id);
-        self.emit(&actor, Ev::CommitmentRemoved { id: id.into(), person: who.id.clone() }).await.map_err(failed)?;
+        // The removal's record and the commitment's leaving are written
+        // together, the record first, before any content goes: a removal cut
+        // short then finishes at the next start (`Log::finish_removals`),
+        // and it never leaves its words with no record to finish it by
+        // (review of #291, #293).
         let seqs: Vec<i64> = c.steps.iter().map(|s| s.seq).collect();
-        self.emit(&actor, Ev::Removed { item: id.into(), seqs: seqs.clone() }).await.map_err(failed)?;
+        let evs = vec![(actor.as_str(), Ev::Removed { item: id.into(), seqs: seqs.clone() }), (actor.as_str(), Ev::CommitmentRemoved { id: id.into(), person: who.id.clone() })];
+        self.emit_all(evs).await.map_err(failed)?;
         self.log.delete_content(&seqs).await.map_err(failed)?;
         if let Err(e) = self.scrub_backups().await {
             tracing::error!("taking a removed commitment out of the backups: {e:#}");

@@ -336,3 +336,36 @@ async fn a_commitment_read_in_untrusted_mail_taints_each_run_that_carries_it() {
     let (_, after) = say(&alice, "And now?", None).await;
     assert_eq!(taint(&alice, &after).await["untrusted"], false, "a done commitment still taints");
 }
+
+/// Removing a commitment records the removal no later than the commitment's
+/// leaving, so a removal cut short between them finishes at the next start
+/// and never leaves its words with no record to finish it by (review of
+/// #291, #293).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_is_recorded_before_the_commitment_leaves() {
+    let w = world().await;
+    let carol = w.app.api("carol");
+    say(&carol, DECK, None).await;
+    let id = one(&carol, "Send Dana the deck").await["id"].as_str().unwrap().to_string();
+    let (st, v) = carol.send(reqwest::Method::DELETE, &format!("/v1/commitments/{id}"), None).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+
+    let (db, conn) = tokio_postgres::connect(&w.app.db.kernel_url(), tokio_postgres::NoTls).await.unwrap();
+    tokio::spawn(conn);
+    let seq = |kind: &'static str| {
+        let (db, id) = (&db, id.clone());
+        async move {
+            let rows = db.query("SELECT seq, body::text FROM public.events WHERE kind = $1 ORDER BY seq", &[&kind]).await.unwrap();
+            rows.into_iter().find(|r| r.get::<_, String>(1).contains(&id)).map(|r| r.get::<_, i64>(0)).unwrap_or_else(|| panic!("no {kind} event for {id}"))
+        }
+    };
+    let (removed, left) = (seq("removed").await, seq("commitment_removed").await);
+    assert!(removed < left, "the commitment left (seq {left}) before its removal was recorded (seq {removed})");
+    // Its words are gone from its own records (the person's message keeps its own).
+    let words = db
+        .query("SELECT c.body::text FROM public.content c JOIN public.events e ON e.seq = c.seq WHERE e.kind LIKE 'commitment_%'", &[])
+        .await
+        .unwrap();
+    let quote = DECK_QUOTE.to_lowercase();
+    assert!(!words.iter().any(|r| r.get::<_, String>(0).to_lowercase().contains(&quote)), "the commitment's words stayed");
+}
