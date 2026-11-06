@@ -139,7 +139,7 @@ impl Kernel {
                     run: run_id.into(),
                     step,
                     attempt,
-                    context: ContextRef { through_seq: run.last_seq, instructions: run.config.instructions.clone(), tools_hash: tools_hash.clone(), relationship },
+                    context: ContextRef { through_seq: run.last_seq, instructions: super::sent_version(&run.config.instructions, &system), tools_hash: tools_hash.clone(), relationship },
                 },
             )
             .await?;

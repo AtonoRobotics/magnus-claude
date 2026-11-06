@@ -272,37 +272,19 @@ impl Kernel {
     }
 
     /// Magnus's recent messages to the person in their other conversations
-    /// (behavior spec, Per-user relationship, "No repetition"): its answers
-    /// and its tasks' results that ended before `before`, newest first,
-    /// recalled for them through their wall, as their threads show them
-    /// (deleted and hidden entries left out). Only those written by a run
-    /// that read nothing from outside the conversation: one carrying
-    /// untrusted or private content would bring its taint into every later
-    /// run of theirs.
+    /// (behavior spec, Per-user relationship, "No repetition"), newest
+    /// first: those `recent_runs` selects, a result's task title recalled
+    /// for them through their wall.
     pub(crate) async fn recent_to(&self, person: &str, except: Option<&str>, before: DateTime<Utc>) -> Result<Vec<(DateTime<Utc>, String)>> {
-        let w = self.person_words(person).await?;
-        let mut out = vec![];
-        for t in self.threads_with(person, &w) {
-            let Some(thread) = t["thread"].as_str().filter(|th| Some(*th) != except) else { continue };
-            for e in self.entries_with(person, thread, &w).unwrap_or_default() {
-                let kind = e["kind"].as_str().unwrap_or_default();
-                if !matches!(kind, "answer" | "result") || e["copied"] == true {
-                    continue;
-                }
-                let ended = self.read(|s| {
-                    let r = s.tasks.get(e["task_id"].as_str()?).and_then(|t| s.runs.get(&t.run_id))?;
-                    (Label { untrusted: r.untrusted, private: r.private } == Label::PRINCIPAL).then_some(r.ended_at).flatten()
-                });
-                let Some(at) = ended.filter(|at| *at < before) else { continue };
-                let text = |k: &str| e[k].as_str().unwrap_or_default().trim().to_string();
-                let said = if kind == "answer" { text("text") } else { format!("Result of the task \"{}\" ({}): {}", text("title"), text("status"), text("summary")) };
-                if !said.is_empty() {
-                    out.push((at, said));
-                }
-            }
-        }
-        out.sort_by(|a, b| b.0.cmp(&a.0));
-        Ok(out)
+        let picked = self.read(|s| recent_runs(s, person, except, before, crate::relationship::BUDGET));
+        let w = self.words(picked.iter().filter(|r| !r.turn).map(|r| (person.to_string(), r.task.seq))).await?;
+        Ok(picked
+            .into_iter()
+            .map(|r| {
+                let said = if r.turn { r.summary } else { format!("Result of the task \"{}\" ({}): {}", crate::api::title_of(&r.task, r.run.as_ref(), &w), r.status, r.summary) };
+                (r.at, said)
+            })
+            .collect())
     }
 
     /// The thread as the model reads it in the next turn: who said what.
@@ -473,5 +455,104 @@ impl Kernel {
             }
             other => Ok(Err(CardRefusal::Invalid(format!("decision is confirm or decline, not {other}")))),
         }
+    }
+}
+
+/// A message of Magnus's a run may see among its recent ones.
+pub(crate) struct RecentRun {
+    pub at: DateTime<Utc>,
+    pub task: Task,
+    /// For a result, the run its title may come from.
+    pub run: Option<Run>,
+    /// An answer in a conversation, or a task's result posted there.
+    pub turn: bool,
+    pub status: &'static str,
+    pub summary: String,
+}
+
+/// Magnus's messages to `person` a run may see, newest first, chosen
+/// straight from the runs rather than by rebuilding each conversation
+/// (review of #245): its answers (chat turns that completed) and its
+/// tasks' results, in a conversation of theirs other than `except`, ended
+/// before `before`, as their conversations show them (a conversation in
+/// the trash, an entry deleted or hidden, a result of a hidden answer, left
+/// out). Only those of a run that read nothing from outside the
+/// conversation: one carrying untrusted or private content would bring its
+/// taint into every later run of theirs. It stops once their text fills
+/// `budget`.
+pub(crate) fn recent_runs(s: &crate::state::State, person: &str, except: Option<&str>, before: DateTime<Utc>, budget: usize) -> Vec<RecentRun> {
+    let shown = |thread: &str, id: String| !s.hidden.get(thread).is_some_and(|h| h.contains(&id)) && !s.trash.contains_key(&id);
+    let mut eligible: Vec<(DateTime<Utc>, &Task, &Run)> = s
+        .tasks
+        .values()
+        .filter(|t| t.person == person)
+        .filter_map(|t| {
+            let c = t.chat.as_ref().filter(|c| Some(c.thread.as_str()) != except)?;
+            if s.trash.contains_key(&c.thread) || s.removed_threads.contains(&c.thread) {
+                return None;
+            }
+            let r = s.runs.get(&t.run_id).filter(|r| !r.untrusted && !r.private)?;
+            let at = r.ended_at.filter(|at| *at < before)?;
+            let ok = if c.turn {
+                r.status == Status::Completed && shown(&c.thread, format!("a:{}", t.task_id))
+            } else {
+                let origin = c.from_run.as_ref().and_then(|f| s.runs.get(f)).map(|o| format!("a:{}", o.task));
+                shown(&c.thread, format!("r:{}", t.task_id)) && origin.is_none_or(|o| shown(&c.thread, o))
+            };
+            ok.then_some((at, t, r))
+        })
+        .collect();
+    eligible.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = vec![];
+    let mut used = 0;
+    for (at, t, r) in eligible {
+        if used >= budget {
+            break;
+        }
+        let turn = t.is_chat_turn();
+        let summary = r.summary.as_deref().unwrap_or_default().trim().to_string();
+        if turn && summary.is_empty() {
+            continue;
+        }
+        used += summary.len().max(1);
+        out.push(RecentRun { at, task: t.clone(), run: (!turn).then(|| r.clone()), turn, status: crate::api::status_str(r.status), summary });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::log::Event;
+    use crate::state::State;
+    use serde_json::json;
+
+    /// Review of #245: the recent messages are chosen newest first and the
+    /// choosing stops at the budget, not after every conversation of the
+    /// person is rebuilt.
+    #[test]
+    fn the_recent_messages_are_the_newest_and_their_choice_stops_at_the_budget() {
+        let mut s = State::default();
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        let t0 = chrono::Utc::now();
+        let mut seq = 0;
+        let mut ev = |at: chrono::DateTime<chrono::Utc>, actor: &str, e: serde_json::Value| {
+            seq += 1;
+            s.apply(&Event { seq, at, actor: actor.into(), ev: serde_json::from_value(e).unwrap() });
+        };
+        // Fifty conversations of Carol's, each a 1KB answer, a minute apart, and one of Bob's.
+        for i in 0..50i64 {
+            let at = t0 + chrono::Duration::minutes(i);
+            let chat = json!({ "thread": format!("th{i}"), "turn": true });
+            ev(at, "person:carol", json!({ "kind": "task_created", "task": format!("t{i}"), "run": format!("r{i}"), "person": "carol", "text": "Hi.", "config": config, "chat": chat }));
+            ev(at, "kernel", json!({ "kind": "completed", "run": format!("r{i}"), "summary": format!("{i:02}{}", "x".repeat(1022)) }));
+        }
+        ev(t0, "person:bob", json!({ "kind": "task_created", "task": "tb", "run": "rb", "person": "bob", "text": "Hi.", "config": config, "chat": { "thread": "thb", "turn": true } }));
+        ev(t0, "kernel", json!({ "kind": "completed", "run": "rb", "summary": "to bob" }));
+        let later = t0 + chrono::Duration::hours(1);
+        let picked = super::recent_runs(&s, "carol", Some("th49"), later, 16 * 1024);
+        let firsts: Vec<String> = picked.iter().map(|r| r.summary[..2].to_string()).collect();
+        // The newest sixteen fill 16KB; the one in this conversation is not among them.
+        assert_eq!(firsts, (33..49).rev().map(|i| format!("{i:02}")).collect::<Vec<_>>());
+        assert!(picked.iter().all(|r| r.turn && r.at < later));
     }
 }

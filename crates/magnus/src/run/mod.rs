@@ -39,6 +39,15 @@ pub fn chat_instructions_version() -> String {
     version_of("chat.md", CHAT_INSTRUCTIONS)
 }
 
+/// The instructions a model call was sent, as each call logs them: the
+/// run's instructions by name, hashed with exactly the system context sent,
+/// the person's relationship memory and recent messages included, so the
+/// log says which prompt Magnus spoke with (DECISIONS.md, "Identity and
+/// characters"). With neither, it is the run's own instructions version.
+pub fn sent_version(run_instructions: &str, system: &str) -> String {
+    version_of(run_instructions.split('@').next().unwrap_or_default(), system)
+}
+
 fn version_of(name: &str, text: &str) -> String {
     use sha2::Digest;
     format!("{name}@{}", &hex::encode(sha2::Sha256::digest(text.as_bytes()))[..12])
