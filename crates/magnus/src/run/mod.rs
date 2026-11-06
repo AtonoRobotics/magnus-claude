@@ -69,6 +69,18 @@ impl Kernel {
     /// It only grows at the end, so provider prompt caches stay valid (C1).
     /// The library files it was given are recalled for its person.
     pub async fn context(&self, run: &Run) -> anyhow::Result<(String, Vec<Message>)> {
+        self.context_with(run).await.map(|(system, msgs, _)| (system, msgs))
+    }
+
+    /// The context, and the version of the person's relationship notes it
+    /// carries (none when they have none), which the model call logs as it
+    /// logs the instructions' version. The system context is the
+    /// instructions, then the person's relationship memory and Magnus's
+    /// recent messages to them elsewhere (`relationship.rs`), in every run
+    /// and chat turn of theirs. The kernel's own passes (the memory pass,
+    /// the verifier, knowledge extraction) have prompts of their own and
+    /// speak for no one, so they carry neither, as they carry no character.
+    pub async fn context_with(&self, run: &Run) -> anyhow::Result<(String, Vec<Message>, Option<u32>)> {
         let given = self.given_files(&run.task).await?;
         let (task, attachments, refs) = self.read(|s| {
             let task = s.tasks.get(&run.task).cloned();
@@ -196,7 +208,8 @@ impl Kernel {
             }
         }
         let system = if chat.is_some_and(|c| c.turn) { CHAT_INSTRUCTIONS } else { INSTRUCTIONS };
-        Ok((system.to_string(), msgs))
+        let (person, relationship) = self.person_context(run).await?;
+        Ok((format!("{system}{person}"), msgs, relationship))
     }
 
     /// A task from chat keeps the conversation it came from with its
@@ -236,7 +249,7 @@ impl Kernel {
         let chat = self.is_chat_turn(run);
         let mut specs = tools::builtin_specs(self.sandboxes.available(), self.web.can_search(), self.browser.available());
         if chat {
-            specs.retain(|t| tools::builtin(&t.name).is_some_and(|b| b.risk == Risk::Read || b.name == "memory_write"));
+            specs.retain(|t| tools::builtin(&t.name).is_some_and(|b| b.risk == Risk::Read || b.app == "memory"));
             specs.extend(tools::chat_specs());
         }
         // project_read only where there are reference files to read.

@@ -89,6 +89,10 @@ pub struct ContextRef {
     pub through_seq: i64,
     pub instructions: String,
     pub tools_hash: String,
+    /// The version of the person's relationship notes the call carried in
+    /// its system context (`relationship.rs`); none when they have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

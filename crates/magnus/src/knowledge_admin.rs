@@ -38,6 +38,13 @@ pub fn relations(fm: &Value) -> Vec<Value> {
 }
 
 /// A type's slug from its path: `/types/customer.md` is `customer`.
+/// Whether a path is a person's own document (`/users/<user>/`), which no
+/// admin reads, writes or rolls back: theirs alone (K2), their relationship
+/// memory among them.
+fn personal(path: &str) -> bool {
+    crate::bundle::place(path).map_or(path.starts_with("/users/"), |(_, user)| user.is_some())
+}
+
 fn slug(path: &str) -> Option<&str> {
     path.strip_prefix("/types/")?.strip_suffix(".md")
 }
@@ -109,6 +116,9 @@ impl Kernel {
 
     /// One version of a document, as it was written.
     pub async fn admin_bundle_version(&self, path: &str, version: u32) -> Result<Value, Refusal> {
+        if personal(path) {
+            return Err((StatusCode::NOT_FOUND, "no such version".into()));
+        }
         let seq = self.read(|s| s.bundle.get(path).and_then(|d| d.versions.iter().find(|v| v.0 == version).map(|v| v.1)));
         let seq = match seq {
             Some(s) => s,
@@ -323,7 +333,8 @@ impl Kernel {
     /// One change, with what was there before and after.
     pub async fn admin_change(&self, seq: i64) -> Result<Value, Refusal> {
         let rows = self.log.of_kinds(&["bundle_written", "bundle_removed"], 100_000).await.map_err(failed)?;
-        let Some((_, at, actor, b)) = rows.iter().find(|r| r.0 == seq).cloned() else { return Err((StatusCode::NOT_FOUND, "no such change".into())) };
+        // A person's own documents are theirs alone, never the organisation's knowledge (K2).
+        let Some((_, at, actor, b)) = rows.iter().find(|r| r.0 == seq && !personal(r.3["path"].as_str().unwrap_or_default())).cloned() else { return Err((StatusCode::NOT_FOUND, "no such change".into())) };
         let path = b["path"].as_str().unwrap_or_default().to_string();
         // The version before it: the newest write of the path before seq.
         let before = rows.iter().filter(|r| r.0 < seq && r.3["path"] == path.as_str() && r.3["kind"] != "bundle_removed").map(|r| r.0).max();

@@ -27,6 +27,9 @@ pub struct Kernel {
     /// item or a chat card is decided once however many answers race in, and
     /// a change of roles keeps an owner however many race in.
     pub(crate) decide: tokio::sync::Mutex<()>,
+    /// Held while a person's relationship notes are read and a new version
+    /// written, so two changes at once never lose one.
+    pub(crate) notes: tokio::sync::Mutex<()>,
     pub vault: Arc<Vault>,
     pub accounts: crate::accounts::Accounts,
     /// Computers paired with this appliance, and the certificates Cloudflare
@@ -147,6 +150,7 @@ impl Kernel {
             state: Mutex::new(state),
             write: tokio::sync::Mutex::new(()),
             decide: tokio::sync::Mutex::new(()),
+            notes: tokio::sync::Mutex::new(()),
             drivers: Mutex::new(HashSet::new()),
             leases: Mutex::new(HashMap::new()),
             live_tools: tokio::sync::Mutex::new(HashMap::new()),

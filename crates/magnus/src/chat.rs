@@ -271,6 +271,40 @@ impl Kernel {
         })
     }
 
+    /// Magnus's recent messages to the person in their other conversations
+    /// (behavior spec, Per-user relationship, "No repetition"): its answers
+    /// and its tasks' results that ended before `before`, newest first,
+    /// recalled for them through their wall, as their threads show them
+    /// (deleted and hidden entries left out). Only those written by a run
+    /// that read nothing from outside the conversation: one carrying
+    /// untrusted or private content would bring its taint into every later
+    /// run of theirs.
+    pub(crate) async fn recent_to(&self, person: &str, except: Option<&str>, before: DateTime<Utc>) -> Result<Vec<(DateTime<Utc>, String)>> {
+        let w = self.person_words(person).await?;
+        let mut out = vec![];
+        for t in self.threads_with(person, &w) {
+            let Some(thread) = t["thread"].as_str().filter(|th| Some(*th) != except) else { continue };
+            for e in self.entries_with(person, thread, &w).unwrap_or_default() {
+                let kind = e["kind"].as_str().unwrap_or_default();
+                if !matches!(kind, "answer" | "result") || e["copied"] == true {
+                    continue;
+                }
+                let ended = self.read(|s| {
+                    let r = s.tasks.get(e["task_id"].as_str()?).and_then(|t| s.runs.get(&t.run_id))?;
+                    (Label { untrusted: r.untrusted, private: r.private } == Label::PRINCIPAL).then_some(r.ended_at).flatten()
+                });
+                let Some(at) = ended.filter(|at| *at < before) else { continue };
+                let text = |k: &str| e[k].as_str().unwrap_or_default().trim().to_string();
+                let said = if kind == "answer" { text("text") } else { format!("Result of the task \"{}\" ({}): {}", text("title"), text("status"), text("summary")) };
+                if !said.is_empty() {
+                    out.push((at, said));
+                }
+            }
+        }
+        out.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(out)
+    }
+
     /// The thread as the model reads it in the next turn: who said what.
     pub(crate) async fn conversation(&self, person: &str, thread: &str) -> Result<Vec<Value>> {
         Ok(Self::transcript_of(self.thread_entries(person, thread).await?.unwrap_or_default()))

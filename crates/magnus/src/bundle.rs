@@ -536,6 +536,10 @@ impl Kernel {
                 let (hits, label) = self.bundle_search(&person, &s("query"), &kinds, limit).await?;
                 (json!({ "hits": hits }).to_string(), false, Some(json!({ "hits": hits, "untrusted": label.untrusted, "private": label.private })))
             }
+            // The person's relationship memory enters every run of theirs
+            // as their own words: it changes only through relationship_note,
+            // which refuses a run that read outside content.
+            _ if s("path") == crate::relationship::path(&person) => (format!("Not written: {} changes only with relationship_note", s("path")), true, None),
             _ => match self.bundle_write(&person, run, &s("path"), &input["frontmatter"], &s("body")).await {
                 Ok(v) => (format!("wrote {} (version {v})", s("path")), false, Some(json!({ "path": s("path"), "version": v }))),
                 Err(why) => (format!("Not written: {why}"), true, None),

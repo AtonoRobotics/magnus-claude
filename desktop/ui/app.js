@@ -2425,13 +2425,20 @@ async function updatesSection(el) {
 }
 
 async function dataSection(el) {
+  // The person's relationship notes as last drawn: each row names its note by them.
+  let notes = [];
   const draw = async () => {
-    const [prefs, { requests }, backups] = await Promise.all([api("GET", "/v1/preferences"), api("GET", "/v1/deletion-requests"), isOwner() ? api("GET", "/v1/backups").catch(() => null) : null]);
+    const [prefs, { requests }, backups, rel] = await Promise.all([api("GET", "/v1/preferences"), api("GET", "/v1/deletion-requests"), isOwner() ? api("GET", "/v1/backups").catch(() => null) : null, api("GET", "/v1/relationship")]);
     App.prefs = prefs;
+    notes = rel.notes;
     const STATE = { done: ["ok", "done"], decline: ["bad", "declined"] };
     paint(el, `<h2>Data and privacy</h2>
       <div class="card"><label class="row toggle"><input type="checkbox" data-pref="feedback_consent" ${prefs.feedback_consent ? "checked" : ""}>
         <span><span>Send problem reports</span><span class="small muted" style="display:block">When you report a problem, what you wrote and the task's record go to the people who build Magnus. Off: nothing leaves the appliance.</span></span></label></div>
+      <h3>How Magnus works with you</h3>
+      <div class="card" data-relationship><p class="small muted">What you told Magnus about working with you: tone, what you delegated, standing decisions. Every task and chat of yours carries it; no one else sees it.</p>
+        ${notes.map((n, i) => `<div class="row" data-note="${i}" style="margin-top:6px"><input aria-label="Note" value="${esc(n)}" style="flex:1"><button data-act="note-save">Save</button><button data-act="note-remove">Remove</button></div>`).join("") || `<p class="small faint">Nothing yet.</p>`}
+        <div class="row" style="margin-top:8px"><input id="newnote" aria-label="New note" style="flex:1" placeholder="For example: fewer jokes"><button data-act="note-add">Add</button></div></div>
       <h3>Delete my data</h3>
       <div class="card"><p class="small muted">The owner is asked, and has 30 days to act. What is deleted leaves every backup within that time.</p>
         <label for="delwhat">What to delete</label><input id="delwhat" data-draft="delwhat" style="width:100%" placeholder="all of my data">
@@ -2455,6 +2462,10 @@ async function dataSection(el) {
         b.disabled = true; await api("POST", "/v1/deletion-requests", { what }); delete drafts.delwhat; toast("Asked. The owner has 30 days to act.");
       }
       if (b.dataset.act === "backup") { b.disabled = true; await api("POST", "/v1/backups", {}); toast("Backed up."); }
+      const row = b.closest("[data-note]"), note = row && notes[+row.dataset.note];
+      if (b.dataset.act === "note-add") { b.disabled = true; await api("POST", "/v1/relationship", { action: "add", text: $("#newnote", el).value }); toast("Saved."); }
+      if (b.dataset.act === "note-save") { b.disabled = true; await api("POST", "/v1/relationship", { action: "change", note, text: $("input", row).value }); toast("Saved."); }
+      if (b.dataset.act === "note-remove") { b.disabled = true; await api("POST", "/v1/relationship", { action: "remove", note }); toast("Removed."); }
       el._html = null; await draw();
     } catch (err) { toast(err.message); b.disabled = false; }
   };

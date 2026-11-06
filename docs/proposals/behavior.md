@@ -60,9 +60,10 @@ admin console.
 3. **Relationship memory and reactions.**
    - The person's tone instructions ("fewer jokes"), what they delegated and
      standing decisions are kept as relationship memory, always in context
-     (not searched for), and never shown to anyone else.
+     (not searched for), and never shown to anyone else. Done (#232,
+     `decisions/2026-11-06-232-relationship-memory.md`).
    - The model sees its recent messages to the person, so it does not repeat
-     itself.
+     itself. Done (#232).
    - Any message can get a "that was great" or "that was annoying" reaction,
      logged.
    - Disagreements are logged: Magnus's position, the person's decision, and
