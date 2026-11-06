@@ -16,18 +16,35 @@
 # runs everything, so a new directory is never left untested.
 set -eu
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/.." && pwd -P)
 full=0
 terms=""
 add() { terms="$terms
 $1"; }
 scratch() { add "binary_id(/^magnus-scratch::($1)/)"; }
 
-while IFS= read -r f || [ -n "$f" ]; do
-  [ -n "$f" ] || continue
+# The Markdown the build compiles in: every file some tracked source names
+# in include_str! (the agent's and the chat's instructions and character),
+# as a path from the root. Derived, so a new compiled prompt is never
+# taken for a document (#190).
+sources=$(git -C "$root" ls-files '*.rs') || { echo "ci-select: cannot list the sources" >&2; exit 1; }
+compiled=$(printf '%s\n' "$sources" | sed '/^$/d' | (cd "$root" && tr '\n' '\0' | xargs -0 -r grep -HoE 'include_str!\("[^"]+\.md"\)' || true) |
+  while IFS=: read -r src m; do
+    p=${m#include_str!(\"}
+    p=${p%\")}
+    d=$(cd "$root/$(dirname "$src")/$(dirname "$p")" 2>/dev/null && pwd -P) || continue
+    echo "${d#"$root"/}/$(basename "$p")"
+  done)
+
+# What a change to the path $1 reaches.
+reach() {
+  f=$1
+  # Documents: nothing to test, unless the build compiles them in: those
+  # are code, and reach what any other file at their path reaches.
   case $f in
-  # Documents: nothing to test.
-  *.md | docs/* | LICENSE*) ;;
+  *.md | docs/* | LICENSE*) printf '%s\n' "$compiled" | grep -qxF "$f" || return 0 ;;
+  esac
+  case $f in
   # The pull request rules and their workflows: their own test.
   release/pr-rules.sh | release/pr-stale.sh | .github/workflows/pr-rules.yml | .github/workflows/pr-stale.yml) add "binary_id(=magnus-scratch::pr_rules)" ;;
   # Workflows other than this one run their own jobs.
@@ -48,7 +65,14 @@ while IFS= read -r f || [ -n "$f" ]; do
   brokered/calendar/*) add "package(=magnus-calendar)"; scratch "brokered|calendar" ;;
   brokered/slack/*) add "package(=magnus-slack)"; scratch "brokered|slack" ;;
   brokered/chat/*) add "package(=magnus-chat)"; scratch "brokered|google_chat" ;;
-  brokered/google/*) add "package(=magnus-brokered-google)"; scratch "brokered|google|gmail|calendar" ;;
+  # The shared Google client: its crate, and every connector built on it
+  # (whose Cargo.toml depends on it) with that connector's own tests (#190).
+  brokered/google/*)
+    add "package(=magnus-brokered-google)"; scratch "brokered|google|gmail"
+    for c in $(grep -lE '^magnus-brokered-google *=' "$root"/brokered/*/Cargo.toml); do
+      reach "${c#"$root"/}"
+    done
+    ;;
   # What every connector shares: every connector crate and scratch test.
   brokered/*) add "package(/^magnus-(brokered-.*|gmail|calendar|slack|chat)$/)"; add "package(=magnus-scratch)" ;;
   # The appliance's release scripts are exercised by the scratch tests.
@@ -61,6 +85,11 @@ while IFS= read -r f || [ -n "$f" ]; do
   # and anything new.
   *) full=1 ;;
   esac
+}
+
+while IFS= read -r f || [ -n "$f" ]; do
+  [ -n "$f" ] || continue
+  reach "$f"
 done
 
 if [ "$full" = 1 ]; then
