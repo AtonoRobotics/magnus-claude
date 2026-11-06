@@ -1872,7 +1872,7 @@ impl State {
             Ev::ModelCall { run, context, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.model_calls += 1;
-                    r.personal |= context.personal;
+                    r.personal |= context.carried_person();
                 }
             }
             Ev::ModelReply { run, step, blocks, state, usage, .. } => {
