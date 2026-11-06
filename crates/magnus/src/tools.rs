@@ -156,6 +156,10 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "relationship_note", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // The person's disagreement log (behavior spec): theirs, on the appliance.
     Builtin { name: "disagreement", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    // The person's commitment ledger (#236): what they and Magnus said
+    // they would do, recorded from their words or what a run read; theirs.
+    Builtin { name: "record_commitment", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "update_commitment", app: "memory", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // The company knowledge base. A search's result carries the taint of
     // what it returns; filing research changes nothing outside the appliance.
     Builtin { name: "knowledge_search", app: "knowledge", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -508,6 +512,22 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
                 json!({ "action": { "type": "string", "enum": ["record", "outcome"] }, "position": { "type": "string" }, "decision": { "type": "string" }, "id": { "type": "string" }, "outcome": { "type": "string" } }),
                 &["action"],
             ),
+        },
+        ToolSpec {
+            name: "record_commitment".into(),
+            description: d("record_commitment"),
+            input_schema: obj(
+                json!({
+                    "who": { "type": "string", "enum": ["person", "magnus"] }, "what": { "type": "string" }, "to": { "type": "string" },
+                    "by": { "type": "string" }, "quote": { "type": "string" }, "call": { "type": "string" }
+                }),
+                &["who", "what", "quote"],
+            ),
+        },
+        ToolSpec {
+            name: "update_commitment".into(),
+            description: d("update_commitment"),
+            input_schema: obj(json!({ "id": { "type": "string" }, "status": { "type": "string", "enum": ["done", "released"] }, "note": { "type": "string" } }), &["id", "status"]),
         },
         ToolSpec { name: "bundle_read".into(), description: d("bundle_read"), input_schema: obj(json!({ "path": { "type": "string" } }), &["path"]) },
         ToolSpec {

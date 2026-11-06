@@ -2563,13 +2563,32 @@ function grantRow(g, apps, editing) {
   </div>`;
 }
 
+// One commitment in Settings (#236): who said they would do what, for
+// whom, by when, overdue shown, where it was said; Done, Release, Edit and
+// Remove.
+function commitmentRow(c, editing) {
+  const STATE = { done: ["ok", "Done"], released: ["", "Released"] };
+  const who = c.who === "magnus" ? "Magnus" : "You";
+  const from = c.source?.kind === "app" ? `read in ${esc(c.source.app)}` : "said in a conversation";
+  const status = c.status === "open" ? (c.overdue ? `<span class="chip bad">Overdue</span>` : "") : `<span class="chip ${STATE[c.status]?.[0] || ""}">${esc(STATE[c.status]?.[1] || c.status)}</span>`;
+  const acts = c.status === "open" ? `<button data-act="cmt-done">Done</button><button data-act="cmt-release">Release</button>` : `<button data-act="cmt-reopen">Reopen</button>`;
+  return `<div class="cmt-row" data-commitment="${esc(c.id)}" style="margin-top:10px">
+    <div class="spread"><span><strong>${who}:</strong> ${esc(c.what)} ${status}</span><span class="row">${acts}<button data-act="cmt-edit">Edit</button><button data-act="cmt-remove">Remove</button></span></div>
+    <p class="small muted">${c.to ? `For ${esc(c.to)} · ` : ""}${c.by ? `By ${esc(c.by)} · ` : ""}${from}, ${esc(when(c.at))}${c.quote ? ` · <span class="faint">“${esc(c.quote)}”</span>` : ""}</p>
+    ${editing === c.id ? `<div class="row" style="margin-top:6px"><input data-f="what" aria-label="What" value="${esc(c.what)}" style="flex:2"><input data-f="to" aria-label="For whom" placeholder="For whom" value="${esc(c.to || "")}" style="flex:1"><input data-f="by" aria-label="By when" placeholder="YYYY-MM-DD" value="${esc(c.by || "")}" style="flex:1"></div>
+      <div class="row"><button class="primary" data-act="cmt-save">Save</button><button class="link" data-act="cmt-cancel">Cancel</button></div>` : ""}
+  </div>`;
+}
+
 async function dataSection(el) {
   // The person's relationship notes as last drawn: each row names its note by them.
   let notes = [];
   // The grant being edited, if any.
   let editing = null;
+  // The commitment being edited, if any.
+  let editingC = null;
   const draw = async () => {
-    const [prefs, { requests }, backups, rel, { disagreements }, granted] = await Promise.all([api("GET", "/v1/preferences"), api("GET", "/v1/deletion-requests"), isOwner() ? api("GET", "/v1/backups").catch(() => null) : null, api("GET", "/v1/relationship"), api("GET", "/v1/disagreements"), api("GET", "/v1/grants")]);
+    const [prefs, { requests }, backups, rel, { disagreements }, granted, { commitments }] = await Promise.all([api("GET", "/v1/preferences"), api("GET", "/v1/deletion-requests"), isOwner() ? api("GET", "/v1/backups").catch(() => null) : null, api("GET", "/v1/relationship"), api("GET", "/v1/disagreements"), api("GET", "/v1/grants"), api("GET", "/v1/commitments")]);
     App.prefs = prefs;
     notes = rel.notes;
     const STATE = { done: ["ok", "done"], decline: ["bad", "declined"] };
@@ -2583,6 +2602,9 @@ async function dataSection(el) {
       <h3>What Magnus may do on its own</h3>
       <div class="card" data-grants><p class="small muted">Kinds of your work you let Magnus handle without asking, within your organisation's policy, each with what was done under it. They are yours alone; spending money always asks.</p>
         ${granted.grants.map(g => grantRow(g, granted.apps, editing)).join("") || `<p class="small faint">None yet. Choose "Handle things like this" on a task Magnus proposes, or ask Magnus.</p>`}</div>
+      <h3>What you and Magnus said you'd do</h3>
+      <div class="card" data-commitments><p class="small muted">What you or Magnus said you would do, recognised from your conversations and what Magnus read for you, with for whom and by when. Open ones are in every task and chat of yours; no one else sees them.</p>
+        ${commitments.map(c => commitmentRow(c, editingC)).join("") || `<p class="small faint">None yet.</p>`}</div>
       <h3>Where you decided otherwise</h3>
       <div class="card" data-disagreements><p class="small muted">When Magnus advised one thing and you decided another, it notes both, and later how it turned out. Only your own tasks and chats see these.</p>
         ${disagreements.map(d => `<p class="small"><span class="faint">${esc(when(d.at))}</span> Magnus advised: ${esc(d.position)} You decided: ${esc(d.decision)} ${d.outcome ? `Outcome: ${esc(d.outcome)}` : `<span class="faint">Outcome not known yet.</span>`}</p>`).join("") || `<p class="small faint">None.</p>`}</div>
@@ -2626,6 +2648,20 @@ async function dataSection(el) {
       if (b.dataset.act === "grant-revoke") {
         if (!await ask("Revoke this? From now on, what it covered asks you again.", "Revoke")) return;
         b.disabled = true; await api("DELETE", `/v1/grants/${enc(g)}`); toast("Revoked.");
+      }
+      const cr = b.closest("[data-commitment]"), c = cr?.dataset.commitment;
+      if (b.dataset.act === "cmt-edit") editingC = c;
+      if (b.dataset.act === "cmt-cancel") editingC = null;
+      const status = { "cmt-done": "done", "cmt-release": "released", "cmt-reopen": "open" }[b.dataset.act];
+      if (status) { b.disabled = true; await api("PUT", `/v1/commitments/${enc(c)}`, { status }); toast(status === "done" ? "Marked done." : status === "released" ? "Released." : "Reopened."); }
+      if (b.dataset.act === "cmt-save") {
+        const f = k => $(`[data-f="${k}"]`, cr).value.trim();
+        if (!f("what")) return toast("Say what will be done.");
+        b.disabled = true; await api("PUT", `/v1/commitments/${enc(c)}`, { what: f("what"), to: f("to"), by: f("by") }); editingC = null; toast("Saved.");
+      }
+      if (b.dataset.act === "cmt-remove") {
+        if (!await ask("Remove this? It leaves your list and Magnus's context, and its words are deleted.", "Remove")) return;
+        b.disabled = true; await api("DELETE", `/v1/commitments/${enc(c)}`); toast("Removed.");
       }
       el._html = null; await draw();
     } catch (err) { toast(err.message); b.disabled = false; }
