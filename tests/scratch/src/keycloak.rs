@@ -227,6 +227,14 @@ impl Keycloak {
         }
     }
 
+    /// The usernames of everyone turned on who holds the realm role `role`
+    /// directly, as the provider has them now.
+    pub async fn enabled_with_role(&self, role: &str) -> Vec<String> {
+        let path = format!("/roles/{}/users?first=0&max=1000&briefRepresentation=false", url::form_urlencoded::byte_serialize(role.as_bytes()).collect::<String>());
+        let users = self.admin(reqwest::Method::GET, &path, None).await;
+        users.as_array().into_iter().flatten().filter(|u| u["enabled"] != false).filter_map(|u| u["username"].as_str().map(String::from)).collect()
+    }
+
     /// Another public client in the realm, for codes that are not ours.
     pub async fn add_client(&self, client_id: &str) {
         let body = json!({ "clientId": client_id, "publicClient": true, "standardFlowEnabled": true, "redirectUris": ["http://127.0.0.1/*"], "attributes": { "pkce.code.challenge.method": "S256" } });

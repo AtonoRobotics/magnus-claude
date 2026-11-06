@@ -74,6 +74,11 @@ pub struct Console {
     pub public_hostnames: Vec<String>,
     /// The certificates it serves, renewed while it runs.
     pub tls: Arc<trusted::Tls>,
+    /// Held by every change that can take an admin away (demote, turn off,
+    /// delete, cancel an admin's invitation) from its last-admin check
+    /// until the provider has made the change, so two such changes never
+    /// both pass the check (#192).
+    pub admin_removals: tokio::sync::Mutex<()>,
 }
 
 impl Console {
@@ -163,6 +168,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
         tunnel_ready: a.tunnel_ready.clone(),
         public_hostnames: a.public_hostnames.clone(),
         tls: tls.clone(),
+        admin_removals: Default::default(),
     });
     // Lifetimes an admin set before this start.
     if let Ok(v) = console.kernel.call(axum::http::Method::GET, "/v1/admin/console-settings", None).await {
