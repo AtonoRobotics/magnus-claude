@@ -20,7 +20,7 @@
 use crate::apps::{AppTool, CallError, CallOutput, Mcp};
 use crate::config::{Brokered as Cfg, Connector, Sandbox};
 use anyhow::{anyhow, Context, Result};
-use magnus_brokered_kit::{schema, MCP_PORT, OUTCOME_META, PROTOCOL, PROXY_PORT, ROOTS_ENV, SCOPES_META, TOKEN_META};
+use magnus_brokered_kit::{schema, BAD_ANSWER, MCP_PORT, OUTCOME_META, PROTOCOL, PROXY_PORT, ROOTS_ENV, SCOPES_META, TOKEN_META};
 use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::HashMap;
@@ -314,11 +314,13 @@ impl Brokered {
         let structured = r.get("structuredContent").cloned().filter(|v| !v.is_null());
         let is_error = r["isError"].as_bool().unwrap_or(false);
         // What the server says happened at the provider, when it failed: a
-        // write that may have gone through, or a refusal for want of
-        // access the connector's scopes name.
+        // write that may have gone through, a call made whose answer does
+        // not match its schema, or a refusal for want of access the
+        // connector's scopes name.
         if is_error {
             match r["_meta"][OUTCOME_META].as_str() {
                 Some("unknown") => return Err(CallError::Unknown(Mcp::clean(&text, Some(token)))),
+                Some(BAD_ANSWER) => return Err(CallError::BadAnswer(Mcp::clean(&text, Some(token)))),
                 Some("needs_scope") => {
                     let wanted: Vec<String> = r["_meta"][SCOPES_META].as_array().into_iter().flatten().filter_map(|s| s.as_str()).filter(|s| c.scopes.iter().any(|x| x == s)).map(String::from).collect();
                     if !wanted.is_empty() {
@@ -329,14 +331,16 @@ impl Brokered {
             }
         }
         // Its answer is checked here too: a server with an output schema
-        // answers with content that matches it (MCP, Tools).
+        // answers with content that matches it (MCP, Tools). The call was
+        // made, so one that does not is a bad answer, never a failure that
+        // says nothing happened (#193).
         if let (false, Some(out_schema)) = (is_error, def.get("outputSchema")) {
             let problem = match &structured {
                 Some(v) => schema::check(out_schema, v).err(),
                 None => Some("it gave no structured content".into()),
             };
             if let Some(e) = problem {
-                return Ok(CallOutput { text: format!("{tool}: the answer does not match its schema: {e}"), structured: None, is_error: true });
+                return Err(CallError::BadAnswer(Mcp::clean(&format!("{tool}: the answer does not match its schema: {e}"), Some(token))));
             }
         }
         Ok(CallOutput { text: Mcp::clean(&text, Some(token)), structured: structured.map(|v| Mcp::clean_value(v, Some(token))), is_error })
