@@ -392,3 +392,18 @@ fn the_installed_app_tests_install_webkit_webdriver_first() {
     let tests = workflow.find("name: Installed-app tests").expect("installed-app tests");
     assert!(driver < tests && clip < tests, "the installed-app tests run before WebKitWebDriver and xclip are installed");
 }
+
+/// Master's runs finish: a merge waits for master's run in progress instead
+/// of cancelling it, so with pull requests merging beside each other master
+/// is still tested in full and the owner's app still gets its build (#228;
+/// 6947618's, 8b78dea's and 99d84fe's runs were cancelled by the next merge).
+/// A pull request's new push still cancels its own earlier run.
+#[test]
+fn a_merge_does_not_cancel_masters_run() {
+    for w in ["desktop", "injection", "appliance"] {
+        let workflow = std::fs::read_to_string(repo().join(format!(".github/workflows/{w}.yml"))).unwrap();
+        let cancel = workflow.lines().find(|l| l.trim_start().starts_with("cancel-in-progress:")).unwrap_or_else(|| panic!("{w}.yml names no cancel-in-progress"));
+        let v = cancel.split_once(':').unwrap().1.trim();
+        assert!(v == "false" || v == "${{ github.event_name == 'pull_request' }}", "{w}.yml cancels master's run on the next merge: {cancel}");
+    }
+}

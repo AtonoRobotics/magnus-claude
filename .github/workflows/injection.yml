@@ -29,7 +29,9 @@ on:
 
 concurrency:
   group: injection-${{ github.ref }}
-  cancel-in-progress: true
+  # A pull request's new push cancels its earlier run; master's runs wait
+  # for each other, so each finishes and the next tests all merged since (#228).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: never
