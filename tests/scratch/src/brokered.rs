@@ -243,7 +243,8 @@ pub struct StandInGmail {
     /// The next answer, instead of Gmail's usual one: status, headers, body.
     pub next: Arc<Mutex<Option<(u16, String, String)>>>,
     /// What every draft says when read: `to`, `cc`, `bcc`, `subject` and
-    /// `body`. A test changes it as the person (or anyone with the
+    /// `body`, and an `html` part and an `attachment` (`filename`, `data`)
+    /// where set. A test changes it as the person (or anyone with the
     /// mailbox) would edit the draft in Gmail.
     pub draft: Arc<Mutex<serde_json::Value>>,
     /// The next send's answer, instead of Gmail's usual one (the draft is
@@ -336,8 +337,30 @@ fn gmail_answer(r: &GmailRequest, before: &[GmailRequest], drafts: usize, draft:
                 .iter()
                 .filter_map(|(name, k)| draft[k].as_str().filter(|v| !v.is_empty()).map(|v| serde_json::json!({ "name": name, "value": v })))
                 .collect();
-            let data = base64::engine::general_purpose::URL_SAFE.encode(draft["body"].as_str().unwrap_or_default());
-            ok(serde_json::json!({ "id": format!("d{n}"), "message": { "id": format!("dm{n}"), "threadId": "t1", "labelIds": ["DRAFT"], "payload": { "mimeType": "text/plain", "headers": headers, "body": { "data": data } } } }))
+            let b64 = |v: &str| base64::engine::general_purpose::URL_SAFE.encode(v);
+            let text = serde_json::json!({ "mimeType": "text/plain", "body": { "data": b64(draft["body"].as_str().unwrap_or_default()) } });
+            // With an HTML part or an attachment, it is multipart, as Gmail
+            // has it; an attachment comes by an id that differs on every
+            // read, as Gmail's does.
+            let mut parts = vec![];
+            if let Some(html) = draft["html"].as_str() {
+                parts.push(serde_json::json!({ "mimeType": "multipart/alternative", "parts": [text.clone(), { "mimeType": "text/html", "body": { "data": b64(html) } }] }));
+            }
+            if let Some(a) = draft.get("attachment").filter(|a| a.is_object()) {
+                if parts.is_empty() {
+                    parts.push(text.clone());
+                }
+                let size = a["data"].as_str().unwrap_or_default().len();
+                parts.push(serde_json::json!({ "mimeType": "application/pdf", "filename": a["filename"], "body": { "attachmentId": format!("att{}", before.len()), "size": size } }));
+            }
+            let mut payload = if parts.is_empty() { text } else { serde_json::json!({ "mimeType": "multipart/mixed", "parts": parts }) };
+            payload["headers"] = serde_json::json!(headers);
+            ok(serde_json::json!({ "id": format!("d{n}"), "message": { "id": format!("dm{n}"), "threadId": "t1", "labelIds": ["DRAFT"], "payload": payload } }))
+        }
+        ("GET", p) if p.starts_with("/messages/dm") && p.contains("/attachments/att") => {
+            use base64::Engine;
+            let data = draft["attachment"]["data"].as_str().unwrap_or_default();
+            ok(serde_json::json!({ "size": data.len(), "data": base64::engine::general_purpose::URL_SAFE.encode(data) }))
         }
         ("POST", "/drafts/send") => {
             let id = serde_json::from_str::<serde_json::Value>(&r.body).unwrap_or_default()["id"].as_str().unwrap_or_default().to_string();
