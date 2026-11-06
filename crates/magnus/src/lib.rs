@@ -29,6 +29,7 @@ pub mod control;
 pub mod dev;
 pub mod devices;
 pub mod events;
+pub mod grants;
 pub mod inbox;
 pub mod kernel;
 pub mod knowledge;

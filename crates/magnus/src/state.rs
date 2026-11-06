@@ -241,6 +241,8 @@ pub struct Task {
     pub project: Option<crate::events::ProjectContext>,
     /// The person's latest verdict on its outcome.
     pub verdict: Option<Verdict>,
+    /// The grant it runs under (#235).
+    pub grant: Option<String>,
 }
 
 /// A person's verdict on an outcome.
@@ -478,6 +480,53 @@ pub struct Schedule {
     pub resumed: Option<DateTime<Utc>>,
 }
 
+/// A person's standing authority over a category of their own work
+/// (#235). Its title is recalled from the event `seq` names (the latest
+/// setting), as a schedule's words are.
+#[derive(Clone, Debug)]
+pub struct Grant {
+    pub id: String,
+    pub person: String,
+    pub apps: Vec<String>,
+    /// Exclusions the person lifted: `send`, `irreversible`.
+    pub allow: Vec<String>,
+    /// `day`, `week` or `month`.
+    pub period: String,
+    pub max_usd: f64,
+    /// The policy the kernel wrote from these: what it covers.
+    pub cedar: String,
+    /// The card it was first set from.
+    pub card: Option<String>,
+    /// The taint of the words of its title, when not the person's own.
+    pub label: Label,
+    pub seq: i64,
+    /// When it was set first, and by whom (as the log names them).
+    pub at: DateTime<Utc>,
+    pub by: String,
+    /// When it was last edited.
+    pub edited: Option<DateTime<Utc>>,
+    pub revoked: Option<DateTime<Utc>>,
+    /// The actions taken under it, oldest first.
+    pub actions: Vec<GrantAction>,
+}
+
+/// An action a grant covered.
+#[derive(Clone, Debug, Serialize)]
+pub struct GrantAction {
+    pub tool: String,
+    pub task: String,
+    pub run: String,
+    pub call_id: String,
+    pub at: DateTime<Utc>,
+}
+
+impl Grant {
+    /// How many days a period runs back from now.
+    pub fn days(&self) -> i64 {
+        crate::grants::period_days(&self.period).unwrap_or(7)
+    }
+}
+
 /// A thread branched from another at one of its entries.
 #[derive(Clone, Debug)]
 pub struct Branch {
@@ -505,6 +554,8 @@ pub enum Answer {
     Confirmed(String),
     /// Accepted: the task it started.
     Started(String),
+    /// Accepted: the grant it set (#235).
+    Granted(String),
     /// "Not now".
     Later,
     /// Declined, with their reason.
@@ -794,6 +845,8 @@ pub struct State {
     /// Threads branched from another, by thread.
     pub branches: HashMap<String, Branch>,
     pub schedules: BTreeMap<String, Schedule>,
+    /// Each person's grants (#235), revoked ones among them, by id.
+    pub grants: BTreeMap<String, Grant>,
     /// Cards from chat (schedules and suggestions) the person answered, by
     /// card id: with the cards in their turns' results, the suggestion
     /// ledger (`suggestions::ledger`).
@@ -1318,6 +1371,8 @@ impl State {
                 self.runs.retain(|_, r| &r.person != person);
                 self.items.retain(|_, i| &i.person != person && i.run.as_ref().is_none_or(|r| !runs.contains(r)));
                 self.schedules.retain(|_, x| &x.person != person);
+                // Their grants: none covers whoever is next known by their name.
+                self.grants.retain(|_, g| &g.person != person);
                 self.memory.retain(|m| &m.person != person);
                 // Their own documents (their relationship memory among
                 // them) and their versions, whose content went with theirs
@@ -1420,6 +1475,50 @@ impl State {
                 );
                 if let Some(c) = card {
                     self.cards.insert(c.clone(), CardState { answer: Answer::Confirmed(id.clone()), at: e.at, person: Some(person.clone()) });
+                }
+            }
+            Ev::GrantSet { id, person, apps, allow, period, max_usd, card, cedar, label, .. } => {
+                let g = self.grants.entry(id.clone()).or_insert_with(|| Grant {
+                    id: id.clone(),
+                    person: person.clone(),
+                    apps: vec![],
+                    allow: vec![],
+                    period: String::new(),
+                    max_usd: 0.0,
+                    cedar: String::new(),
+                    card: card.clone(),
+                    label: Label::PRINCIPAL,
+                    seq: e.seq,
+                    at: e.at,
+                    by: e.actor.clone(),
+                    edited: None,
+                    revoked: None,
+                    actions: vec![],
+                });
+                if g.seq != e.seq {
+                    g.edited = Some(e.at);
+                }
+                g.apps = apps.clone();
+                g.allow = allow.clone();
+                g.period = period.clone();
+                g.max_usd = *max_usd;
+                g.cedar = cedar.clone();
+                g.label = label.unwrap_or_default();
+                g.seq = e.seq;
+                // A card accepted sets it; a proposal handled with it is
+                // answered by the task it started, which follows.
+                if let Some(c) = card.as_ref().filter(|c| !self.cards.contains_key(*c)) {
+                    self.cards.insert(c.clone(), CardState { answer: Answer::Granted(id.clone()), at: e.at, person: Some(person.clone()) });
+                }
+            }
+            Ev::GrantRevoked { id, .. } => {
+                if let Some(g) = self.grants.get_mut(id).filter(|g| g.revoked.is_none()) {
+                    g.revoked = Some(e.at);
+                }
+            }
+            Ev::GrantUsed { grant, task, run, call_id, tool } => {
+                if let Some(g) = self.grants.get_mut(grant) {
+                    g.actions.push(GrantAction { tool: tool.clone(), task: task.clone(), run: run.clone(), call_id: call_id.clone(), at: e.at });
                 }
             }
             Ev::CardDeclined { card, person, reason } => {
@@ -1555,7 +1654,7 @@ impl State {
                     (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: false }),
                 );
             }
-            Ev::TaskCreated { task, run, person, config, attachments, experiment, chat, label, files, project, .. } => {
+            Ev::TaskCreated { task, run, person, config, attachments, experiment, chat, label, files, project, grant, .. } => {
                 // Playbook items the run starts with carry the taint of the
                 // runs that wrote them (I2, M1), and a task from chat that of
                 // the turn that started it.
@@ -1584,6 +1683,7 @@ impl State {
                         files: files.clone(),
                         project: project.clone(),
                         verdict: None,
+                        grant: grant.clone(),
                     },
                 );
                 self.runs.insert(

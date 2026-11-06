@@ -190,6 +190,11 @@ pub const BUILTINS: &[Builtin] = &[
     // A task proposal: a card for one task the person approves (it starts,
     // within the cost they approved) or dismisses. Nothing starts until then.
     Builtin { name: "propose_task", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    // A grant card, when the person asked for standing authority over a
+    // kind of their work (#235): nothing is granted until they accept it.
+    // Revoking one of theirs at their word only narrows what Magnus may do.
+    Builtin { name: "propose_grant", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "revoke_grant", app: "chat", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // Control of the person's own tasks and schedules, as the app's buttons
     // (behavior spec, Tasks and schedules in conversation).
     Builtin { name: "list_tasks", app: "chat", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
@@ -283,7 +288,7 @@ pub fn chat_specs() -> Vec<ToolSpec> {
             description: d("show"),
             input_schema: obj(json!({ "components": { "type": "array", "minItems": 1, "items": component(crate::compose::SHOWN) } }), &["components"]),
         },
-        ToolSpec { name: "create_task".into(), description: d("create_task"), input_schema: obj(json!({ "title": { "type": "string" }, "text": { "type": "string" } }), &["title", "text"]) },
+        ToolSpec { name: "create_task".into(), description: d("create_task"), input_schema: obj(json!({ "title": { "type": "string" }, "text": { "type": "string" }, "grant": { "type": "string" } }), &["title", "text"]) },
         ToolSpec {
             name: "create_schedule".into(),
             description: d("create_schedule"),
@@ -329,6 +334,23 @@ pub fn chat_specs() -> Vec<ToolSpec> {
                 &["title", "text", "noticed", "outcome", "why_now", "needs", "evidence"],
             ),
         },
+        ToolSpec {
+            name: "propose_grant".into(),
+            description: d("propose_grant"),
+            input_schema: obj(
+                json!({
+                    "title": { "type": "string" },
+                    "apps": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                    "allow": { "type": "array", "items": { "type": "string", "enum": crate::grants::LIFTABLE } },
+                    "period": { "type": "string", "enum": ["day", "week", "month"] },
+                    "max_usd": { "type": "number" },
+                    "why": { "type": "string" },
+                    "replaces": { "type": "string" }
+                }),
+                &["title", "apps", "period", "max_usd", "why"],
+            ),
+        },
+        ToolSpec { name: "revoke_grant".into(), description: d("revoke_grant"), input_schema: obj(json!({ "grant": { "type": "string" } }), &["grant"]) },
         ToolSpec { name: "list_tasks".into(), description: d("list_tasks"), input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "list_schedules".into(), description: d("list_schedules"), input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "cancel_task".into(), description: d("cancel_task"), input_schema: obj(json!({ "id": { "type": "string" } }), &["id"]) },

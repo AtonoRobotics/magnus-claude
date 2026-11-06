@@ -27,7 +27,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 /// Tools whose results are cards, not something read: no evidence.
-const CARDS: &[&str] = &["suggest", "propose_task", "create_schedule", "offer_app"];
+const CARDS: &[&str] = &["suggest", "propose_task", "propose_grant", "create_schedule", "offer_app"];
 
 /// A card proposed in one of the person's chat turns.
 pub(crate) struct Card {
@@ -81,7 +81,15 @@ pub(crate) fn ledger(s: &Projection, person: &str, before: DateTime<Utc>) -> Vec
         .filter(|c| c.at < before)
         .map(|c| {
             let proposal = c.data["proposal"] == true;
-            let what = if proposal { "you proposed the task" } else if c.data["suggestion"] == true { "you suggested" } else { "you proposed the schedule" };
+            let what = if proposal {
+                "you proposed the task"
+            } else if c.data["grant"] == true {
+                "you proposed the grant"
+            } else if c.data["suggestion"] == true {
+                "you suggested"
+            } else {
+                "you proposed the schedule"
+            };
             let words = if c.tainted {
                 "(its words are not shown: the run that proposed it read content from outside the conversation)".to_string()
             } else {
@@ -96,7 +104,7 @@ pub(crate) fn ledger(s: &Projection, person: &str, before: DateTime<Utc>) -> Vec
                     match &a.answer {
                         Answer::Started(_) if proposal => format!("they approved it on {on}"),
                         Answer::Declined(r) if proposal => format!("they dismissed it on {on}, saying: \"{}\"", r.as_deref().unwrap_or("(no reason)")),
-                        Answer::Confirmed(_) | Answer::Started(_) => format!("they accepted it on {on}"),
+                        Answer::Confirmed(_) | Answer::Started(_) | Answer::Granted(_) => format!("they accepted it on {on}"),
                         Answer::Later => format!("they said not now on {on}"),
                         Answer::Declined(r) => format!("they declined it on {on}, saying: \"{}\"", r.as_deref().unwrap_or("(no reason)")),
                     }
@@ -126,6 +134,7 @@ pub(crate) fn state_of(a: Option<&CardState>) -> (&'static str, Value) {
         None => ("open", json!({})),
         Some(Answer::Confirmed(id)) => ("confirmed", json!({ "schedule": id })),
         Some(Answer::Started(t)) => ("confirmed", json!({ "started": t })),
+        Some(Answer::Granted(g)) => ("confirmed", json!({ "granted": g })),
         Some(Answer::Later) => ("later", json!({})),
         Some(Answer::Declined(r)) => ("declined", json!({ "reason": r })),
     }

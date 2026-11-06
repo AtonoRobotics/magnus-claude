@@ -223,7 +223,10 @@ impl Kernel {
         let (reactions, open) = self.read(|s| (crate::reactions::reactions_before(s, &run.person, run.created_at), crate::reactions::open_before(s, &run.person, run.created_at)));
         // Their suggestion ledger, as it stood when it started (#253).
         let ledger = self.read(|s| crate::suggestions::ledger(s, &run.person, run.created_at));
-        let sections = format!("{}{}{}", section(&notes, &recent), crate::reactions::section(&reactions, &open), crate::suggestions::section(&ledger));
+        // In a conversation, their grants, so work that fits one starts under it (#235).
+        let chat = self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.is_chat_turn()));
+        let grants = if chat { self.grant_section(run).await? } else { String::new() };
+        let sections = format!("{}{}{}{grants}", section(&notes, &recent), crate::reactions::section(&reactions, &open), crate::suggestions::section(&ledger));
         Ok((sections, (!notes.is_empty()).then_some(version)))
     }
 }

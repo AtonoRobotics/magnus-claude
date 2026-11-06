@@ -108,6 +108,8 @@ pub struct NewRun {
     pub modules: std::collections::BTreeMap<String, bool>,
     /// The scope the person confirmed for the schedule starting it.
     pub scope: Option<String>,
+    /// The grant it runs under (#235).
+    pub grant: Option<String>,
 }
 
 impl Kernel {
@@ -562,6 +564,7 @@ impl Kernel {
                 files: o.files,
                 project,
                 scope: o.scope,
+                grant: o.grant,
             },
         )
         .await?;
