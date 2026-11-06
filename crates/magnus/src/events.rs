@@ -556,6 +556,49 @@ pub enum Ev {
     ScheduleRemoved {
         id: String,
     },
+    /// A person's standing authority over a category of their own work
+    /// (behavior spec, Standing authority; #235): set when they chose
+    /// "Handle things like this" on a task proposal, or accepted a grant
+    /// card Magnus put to them. An edit sets it again with the same id.
+    /// `cedar` is the policy the kernel wrote from these fields: what it
+    /// covers in the tasks started under it.
+    GrantSet {
+        id: String,
+        person: String,
+        /// The category of work, in words (content).
+        #[serde(default)]
+        title: String,
+        /// The apps it covers, by name.
+        apps: Vec<String>,
+        /// Exclusions the person lifted: `send`, `irreversible`.
+        #[serde(default)]
+        allow: Vec<String>,
+        /// `day`, `week` or `month`: a rolling 1, 7 or 30 days.
+        period: String,
+        /// Model cost its tasks may spend in a period.
+        max_usd: f64,
+        /// The card it was set from, if any.
+        #[serde(default)]
+        card: Option<String>,
+        cedar: String,
+        /// The taint of the chat turn whose words its title is, when they
+        /// were not the person's own.
+        #[serde(default)]
+        label: Option<Label>,
+    },
+    /// The person revoked a grant: it covers nothing from now on.
+    GrantRevoked {
+        id: String,
+        person: String,
+    },
+    /// An action a policy asked about went ahead under a grant.
+    GrantUsed {
+        grant: String,
+        task: String,
+        run: String,
+        call_id: String,
+        tool: String,
+    },
     /// A due schedule could not start its task.
     ScheduleFailed {
         id: String,
@@ -619,6 +662,10 @@ pub enum Ev {
         /// The scope the person confirmed for the schedule that started it.
         #[serde(default)]
         scope: Option<String>,
+        /// The grant it runs under (#235): its policy asks within the
+        /// grant go ahead without asking.
+        #[serde(default)]
+        grant: Option<String>,
     },
     /// A file the person added: to the library, a project, or a chat
     /// message. Its content is private data, never instructions.
@@ -1068,6 +1115,7 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("disagreement_outcome", &["outcome"]),
     ("card_declined", &["reason"]),
     ("schedule_ended", &["reason"]),
+    ("grant_set", &["title"]),
 ];
 
 /// The content fields of one kind of event; none for most.
@@ -1111,6 +1159,7 @@ impl Ev {
             | Failed { run, .. }
             | Cancelled { run }
             | ApprovalUsed { run, .. }
+            | GrantUsed { run, .. }
             | Wait { run, .. }
             | BudgetExtended { run, .. }
             | Memory { run, .. }

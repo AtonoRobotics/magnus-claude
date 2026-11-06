@@ -95,21 +95,30 @@ admin console.
    - A grant comes only from "Handle things like this" or the person asking
      in conversation; approving one proposal never creates one. The button
      goes on the task proposal card here, with grants (moved from step 4,
-     #254).
+     #254). Done (#235, `decisions/2026-11-06-235-standing-authority.md`):
+     "Handle things like this" on a task proposal, or a grant card
+     (`propose_grant`) the person accepts.
    - A grant is a Cedar policy in the person's layer: a category of work, a
      budget per period (spend and model cost), and excluded actions that
      still need approval. Excluded by default: sending on the person's
      behalf, spending money, deleting, and committing them to anything; the
-     person can change these per grant.
+     person can change these per grant. Done (#235), with the budget in
+     model cost per rolling day, week or month; spending money stays
+     excluded in every grant (the kernel cannot measure an amount), and
+     deleting and committing are one exclusion (the kernel's one class,
+     `irreversible`).
    - Within limits (owner's ruling, 2026-11-02): a person grants only over
      their own work, and only actions they could approve themselves; the
      organisation's policy still bounds every grant. Invariant 6 is reworded
      to say so ("autonomy comes from policy: the owner's for the
      organisation, each person's own grants over their own work within it"),
-     and its test is updated with it, both in this step.
+     and its test is updated with it, both in this step. Done (#235).
    - Work under a grant runs as tasks with their usual checks; grants are
      listed with approvals, editable and revocable there or by telling
-     Magnus; Magnus reports every action taken under one.
+     Magnus; Magnus reports every action taken under one. Done (#235): in
+     Settings, under "What Magnus may do on its own", and by `revoke_grant`
+     in conversation; each covered action is a `grant_used` event listed
+     under its grant.
 6. **Commitment ledger.** What the person and Magnus said they would do, to
    whom, by when, from where, and its status (open, done, overdue,
    released), recognised by the model in conversations and connected data.
