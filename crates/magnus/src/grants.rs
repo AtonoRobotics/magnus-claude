@@ -73,6 +73,30 @@ pub fn spent(_s: &Projection, g: &Grant, now: DateTime<Utc>) -> f64 {
     g.charges.iter().filter(|(at, _)| *at > from).map(|(_, usd)| usd).sum()
 }
 
+/// A grant whose budget for its period is spent: what it spent of what.
+pub struct Spent {
+    pub grant: String,
+    pub spent: f64,
+    pub max: f64,
+    pub period: String,
+}
+
+impl Kernel {
+    /// The grant this run's task runs under, when its budget for the period
+    /// is spent and the run's person has not resumed it past that. Every
+    /// paid model call of the run checks it first: the agent's, the
+    /// verifier's, the memory pass's and an extraction's (#280, #286).
+    pub fn grant_spent(&self, run: &str) -> Option<Spent> {
+        let now = chrono::Utc::now();
+        self.read(|s| {
+            let r = s.runs.get(run).filter(|r| !r.past_grant)?;
+            let g = s.tasks.get(&r.task).and_then(|t| t.grant.as_ref()).and_then(|g| s.grants.get(g))?;
+            let spent = spent(s, g, now);
+            (spent >= g.max_usd).then(|| Spent { grant: g.id.clone(), spent, max: g.max_usd, period: g.period.clone() })
+        })
+    }
+}
+
 /// A grant's fields, checked.
 #[derive(Debug, Clone)]
 pub struct Fields {

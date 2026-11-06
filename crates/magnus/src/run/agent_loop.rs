@@ -7,6 +7,7 @@
 //! unavailable provider a bounded number of times, and suspends with a notice.
 //! What to do next is always the model's decision.
 
+use crate::grants::Spent;
 use crate::boundary::{Action, Issuer, Verdict};
 use crate::events::{ContextRef, Ev};
 use crate::kernel::Kernel;
@@ -65,12 +66,7 @@ impl Kernel {
         // A task under a grant also stops once the grant's budget for its
         // period is spent, by all its tasks together (#280), until its
         // person resumes it, which is theirs to decide.
-        let now = chrono::Utc::now();
-        let grant = (!run.past_grant).then(|| self.read(|s| {
-            let g = s.tasks.get(&run.task).and_then(|t| t.grant.as_ref()).and_then(|g| s.grants.get(g))?;
-            Some((g.id.clone(), crate::grants::spent(s, g, now), g.max_usd, g.period.clone()))
-        })).flatten();
-        if let Some((g, spent, max, period)) = grant.filter(|(_, spent, max, _)| spent >= max) {
+        if let Some(Spent { grant: g, spent, max, period }) = self.grant_spent(&run.id) {
             let why = format!("Stopped: the grant {g} has spent its ${max:.2} for this {period} (${spent:.2}).");
             self.suspend_with_notice(run_id, "grant_budget", why, json!({ "grant": g, "usd": spent, "limit": max })).await?;
             return Ok(false);
