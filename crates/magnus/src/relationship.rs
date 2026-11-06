@@ -231,6 +231,14 @@ impl Kernel {
         let sections = format!("{}{}{}{grants}{commitments}", section(&notes, &recent), crate::reactions::section(&reactions, &open), crate::suggestions::section(&ledger));
         Ok((sections, (!notes.is_empty()).then_some(version)))
     }
+
+    /// Whether the run's context carries anything of its person's (notes,
+    /// recent messages, reactions, disagreements, commitments): what it
+    /// writes for others to read may carry it, so it is the person's, as
+    /// private content it read is (#258).
+    pub(crate) async fn carries_person(&self, run: &Run) -> anyhow::Result<bool> {
+        Ok(!self.person_context(run).await?.0.is_empty())
+    }
 }
 
 pub fn router() -> Router<Arc<Kernel>> {
