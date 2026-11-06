@@ -30,9 +30,11 @@ impl Drop for Inbox {
 
 /// How long a docker command may take, in seconds, before the test fails
 /// naming it: a container engine stalled under load held the invite test
-/// silently until the runner killed it at 600 s (#246). A minute is far
-/// above what these commands take on an idle box (under a second).
-pub const DOCKER_PATIENCE: &str = "60";
+/// silently until the runner killed it at 600 s (#246). These commands take
+/// under a second on an idle box, but `docker run` took over a minute on
+/// the loaded box (run 42167240885). Three minutes, beside the 249 s the
+/// whole test has taken under load, stays under the runner's 600 s.
+pub const DOCKER_PATIENCE: &str = "180";
 
 fn docker(args: &[&str]) -> String {
     let out = std::process::Command::new("timeout").arg(DOCKER_PATIENCE).arg("docker").args(args).output().expect("run docker");
