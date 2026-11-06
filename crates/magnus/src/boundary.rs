@@ -132,6 +132,13 @@ pub fn may_use(person: &Person, c: &crate::config::Connector) -> bool {
     (c.access_groups.is_empty() || c.access_groups.iter().any(|g| person.groups.contains(g))) && !c.blocked_groups.iter().any(|g| person.groups.contains(g))
 }
 
+/// What a run has spent of its action and dollar budget, as a budget stop
+/// tells the person.
+pub fn budget_used(run: &Run) -> String {
+    let b = &run.config.budget;
+    format!("budget used: {} of {} actions, ${:.2} of ${:.2}", run.actions, b.max_actions, run.usd, b.max_usd)
+}
+
 pub fn idempotency_key(run: &str, step_id: &str, tool: &str) -> String {
     use sha2::Digest;
     hex::encode(&sha2::Sha256::digest(format!("{run}\n{step_id}\n{tool}").as_bytes())[..16])
@@ -309,7 +316,7 @@ impl Kernel {
         // 3. Budget.
         let b = &run.config.budget;
         if a.issuer == Issuer::Model && (run.actions >= b.max_actions || run.usd >= b.max_usd) {
-            let why = format!("budget used: {} of {} actions, ${:.2} of ${:.2}", run.actions, b.max_actions, run.usd, b.max_usd);
+            let why = budget_used(&run);
             self.decision(a, "ask", "budget", &why, None).await?;
             self.suspend_with_notice(&a.run, "budget", format!("Stopped: {why}."), json!({ "actions": run.actions, "usd": run.usd })).await?;
             return Ok(Verdict::Suspended);

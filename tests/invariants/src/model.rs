@@ -29,6 +29,9 @@ pub enum Reply {
     Text(String),
     /// An HTTP error from the provider.
     Status(u16),
+    /// A text reply the provider charged for (this many input tokens) that
+    /// names no model: the adapter bills it, then fails it as malformed.
+    Charged(u64),
 }
 
 pub fn tool(name: &str, input: Value) -> Reply {
@@ -201,12 +204,17 @@ async fn messages(State(inner): State<Arc<Inner>>, headers: HeaderMap, body: Str
     let s = inner.script.lock().unwrap().clone();
     let reply = s(conv).await;
 
+    let (model, input_tokens) = match reply {
+        Reply::Charged(n) => (Value::Null, n),
+        _ => (body["model"].clone(), 100),
+    };
     let content: Vec<Value> = match reply {
         Reply::Status(code) => {
             let err = json!({"type": "error", "error": {"type": "api_error", "message": "scripted failure"}});
             return (StatusCode::from_u16(code).unwrap(), axum::Json(err)).into_response();
         }
         Reply::Text(t) => vec![json!({"type": "text", "text": t})],
+        Reply::Charged(_) => vec![json!({"type": "text", "text": "charged"})],
         Reply::Tools(calls) => calls
             .into_iter()
             .map(|(name, input)| {
@@ -224,11 +232,11 @@ async fn messages(State(inner): State<Arc<Inner>>, headers: HeaderMap, body: Str
         "id": format!("msg_{}", uuid::Uuid::new_v4().simple()),
         "type": "message",
         "role": "assistant",
-        "model": body["model"].clone(),
+        "model": model,
         "content": content,
         "stop_reason": stop,
         "stop_sequence": null,
-        "usage": {"input_tokens": 100, "output_tokens": 20}
+        "usage": {"input_tokens": input_tokens, "output_tokens": 20}
     });
     inner.responses.lock().unwrap().push(msg.clone());
 
