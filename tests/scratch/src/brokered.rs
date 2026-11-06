@@ -250,7 +250,27 @@ pub struct StandInGmail {
     /// The next send's answer, instead of Gmail's usual one (the draft is
     /// read before it is sent, so `next` would answer that read).
     pub next_send: Arc<Mutex<Option<(u16, String, String)>>>,
+    /// The next read of a draft, once `hold_draft_read` sets it.
+    held: Arc<Mutex<Option<HeldRead>>>,
     _ca: TestCa,
+}
+
+/// A read of a draft Gmail's stand-in has and answers only once released.
+#[derive(Clone)]
+pub struct HeldRead {
+    received: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl HeldRead {
+    /// Resolves once the held read has reached Gmail.
+    pub async fn received(&self) {
+        self.received.notified().await
+    }
+    /// Let Gmail answer it.
+    pub fn release(&self) {
+        self.release.notify_one()
+    }
 }
 
 impl StandInGmail {
@@ -269,14 +289,22 @@ impl StandInGmail {
         let next: Arc<Mutex<Option<(u16, String, String)>>> = Arc::default();
         let draft = Arc::new(Mutex::new(serde_json::json!({ "to": "Bo <bo@example.com>", "cc": "", "bcc": "", "subject": "Re: Plans", "body": "Friday works." })));
         let next_send: Arc<Mutex<Option<(u16, String, String)>>> = Arc::default();
-        let (s2, n2, d2, ns2) = (seen.clone(), next.clone(), draft.clone(), next_send.clone());
+        let held: Arc<Mutex<Option<HeldRead>>> = Arc::default();
+        let (s2, n2, d2, ns2, h2) = (seen.clone(), next.clone(), draft.clone(), next_send.clone(), held.clone());
         tokio::spawn(async move {
             while let Ok((tcp, _)) = l.accept().await {
-                let (acceptor, seen, next, draft, next_send) = (acceptor.clone(), s2.clone(), n2.clone(), d2.clone(), ns2.clone());
+                let (acceptor, seen, next, draft, next_send, held) = (acceptor.clone(), s2.clone(), n2.clone(), d2.clone(), ns2.clone(), h2.clone());
                 tokio::spawn(async move {
                     let Ok(mut s) = acceptor.accept(tcp).await else { return };
                     let sni = s.get_ref().1.server_name().unwrap_or_default().to_string();
                     let Some(r) = read_request(&mut s, sni).await else { return };
+                    if r.method == "GET" && r.path.contains("/drafts/") {
+                        let hold = held.lock().unwrap().take();
+                        if let Some(h) = hold {
+                            h.received.notify_one();
+                            h.release.notified().await;
+                        }
+                    }
                     let send = r.method == "POST" && r.path.ends_with("/drafts/send");
                     let (status, head, body) = send.then(|| next_send.lock().unwrap().take()).flatten().or_else(|| next.lock().unwrap().take()).unwrap_or_else(|| gmail_answer(&r, &seen.lock().unwrap(), drafts, &draft.lock().unwrap()));
                     seen.lock().unwrap().push(r);
@@ -287,7 +315,15 @@ impl StandInGmail {
                 });
             }
         });
-        StandInGmail { addr, root, seen, next, draft, next_send, _ca: ca }
+        StandInGmail { addr, root, seen, next, draft, next_send, held, _ca: ca }
+    }
+
+    /// The next read of a draft reaches Gmail and waits there, unanswered,
+    /// until released.
+    pub fn hold_draft_read(&self) -> HeldRead {
+        let h = HeldRead { received: Arc::default(), release: Arc::default() };
+        *self.held.lock().unwrap() = Some(h.clone());
+        h
     }
 
     pub fn requests(&self) -> Vec<GmailRequest> {
