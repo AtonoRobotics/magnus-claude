@@ -128,6 +128,34 @@ fn stale(hours: u32, hold: &str) -> String {
 }
 
 #[test]
+fn the_agent_chooses_the_next_issue_from_the_queue_itself() {
+    // CLAUDE.md, "Work starts from an issue" (owner, 2026-11-05: "It should
+    // be the agent chooses ready not me"): with no `ready` issue every agent
+    // stopped and asked the owner which issue to pull. The agent promotes one
+    // from `queue` itself; the rest stays (one claim per issue, one
+    // shared-file change in flight, the cap of 6 open agent pull requests).
+    // The previous wording said only the owner adds `ready`, so this fails
+    // on it. `release/pr-rules.sh` agrees by saying nothing about who
+    // added `ready`: it checks only the cap, the base, and size.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let claude = std::fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+    let section = claude.split("### Work starts from an issue").nth(1).expect("CLAUDE.md says where work starts");
+    for phrase in [
+        "chooses the next issue from `queue` itself",
+        "promotes one to `ready`",
+        "straight to `in-progress` with its claim",
+        "a red master or a failed release first",
+        "says why in the claim comment",
+        "One change that touches the shared files is in flight at a time",
+    ] {
+        assert!(section.contains(phrase), "missing: {phrase}");
+    }
+    assert!(!section.contains("Only the owner adds `ready`"), "the owner is not the scheduler:\n{section}");
+    let script = std::fs::read_to_string(root.join("release/pr-rules.sh")).unwrap();
+    assert!(!script.contains("ready`") && !script.contains("READY"), "the rules check says nothing about the ready label:\n{script}");
+}
+
+#[test]
 fn a_quiet_pull_request_is_warned_then_labelled_then_closed() {
     assert_eq!(stale(23, ""), "");
     assert_eq!(stale(24, ""), "comment\n");
