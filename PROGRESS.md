@@ -1,5 +1,7 @@
 # Progress
 
+From 2026-11-06 each pull request adds a file to `progress/` instead of lines here; this file is the record before that.
+
 ## An approval holds for every part of the email (2026-11-06)
 
 A Gmail send's approval held for the recipients, subject, text and attachment names, but not the HTML part or the attachments' bytes, so a draft changed only there was sent on the old approval (#177). Gmail's `get_draft` now adds a digest of every part, attachment bytes included, and the approval holds for it without the card showing it. With the draft lease (#216), #177 is done. Gmail manifest 1.3.0, image `sha256:465b2921…`.

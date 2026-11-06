@@ -282,6 +282,26 @@ fn only_the_runner_with_the_appliance_publishes_and_master_and_tags_run_there() 
     assert!(check < appliance.find("dev/services.sh").unwrap(), "the release checks its runner before it builds");
 }
 
+/// Pull requests run beside each other, so none publishes to the installed
+/// apps: two open ones replaced each other's build in the owner's app, and
+/// a pull request tested on beta published nothing. Master publishes every
+/// merge to the owner's app (development) and the testers' (test), and a
+/// master build holds everything merged (2026-11-06).
+#[test]
+fn only_master_publishes_to_the_installed_apps() {
+    let workflow = std::fs::read_to_string(repo().join(".github/workflows/desktop.yml")).unwrap();
+    let steps: Vec<&str> = workflow.split("      - name: ").skip(1).collect();
+    for step in &steps {
+        let name = step.lines().next().unwrap_or_default();
+        if step.lines().any(|l| !l.trim_start().starts_with('#') && l.contains("release/publish.sh")) {
+            let cond = step.lines().find(|l| l.trim_start().starts_with("if:")).unwrap_or_else(|| panic!("{name} publishes on every event"));
+            assert!(!cond.contains("'pull_request'"), "{name} publishes from a pull request: {cond}");
+        }
+    }
+    let master = steps.iter().find(|s| s.contains("refs/heads/master") && s.contains("dist test")).expect("master publishes to test");
+    assert!(master.contains("dist development"), "master does not publish to the owner's app");
+}
+
 /// The two update AppImages compile after the suite. Beside it, they took
 /// the cores the browser tests need (run 41949527809).
 #[test]
