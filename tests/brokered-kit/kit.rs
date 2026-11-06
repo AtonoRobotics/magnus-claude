@@ -77,6 +77,21 @@ fn a_session_runs_a_call_only_with_its_token_and_schemas() {
     assert_eq!((a[8]["result"]["isError"].as_bool(), a[9]["result"]["isError"].as_bool()), (Some(true), Some(true)));
 }
 
+/// A call the tool made whose answer does not match its output schema says
+/// so in its result's outcome, not only in its words: the provider may have
+/// done it, and the appliance decides what that means by the tool's class
+/// (#193). One refused before it ran says nothing happened.
+#[test]
+fn an_answer_that_breaks_its_schema_says_the_call_was_made() {
+    let a = talk(&[call(1, json!({ "say": "wrong" }), Some("tok")), call(2, json!({ "say": 7 }), Some("tok")), call(3, json!({ "say": "hi" }), None)]);
+    assert_eq!(a[0]["result"]["isError"], true, "{}", a[0]);
+    assert_eq!(a[0]["result"]["_meta"], json!({ OUTCOME_META: BAD_ANSWER }), "{}", a[0]);
+    for m in &a[1..] {
+        assert_eq!(m["result"]["isError"], true, "{m}");
+        assert!(m["result"].get("_meta").is_none(), "refused before it ran, yet it says it was made: {m}");
+    }
+}
+
 /// A provider's side of one exchange: what it was sent, and its answer,
 /// after which its reads end as `end` says (`None`: a clean end).
 struct Peer(Vec<u8>, std::io::Cursor<Vec<u8>>, Option<std::io::ErrorKind>);

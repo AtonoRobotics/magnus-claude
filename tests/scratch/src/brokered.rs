@@ -123,7 +123,8 @@ pub fn trust(cfg: &mut toml::Table, ca: &TestCa) {
 
 /// A local host standing in for a provider's API, over HTTPS with a
 /// certificate for `127.0.0.1` from its own CA: every request it is sent,
-/// as (path, Authorization header), answered with a greeting; and every
+/// as (path, Authorization header), answered with a greeting (with JSON
+/// under `/json/`); and every
 /// byte that reached it before TLS, as it came.
 #[derive(Clone)]
 pub struct ProviderApi {
@@ -167,8 +168,10 @@ impl ProviderApi {
             let head = String::from_utf8_lossy(&got).to_string();
             let path = head.split_whitespace().nth(1).unwrap_or_default().to_string();
             let auth = head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("authorization")).map(|(_, v)| v.trim().to_string())).unwrap_or_default();
+            // A path under `/json/` is answered with JSON that is valid but
+            // names nothing a tool's answer must (no `id`).
+            let body = if path.starts_with("/json/") { r#"{"done":true}"# } else { "hello from the provider" };
             seen.lock().unwrap().push((path, auth));
-            let body = "hello from the provider";
             let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
             let _ = s.shutdown().await;
         }

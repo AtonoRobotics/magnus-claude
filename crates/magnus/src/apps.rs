@@ -28,6 +28,10 @@ pub enum CallError {
     NotSent(String),
     /// The request may have reached the app; its outcome is unknown.
     Unknown(String),
+    /// The app ran the call and answered, but not as its output schema
+    /// says (#193): what it did there is unknown. The caller, who knows
+    /// whether the tool changes anything, decides what that means.
+    BadAnswer(String),
     /// The app refused it for want of access the sign-in does not hold
     /// (HTTP 403, `insufficient_scope`, MCP authorization's step-up): the
     /// scopes it names. Nothing happened at the app.
@@ -207,6 +211,7 @@ impl Mcp {
         match e {
             CallError::NotSent(m) => CallError::NotSent(Self::clean(&m, bearer)),
             CallError::Unknown(m) => CallError::Unknown(Self::clean(&m, bearer)),
+            CallError::BadAnswer(m) => CallError::BadAnswer(Self::clean(&m, bearer)),
             CallError::NeedsScope(s) => CallError::NeedsScope(s),
         }
     }

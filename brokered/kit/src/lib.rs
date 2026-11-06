@@ -30,8 +30,14 @@ pub const PROTOCOL: &str = "2025-06-18";
 const HEAD_MAX: usize = 8192;
 
 /// Where a failed call's result says what it means for what happened at the
-/// provider (`unknown` or `needs_scope`; nothing said, nothing happened).
+/// provider (`unknown`, `needs_scope` or `bad_answer`; nothing said,
+/// nothing happened).
 pub const OUTCOME_META: &str = "io.magnus/outcome";
+/// The outcome of a call the tool made, whose answer does not match its
+/// output schema: what the provider did is unknown (#193). The appliance
+/// knows which tools change things, so it decides what that means: a
+/// write that may have happened, or a read that came back unusable.
+pub const BAD_ANSWER: &str = "bad_answer";
 /// With `needs_scope`, the scopes the provider wants.
 pub const SCOPES_META: &str = "io.magnus/scopes";
 
@@ -93,7 +99,7 @@ fn call(params: &Value, tools: &[Tool]) -> Value {
     match (t.run)(&args, token) {
         Ok(v) => match schema::check(&t.output, &v) {
             Ok(()) => json!({ "content": [{ "type": "text", "text": v.to_string() }], "structuredContent": v, "isError": false }),
-            Err(e) => failed(format!("{name}: the answer does not match its schema: {e}")),
+            Err(e) => with_meta(failed(format!("{name}: the answer does not match its schema: {e}")), json!({ OUTCOME_META: BAD_ANSWER })),
         },
         Err(Failure::NotDone(e)) => failed(e),
         Err(Failure::Unknown(e)) => with_meta(failed(e), json!({ OUTCOME_META: "unknown" })),

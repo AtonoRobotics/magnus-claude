@@ -872,7 +872,7 @@ impl Kernel {
         let read = match out {
             Ok(o) if !o.is_error => o.structured.or_else(|| serde_json::from_str(&o.text).ok()).unwrap_or(Value::Null),
             Ok(o) => return Err(format!("{} could not read {id} to see who {} goes to: {}. {nothing}", f.app, a.tool, o.text)),
-            Err(crate::apps::CallError::NotSent(m) | crate::apps::CallError::Unknown(m)) => return Err(format!("{} could not be read to see who {} goes to: {m}. {nothing}", f.app, a.tool)),
+            Err(crate::apps::CallError::NotSent(m) | crate::apps::CallError::Unknown(m) | crate::apps::CallError::BadAnswer(m)) => return Err(format!("{} could not be read to see who {} goes to: {m}. {nothing}", f.app, a.tool)),
             Err(crate::apps::CallError::NeedsScope(_)) => return Err(format!("{} wants more access to read who {} goes to. {nothing}", f.app, a.tool)),
         };
         let field = |p: &String| (p.rsplit('/').next().unwrap_or_default().to_string(), read.pointer(p).cloned().unwrap_or(Value::Null));
@@ -904,6 +904,12 @@ impl Kernel {
                 Ok(o) => Ok((o.text, o.is_error, o.structured)),
                 Err(crate::apps::CallError::NotSent(m)) => Err(CallFailure::NotDone(m)),
                 Err(crate::apps::CallError::Unknown(m)) => Err(CallFailure::Unknown(m)),
+                // The call was made and its answer does not match its
+                // schema (#193): a read's is only unusable, but a write may
+                // have happened, so it is unknown and reconciled as one,
+                // never failed as if nothing happened to be tried again.
+                Err(crate::apps::CallError::BadAnswer(m)) if f.risk == Risk::Read => Ok((m, true, None)),
+                Err(crate::apps::CallError::BadAnswer(m)) => Err(CallFailure::Unknown(m)),
                 // The app wants more access for this (connectors spec,
                 // Remote MCP connectors: a scope challenge becomes a card
                 // asking for it). Nothing happened at the app.
