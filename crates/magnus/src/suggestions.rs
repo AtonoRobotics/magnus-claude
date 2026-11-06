@@ -156,19 +156,26 @@ impl Kernel {
         let (again, changed) = (text("again"), text("changed"));
         let mine = self.read(|s| cards_of(s, &run.person));
         let declined = |c: &&Card| c.answer.as_ref().is_some_and(|a| matches!(a.answer, Answer::Declined(_)));
-        match &again {
-            Some(g) => match mine.iter().find(|c| &c.id == g) {
+        if let Some(g) = &again {
+            match mine.iter().find(|c| &c.id == g) {
                 None => return no(format!("again names {g}, which is no card of this person's.")),
                 Some(c) if declined(&c) && changed.is_none() => return no(format!("they declined {g}; suggest it again only with changed: what changed since.")),
                 Some(_) => {}
-            },
-            None => {
-                if let Some(c) = mine.iter().filter(declined).find(|c| c.title().trim().to_lowercase() == title.to_lowercase()) {
-                    return no(format!("they declined this before ({}). Suggest it again only when circumstances changed, with again: {} and changed: what changed since.", c.id, c.id));
-                }
             }
         }
-        let timing = ["every_minutes", "daily_at"].iter().any(|k| a.input[*k].as_u64().is_some_and(|m| m > 0) || a.input[*k].as_str().is_some_and(|t| !t.trim().is_empty()));
+        // A title they declined comes back only naming that card, with what
+        // changed, whatever else `again` names (review of #256).
+        if let Some(c) = mine.iter().filter(declined).find(|c| c.title().trim().to_lowercase() == title.to_lowercase()) {
+            if again.as_deref() != Some(c.id.as_str()) || changed.is_none() {
+                return no(format!("they declined this before ({}). Suggest it again only when circumstances changed, with again: {} and changed: what changed since.", c.id, c.id));
+            }
+        }
+        // Any timing given is a schedule's, checked as create_schedule checks
+        // it: a bad value (a negative interval, an end with no rule) is
+        // refused, never read as no timing (review of #256). As there, 0 or
+        // "" is a field the model had to fill and did not mean.
+        let given = |v: &Value| !(v.is_null() || v.as_u64() == Some(0) || v.as_str().is_some_and(|s| s.trim().is_empty()));
+        let timing = ["every_minutes", "daily_at", "until", "max_runs"].iter().any(|k| given(&a.input[*k]));
         let (mut every, mut daily, mut until, mut max_runs) = (None, None, None, None);
         if timing {
             (every, daily) = match crate::api::rule_for(&a.input, self.cfg.schedules.min_every_minutes) {

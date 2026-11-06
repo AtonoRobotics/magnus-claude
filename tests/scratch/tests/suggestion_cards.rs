@@ -299,6 +299,68 @@ async fn a_declined_suggestion_comes_back_only_with_what_changed() {
     assert_eq!((&card["again"], &card["changed"], &card["state"]), (&json!(id), &json!("Your invoices doubled this month (chg-63)."), &json!("open")), "{card}");
 }
 
+/// Review of #256: naming another card of theirs in `again` does not bring
+/// back a title they declined, with or without what changed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declined_title_does_not_come_back_by_naming_another_card() {
+    let open = Arc::new(Mutex::new(String::new()));
+    let other = open.clone();
+    let m = FakeModel::start(model(move |said, turn, c| {
+        let back = |extra: Value| tool("suggest", suggestion(json!([{ "call": read_call(c), "shows": "You still get invoices." }]), extra));
+        match (said, turn) {
+            (s, _) if s.contains("plate") => read_then_suggest(turn, c, json!({})),
+            (s, _) if s.contains("Anything else") => read_then_suggest(turn, c, json!({ "title": "Inbox triage" })),
+            (_, 0) => tool("list_tasks", json!({})),
+            (_, 1) => back(json!({ "again": other.lock().unwrap().clone() })),
+            (_, 2) => back(json!({ "again": other.lock().unwrap().clone(), "changed": "Nothing really." })),
+            _ => Reply::Text("Done.".into()),
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (thread, _) = chat(&alice, "What could you take off my plate?").await;
+    let declined = wait_entry(&alice, &thread, |e| e["kind"] == "suggestion_card").await["card"].as_str().unwrap().to_string();
+    assert_eq!(decide(&alice, &declined, json!({ "decision": "decline", "reason": REASON })).await.0, 200);
+    let (thread, _) = chat(&alice, "Anything else?").await;
+    *open.lock().unwrap() = wait_entry(&alice, &thread, |e| e["kind"] == "suggestion_card").await["card"].as_str().unwrap().to_string();
+
+    let text = "Once more with the invoices.";
+    let (thread, _) = chat(&alice, text).await;
+    for turn in [2, 3] {
+        let r = request(&m, text, turn).last_results();
+        assert!(r[0].is_error && r[0].text.contains(&declined) && r[0].text.contains("changed"), "turn {turn}: {r:?}");
+    }
+    assert!(!entries(&alice, &thread).await.iter().any(|e| e["kind"] == "suggestion_card"), "the declined title came back");
+}
+
+/// Review of #256: timing that is given is a schedule's and checked as one;
+/// only the 0 and "" a model fills in for a field it does not mean are none.
+#[tokio::test(flavor = "multi_thread")]
+async fn timing_given_is_checked_as_a_schedules() {
+    let m = FakeModel::start(model(|_, turn, c| {
+        let timed = |extra: Value| tool("suggest", suggestion(json!([{ "call": read_call(c), "shows": "You ask for it weekly." }]), extra));
+        match turn {
+            0 => tool("list_tasks", json!({})),
+            1 => timed(json!({ "every_minutes": -60 })),
+            2 => timed(json!({ "until": "2099-01-01T00:00:00Z" })),
+            3 => timed(json!({ "every_minutes": 0, "daily_at": " ", "until": "", "max_runs": 0 })),
+            _ => Reply::Text("Done.".into()),
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let text = "What could you do regularly?";
+    let (thread, _) = chat(&alice, text).await;
+    for turn in [2, 3] {
+        let r = request(&m, text, turn).last_results();
+        assert!(r[0].is_error && r[0].text.contains("every_minutes or daily_at"), "turn {turn}: {r:?}");
+    }
+    let card = wait_entry(&alice, &thread, |e| e["kind"] == "suggestion_card").await;
+    assert_eq!((&card["every_minutes"], &card["daily_at"], &card["until"], &card["max_runs"]), (&Value::Null, &Value::Null, &Value::Null, &Value::Null), "{card}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_schedule_card_is_a_suggestion_put_off_or_declined_with_a_reason() {
     let m = FakeModel::start(model(|said, turn, _| match (said, turn) {
