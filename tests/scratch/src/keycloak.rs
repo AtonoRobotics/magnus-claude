@@ -70,10 +70,23 @@ async fn admin_token(http: &reqwest::Client) -> String {
     r.json::<Value>().await.unwrap()["access_token"].as_str().unwrap().to_string()
 }
 
+/// How long a test waits for any one HTTP answer from Keycloak, the console
+/// or the appliance: a request that never answers fails its test, named,
+/// instead of holding it until the runner kills it at 600 s with nothing to
+/// say (#239). Two minutes is above every answer these servers give: the
+/// console's own calls to Keycloak time out at 30 s, and its slowest request
+/// (an invitation) makes three of them.
+pub const HTTP_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// An HTTP client for the tests that gives up after `HTTP_PATIENCE`.
+pub fn http() -> reqwest::Client {
+    reqwest::Client::builder().timeout(HTTP_PATIENCE).build().unwrap()
+}
+
 impl Keycloak {
     /// A new realm on the test Keycloak, with the client and the mappers.
     pub async fn start() -> Keycloak {
-        let http = reqwest::Client::new();
+        let http = http();
         let realm = format!("t{}", uuid::Uuid::new_v4().simple());
         let status_secret = uuid::Uuid::new_v4().simple().to_string();
         let mapper = |name: &str, kind: &str, config: Value| json!({ "name": name, "protocol": "openid-connect", "protocolMapper": kind, "config": config });
@@ -365,7 +378,7 @@ impl Keycloak {
     pub async fn app_sign_in(&self, app: &Appliance, username: &str) -> (u16, Value) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let redirect = format!("http://127.0.0.1:{}/callback", l.local_addr().unwrap().port());
-        let http = reqwest::Client::new();
+        let http = http();
         let begun: Value = http.post(format!("{}/v1/sign-in/browser", app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "redirect_uri": redirect, "client": "app" })).send().await.unwrap().json().await.unwrap();
         let page = begun["authorize_url"].as_str().unwrap_or_else(|| panic!("no sign-in page: {begun}")).to_string();
         let (back, browsed) = tokio::join!(loopback_once(l), self.browser(&page, username));
@@ -384,7 +397,7 @@ impl Keycloak {
     /// A username and password typed in the app, and the code if given. The
     /// appliance's answer.
     pub async fn app_password(&self, app: &Appliance, username: &str, password: &str, code: Option<&str>) -> (u16, Value) {
-        let r = reqwest::Client::new()
+        let r = http()
             .post(format!("{}/v1/sign-in", app.base))
             .header("x-magnus-app", "0.5.0")
             .json(&json!({ "person": username, "password": password, "code": code, "client": "app" }))
@@ -434,7 +447,7 @@ impl Drop for Keycloak {
         let _ = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(async move {
-                let http = reqwest::Client::new();
+                let http = http();
                 let token = admin_token(&http).await;
                 let _ = http.delete(format!("{}/admin/realms/{realm}", server_url())).bearer_auth(token).send().await;
             })
