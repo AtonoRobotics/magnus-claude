@@ -29,7 +29,7 @@ async fn browser_navigates_clicks_types_and_screenshots() {
     });
     let dir = tempfile::tempdir().unwrap();
     let b = Browser::new(
-        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium }),
+        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium, allow: vec!["127.0.0.1".into()] }),
         dir.path(),
     );
     let url = page_server().await;
@@ -57,7 +57,7 @@ async fn browser_snapshot_never_shows_a_secret_field_value() {
     });
     let dir = tempfile::tempdir().unwrap();
     let b = Browser::new(
-        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium }),
+        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium, allow: vec!["127.0.0.1".into()] }),
         dir.path(),
     );
     let url = page_server().await;
@@ -98,7 +98,7 @@ async fn browser_cannot_read_the_appliances_files_or_execute_a_navigation_script
     let canary = dir.path().join("private.txt");
     std::fs::write(&canary, "PRIVATE-HOST-FILE-CANARY").unwrap();
     let b = Browser::new(
-        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium }),
+        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium, allow: vec!["127.0.0.1".into()] }),
         dir.path(),
     );
     let url = page_server().await;
@@ -186,7 +186,7 @@ async fn closing_the_browser_closes_every_runs_pages_and_a_later_request_starts_
     });
     let dir = tempfile::tempdir().unwrap();
     let b = Browser::new(
-        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium }),
+        Some(config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium, allow: vec!["127.0.0.1".into()] }),
         dir.path(),
     );
     let url = page_server().await;
@@ -201,4 +201,208 @@ async fn closing_the_browser_closes_every_runs_pages_and_a_later_request_starts_
     }
     let v = b.request("r1", json!({ "op": "navigate", "url": url })).await.unwrap();
     assert!(v["text"].as_str().unwrap().contains("Welcome"), "{}", v["text"]);
+}
+
+// Where the browser may connect (#185). The sites below are on this machine;
+// on master the browser opened every one of them.
+
+fn sidecar(allow: &[String]) -> config::Browser {
+    let chromium = std::env::var("MAGNUS_CHROMIUM").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/ms-playwright/chromium-1234/chrome-linux64/chrome")
+    });
+    config::Browser { command: vec!["node".into(), root().join("browser/sidecar.js").to_string_lossy().into()], chromium, allow: allow.to_vec() }
+}
+
+/// A site on every address of this machine, IPv4 and IPv6, that counts
+/// each request it gets: what a page on the appliance's host or LAN is.
+async fn private_site() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let h = hits.clone();
+    let app = axum::Router::new().fallback(move || {
+        let h = h.clone();
+        async move {
+            h.fetch_add(1, Ordering::SeqCst);
+            axum::response::Html("<html><body><p>PRIVATE-CANARY</p></body></html>")
+        }
+    });
+    let l = tokio::net::TcpListener::bind("[::]:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (port, hits)
+}
+
+/// A site the owner allows (`[browser] allow = ["127.0.0.1:<port>"]`),
+/// standing in for a public one, that sends the browser on to `private`.
+async fn allowed_site(private: u16) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use axum::{response::Html, routing::get, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let done = std::sync::Arc::new(AtomicUsize::new(0));
+    let d = done.clone();
+    let subrequests = format!(
+        "<html><body><h1>Subrequests</h1>\
+         <img src='http://127.0.0.1:{private}/img'><iframe src='http://localhost:{private}/frame'></iframe>\
+         <script>Promise.all([\
+           fetch('http://127.0.0.1:{private}/fetch', {{ mode: 'no-cors' }}).catch(() => {{}}),\
+           new Promise(r => {{ const w = new WebSocket('ws://127.0.0.1:{private}/ws'); w.onopen = w.onerror = w.onclose = r; }}),\
+           new Promise(r => {{ const i = new Image(); i.onload = i.onerror = r; i.src = 'http://[::ffff:127.0.0.1]:{private}/mapped'; }}),\
+         ]).then(() => fetch('/done'));</script></body></html>"
+    );
+    let app = Router::new()
+        .route("/", get(|| async { Html("<html><body><h1>Allowed page</h1></body></html>") }))
+        .route("/redirect", get(move || async move { axum::response::Redirect::temporary(&format!("http://127.0.0.1:{private}/secret")) }))
+        .route("/subrequests", get(move || async move { Html(subrequests) }))
+        .route(
+            "/done",
+            get(move || async move {
+                d.fetch_add(1, Ordering::SeqCst);
+                ""
+            }),
+        );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (url, done)
+}
+
+async fn refused(b: &Browser, url: &str) {
+    match b.request("r1", json!({ "op": "navigate", "url": url })).await {
+        Ok(v) => panic!("the browser opened {url}: {}", v["text"]),
+        Err(e) => assert!(e.to_string().contains("opens only public websites"), "{url} was not refused as a private address: {e}"),
+    }
+}
+
+/// This machine's name, which resolves to its own (non-public) addresses.
+async fn own_name(port: u16) -> (String, Vec<std::net::IpAddr>) {
+    let name = String::from_utf8(std::process::Command::new("hostname").output().unwrap().stdout).unwrap().trim().to_string();
+    let ips = tokio::net::lookup_host((name.as_str(), port)).await.unwrap().map(|a| a.ip()).collect();
+    (name, ips)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_browser_refuses_loopback_however_it_is_written_including_mapped_ipv4() {
+    let (port, hits) = private_site().await;
+    let dir = tempfile::tempdir().unwrap();
+    let b = Browser::new(Some(sidecar(&[])), dir.path());
+    for host in [
+        "localhost",
+        "LocalHost.",
+        "127.0.0.1",
+        "127.1",
+        "2130706433",
+        "127.9.9.9",
+        "[::1]",
+        "0.0.0.0",
+        "[::]",
+        "[::ffff:127.0.0.1]",
+        "[::ffff:7f00:1]",
+        "[0:0:0:0:0:ffff:127.0.0.1]",
+    ] {
+        refused(&b, &format!("http://{host}:{port}/")).await;
+    }
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "a loopback page was fetched");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_browser_refuses_metadata_link_local_and_private_network_addresses() {
+    let (port, hits) = private_site().await;
+    let dir = tempfile::tempdir().unwrap();
+    let b = Browser::new(Some(sidecar(&[])), dir.path());
+    // This machine's own LAN address first: a private address that answers.
+    let (_, ips) = own_name(port).await;
+    let lan: Vec<String> = ips.iter().filter(|ip| matches!(ip, std::net::IpAddr::V4(v) if v.is_private())).map(|ip| ip.to_string()).collect();
+    for host in lan.iter().map(String::as_str).chain([
+        "169.254.169.254",
+        "[::ffff:169.254.169.254]",
+        "[fe80::1]",
+        "10.0.0.1",
+        "172.16.0.1",
+        "192.168.1.1",
+        "[::ffff:192.168.1.1]",
+        "[fd00::1]",
+        "100.64.0.1",
+    ]) {
+        refused(&b, &format!("http://{host}:{port}/")).await;
+        refused(&b, &format!("https://{host}/")).await;
+    }
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "a LAN page was fetched");
+}
+
+/// DNS rebinding's target: a name, not an address, that resolves to a
+/// private address is judged by that address. The owner can allow it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_resolving_to_a_private_address_is_refused_unless_the_owner_allows_it() {
+    use std::sync::atomic::Ordering;
+    let (port, hits) = private_site().await;
+    let (name, ips) = own_name(port).await;
+    assert!(!ips.is_empty(), "{name} does not resolve");
+    let dir = tempfile::tempdir().unwrap();
+    let b = Browser::new(Some(sidecar(&[])), dir.path());
+    refused(&b, &format!("http://{name}:{port}/")).await;
+    refused(&b, &format!("http://rebind.localhost:{port}/")).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "{name} ({ips:?}) was fetched");
+
+    let dir = tempfile::tempdir().unwrap();
+    let b = Browser::new(Some(sidecar(&[format!("{name}:{port}")])), dir.path());
+    let v = b.request("r1", json!({ "op": "navigate", "url": format!("http://{name}:{port}/") })).await.unwrap();
+    assert!(v["text"].as_str().unwrap().contains("PRIVATE-CANARY"), "{}", v["text"]);
+    // Allowing the name allows that site, not every private address.
+    refused(&b, &format!("http://127.0.0.1:{port}/")).await;
+    b.close("r1").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allowed_sites_redirect_to_a_private_address_is_refused() {
+    let (port, hits) = private_site().await;
+    let (site, _) = allowed_site(port).await;
+    let dir = tempfile::tempdir().unwrap();
+    let b = Browser::new(Some(sidecar(&[site.trim_start_matches("http://").to_string()])), dir.path());
+    let v = b.request("r1", json!({ "op": "navigate", "url": site })).await.unwrap();
+    assert!(v["text"].as_str().unwrap().contains("Allowed page"), "{}", v["text"]);
+    refused(&b, &format!("{site}/redirect")).await;
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "the redirect reached the private address");
+    b.close("r1").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allowed_pages_images_frames_fetches_and_websockets_never_reach_a_private_address() {
+    use std::sync::atomic::Ordering;
+    let (port, hits) = private_site().await;
+    let (site, done) = allowed_site(port).await;
+    let dir = tempfile::tempdir().unwrap();
+    let b = Browser::new(Some(sidecar(&[site.trim_start_matches("http://").to_string()])), dir.path());
+    let v = b.request("r1", json!({ "op": "navigate", "url": format!("{site}/subrequests") })).await.unwrap();
+    assert!(v["text"].as_str().unwrap().contains("Subrequests"), "{}", v["text"]);
+    for _ in 0..200 {
+        if done.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(done.load(Ordering::SeqCst) > 0, "the page's subrequests never settled");
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "the page's subrequests reached the private address");
+    b.close("r1").await;
+}
+
+/// Public addresses are websites; the special-purpose ranges are not, in
+/// either IP version or written as IPv6.
+#[test]
+fn public_addresses_are_websites_and_special_purpose_ones_are_not() {
+    let public = ["8.8.8.8", "1.1.1.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8"];
+    let not_public = [
+        "127.0.0.1", "::1", "::ffff:127.0.0.1", "0.0.0.0", "::", "169.254.169.254", "fe80::1", "10.1.2.3", "172.16.0.1",
+        "172.31.255.255", "192.168.1.1", "fd00::1", "fc00::1", "100.64.0.1", "224.0.0.1", "255.255.255.255", "198.18.0.1",
+        "192.0.2.1", "2001:db8::1", "64:ff9b::a00:1", "2002:7f00:1::", "::ffff:10.0.0.1", "::ffff:169.254.169.254",
+    ];
+    let script = format!(
+        "const {{ notPublic }} = require({:?}); console.log(JSON.stringify(process.argv.slice(1).map(ip => [ip, notPublic(ip)])))",
+        root().join("browser/destinations.js")
+    );
+    let out = std::process::Command::new("node").arg("-e").arg(&script).args(public).args(not_public).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let judged: Vec<(String, Option<String>)> = serde_json::from_slice(&out.stdout).unwrap();
+    for (ip, why) in judged {
+        assert_eq!(why.is_none(), public.contains(&ip.as_str()), "{ip}: {why:?}");
+    }
 }

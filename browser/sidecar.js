@@ -6,11 +6,15 @@
 const net = require('net');
 const fs = require('fs');
 const { chromium } = require('playwright-core');
+const { policy } = require('./destinations');
 
 const arg = n => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : undefined; };
 const socket = arg('--socket');
 const executablePath = process.env.MAGNUS_CHROMIUM;
-if (!socket || !executablePath) { console.error('usage: MAGNUS_CHROMIUM=<chrome> node sidecar.js --socket <path>'); process.exit(2); }
+if (!socket || !executablePath) { console.error('usage: MAGNUS_CHROMIUM=<chrome> node sidecar.js --socket <path> [--allow <site>]...'); process.exit(2); }
+// Internal sites the owner allows (`[browser] allow`); see destinations.js.
+const destinations = policy(process.argv.flatMap((a, i) => a === '--allow' ? [process.argv[i + 1]] : []));
+const egress = destinations.proxy();
 
 let browser; // a promise of the launched browser, while one is open
 const runs = new Map(); // run -> { context, page }
@@ -41,7 +45,14 @@ async function page(run) {
   const at = epoch;
   if (!browser) {
     // A launch that fails is tried again on the next request.
-    const launching = chromium.launch({ executablePath, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+    // Every connection Chromium makes goes through the egress proxy, loopback
+    // included (Playwright adds `<-loopback>` to the bypass list); WebRTC may
+    // not send UDP around it.
+    const launching = chromium.launch({
+      executablePath,
+      args: ['--no-sandbox', '--disable-dev-shm-usage', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'],
+      proxy: { server: `http://127.0.0.1:${egress.address().port}` },
+    });
     browser = launching;
     launching.catch(() => { if (browser === launching) browser = undefined; });
   }
@@ -116,11 +127,13 @@ async function handle(req) {
     if (b) await b.then(x => x.close()).catch(() => {});
     return { ok: true };
   }
-  if (op === 'navigate') website(req.url);
+  if (op === 'navigate') { website(req.url); await destinations.check(req.url); }
   const p = await page(run);
   switch (op) {
     case 'navigate': {
       const resp = await p.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      // A redirect the proxy refused ends on its refusal.
+      if (resp && resp.headers()['x-magnus-refused']) throw new Error(await resp.text());
       await p.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
       return { status: resp ? resp.status() : null, text: await snapshot(p) };
     }
@@ -139,7 +152,7 @@ async function handle(req) {
 }
 
 try { fs.unlinkSync(socket); } catch {}
-net.createServer(conn => {
+egress.listen(0, '127.0.0.1', () => net.createServer(conn => {
   let buf = '';
   conn.on('data', async d => {
     buf += d.toString();
@@ -150,4 +163,4 @@ net.createServer(conn => {
     try { out = await handle(JSON.parse(line)); } catch (e) { out = { error: String(e && e.message || e).split('\n')[0] }; }
     conn.end(JSON.stringify(out) + '\n');
   });
-}).listen(socket, () => console.error('browser sidecar listening'));
+}).listen(socket, () => console.error('browser sidecar listening')));

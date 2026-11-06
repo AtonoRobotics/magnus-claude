@@ -36,6 +36,9 @@ impl Browser {
         let _ = std::fs::remove_file(&self.socket);
         let mut cmd = Command::new(&cfg.command[0]);
         cmd.args(&cfg.command[1..]).arg("--socket").arg(&self.socket);
+        for site in &cfg.allow {
+            cmd.arg("--allow").arg(site);
+        }
         cmd.env_clear().env("PATH", std::env::var("PATH").unwrap_or_default()).env("MAGNUS_CHROMIUM", &cfg.chromium);
         if let Ok(h) = std::env::var("HOME") {
             cmd.env("HOME", h);
