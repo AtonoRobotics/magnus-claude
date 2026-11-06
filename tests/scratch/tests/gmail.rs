@@ -139,6 +139,46 @@ async fn gmail_sends_a_draft_only_once_the_person_approves_it_reaching_only_gmai
     only_gmail(&app, &gmail, &provider);
 }
 
+/// An approved send whose task is cancelled while the gate reads the draft
+/// again sends nothing: once the read is answered, the run is read live,
+/// before the call goes out and again once it has its microVM (#187).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_send_whose_task_is_cancelled_while_the_gate_reads_the_draft_sends_nothing() {
+    let gmail = StandInGmail::with_drafts(1).await;
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("send Bob the draft I wrote him", "Bob has it"),
+            1 => tool("gmail__send_draft", json!({ "draft_id": "d1" })),
+            _ => complete("sent Bob your draft"),
+        }
+    }))
+    .await;
+    let (app, _provider, _image) = gmail_for_alice(&m, &gmail).await;
+    let alice = app.api("alice");
+
+    let task = alice.submit("Send Bob the draft I wrote him.").await;
+    let (ask, tool) = asked(&alice, &task).await;
+    assert_eq!(tool, "send_draft");
+    let read = gmail.hold_draft_read();
+    approve(&alice, &ask).await;
+    tokio::time::timeout(PATIENCE, read.received()).await.expect("the gate never read the draft again");
+    let (st, v) = alice.post(&format!("/v1/tasks/{task}/cancel"), json!({})).await;
+    assert!(st.is_success(), "cancel: {st} {v}");
+    alice.wait_status(&task, &["cancelled"]).await;
+    read.release();
+
+    let send = eventually("the send has a result", PATIENCE, || async {
+        let (_, t) = alice.get(&format!("/v1/tasks/{task}/timeline")).await;
+        t["steps"].as_array()?.iter().flat_map(|s| s["calls"].as_array().cloned().unwrap_or_default()).find(|c| c["tool"] == "gmail__send_draft" && !c["status"].is_null())
+    })
+    .await;
+    let get = ("GET".to_string(), "/drafts/d1".to_string());
+    assert_eq!(calls(&gmail), [get.clone(), get], "a cancelled task's send reached Gmail: {send}");
+    assert_eq!(send["status"], "failed", "{send}");
+    assert!(send["result"].as_str().is_some_and(|t| t.contains("was not sent") && t.contains("cancelled")), "{send}");
+    assert_eq!(alice.task(&task).await["status"], "cancelled");
+}
+
 /// Having read her mail (private, and written by others), Magnus labels the
 /// thread and writes the draft without asking: they stay in her own account
 /// and reach no one (approvals spec, Email end to end). It asks once, before
