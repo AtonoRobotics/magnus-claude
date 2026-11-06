@@ -76,9 +76,10 @@ for (const [name, look] of LOOKS) {
   await page.locator(`[data-open="task:${task}"]`).first().click();
   await page.locator("aside.detail").waitFor({ timeout: T });
   await page.locator("iframe.composed").first().waitFor({ timeout: T });
-  await page.waitForTimeout(800);
-  await shoot(page, `app-${name}.png`);
-  const got = await page.evaluate(() => {
+  // Measured again until every part is drawn: a live update redraws the
+  // panel, and one measured mid-redraw found none of its parts (#250, run
+  // 42169676436). A part still missing after T is reported as not drawn.
+  const measure = () => page.evaluate(() => {
     const cs = (sel, prop, root = document) => { const e = root.querySelector(sel); return e ? getComputedStyle(e)[prop] : null; };
     const frame = document.querySelector("aside.detail iframe.composed")?.contentDocument;
     return {
@@ -108,6 +109,14 @@ for (const [name, look] of LOOKS) {
       frameBg: frame && cs("body", "backgroundColor", frame),
     };
   });
+  const missing = got => Object.values(got).some(v => v == null);
+  const until = Date.now() + T;
+  let got = await measure();
+  while (missing(got) && Date.now() < until) {
+    await page.waitForTimeout(250);
+    got = await measure();
+  }
+  await shoot(page, `app-${name}.png`);
   const r = REF[name];
   for (const [what, key, want] of [["the text", "body", r.text], ["the sidebar", "side", r.side], ["the task panel", "panel", r.panel],
     ["the conversation", "main", r.main], ["the search field", "search", r.search], ["the tabs' track", "seg", r.seg],

@@ -106,3 +106,12 @@ async fn each_look_draws_the_workspace_as_the_references_do() {
     assert!(out.status.success(), "the looks differ from the references:\n{log}");
     println!("{log}");
 }
+
+/// Each look is measured again until every part it checks is drawn, not
+/// once after a fixed pause: a live update redrawing the task panel left
+/// the light-solid look with none of its parts on run 42169676436 (#250).
+#[test]
+fn each_look_is_measured_once_every_part_is_drawn() {
+    let src = std::fs::read_to_string(workspace_root().join("desktop/tests/looks.mjs")).unwrap();
+    assert!(src.contains("while (missing(got) && Date.now() < until)"), "looks.mjs measures each look once, after a fixed pause");
+}
