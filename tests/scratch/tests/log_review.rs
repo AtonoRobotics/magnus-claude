@@ -151,3 +151,65 @@ async fn migrate_leaves_the_kernel_role_unable_to_change_the_log() {
     let err = magnus::log::migrate(&db.admin_url(), &db.kernel_url(), None).await.expect_err("migrate left a role that can change the log");
     assert!(format!("{err:#}").contains("change the log"), "{err:#}");
 }
+
+/// A role made beforehand with NOINHERIT holds nothing through its
+/// memberships until it switches to one with SET ROLE, so it passed the
+/// check above and could then change the log (#186). `migrate` refuses any
+/// membership the role can switch to, directly or through roles in between,
+/// that can change the log or holds what the kernel's role is stripped of;
+/// once the membership is taken away, no role the kernel can switch to can
+/// change or delete the log.
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_refuses_a_kernel_role_that_can_set_role_to_change_the_log() {
+    // Directly, to pg_write_all_data; through a role in between; to a superuser.
+    for (setup, named) in [
+        ("GRANT pg_write_all_data TO {k}", "pg_write_all_data"),
+        ("CREATE ROLE {k}_mid NOLOGIN; GRANT pg_write_all_data TO {k}_mid; GRANT {k}_mid TO {k}", "pg_write_all_data"),
+        ("CREATE ROLE {k}_su NOLOGIN SUPERUSER; GRANT {k}_su TO {k}", "{k}_su"),
+    ] {
+        let db = pg::TestDb::create().await;
+        let k = db.kernel_role.clone();
+        let (setup, named) = (setup.replace("{k}", &k), named.replace("{k}", &k));
+        let admin = db.admin().await;
+        admin.batch_execute(&format!("CREATE ROLE {k} LOGIN NOINHERIT PASSWORD 'x'; {setup}")).await.unwrap();
+        let err = magnus::log::migrate(&db.admin_url(), &db.kernel_url(), None)
+            .await
+            .expect_err(&format!("migrate left a NOINHERIT role that can SET ROLE to {named} and change the log ({setup})"));
+        let msg = format!("{err:#}");
+        assert!(msg.contains("change the log") && msg.contains(&named), "the refusal does not name {named}: {msg}");
+
+        // The route is real: the kernel, switching role, changes the log.
+        admin.execute("INSERT INTO public.events (kind, actor, body) VALUES ('x', 'test', '{}')", &[]).await.unwrap();
+        let kernel = db.as_kernel().await;
+        kernel.batch_execute(&format!("SET ROLE {named}")).await.unwrap();
+        kernel.execute("UPDATE public.events SET kind = 'y'", &[]).await.expect("the test needs the route to the log to be real");
+    }
+
+    // Taken away as the refusal says, migrate passes, and no role the
+    // kernel can switch to can change or delete the log.
+    let db = pg::TestDb::create().await;
+    let k = db.kernel_role.clone();
+    let admin = db.admin().await;
+    admin.batch_execute(&format!("CREATE ROLE {k} LOGIN NOINHERIT PASSWORD 'x'; GRANT pg_write_all_data TO {k}")).await.unwrap();
+    magnus::log::migrate(&db.admin_url(), &db.kernel_url(), None).await.expect_err("migrate refuses the membership");
+    admin.batch_execute(&format!("REVOKE pg_write_all_data FROM {k}")).await.unwrap();
+    magnus::log::migrate(&db.admin_url(), &db.kernel_url(), None).await.expect("migrate");
+    let kernel = db.as_kernel().await;
+    kernel.execute("INSERT INTO public.events (kind, actor, body) VALUES ('x', 'test', '{}')", &[]).await.unwrap();
+    assert!(kernel.batch_execute("SET ROLE pg_write_all_data").await.is_err(), "the kernel can still switch to pg_write_all_data");
+    let settable: Vec<String> = kernel
+        .query("SELECT rolname FROM pg_roles WHERE pg_has_role(current_user, oid, 'SET') ORDER BY rolname", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert!(settable.len() > 1, "the kernel's role is a member of its readers: {settable:?}");
+    for r in &settable {
+        kernel.batch_execute(&format!("SET ROLE \"{r}\"")).await.unwrap();
+        assert!(kernel.execute("UPDATE public.events SET kind = 'y'", &[]).await.is_err(), "as {r} the kernel can change the log");
+        assert!(kernel.execute("DELETE FROM public.events", &[]).await.is_err(), "as {r} the kernel can delete from the log");
+        assert!(kernel.batch_execute("TRUNCATE public.events").await.is_err(), "as {r} the kernel can empty the log");
+        kernel.batch_execute("RESET ROLE").await.unwrap();
+    }
+}

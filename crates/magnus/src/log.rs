@@ -97,13 +97,42 @@ pub async fn migrate(admin_url: &str, kernel_url: &str, root_url: Option<&str>) 
     // Append-only is the database's to enforce: whatever grants or
     // memberships the role holds (pg_write_all_data, owning the table, a
     // role that does), it must not be able to change or delete the log.
+    // A membership counts whether or not the role inherits it: a NOINHERIT
+    // role holds nothing through it until it switches to it with SET ROLE
+    // (#186). So every role it is a member of, directly or through others,
+    // itself included, is checked as if the kernel were that role: none may
+    // change the log, hold what the kernel was stripped of above, or reach
+    // the server's files and programs (Postgres documents those three roles
+    // as a way to superuser). Memberships are refused, not revoked, as an
+    // inherited one always was: they were given on purpose by someone, and
+    // taking them away is theirs to decide.
     let can: Vec<String> = admin
-        .query("SELECT p FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE']) p WHERE has_table_privilege($1, 'public.events', p)", &[&role])
+        .query(
+            "SELECT rolname || ': ' || array_to_string(rights, ', ') FROM (
+                SELECT r.rolname, array_remove(ARRAY[
+                    CASE WHEN has_table_privilege(r.oid, 'public.events', 'UPDATE') THEN 'UPDATE' END,
+                    CASE WHEN has_table_privilege(r.oid, 'public.events', 'DELETE') THEN 'DELETE' END,
+                    CASE WHEN has_table_privilege(r.oid, 'public.events', 'TRUNCATE') THEN 'TRUNCATE' END,
+                    CASE WHEN r.rolsuper THEN 'SUPERUSER' END,
+                    CASE WHEN r.rolcreatedb THEN 'CREATEDB' END,
+                    CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END,
+                    CASE WHEN r.rolreplication THEN 'REPLICATION' END,
+                    CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END,
+                    CASE WHEN r.rolname IN ('pg_read_server_files', 'pg_write_server_files', 'pg_execute_server_program') THEN 'server files' END
+                ], NULL) AS rights
+                FROM pg_roles r WHERE pg_has_role($1, r.oid, 'MEMBER')
+             ) m WHERE cardinality(rights) > 0 ORDER BY rolname",
+            &[&role],
+        )
         .await?
         .iter()
         .map(|r| r.get(0))
         .collect();
-    anyhow::ensure!(can.is_empty(), "the kernel's role {role} can change the log ({}), through a grant or a role it is a member of; take that away and run migrate again", can.join(", "));
+    anyhow::ensure!(
+        can.is_empty(),
+        "the kernel's role {role} can change the log or act past its grants ({}), through a grant or a role it is a member of, inherited or by SET ROLE; take that away and run migrate again",
+        can.join("; ")
+    );
     if let Some(root) = root_url {
         migrate_root(&admin, root, &db).await.context("the admin console's database role")?;
     }
