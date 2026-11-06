@@ -13,6 +13,15 @@
 // was reported, is loaded again. Any other failure is the test's to report
 // at once, naming the request's own error, and a network that never settles
 // fails after `tries` loads.
+//
+// Playwright can reject the load before it reports the request's failure,
+// or not report it at all: master's run 42164847174 failed this way, and
+// the failed step's screenshot showed the console loaded, Chrome having
+// reloaded its error page by itself (#248). So after Chrome's error page the
+// failure is waited for, briefly; when nothing names a cause, the page is
+// loaded again too, within the same `tries`.
+const CHROME_ERROR = "chrome-error://chromewebdata/";
+export const LATE_FAILURE_MS = 2000;
 export async function goto(page, url, tries = 3) {
   for (let i = 1; ; i++) {
     let failed = "";
@@ -26,9 +35,12 @@ export async function goto(page, url, tries = 3) {
       return await page.goto(url);
     } catch (e) {
       const said = String(e?.message ?? e);
+      const errorPage = said.includes(CHROME_ERROR);
+      for (let waited = 0; errorPage && !failed && waited < LATE_FAILURE_MS; waited += 50) await new Promise(r => setTimeout(r, 50));
       const changed = said.includes("net::ERR_NETWORK_CHANGED") || failed.includes("net::ERR_NETWORK_CHANGED");
-      if (i < tries && changed) continue;
+      if (i < tries && (changed || (errorPage && !failed))) continue;
       if (failed && !said.includes(failed) && e instanceof Error) e.message += ` (the page's request failed: ${failed})`;
+      else if (errorPage && !failed && e instanceof Error) e.message += ` (the page's request named no failure in ${LATE_FAILURE_MS} ms, after ${i} loads)`;
       throw e;
     } finally {
       page.off?.("requestfailed", watch);
