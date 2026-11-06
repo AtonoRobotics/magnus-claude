@@ -108,13 +108,18 @@ pub async fn detail(State(c): State<Arc<Console>>, Path(id): Path<String>) -> Re
     Json(p).into_response()
 }
 
-/// The last admin turned on cannot lose the role or be turned off.
-async fn last_admin(c: &Console, id: &str) -> Result<(), Response> {
+/// The last admin turned on cannot lose the role, be turned off or go.
+/// The check takes the console's one guard for changes that can take an
+/// admin away and reads the admins from the provider under it; the caller
+/// keeps the guard it returns until the provider has made the change, so
+/// two such changes never both see an admin to spare (#192).
+async fn last_admin<'a>(c: &'a Console, id: &str) -> Result<tokio::sync::MutexGuard<'a, ()>, Response> {
+    let held = c.admin_removals.lock().await;
     let on = c.directory.admins(&c.idp, &c.key, false).await.map_err(failed)?;
     if on.iter().any(|a| a == id) && on.len() <= 1 {
         return Err(refuse(StatusCode::CONFLICT, "last_admin", "This is the organisation's last admin: make someone else an admin first."));
     }
-    Ok(())
+    Ok(held)
 }
 
 fn role_of(b: &Value) -> Option<bool> {
@@ -174,11 +179,15 @@ pub async fn update(State(c): State<Arc<Console>>, Extension(a): Extension<Admin
     if is_admin == to_admin {
         return StatusCode::NO_CONTENT.into_response();
     }
-    if !to_admin {
-        if let Err(r) = last_admin(&c, &id).await {
-            return r;
+    // Held until the role has changed at the provider.
+    let _held = if to_admin {
+        None
+    } else {
+        match last_admin(&c, &id).await {
+            Ok(g) => Some(g),
+            Err(r) => return r,
         }
-    }
+    };
     let role = |admin: bool| json!({ "role": if admin { "admin" } else { "member" } });
     match recorded(&c, &a, "user_role_changed", &id, Some(role(is_admin)), Some(role(to_admin)), async {
         c.directory.set_admin(&c.idp, &c.key, &id, to_admin).await?;
@@ -197,9 +206,11 @@ pub async fn disable(State(c): State<Arc<Console>>, Extension(a): Extension<Admi
     if let Err(r) = one(&c, &id).await {
         return r;
     }
-    if let Err(r) = last_admin(&c, &id).await {
-        return r;
-    }
+    // Held until they are turned off at the provider.
+    let _held = match last_admin(&c, &id).await {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
     let r = recorded(&c, &a, "user_disabled", &id, Some(json!({ "enabled": true })), Some(json!({ "enabled": false })), async {
         c.directory.set_enabled(&c.idp, &c.key, &id, false).await?;
         c.directory.sign_out(&c.idp, &c.key, &id).await?;
@@ -289,11 +300,12 @@ pub async fn cancel(State(c): State<Arc<Console>>, Extension(a): Extension<Admin
         Ok(p) => p,
         Err(r) => return r,
     };
-    if p["role"] == "admin" {
-        if let Err(r) = last_admin(&c, &id).await {
-            return r;
-        }
-    }
+    // An admin's invitation counts as an admin turned on, and the role is
+    // read again under the guard: held until the account has gone.
+    let _held = match last_admin(&c, &id).await {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
     match recorded(&c, &a, "user_invite_cancelled", &id, Some(json!({ "email": p["email"], "role": p["role"] })), None, async {
         c.directory.delete(&c.idp, &c.key, &id).await?;
         Ok(Value::Null)
@@ -374,9 +386,11 @@ pub async fn delete(State(c): State<Arc<Console>>, Extension(a): Extension<Admin
     if id == a.session.sub {
         return refuse(StatusCode::CONFLICT, "self", "You cannot delete yourself: another admin can.");
     }
-    if let Err(r) = last_admin(&c, &id).await {
-        return r;
-    }
+    // Held until their account has gone at the provider.
+    let _held = match last_admin(&c, &id).await {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
     let before = json!({ "name": p["name"], "email": p["email"], "role": p["role"] });
     let body = json!({ "actor": actor(&a) });
     let r = recorded(&c, &a, "user_deleted", &id, Some(before), None, async {

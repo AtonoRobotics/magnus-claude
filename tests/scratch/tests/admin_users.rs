@@ -24,6 +24,11 @@ struct Setup {
 
 impl Setup {
     async fn start(step_up_seconds: i64, people: &[&str]) -> Setup {
+        Setup::start_with(step_up_seconds, people, &[]).await
+    }
+
+    /// With more of the console's settings (`refresh_seconds`, say).
+    async fn start_with(step_up_seconds: i64, people: &[&str], more: &[(&str, toml::Value)]) -> Setup {
         let kc = Keycloak::start().await;
         kc.add_person("Alice").await;
         kc.set_roles("Alice", &["admin"]).await;
@@ -34,7 +39,9 @@ impl Setup {
         let mut app = Appliance::start(Spec::default(), &m).await;
         kc.configure(&mut app).await;
         let mine = format!("{}/32", lan_ip());
-        let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", step_up_seconds.into())]);
+        let mut settings = vec![("issuer", kc.issuer.clone().into()), ("step_up_seconds", step_up_seconds.into())];
+        settings.extend(more.iter().cloned());
+        let p = prepare(&app, &[&mine], &settings);
         let jwks = p.jwks().await;
         kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &jwks).await;
         kc.add_admin_service("magnus-admin-svc", &jwks).await;
@@ -242,5 +249,46 @@ async fn the_last_admin_stays_and_a_person_turned_off_loses_every_session_and_sc
     let actions = s.audited(&alice).await;
     for a in ["user_role_changed", "user_disabled", "user_enabled", "user_sessions_ended", "user_session_ended"] {
         assert!(actions.iter().any(|x| x == a), "{a} is not in the audit: {actions:?}");
+    }
+}
+
+/// Issue #192: two changes aimed at the last two admins, sent together,
+/// each demoting or turning off one of them. The console lets one through
+/// and refuses the other, whatever the timing: at least one admin turned on
+/// is left. Each round sends both at the same moment (a barrier); the
+/// rounds cover every pairing of demote and turn off.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_changes_at_once_never_take_away_the_last_admin() {
+    // Alice's console session outlives her losing the role in a round.
+    let s = Setup::start_with(600, &["Bob"], &[("refresh_seconds", 3600.into())]).await;
+    let alice = s.alice(true).await;
+    let list = s.users(&alice).await;
+    let id = |email: &str| list.iter().find(|u| u["email"] == email).unwrap()["id"].as_str().unwrap().to_string();
+    let (a_id, b_id) = (id("alice@example.test"), id("bob@example.test"));
+    let demote = |id: &str| (reqwest::Method::PATCH, format!("/users/{id}"), Some(json!({ "role": "member" })));
+    let turn_off = |id: &str| (reqwest::Method::POST, format!("/users/{id}/disable"), None);
+    let pairs = [("demote both", demote(&a_id), demote(&b_id)), ("turn both off", turn_off(&a_id), turn_off(&b_id)), ("demote Alice, turn Bob off", demote(&a_id), turn_off(&b_id)), ("turn Alice off, demote Bob", turn_off(&a_id), demote(&b_id))];
+    for round in 0..12 {
+        let (what, one, two) = pairs[round % pairs.len()].clone();
+        // Both are admins and turned on again.
+        for who in ["Alice", "Bob"] {
+            s.kc.set_roles(who, &["admin"]).await;
+            s.kc.enable(who).await;
+        }
+        assert_eq!(s.kc.enabled_with_role("admin").await.len(), 2, "round {round}: two admins to start with");
+        let gate = tokio::sync::Barrier::new(2);
+        let go = |(method, path, body): (reqwest::Method, String, Option<Value>)| {
+            let (gate, alice, s) = (&gate, &alice, &s);
+            async move {
+                gate.wait().await;
+                s.send(method, &path, alice, body).await
+            }
+        };
+        let (r1, r2) = tokio::join!(go(one), go(two));
+        let left = s.kc.enabled_with_role("admin").await;
+        assert!(!left.is_empty(), "round {round} ({what}): both changes went through and no admin is left: {r1:?} {r2:?}");
+        let refused = [&r1, &r2].iter().filter(|(st, v)| *st == StatusCode::CONFLICT && v["error"] == "last_admin").count();
+        let done = [&r1, &r2].iter().filter(|(st, _)| st.is_success()).count();
+        assert_eq!((done, refused), (1, 1), "round {round} ({what}): one change goes through and the other is refused: {r1:?} {r2:?}");
     }
 }
