@@ -15,6 +15,13 @@ pub struct Web {
 }
 
 fn private_ip(ip: IpAddr) -> bool {
+    // An IPv4 address written as IPv6 (`::ffff:a.b.c.d`) is reached as that
+    // IPv4 address, so it is judged as one (#196).
+    if let IpAddr::V6(v) = ip {
+        if let Some(v4) = v.to_ipv4_mapped() {
+            return private_ip(IpAddr::V4(v4));
+        }
+    }
     match ip {
         IpAddr::V4(v) => v.is_private() || v.is_loopback() || v.is_link_local() || v.is_unspecified() || v.is_broadcast() || v.octets()[0] == 100 && (64..128).contains(&v.octets()[1]),
         IpAddr::V6(v) => v.is_loopback() || v.is_unspecified() || (v.segments()[0] & 0xfe00) == 0xfc00 || (v.segments()[0] & 0xffc0) == 0xfe80,
@@ -49,7 +56,13 @@ impl Web {
         }
         let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?.to_string();
         let port = url.port_or_known_default().unwrap_or(443);
-        let addrs: Vec<_> = tokio::net::lookup_host((host.as_str(), port)).await?.collect();
+        // An address written in the URL is that address (`host_str` keeps an
+        // IPv6 one's brackets, which no resolver takes); a name is resolved.
+        let addrs: Vec<std::net::SocketAddr> = match url.host() {
+            Some(url::Host::Ipv4(ip)) => vec![(IpAddr::V4(ip), port).into()],
+            Some(url::Host::Ipv6(ip)) => vec![(IpAddr::V6(ip), port).into()],
+            _ => tokio::net::lookup_host((host.as_str(), port)).await?.collect(),
+        };
         anyhow::ensure!(!addrs.is_empty(), "{host} does not resolve");
         for a in &addrs {
             anyhow::ensure!(!private_ip(a.ip()), "{host} resolves to a private address; fetching it is not allowed");
@@ -140,5 +153,46 @@ impl Web {
             out = "no results".into();
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server on this machine's loopback that answers "ok".
+    async fn local() -> u16 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut s, _)) = l.accept().await {
+                let mut b = [0u8; 2048];
+                let _ = s.read(&mut b).await;
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await;
+            }
+        });
+        port
+    }
+
+    fn web(allow_private_networks: bool) -> Web {
+        Web::new(&crate::config::Web { allow_private_networks, search_url: None })
+    }
+
+    /// An IPv4 address written as IPv6 (`::ffff:a.b.c.d`) is that IPv4
+    /// address: loopback, private and the metadata service stay out of
+    /// reach however they are written (#196).
+    #[tokio::test]
+    async fn a_mapped_ipv4_address_is_refused_like_the_address_it_maps() {
+        let port = local().await;
+        let url = format!("http://[::ffff:127.0.0.1]:{port}/");
+        let refused = web(false).fetch(&url).await.expect_err("the mapped loopback address was fetched");
+        assert!(refused.to_string().contains("private address"), "{refused}");
+        let (text, _) = web(true).fetch(&url).await.expect("a test appliance allows private networks");
+        assert!(text.ends_with("ok"), "{text}");
+        for a in ["::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:169.254.169.254", "::ffff:192.168.1.1", "::ffff:100.64.0.1"] {
+            assert!(private_ip(a.parse().unwrap()), "{a}");
+        }
+        assert!(!private_ip("::ffff:93.184.216.34".parse().unwrap()), "a public IPv4 address, mapped");
     }
 }
