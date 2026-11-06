@@ -141,6 +141,10 @@ fn line(id: &str, who: &str, w: &Wording, by: Option<&str>, late: bool, label: L
     s
 }
 
+
+/// Held while a commitment is checked and recorded.
+static RECORDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 impl Kernel {
     /// The words of these commitments, each recalled for its person through
     /// their wall from the events `seqs` names, by id.
@@ -240,6 +244,9 @@ impl Kernel {
             Err(why) => return no(why),
         };
         let call = a.input["call"].as_str().map(str::trim).filter(|c| !c.is_empty());
+        // One record at a time, so two runs recording the same commitment at
+        // once cannot both pass the check for an open one.
+        let _one = RECORDING.lock().await;
         let source = match self.source_of(&run, &who, &quote, call).await? {
             Ok(s) => s,
             Err(why) => return no(why),
