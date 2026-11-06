@@ -7,6 +7,7 @@
 //! unavailable provider a bounded number of times, and suspends with a notice.
 //! What to do next is always the model's decision.
 
+use crate::grants::Spent;
 use crate::boundary::{Action, Issuer, Verdict};
 use crate::events::{ContextRef, Ev};
 use crate::kernel::Kernel;
@@ -60,6 +61,14 @@ impl Kernel {
         if run.usd >= budget.max_usd {
             let why = crate::boundary::budget_used(&run);
             self.suspend_with_notice(run_id, "budget", format!("Stopped: {why}."), json!({ "actions": run.actions, "usd": run.usd })).await?;
+            return Ok(false);
+        }
+        // A task under a grant also stops once the grant's budget for its
+        // period is spent, by all its tasks together (#280), until its
+        // person resumes it, which is theirs to decide.
+        if let Some(Spent { grant: g, spent, max, period }) = self.grant_spent(&run.id) {
+            let why = format!("Stopped: the grant {g} has spent its ${max:.2} for this {period} (${spent:.2}).");
+            self.suspend_with_notice(run_id, "grant_budget", why, json!({ "grant": g, "usd": spent, "limit": max })).await?;
             return Ok(false);
         }
         Ok(true)
@@ -117,7 +126,7 @@ impl Kernel {
         // The tools first: asking an app for them is how Magnus learns it
         // refuses, which the context's app index then says.
         let tools = self.tools_for(&run).await;
-        let (system, messages, relationship) = self.context_with(&run).await?;
+        let (system, messages, relationship, personal) = self.context_with(&run).await?;
         let chat = self.is_chat_turn(&run);
         let tools_hash = {
             use sha2::Digest;
@@ -139,7 +148,7 @@ impl Kernel {
                     run: run_id.into(),
                     step,
                     attempt,
-                    context: ContextRef { through_seq: run.last_seq, instructions: super::sent_version(&run.config.instructions, &system), tools_hash: tools_hash.clone(), relationship },
+                    context: ContextRef { through_seq: run.last_seq, instructions: super::sent_version(&run.config.instructions, &system), tools_hash: tools_hash.clone(), relationship, personal },
                 },
             )
             .await?;

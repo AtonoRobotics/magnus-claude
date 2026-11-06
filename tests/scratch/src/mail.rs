@@ -36,12 +36,20 @@ impl Drop for Inbox {
 /// whole test has taken under load, stays under the runner's 600 s.
 pub const DOCKER_PATIENCE: &str = "180";
 
-fn docker(args: &[&str]) -> String {
+fn docker_result(args: &[&str]) -> Result<String, String> {
     let out = std::process::Command::new("timeout").arg(DOCKER_PATIENCE).arg("docker").args(args).output().expect("run docker");
     // `timeout` exits 124 when it had to stop the command.
-    assert!(out.status.code() != Some(124), "docker {} did not finish in {DOCKER_PATIENCE} s", args.join(" "));
-    assert!(out.status.success(), "docker {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    if out.status.code() == Some(124) {
+        return Err(format!("docker {} did not finish in {DOCKER_PATIENCE} s", args.join(" ")));
+    }
+    if !out.status.success() {
+        return Err(format!("docker {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr)));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn docker(args: &[&str]) -> String {
+    docker_result(args).unwrap_or_else(|e| panic!("{e}"))
 }
 
 impl Inbox {
@@ -54,7 +62,22 @@ impl Inbox {
         let image = docker(&["inspect", "magnus-claude-kc", "--format", "{{.Image}}"]);
         let sink = bin("mail-sink");
         let (sink_mount, out_mount) = (format!("{}:/mail-sink:ro", sink.display()), format!("{}:/out", dir.path().display()));
-        let container = docker(&["run", "-d", "--rm", "--network", "container:magnus-claude-kc", "-v", &sink_mount, "-v", &out_mount, "--entrypoint", "/mail-sink", &image, &port.to_string(), "/out"]);
+        // `docker run` has not answered within the patience under parallel
+        // suites (runs 42257501972, 42261795000, 42262894435): try again
+        // twice, each attempt under a fresh name. A timed-out run may still
+        // have created its container late; the names cannot clash, the late
+        // one fails to bind the port the winner holds and exits (the sink
+        // panics when it cannot listen, `--rm` removes it), and anything
+        // left is stopped by release/ci-clean.sh.
+        let mut container = Err("no attempt ran".to_string());
+        for _ in 0..3 {
+            let name = format!("mail-sink-{}", uuid::Uuid::new_v4().as_simple());
+            container = docker_result(&["run", "-d", "--rm", "--network", "container:magnus-claude-kc", "--name", &name, "-v", &sink_mount, "-v", &out_mount, "--entrypoint", "/mail-sink", &image, &port.to_string(), "/out"]);
+            if container.is_ok() {
+                break;
+            }
+        }
+        let container = container.unwrap_or_else(|e| panic!("{e}"));
         let inbox = Inbox { addr: SocketAddr::from(([127, 0, 0, 1], port)), dir, container };
         for _ in 0..300 {
             if inbox.dir.path().join("ready").exists() {

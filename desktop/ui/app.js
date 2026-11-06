@@ -131,13 +131,13 @@ function paint(el, html) {
   // panel, Needs you), each copy with the same draft key: the copy being
   // typed in is the draft, and only a region that held the focus takes it.
   const active = document.activeElement;
-  $$("[data-draft]", el).forEach(i => { if (!(active !== i && active?.dataset?.draft === i.dataset.draft)) drafts[i.dataset.draft] = i.value; });
+  $$("[data-draft]", el).forEach(i => { if (!(active !== i && active?.dataset?.draft === i.dataset.draft)) drafts[i.dataset.draft] = i.type === "checkbox" ? i.checked : i.value; });
   const opened = new Set($$("details[data-key]", el).filter(d => d.open).map(d => d.dataset.key));
   const focused = el.contains(active) ? active?.dataset?.draft : undefined;
   el.innerHTML = html;
   el._html = html;
   $$("details[data-key]", el).forEach(d => { if (opened.has(d.dataset.key)) d.open = true; });
-  $$("[data-draft]", el).forEach(i => { if (drafts[i.dataset.draft] !== undefined) i.value = drafts[i.dataset.draft]; });
+  $$("[data-draft]", el).forEach(i => { const v = drafts[i.dataset.draft]; if (v === undefined) return; if (i.type === "checkbox") i.checked = !!v; else i.value = v; });
   if (focused) $(`[data-draft="${CSS.escape(focused)}"]`, el)?.focus();
   return true;
 }
@@ -1008,7 +1008,14 @@ async function showThread(main, thread) {
     const card = b.closest("[data-card]").dataset.card, decision = b.dataset.decide;
     // Decline asks for the reason first; Magnus reads it before suggesting again.
     if (decision === "decline-open" || decision === "decline-cancel") { ui.declining = decision === "decline-open" ? card : null; return draw(); }
+    if (decision === "handle-open" || decision === "handle-cancel") { ui.handling = decision === "handle-open" ? card : null; return draw(); }
     const body = { decision };
+    // "Handle things like this", or a grant card accepted: the grant as the person set it in the form.
+    const box = b.closest("[data-card]");
+    if (decision === "handle" || (box.matches(".grant") && decision === "confirm")) {
+      Object.assign(body, readGrantForm(box));
+      if (!body.apps.length) return toast("Choose at least one app.");
+    }
     const no = decision === "decline" || decision === "dismiss";
     if (no) {
       body.reason = ($(`#why-${CSS.escape(card)}`, main)?.value || "").trim();
@@ -1017,8 +1024,9 @@ async function showThread(main, thread) {
     b.disabled = true;
     try {
       const r = await api("POST", `/v1/chat/cards/${enc(card)}`, body);
-      toast(no ? (decision === "dismiss" ? "Dismissed." : "Declined.") : decision === "later" ? "Not now." : r.task ? "Started." : "Scheduled.");
-      ui.declining = null; delete drafts[`why-${card}`];
+      toast(no ? (decision === "dismiss" ? "Dismissed." : "Declined.") : decision === "later" ? "Not now." : decision === "handle" ? "Started. Things like this are handled from now on." : r.grant ? "Granted." : r.task ? "Started." : "Scheduled.");
+      ui.declining = null; ui.handling = null; delete drafts[`why-${card}`];
+      for (const k of Object.keys(drafts)) if (k.startsWith(`g-${card}-`)) delete drafts[k];
       await refresh();
     } catch (err) { toast(err.message); b.disabled = false; }
   };
@@ -1117,13 +1125,43 @@ function scheduleText(sc) {
   return `${sc.paused ? `Paused: ${sc.paused}` : `Next run ${until(sc.next)}`} · ${sc.last_failed ? `Last firing could not start: ${sc.last_failed.error}` : last ? `Last result: ${(STATUS[last.status] || ["", last.status])[1]}, ${when(last.ended_at || last.created_at)}` : "No results yet"}`;
 }
 // A card's answers: accept, Not now, or Decline, which asks for the reason.
-// A task proposal is approved or dismissed (with the reason), not put off.
-function cardActs(e, ui, accept, more = "", proposal = false) {
+// A task proposal is approved or dismissed (with the reason), not put off;
+// neither is a grant card (`later` false).
+function cardActs(e, ui, accept, more = "", proposal = false, later = !proposal) {
   const no = proposal ? "Dismiss" : "Decline";
   if (ui.declining === e.card) return `<div class="row cc-act decline-why"><label class="sr" for="why-${esc(e.card)}">Why not?</label>
     <input id="why-${esc(e.card)}" data-draft="why-${esc(e.card)}" placeholder="Why not? Magnus reads this before ${proposal ? "proposing" : "suggesting"} again">
     <button class="primary" data-decide="${no.toLowerCase()}">${no}</button><button class="link" data-decide="decline-cancel">Cancel</button></div>`;
-  return `<div class="row cc-act"><button class="primary" data-decide="${proposal ? "approve" : "confirm"}">${esc(accept)}</button>${more}${proposal ? "" : `<button data-decide="later">Not now</button>`}<button class="link" data-decide="decline-open">${no}</button></div>`;
+  return `<div class="row cc-act"><button class="primary" data-decide="${proposal ? "approve" : "confirm"}">${esc(accept)}</button>${more}${later ? `<button data-decide="later">Not now</button>` : ""}<button class="link" data-decide="decline-open">${no}</button></div>`;
+}
+
+// A grant's fields as a form (#235): the kind of work, the apps it covers,
+// what may go ahead without asking besides, and its budget of model cost
+// per period. `k` keys its drafts; `f` holds the values it starts from;
+// `apps` are the person's apps to choose from.
+function grantForm(k, f, apps) {
+  const id = n => `g-${esc(k)}-${n}`, d = n => `data-draft="${id(n)}"`;
+  const lifted = x => (f.allow || []).includes(x) ? "checked" : "";
+  const choices = apps?.length ? apps : (f.apps || []).map(name => ({ name, title: name }));
+  return `<div class="grant-form" data-grant-form>
+    <label for="${id("title")}" class="small muted">What kind of work</label><input id="${id("title")}" ${d("title")} data-g="title" value="${esc(f.title || "")}" style="width:100%">
+    <div class="sugg-part"><span class="small muted">In these apps</span>${choices.map(a => `<label class="row toggle small"><input type="checkbox" data-g-app="${esc(a.name)}" ${d(`app-${a.name}`)} ${(f.apps || []).includes(a.name) ? "checked" : ""}><span>${esc(a.title || a.name)}</span></label>`).join("")}</div>
+    <div class="sugg-part"><span class="small muted">Without asking, Magnus may also</span>
+      <label class="row toggle small"><input type="checkbox" data-g-allow="send" ${d("send")} ${lifted("send")}><span>Send on my behalf</span></label>
+      <label class="row toggle small"><input type="checkbox" data-g-allow="irreversible" ${d("irreversible")} ${lifted("irreversible")}><span>Delete or commit me to anything</span></label>
+      <p class="small faint">Spending money always asks.</p></div>
+    <div class="row"><label for="${id("max")}" class="small muted">Budget</label><span class="small">$</span><input id="${id("max")}" type="number" min="0" step="0.5" data-g="max_usd" ${d("max")} value="${esc(f.max_usd ?? "")}" style="width:6em">
+      <select aria-label="Per" data-g="period" ${d("period")}>${["day", "week", "month"].map(p => `<option value="${p}" ${(f.period || "week") === p ? "selected" : ""}>a ${p}</option>`).join("")}</select><span class="small muted">of model cost</span></div>
+  </div>`;
+}
+
+// The grant a form holds, as the appliance takes it.
+function readGrantForm(root) {
+  const f = $("[data-grant-form]", root);
+  return {
+    title: $("[data-g=title]", f).value.trim(), period: $("[data-g=period]", f).value, max_usd: Number($("[data-g=max_usd]", f).value),
+    apps: $$("[data-g-app]", f).filter(i => i.checked).map(i => i.dataset.gApp), allow: $$("[data-g-allow]", f).filter(i => i.checked).map(i => i.dataset.gAllow),
+  };
 }
 
 // What a card rests on: each item, and the tool or task it points at.
@@ -1136,7 +1174,9 @@ function cardOutcome(e) {
   const p = e.kind === "proposal_card";
   if (e.state === "declined") return `<p class="small"><span class="chip">${p ? "Dismissed" : "Declined"}</span> ${esc(e.title || "")}${e.reason ? ` <span class="muted">· ${esc(e.reason)}</span>` : ""}</p>`;
   if (e.state === "later") return `<p class="small"><span class="chip">Not now</span> ${esc(e.title || "")}</p>`;
-  if (e.started) return `<p class="small"><span class="chip ok">${p ? "Approved" : "Accepted"}</span> ${esc(e.title || "")} <a href="#/task/${enc(e.started)}" data-open="task:${esc(e.started)}">See the task</a></p>`;
+  const handled = e.granted ? ` <span class="chip ok">Handled from now on</span> <a class="small" href="#/settings/data">Your grants</a>` : "";
+  if (e.started) return `<p class="small"><span class="chip ok">${p ? "Approved" : "Accepted"}</span> ${esc(e.title || "")} <a href="#/task/${enc(e.started)}" data-open="task:${esc(e.started)}">See the task</a>${handled}</p>`;
+  if (e.kind === "grant_card" && e.granted) return `<p class="small"><span class="chip ok">Granted</span> ${esc(e.title || "")} <a href="#/settings/data">See it in Settings</a></p>`;
   return "";
 }
 
@@ -1305,7 +1345,18 @@ function entry(e, ui = {}) {
         ${part("Needs", `<ul class="sugg-list">${(n.permissions || []).map(x => `<li>${esc(x)}</li>`).join("")}<li class="num">Up to $${esc(n.estimated_cost_usd)}</li>${n.input ? `<li>From you: ${esc(n.input)}</li>` : ""}</ul>`)}
         ${evidenceList(e, "Seen in")}
         <p class="small muted">It acts for you (${esc(e.acts_for)}), with your access, and spends no more than this; what it needs from you shows under Needs you.</p>${taintNote(e.taint)}
-        ${cardActs(e, ui, "Approve", "", true)}</div>`;
+        ${ui.handling === e.card ? `<div class="sugg-part" data-handle>${grantForm(e.card, e.handle || {}, e.your_apps)}
+          <p class="small muted">This task starts now, and from now on Magnus handles work like it without asking, within these limits and your organisation's policy. Change or revoke it in Settings.</p>
+          <div class="row cc-act"><button class="primary" data-decide="handle">Handle from now on</button><button class="link" data-decide="handle-cancel">Cancel</button></div></div>`
+          : cardActs(e, ui, "Approve", `<button data-decide="handle-open">Handle things like this</button>`, true)}</div>`;
+    }
+    case "grant_card": {
+      if (e.state !== "open") return `<div data-card="${esc(e.card)}">${cardOutcome(e)}</div>`;
+      return `<div class="confirm chatcard suggestion grant" data-card="${esc(e.card)}"><div class="cc-head"><span class="st sch">${icon("tasks")}</span><strong>Let Magnus handle this on its own?</strong></div>
+        <p class="cc-text">${esc(e.why)}</p>
+        ${grantForm(e.card, e, e.your_apps)}
+        <p class="small muted">Tasks Magnus starts for this go ahead without asking, as you (${esc(e.acts_for)}), within these limits and your organisation's policy; it reports every action. Change or revoke it in Settings.</p>${taintNote(e.taint)}
+        ${cardActs(e, ui, "Accept", "", false, false)}</div>`;
     }
     case "schedule_card": {
       const b = e.budget || {};
@@ -2499,11 +2550,45 @@ async function updatesSection(el) {
   await draw();
 }
 
+// One grant in Settings: what it covers, what still asks, its spend this
+// period, the actions taken under it and its policy, with Edit and Revoke.
+function grantRow(g, apps, editing) {
+  const acts = g.actions || [];
+  return `<div class="grant-row" data-grant="${esc(g.id)}" style="margin-top:10px">
+    <div class="spread"><strong>${esc(g.title)}</strong>${g.revoked ? `<span class="chip">Revoked ${esc(when(g.revoked))}</span>` : `<span class="row"><button data-act="grant-edit">Edit</button><button data-act="grant-revoke">Revoke</button></span>`}</div>
+    <p class="small muted">In ${esc(g.apps.join(", "))} · still asks before ${esc(g.still_asks.join(", "))} · <span class="num">$${esc(Number(g.spent).toFixed(2))} of $${esc(g.max_usd)} this ${esc(g.period)}</span></p>
+    ${editing === g.id ? `${grantForm(g.id, g, apps)}<div class="row"><button class="primary" data-act="grant-save">Save</button><button class="link" data-act="grant-cancel">Cancel</button></div>` : ""}
+    ${acts.length ? `<details data-key="grant-actions:${esc(g.id)}"><summary class="small">${acts.length} action${acts.length === 1 ? "" : "s"} taken under it</summary><ul class="small">${acts.slice(0, 20).map(a => `<li><span class="faint">${esc(when(a.at))}</span> ${esc(a.tool)} in <a href="#/task/${enc(a.task)}" data-open="task:${esc(a.task)}">${esc(a.task_title || "a task")}</a></li>`).join("")}</ul></details>` : `<p class="small faint">Nothing done under it yet.</p>`}
+    <details data-key="grant-policy:${esc(g.id)}"><summary class="small">Its policy</summary><pre class="mono small">${esc(g.cedar)}</pre></details>
+  </div>`;
+}
+
+// One commitment in Settings (#236): who said they would do what, for
+// whom, by when, overdue shown, where it was said; Done, Release, Edit and
+// Remove.
+function commitmentRow(c, editing) {
+  const STATE = { done: ["ok", "Done"], released: ["", "Released"] };
+  const who = c.who === "magnus" ? "Magnus" : "You";
+  const from = c.source?.kind === "app" ? `read in ${esc(c.source.app)}` : "said in a conversation";
+  const status = c.status === "open" ? (c.overdue ? `<span class="chip bad">Overdue</span>` : "") : `<span class="chip ${STATE[c.status]?.[0] || ""}">${esc(STATE[c.status]?.[1] || c.status)}</span>`;
+  const acts = c.status === "open" ? `<button data-act="cmt-done">Done</button><button data-act="cmt-release">Release</button>` : `<button data-act="cmt-reopen">Reopen</button>`;
+  return `<div class="cmt-row" data-commitment="${esc(c.id)}" style="margin-top:10px">
+    <div class="spread"><span><strong>${who}:</strong> ${esc(c.what)} ${status}</span><span class="row">${acts}<button data-act="cmt-edit">Edit</button><button data-act="cmt-remove">Remove</button></span></div>
+    <p class="small muted">${c.to ? `For ${esc(c.to)} · ` : ""}${c.by ? `By ${esc(c.by)} · ` : ""}${from}, ${esc(when(c.at))}${c.quote ? ` · <span class="faint">“${esc(c.quote)}”</span>` : ""}</p>
+    ${editing === c.id ? `<div class="row" style="margin-top:6px"><input data-f="what" aria-label="What" value="${esc(c.what)}" style="flex:2"><input data-f="to" aria-label="For whom" placeholder="For whom" value="${esc(c.to || "")}" style="flex:1"><input data-f="by" aria-label="By when" placeholder="YYYY-MM-DD" value="${esc(c.by || "")}" style="flex:1"></div>
+      <div class="row"><button class="primary" data-act="cmt-save">Save</button><button class="link" data-act="cmt-cancel">Cancel</button></div>` : ""}
+  </div>`;
+}
+
 async function dataSection(el) {
   // The person's relationship notes as last drawn: each row names its note by them.
   let notes = [];
+  // The grant being edited, if any.
+  let editing = null;
+  // The commitment being edited, if any.
+  let editingC = null;
   const draw = async () => {
-    const [prefs, { requests }, backups, rel, { disagreements }] = await Promise.all([api("GET", "/v1/preferences"), api("GET", "/v1/deletion-requests"), isOwner() ? api("GET", "/v1/backups").catch(() => null) : null, api("GET", "/v1/relationship"), api("GET", "/v1/disagreements")]);
+    const [prefs, { requests }, backups, rel, { disagreements }, granted, { commitments }] = await Promise.all([api("GET", "/v1/preferences"), api("GET", "/v1/deletion-requests"), isOwner() ? api("GET", "/v1/backups").catch(() => null) : null, api("GET", "/v1/relationship"), api("GET", "/v1/disagreements"), api("GET", "/v1/grants"), api("GET", "/v1/commitments")]);
     App.prefs = prefs;
     notes = rel.notes;
     const STATE = { done: ["ok", "done"], decline: ["bad", "declined"] };
@@ -2514,6 +2599,12 @@ async function dataSection(el) {
       <div class="card" data-relationship><p class="small muted">What you told Magnus about working with you: tone, what you delegated, standing decisions. Every task and chat of yours carries it; no one else sees it.</p>
         ${notes.map((n, i) => `<div class="row" data-note="${i}" style="margin-top:6px"><input aria-label="Note" value="${esc(n)}" style="flex:1"><button data-act="note-save">Save</button><button data-act="note-remove">Remove</button></div>`).join("") || `<p class="small faint">Nothing yet.</p>`}
         <div class="row" style="margin-top:8px"><input id="newnote" aria-label="New note" style="flex:1" placeholder="For example: fewer jokes"><button data-act="note-add">Add</button></div></div>
+      <h3>What Magnus may do on its own</h3>
+      <div class="card" data-grants><p class="small muted">Kinds of your work you let Magnus handle without asking, within your organisation's policy, each with what was done under it. They are yours alone; spending money always asks.</p>
+        ${granted.grants.map(g => grantRow(g, granted.apps, editing)).join("") || `<p class="small faint">None yet. Choose "Handle things like this" on a task Magnus proposes, or ask Magnus.</p>`}</div>
+      <h3>What you and Magnus said you'd do</h3>
+      <div class="card" data-commitments><p class="small muted">What you or Magnus said you would do, recognised from your conversations and what Magnus read for you, with for whom and by when. Open ones are in every task and chat of yours; no one else sees them.</p>
+        ${commitments.map(c => commitmentRow(c, editingC)).join("") || `<p class="small faint">None yet.</p>`}</div>
       <h3>Where you decided otherwise</h3>
       <div class="card" data-disagreements><p class="small muted">When Magnus advised one thing and you decided another, it notes both, and later how it turned out. Only your own tasks and chats see these.</p>
         ${disagreements.map(d => `<p class="small"><span class="faint">${esc(when(d.at))}</span> Magnus advised: ${esc(d.position)} You decided: ${esc(d.decision)} ${d.outcome ? `Outcome: ${esc(d.outcome)}` : `<span class="faint">Outcome not known yet.</span>`}</p>`).join("") || `<p class="small faint">None.</p>`}</div>
@@ -2545,6 +2636,33 @@ async function dataSection(el) {
       if (b.dataset.act === "note-add") { b.disabled = true; await api("POST", "/v1/relationship", { action: "add", text: $("#newnote", el).value }); toast("Saved."); }
       if (b.dataset.act === "note-save") { b.disabled = true; await api("POST", "/v1/relationship", { action: "change", note, text: $("input", row).value }); toast("Saved."); }
       if (b.dataset.act === "note-remove") { b.disabled = true; await api("POST", "/v1/relationship", { action: "remove", note }); toast("Removed."); }
+      const g = b.closest("[data-grant]")?.dataset.grant;
+      if (b.dataset.act === "grant-edit") editing = g;
+      if (b.dataset.act === "grant-cancel") editing = null;
+      if (b.dataset.act === "grant-save") {
+        const f = readGrantForm(b.closest("[data-grant]"));
+        if (!f.apps.length) return toast("Choose at least one app.");
+        b.disabled = true; await api("PUT", `/v1/grants/${enc(g)}`, f); editing = null; toast("Saved.");
+        for (const k of Object.keys(drafts)) if (k.startsWith(`g-${g}-`)) delete drafts[k];
+      }
+      if (b.dataset.act === "grant-revoke") {
+        if (!await ask("Revoke this? From now on, what it covered asks you again.", "Revoke")) return;
+        b.disabled = true; await api("DELETE", `/v1/grants/${enc(g)}`); toast("Revoked.");
+      }
+      const cr = b.closest("[data-commitment]"), c = cr?.dataset.commitment;
+      if (b.dataset.act === "cmt-edit") editingC = c;
+      if (b.dataset.act === "cmt-cancel") editingC = null;
+      const status = { "cmt-done": "done", "cmt-release": "released", "cmt-reopen": "open" }[b.dataset.act];
+      if (status) { b.disabled = true; await api("PUT", `/v1/commitments/${enc(c)}`, { status }); toast(status === "done" ? "Marked done." : status === "released" ? "Released." : "Reopened."); }
+      if (b.dataset.act === "cmt-save") {
+        const f = k => $(`[data-f="${k}"]`, cr).value.trim();
+        if (!f("what")) return toast("Say what will be done.");
+        b.disabled = true; await api("PUT", `/v1/commitments/${enc(c)}`, { what: f("what"), to: f("to"), by: f("by") }); editingC = null; toast("Saved.");
+      }
+      if (b.dataset.act === "cmt-remove") {
+        if (!await ask("Remove this? It leaves your list and Magnus's context, and its words are deleted.", "Remove")) return;
+        b.disabled = true; await api("DELETE", `/v1/commitments/${enc(c)}`); toast("Removed.");
+      }
       el._html = null; await draw();
     } catch (err) { toast(err.message); b.disabled = false; }
   };

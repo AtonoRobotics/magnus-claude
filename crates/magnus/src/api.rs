@@ -165,6 +165,8 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .merge(crate::settings::router())
         .merge(crate::relationship::router())
         .merge(crate::reactions::router())
+        .merge(crate::grants::router())
+        .merge(crate::commitments::router())
         .merge(crate::knowledge::router())
         .merge(crate::chat_actions::router())
         .merge(crate::trash::router())
@@ -1094,7 +1096,7 @@ async fn chat_card(State(k): K, h: HeaderMap, Path(card): Path<String>, Json(b):
         Ok(p) => p,
         Err(r) => return r,
     };
-    match k.decide_card(&p.id, &card, b["decision"].as_str().unwrap_or_default(), b["reason"].as_str()).await {
+    match k.decide_card(&p.id, &card, b["decision"].as_str().unwrap_or_default(), b["reason"].as_str(), &b).await {
         Ok(Ok(v)) => Json(v).into_response(),
         Ok(Err(CardRefusal::NotFound)) => err(StatusCode::NOT_FOUND, "no such card"),
         Ok(Err(CardRefusal::Decided)) => err(StatusCode::CONFLICT, "this card has been decided"),

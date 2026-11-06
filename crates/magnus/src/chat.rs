@@ -219,11 +219,33 @@ impl Kernel {
                     let mut e = d.clone();
                     e["id"] = json!(format!("c:{card}"));
                     e["task_id"] = json!(t.task_id);
-                    e["kind"] = json!(if d["proposal"] == true { "proposal_card" } else if d["suggestion"] == true { "suggestion_card" } else { "schedule_card" });
+                    e["kind"] = json!(if d["proposal"] == true {
+                        "proposal_card"
+                    } else if d["grant"] == true {
+                        "grant_card"
+                    } else if d["suggestion"] == true {
+                        "suggestion_card"
+                    } else {
+                        "schedule_card"
+                    });
                     e["state"] = json!(state);
                     e["schedule"] = made["schedule"].clone();
                     e["started"] = made["started"].clone();
                     e["reason"] = made["reason"].clone();
+                    // The grant it set: accepted, or a proposal handled from now on (#235).
+                    e["granted"] = made["granted"].clone();
+                    if d["proposal"] == true || d["grant"] == true {
+                        if let Some(g) = self.read(|s| s.grants.values().find(|g| g.card.as_deref() == Some(card.as_str())).map(|g| g.id.clone())) {
+                            e["granted"] = json!(g);
+                        }
+                        // What a grant form offers: the person's apps, and for a proposal its defaults.
+                        if state == "open" {
+                            e["your_apps"] = self.grant_apps(person);
+                            if d["proposal"] == true {
+                                e["handle"] = self.handle_defaults(person, &d);
+                            }
+                        }
+                    }
                     e["acts_for"] = json!(t.person);
                     e["taint"] = json!({ "untrusted": r.untrusted, "private": r.private });
                     out.push((t.created_at, seq, e));
@@ -342,7 +364,13 @@ impl Kernel {
                     }
                     "proposal_card" => {
                         let changed = e["changed"].as_str().map(|c| format!(" (again: {c})")).unwrap_or_default();
-                        ("you", format!("Proposed the task {} ({}, card {}): {} Outcome: {}{changed}", text("title"), answered(&e), text("card"), text("text"), text("outcome")))
+                        let handled = e["granted"].as_str().map(|g| format!(" They chose to have things like this handled from now on: grant {g}.")).unwrap_or_default();
+                        ("you", format!("Proposed the task {} ({}, card {}): {} Outcome: {}{changed}{handled}", text("title"), answered(&e), text("card"), text("text"), text("outcome")))
+                    }
+                    "grant_card" => {
+                        let list = |k: &str| e[k].as_array().into_iter().flatten().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ");
+                        let id = e["granted"].as_str().map(|g| format!(", grant {g}")).unwrap_or_default();
+                        ("you", format!("Proposed a grant {} ({}, card {}{id}): apps {}; still asks before {}; up to ${} a {}", text("title"), answered(&e), text("card"), list("apps"), list("still_asks"), e["max_usd"], text("period")))
                     }
                     "connector_card" => ("you", format!("Offered the app {} ({}): {}", text("title"), text("state"), text("why"))),
                     _ => return None,
@@ -367,8 +395,23 @@ impl Kernel {
         if !task.is_chat_turn() {
             return Ok(("create_task is for chat.".into(), true, None));
         }
-        let task_id = self.task_from_turn(&format!("chat:{}", a.run), &task, &run, key, text.clone(), title.clone(), NewRun::default()).await?;
-        Ok((format!("Started task {task_id} ({title}): {text}. It is in the person's Tasks and will post its result to this thread."), false, Some(json!({ "task": task_id }))))
+        // Under a grant (#235): the person's own, live, with budget left;
+        // the task spends no more than what is left of it this period.
+        let mut more = NewRun::default();
+        if let Some(id) = a.input["grant"].as_str().map(str::trim).filter(|g| !g.is_empty()) {
+            match self.grant_for_task(&run.person, id) {
+                Ok((g, left)) => {
+                    let mut budget = self.cfg.budget.clone();
+                    budget.max_usd = budget.max_usd.min(left);
+                    more = NewRun { grant: Some(g.id), budget: Some(budget), ..more };
+                }
+                Err(why) => return Ok((format!("No task started: {why}."), true, None)),
+            }
+        }
+        let grant = more.grant.clone();
+        let task_id = self.task_from_turn(&format!("chat:{}", a.run), &task, &run, key, text.clone(), title.clone(), more).await?;
+        let under = grant.as_ref().map(|g| format!(" It runs under the grant {g}.")).unwrap_or_default();
+        Ok((format!("Started task {task_id} ({title}): {text}. It is in the person's Tasks and will post its result to this thread.{under}"), false, Some(json!({ "task": task_id, "grant": grant }))))
     }
 
     /// A task started from a chat turn, once for `key`: for the turn's
@@ -465,7 +508,14 @@ impl Kernel {
     /// without timing starts a task for them as `create_task` would. A task
     /// proposal is approved (it starts as such a suggestion does) or
     /// dismissed with their reason; it is not put off (#254).
-    pub async fn decide_card(self: &Arc<Self>, person: &str, card: &str, decision: &str, reason: Option<&str>) -> Result<std::result::Result<Value, CardRefusal>> {
+    ///
+    /// A proposal may instead be handled from now on (`handle`, "Handle
+    /// things like this"): the person sets a grant over that kind of work,
+    /// from the fields in `body` over the card's defaults, and its task
+    /// starts under it. A grant card (`propose_grant`) is accepted, with
+    /// any changes of the person's in `body`, setting the grant, or
+    /// declined with their reason (#235).
+    pub async fn decide_card(self: &Arc<Self>, person: &str, card: &str, decision: &str, reason: Option<&str>, body: &Value) -> Result<std::result::Result<Value, CardRefusal>> {
         let _decide = self.decide.lock().await;
         let found = self.read(|s| {
             s.runs.values().find_map(|r| {
@@ -475,17 +525,69 @@ impl Kernel {
             })
         });
         let Some((task, run, d)) = found else { return Ok(Err(CardRefusal::NotFound)) };
-        if self.read(|s| s.cards.contains_key(card)) {
+        let actor = format!("person:{person}");
+        let decision = match (d["proposal"] == true, d["grant"] == true, decision) {
+            (true, _, "approve" | "accept" | "confirm") => "accept",
+            (true, _, "handle") => "handle",
+            (true, _, "dismiss" | "decline") => "decline",
+            (true, _, other) => return Ok(Err(CardRefusal::Invalid(format!("a task proposal is approved or dismissed (with a reason), or handled from now on under a grant (handle), not {other}")))),
+            (false, true, "accept" | "confirm" | "approve") => "grant",
+            (false, true, "decline" | "dismiss") => "decline",
+            (false, true, other) => return Ok(Err(CardRefusal::Invalid(format!("a grant card is accepted or declined (with a reason), not {other}")))),
+            (false, false, d) => d,
+        };
+        // A proposal handled whose grant was set but whose task had not
+        // started (the appliance stopped between them) finishes now.
+        let prior = self.read(|s| s.cards.get(card).map(|c| c.answer.clone()));
+        let resumed = decision == "handle" && matches!(prior, Some(crate::state::Answer::Granted(_)));
+        if prior.is_some() && !resumed {
             return Ok(Err(CardRefusal::Decided));
         }
-        let actor = format!("person:{person}");
-        let decision = match (d["proposal"] == true, decision) {
-            (true, "approve" | "accept" | "confirm") => "accept",
-            (true, "dismiss" | "decline") => "decline",
-            (true, other) => return Ok(Err(CardRefusal::Invalid(format!("a task proposal is approved or dismissed (with a reason), not {other}")))),
-            (false, d) => d,
-        };
+        // The card's words are the model's, carrying the turn's taint; a
+        // title the person wrote is theirs.
+        let turn_label = Label { untrusted: run.untrusted, private: run.private };
+        let label_for = || if body["title"].as_str().is_some_and(|t| t.trim() != d["title"].as_str().unwrap_or_default().trim()) { None } else { Some(turn_label) };
         match decision {
+            "handle" => {
+                let Some(who) = self.person(person) else { return Ok(Err(CardRefusal::NotFound)) };
+                let id = derived("grant", &format!("card:{card}"));
+                if !resumed {
+                    let fields = match self.grant_fields(&who, &crate::grants::over(&self.handle_defaults(person, &d), body)) {
+                        Ok(f) => f,
+                        Err(why) => return Ok(Err(CardRefusal::Invalid(why))),
+                    };
+                    let label = label_for();
+                    self.set_grant(&actor, person, &id, &fields, Some(card.into()), label).await?;
+                }
+                let left = match self.grant_for_task(person, &id) {
+                    Ok((_, left)) => left,
+                    Err(why) => return Ok(Err(CardRefusal::Invalid(why))),
+                };
+                let plan = d["text"].as_str().unwrap_or_default().to_string();
+                let title = d["title"].as_str().unwrap_or_default().to_string();
+                let mut budget: crate::config::Budget = serde_json::from_value(d["budget"].clone()).unwrap_or_else(|_| self.cfg.budget.clone());
+                budget.max_usd = budget.max_usd.min(left);
+                let more = NewRun { budget: Some(budget), scope: d["scope"].as_str().map(String::from), grant: Some(id.clone()), ..Default::default() };
+                let started = self.task_from_turn(&actor, &task, &run, &format!("card:{card}"), plan, title, more).await?;
+                self.emit(&actor, Ev::CardAccepted { card: card.into(), person: person.into(), task: started.clone() }).await?;
+                Ok(Ok(json!({ "task": started, "grant": id })))
+            }
+            "grant" => {
+                let Some(who) = self.person(person) else { return Ok(Err(CardRefusal::NotFound)) };
+                let fields = match self.grant_fields(&who, &crate::grants::over(&d, body)) {
+                    Ok(f) => f,
+                    Err(why) => return Ok(Err(CardRefusal::Invalid(why))),
+                };
+                // A change to one of theirs keeps its id, while it is still theirs and live.
+                let id = match d["replaces"].as_str() {
+                    Some(r) if self.read(|s| s.grants.get(r).is_some_and(|g| g.person == person && g.revoked.is_none())) => r.to_string(),
+                    Some(r) => return Ok(Err(CardRefusal::Invalid(format!("the grant it changes ({r}) was revoked; ask Magnus for a new one")))),
+                    None => crate::kernel::new_id("grant"),
+                };
+                let label = label_for();
+                self.set_grant(&actor, person, &id, &fields, Some(card.into()), label).await?;
+                Ok(Ok(json!({ "grant": id })))
+            }
             "confirm" | "accept" if !crate::suggestions::timed(&d) => {
                 let plan = d["plan"].as_str().or(d["text"].as_str()).unwrap_or_default().to_string();
                 let title = d["title"].as_str().unwrap_or_default().to_string();

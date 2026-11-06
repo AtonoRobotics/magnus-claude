@@ -469,7 +469,14 @@ impl Kernel {
         let mut sources: Vec<String> = fm["sources"].as_array().into_iter().flatten().filter_map(|x| x["resource"].as_str().map(String::from)).collect();
         // What the run read, whatever the document cites: each place whose
         // private content it read is a source the kernel names itself (K2).
-        for s in read.iter().map(|app| read_source(app)) {
+        // A shared document written by a run that carried its person's
+        // relationship memory may carry it: drawn from their memory (#258).
+        let personal = match self.read(|s| s.runs.get(run).cloned()) {
+            Some(r) if user.is_none() => self.carries_person(&r).await.map_err(|e| format!("{e:#}"))?,
+            _ => false,
+        };
+        let memory = personal.then(|| "memory".to_string());
+        for s in read.iter().chain(memory.iter()).map(|app| read_source(app)) {
             if !sources.contains(&s) {
                 sources.push(s);
             }

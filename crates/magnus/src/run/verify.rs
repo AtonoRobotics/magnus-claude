@@ -36,7 +36,8 @@ impl Kernel {
     /// spent or the provider failed: the verifier then says nothing.
     async fn verifier_call(&self, run: &Run, purpose: &str, system: &str, messages: Vec<Message>, tools: Vec<ToolSpec>) -> Result<Option<Vec<Block>>> {
         let calls = self.read(|s| s.runs.get(&run.id).map(|r| r.model_calls)).unwrap_or(0);
-        if calls >= run.config.budget.max_model_calls {
+        // Nor once its grant's budget for the period is spent (#286).
+        if calls >= run.config.budget.max_model_calls || self.grant_spent(&run.id).is_some() {
             return Ok(None);
         }
         let (adapter, model) = Self::verifier_model(run);

@@ -223,8 +223,22 @@ impl Kernel {
         let (reactions, open) = self.read(|s| (crate::reactions::reactions_before(s, &run.person, run.created_at), crate::reactions::open_before(s, &run.person, run.created_at)));
         // Their suggestion ledger, as it stood when it started (#253).
         let ledger = self.read(|s| crate::suggestions::ledger(s, &run.person, run.created_at));
-        let sections = format!("{}{}{}", section(&notes, &recent), crate::reactions::section(&reactions, &open), crate::suggestions::section(&ledger));
+        // In a conversation, their grants, so work that fits one starts under it (#235).
+        let chat = self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.is_chat_turn()));
+        let grants = if chat { self.grant_section(run).await? } else { String::new() };
+        // Their open commitments, as they stood when it started (#236).
+        let commitments = self.commitment_section(run).await?;
+        let sections = format!("{}{}{}{grants}{commitments}", section(&notes, &recent), crate::reactions::section(&reactions, &open), crate::suggestions::section(&ledger));
         Ok((sections, (!notes.is_empty()).then_some(version)))
+    }
+
+    /// Whether a model call of the run carried anything of its person's
+    /// (notes, recent messages, reactions, disagreements, commitments):
+    /// what it writes for others to read may carry it, so it is the
+    /// person's, as private content it read is (#258). Recorded with each
+    /// call as it was sent, so a note removed since still counts (#301).
+    pub(crate) async fn carries_person(&self, run: &Run) -> anyhow::Result<bool> {
+        Ok(run.personal)
     }
 }
 

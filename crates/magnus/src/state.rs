@@ -152,6 +152,12 @@ pub struct Run {
     /// The stronger model the escalation module moved this run to; its
     /// pinned configuration stays what it started with.
     pub escalated: Option<(String, String)>,
+    /// Its person resumed it after its grant's budget for the period was
+    /// spent: it goes on under its own budget alone (#280).
+    pub past_grant: bool,
+    /// A model call of the run carried its person's relationship context
+    /// (`ContextRef::personal`), so what it writes for others is theirs.
+    pub personal: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +247,8 @@ pub struct Task {
     pub project: Option<crate::events::ProjectContext>,
     /// The person's latest verdict on its outcome.
     pub verdict: Option<Verdict>,
+    /// The grant it runs under (#235).
+    pub grant: Option<String>,
 }
 
 /// A person's verdict on an outcome.
@@ -478,6 +486,100 @@ pub struct Schedule {
     pub resumed: Option<DateTime<Utc>>,
 }
 
+/// A person's standing authority over a category of their own work
+/// (#235). Its title is recalled from the event `seq` names (the latest
+/// setting), as a schedule's words are.
+#[derive(Clone, Debug)]
+pub struct Grant {
+    pub id: String,
+    pub person: String,
+    pub apps: Vec<String>,
+    /// Exclusions the person lifted: `send`, `irreversible`.
+    pub allow: Vec<String>,
+    /// `day`, `week` or `month`.
+    pub period: String,
+    pub max_usd: f64,
+    /// The policy the kernel wrote from these: what it covers.
+    pub cedar: String,
+    /// The card it was first set from.
+    pub card: Option<String>,
+    /// The taint of the words of its title, when not the person's own.
+    pub label: Label,
+    pub seq: i64,
+    /// When it was set first, and by whom (as the log names them).
+    pub at: DateTime<Utc>,
+    pub by: String,
+    /// When it was last edited.
+    pub edited: Option<DateTime<Utc>>,
+    pub revoked: Option<DateTime<Utc>>,
+    /// The actions taken under it, oldest first.
+    pub actions: Vec<GrantAction>,
+    /// What its tasks' model calls cost, as each was charged: kept with the
+    /// grant, so deleting a task gives none of it back (review of #278).
+    pub charges: Vec<(DateTime<Utc>, f64)>,
+}
+
+/// An action a grant covered.
+#[derive(Clone, Debug, Serialize)]
+pub struct GrantAction {
+    pub tool: String,
+    pub task: String,
+    pub run: String,
+    pub call_id: String,
+    pub at: DateTime<Utc>,
+}
+
+impl Grant {
+    /// How many days a period runs back from now.
+    pub fn days(&self) -> i64 {
+        crate::grants::period_days(&self.period).unwrap_or(7)
+    }
+}
+
+/// Something the person or Magnus said they would do (#236). Its words
+/// (what, for whom, the quote, notes) are recalled from its events, by
+/// `steps`; the rest is here. Overdue is never stored: it is open with
+/// `by` past (`commitments::overdue`).
+#[derive(Clone, Debug)]
+pub struct Commitment {
+    pub id: String,
+    pub person: String,
+    /// `person` or `magnus`.
+    pub who: String,
+    pub source: Value,
+    /// The taint of the run that recorded it.
+    pub label: Label,
+    /// When it was recorded, and by whom (as the log names them).
+    pub at: DateTime<Utc>,
+    pub by_actor: String,
+    /// When it last changed.
+    pub changed: DateTime<Utc>,
+    /// Its recording event.
+    pub seq: i64,
+    pub status: String,
+    pub by: Option<String>,
+    /// Each event of it, oldest first, with its status and date after it:
+    /// what it was as a run that started at any point saw it.
+    pub steps: Vec<CommitmentStep>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommitmentStep {
+    pub seq: i64,
+    pub status: String,
+    pub by: Option<String>,
+}
+
+impl Commitment {
+    /// Its status and date as they stood before the event `seq`, and the
+    /// events that made it so; None when it was recorded after.
+    pub fn before(&self, seq: i64) -> Option<(&str, Option<&str>, Vec<i64>)> {
+        let steps: Vec<&CommitmentStep> = self.steps.iter().filter(|s| s.seq < seq).collect();
+        let last = steps.last()?;
+        Some((last.status.as_str(), last.by.as_deref(), steps.iter().map(|s| s.seq).collect()))
+    }
+}
+
 /// A thread branched from another at one of its entries.
 #[derive(Clone, Debug)]
 pub struct Branch {
@@ -505,6 +607,8 @@ pub enum Answer {
     Confirmed(String),
     /// Accepted: the task it started.
     Started(String),
+    /// Accepted: the grant it set (#235).
+    Granted(String),
     /// "Not now".
     Later,
     /// Declined, with their reason.
@@ -797,6 +901,10 @@ pub struct State {
     /// Threads branched from another, by thread.
     pub branches: HashMap<String, Branch>,
     pub schedules: BTreeMap<String, Schedule>,
+    /// Each person's grants (#235), revoked ones among them, by id.
+    pub grants: BTreeMap<String, Grant>,
+    /// Each person's commitment ledger (#236), by id.
+    pub commitments: BTreeMap<String, Commitment>,
     /// Cards from chat (schedules and suggestions) the person answered, by
     /// card id: with the cards in their turns' results, the suggestion
     /// ledger (`suggestions::ledger`).
@@ -981,6 +1089,15 @@ impl State {
             Ok(())
         } else {
             Err(NotFound)
+        }
+    }
+
+    /// A model call's cost, charged to the grant the run's task runs
+    /// under, if any (#280).
+    fn charge_grant(&mut self, run: &str, at: DateTime<Utc>, usd: f64) {
+        let grant = self.runs.get(run).and_then(|r| self.tasks.get(&r.task)).and_then(|t| t.grant.clone());
+        if let Some(g) = grant.and_then(|g| self.grants.get_mut(&g)) {
+            g.charges.push((at, usd));
         }
     }
 
@@ -1326,6 +1443,10 @@ impl State {
                 self.runs.retain(|_, r| &r.person != person);
                 self.items.retain(|_, i| &i.person != person && i.run.as_ref().is_none_or(|r| !runs.contains(r)));
                 self.schedules.retain(|_, x| &x.person != person);
+                // Their grants: none covers whoever is next known by their name.
+                self.grants.retain(|_, g| &g.person != person);
+                // Their commitments, whose words went with theirs (#236).
+                self.commitments.retain(|_, c| &c.person != person);
                 self.memory.retain(|m| &m.person != person);
                 // Their own documents (their relationship memory among
                 // them) and their versions, whose content went with theirs
@@ -1429,6 +1550,85 @@ impl State {
                 );
                 if let Some(c) = card {
                     self.cards.insert(c.clone(), CardState { answer: Answer::Confirmed(id.clone()), at: e.at, person: Some(person.clone()) });
+                }
+            }
+            Ev::GrantSet { id, person, apps, allow, period, max_usd, card, cedar, label, .. } => {
+                let g = self.grants.entry(id.clone()).or_insert_with(|| Grant {
+                    id: id.clone(),
+                    person: person.clone(),
+                    apps: vec![],
+                    allow: vec![],
+                    period: String::new(),
+                    max_usd: 0.0,
+                    cedar: String::new(),
+                    card: card.clone(),
+                    label: Label::PRINCIPAL,
+                    seq: e.seq,
+                    at: e.at,
+                    by: e.actor.clone(),
+                    edited: None,
+                    revoked: None,
+                    actions: vec![],
+                    charges: vec![],
+                });
+                if g.seq != e.seq {
+                    g.edited = Some(e.at);
+                }
+                g.apps = apps.clone();
+                g.allow = allow.clone();
+                g.period = period.clone();
+                g.max_usd = *max_usd;
+                g.cedar = cedar.clone();
+                g.label = label.unwrap_or_default();
+                g.seq = e.seq;
+                // A card accepted sets it; a proposal handled with it is
+                // answered by the task it started, which follows.
+                if let Some(c) = card.as_ref().filter(|c| !self.cards.contains_key(*c)) {
+                    self.cards.insert(c.clone(), CardState { answer: Answer::Granted(id.clone()), at: e.at, person: Some(person.clone()) });
+                }
+            }
+            Ev::GrantRevoked { id, .. } => {
+                if let Some(g) = self.grants.get_mut(id).filter(|g| g.revoked.is_none()) {
+                    g.revoked = Some(e.at);
+                }
+            }
+            Ev::GrantUsed { grant, task, run, call_id, tool } => {
+                if let Some(g) = self.grants.get_mut(grant) {
+                    g.actions.push(GrantAction { tool: tool.clone(), task: task.clone(), run: run.clone(), call_id: call_id.clone(), at: e.at });
+                }
+            }
+            Ev::CommitmentRecorded { id, person, who, by, source, label, .. } => {
+                let by = by.clone().filter(|b| !b.is_empty());
+                self.commitments.entry(id.clone()).or_insert_with(|| Commitment {
+                    id: id.clone(),
+                    person: person.clone(),
+                    who: who.clone(),
+                    source: source.clone(),
+                    label: *label,
+                    at: e.at,
+                    by_actor: e.actor.clone(),
+                    changed: e.at,
+                    seq: e.seq,
+                    status: "open".into(),
+                    by: by.clone(),
+                    steps: vec![CommitmentStep { seq: e.seq, status: "open".into(), by }],
+                });
+            }
+            Ev::CommitmentChanged { id, person, by, status, .. } => {
+                if let Some(c) = self.commitments.get_mut(id).filter(|c| &c.person == person) {
+                    if let Some(b) = by {
+                        c.by = Some(b.clone()).filter(|b| !b.is_empty());
+                    }
+                    if let Some(s) = status {
+                        c.status = s.clone();
+                    }
+                    c.changed = e.at;
+                    c.steps.push(CommitmentStep { seq: e.seq, status: c.status.clone(), by: c.by.clone() });
+                }
+            }
+            Ev::CommitmentRemoved { id, person } => {
+                if self.commitments.get(id).is_some_and(|c| &c.person == person) {
+                    self.commitments.remove(id);
                 }
             }
             Ev::CardDeclined { card, person, reason } => {
@@ -1564,11 +1764,15 @@ impl State {
                     (item.clone(), Pin { hash: hash.clone(), description: description.clone(), input_schema: input_schema.clone(), approved: false }),
                 );
             }
-            Ev::TaskCreated { task, run, person, config, attachments, experiment, chat, label, files, project, .. } => {
+            Ev::TaskCreated { task, run, person, config, attachments, experiment, chat, label, files, project, grant, .. } => {
                 // Playbook items the run starts with carry the taint of the
                 // runs that wrote them (I2, M1), and a task from chat that of
                 // the turn that started it.
                 let pb = self.playbook_at(person, config.playbook).into_iter().fold(label.unwrap_or_default(), |l, i| l.join(i.label));
+                // So do the person's open commitments, which its context
+                // carries as they stand now (#236): words read in a mailbox
+                // do not enter a clean run untainted.
+                let pb = self.commitments.values().filter(|c| &c.person == person && c.status == "open").fold(pb, |l, c| l.join(c.label));
                 let uploads = !attachments.is_empty() || !files.is_empty();
                 // A schedule's run counts against it as it is created.
                 if let Some(s) = e.actor.strip_prefix("schedule:").and_then(|id| self.schedules.get_mut(id)) {
@@ -1596,6 +1800,7 @@ impl State {
                         files: files.clone(),
                         project: project.clone(),
                         verdict: None,
+                        grant: grant.clone(),
                     },
                 );
                 self.runs.insert(
@@ -1659,15 +1864,19 @@ impl State {
                         cuts: vec![],
                         lost_since: 0,
                         escalated: None,
+                        past_grant: false,
+                        personal: false,
                     },
                 );
             }
-            Ev::ModelCall { run, .. } => {
+            Ev::ModelCall { run, context, .. } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.model_calls += 1;
+                    r.personal |= context.carried_person();
                 }
             }
             Ev::ModelReply { run, step, blocks, state, usage, .. } => {
+                self.charge_grant(run, e.at, usage.cost_usd);
                 if let Some(r) = self.runs.get_mut(run) {
                     r.usd += usage.cost_usd;
                     r.tokens.input += usage.input_tokens;
@@ -1678,6 +1887,7 @@ impl State {
                 }
             }
             Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } | Ev::SpokenWritten { run, usage, .. } | Ev::KnowledgeExtraction { run, usage, .. } => {
+                self.charge_grant(run, e.at, usage.cost_usd);
                 if let Some(r) = self.runs.get_mut(run) {
                     if let Ev::SpokenWritten { script, .. } = &e.ev {
                         r.spoken = Some(script.clone());
@@ -1691,6 +1901,9 @@ impl State {
                 }
             }
             Ev::ModelError { run, usage, .. } => {
+                if let Some(u) = usage {
+                    self.charge_grant(run, e.at, u.cost_usd);
+                }
                 if let Some(r) = self.runs.get_mut(run) {
                     r.model_errors += 1;
                     if let Some(usage) = usage {
@@ -1849,6 +2062,9 @@ impl State {
             }
             Ev::Resumed { run } => {
                 if let Some(r) = self.runs.get_mut(run) {
+                    if r.reason.as_deref() == Some("grant_budget") {
+                        r.past_grant = true;
+                    }
                     if !r.status.terminal() {
                         r.status = Status::Running;
                         r.reason = None;

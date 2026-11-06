@@ -112,7 +112,7 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
 }
 
 /// The appliance's own chat tools (`create_task`, `create_schedule`, `suggest`,
-/// `propose_task`, the task and schedule controls), never
+/// `propose_task`, `propose_grant`, `revoke_grant`, the task and schedule controls), never
 /// a connector's, whatever the connector is called.
 /// The Rule of Two asks before a web lookup; one approval covers a task's
 /// lookups (or a conversation's).
@@ -699,6 +699,15 @@ impl Kernel {
                 self.decision(a, "allow", "approval", &format!("covered by the confirmed schedule {id}"), rule).await?;
                 return Ok(Gate::Pass);
             }
+            // A grant the person set covers the policy's asks in the tasks
+            // started under it, for actions they could approve themselves,
+            // as its policy and budget allow (#235; owner's ruling,
+            // 2026-11-02). The kernel's own asks are never covered.
+            if let Some(g) = self.covering_grant(run, f).filter(|_| may) {
+                self.decision(a, "allow", "approval", &format!("covered by the grant {g}"), rule).await?;
+                self.emit("kernel", Ev::GrantUsed { grant: g, task: run.task.clone(), run: a.run.clone(), call_id: a.call_id.clone(), tool: a.tool.clone() }).await?;
+                return Ok(Gate::Pass);
+            }
         }
         if let Some(ap) = found {
             self.decision(a, "allow", "approval", &format!("approved by {} ({})", ap.by, ap.scope), rule).await?;
@@ -842,6 +851,31 @@ impl Kernel {
         }
     }
 
+    /// The grant that covers this action of the run, if one does: the one
+    /// its task was started under, its person's, not revoked, with budget
+    /// left in its period, whose policy permits the action. An error in
+    /// evaluating it covers nothing, so the action asks.
+    fn covering_grant(&self, run: &Run, f: &Facts) -> Option<String> {
+        let now = chrono::Utc::now();
+        let (g, spent) = self.read(|s| {
+            let g = s.tasks.get(&run.task).and_then(|t| t.grant.as_ref()).and_then(|id| s.grants.get(id)).filter(|g| g.person == run.person && g.revoked.is_none())?;
+            Some((g.clone(), crate::grants::spent(s, g, now)))
+        })?;
+        if spent >= g.max_usd {
+            return None;
+        }
+        let person = self.person(&run.person)?;
+        let facts = ToolFacts { name: &f.name, app: &f.app, risk: f.risk, audience: f.audience };
+        match policy::grant_covers(&g.cedar, &person, &facts) {
+            Ok(true) => Some(g.id),
+            Ok(false) => None,
+            Err(e) => {
+                tracing::warn!("grant {} did not evaluate: {e:#}", g.id);
+                None
+            }
+        }
+    }
+
     /// The addresses the person wrote themselves for this run: in what they
     /// asked (a task they started, or their chat message), or in their own
     /// messages of the conversation a task started from chat carries. Never
@@ -961,6 +995,8 @@ impl Kernel {
                 "create_schedule" => Ok(self.chat_card(a, key)),
                 "suggest" => self.suggest(a, key).await,
                 "propose_task" => self.propose_task(a, key).await,
+                "propose_grant" => Ok(self.propose_grant(a, key)),
+                "revoke_grant" => Ok(self.revoke_grant_tool(&a.run, &a.input).await),
                 "find_tools" => {
                     let Some(run) = self.read(|s| s.runs.get(&a.run).cloned()) else { return Ok(("no such run".into(), true, None)) };
                     let v = self.find_tools(&run, a.input["query"].as_str().unwrap_or_default()).await;
@@ -1089,6 +1125,8 @@ impl Kernel {
                 "bundle_read" | "bundle_search" | "bundle_write" => Ok(self.bundle_tool(&a.run, &a.tool, &a.input).await?),
                 "relationship_note" => Ok(self.relationship_tool(&a.run, &a.input).await?),
                 "disagreement" => Ok(self.disagreement_tool(&a.run, &a.input).await?),
+                "record_commitment" => Ok(self.record_commitment_tool(a, key).await?),
+                "update_commitment" => Ok(self.update_commitment_tool(&a.run, &a.input).await?),
                 "knowledge_add" => Ok(self.knowledge_add(&a.run, &a.input).await?),
                 "project_read" => {
                     let name = s("name");

@@ -319,8 +319,9 @@ impl Kernel {
     /// Who may read what a run files: each app whose private content it
     /// read limits the readers to that app's groups, or to the person when
     /// the app names none (their files, their memory); the public web adds
-    /// no limit.
-    fn readers_of(&self, run: &Run) -> Vec<Vec<String>> {
+    /// no limit. A run whose context carried its person's relationship
+    /// memory (`personal`) files for the person only (#258).
+    fn readers_of(&self, run: &Run, personal: bool) -> Vec<Vec<String>> {
         let person = vec![format!("person:{}", run.person)];
         let mut clauses: BTreeSet<Vec<String>> = BTreeSet::new();
         for app in &run.private_from {
@@ -335,7 +336,7 @@ impl Kernel {
                 }
             }
         }
-        if run.private && run.private_from.is_empty() {
+        if (run.private && run.private_from.is_empty()) || personal {
             clauses.insert(person);
         }
         clauses.into_iter().collect()
@@ -402,7 +403,7 @@ impl Kernel {
             return Ok((format!("Not filed: {why}."), true, None));
         }
         let id = new_id("kb");
-        let readers = self.readers_of(&run);
+        let readers = self.readers_of(&run, self.carries_person(&run).await?);
         let integrity = if verification["verified"] == true { "verified" } else { "untrusted" };
         self.emit(
             "kernel",
@@ -448,6 +449,10 @@ impl Kernel {
     /// owner's rule: only a value that cannot carry instructions is endorsed
     /// without a person).
     async fn extract_value(&self, run: &Run, from: &str, spec: &Value) -> Result<Option<(String, Value)>> {
+        // A paid call: not once the run's grant's budget is spent (#286).
+        if self.grant_spent(&run.id).is_some() {
+            return Ok(None);
+        }
         let Some(e) = self.knowledge_shown(from).await? else { return Ok(None) };
         let (key, kind) = (spec["key"].as_str().unwrap_or_default(), spec["type"].as_str().unwrap_or_default());
         let options: Vec<String> = spec["options"].as_array().into_iter().flatten().filter_map(|o| o.as_str().map(String::from)).collect();

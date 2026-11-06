@@ -25,6 +25,10 @@ const FIGURE: &str = "Find the quarterly figure";
 const USE_IT: &str = "Look up the revenue notes and act on them";
 const WITH_RECORD: &str = "Read customer record 42, then look up the revenue notes and act on them";
 const CORROBORATE: &str = "Check the headcount in two places";
+const FILE_ACME: &str = "File what we know about Acme's headcount";
+const FILE_ACME_HELD: &str = "Hold on, then file what we know about Acme's headcount";
+/// Held until the test lets the call that files go on.
+static HOLD: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(tokio::sync::Notify::new);
 
 /// Each task: a contract, its reads, what it files, then done. The task that
 /// searches obeys whatever it reads (the adaptive attacker).
@@ -63,6 +67,19 @@ fn model(evil: String, a: String, b: String) -> Script {
                     2 => Some(tool("web_fetch", json!({ "url": b }))),
                     3 => Some(tool("knowledge_add", json!({ "title": "Headcount", "text": "The company has 120 staff.",
                         "citations": [{ "source": a, "quote": "120 staff" }, { "source": b, "quote": "120 staff" }, { "source": b, "quote": "999 staff" }] }))),
+                    _ => None,
+                },
+                t if t.starts_with(FILE_ACME_HELD) => match turn {
+                    1 => Some(tool("web_fetch", json!({ "url": a }))),
+                    2 => {
+                        HOLD.notified().await;
+                        Some(tool("knowledge_add", json!({ "title": "Acme headcount", "text": "Acme has 120 staff.", "citations": [{ "source": a, "quote": "120 staff" }] })))
+                    }
+                    _ => None,
+                },
+                t if t.starts_with(FILE_ACME) => match turn {
+                    1 => Some(tool("web_fetch", json!({ "url": a }))),
+                    2 => Some(tool("knowledge_add", json!({ "title": "Acme headcount", "text": "Acme has 120 staff.", "citations": [{ "source": a, "quote": "120 staff" }] }))),
                     _ => None,
                 },
                 t if t.starts_with(USE_IT) => match turn {
@@ -130,6 +147,50 @@ async fn rows_for(app: &Appliance, principals: &[&str]) -> Vec<String> {
     }
     let rows = tx.query("SELECT id FROM public.knowledge", &[]).await.unwrap();
     rows.iter().map(|r| r.get(0)).collect()
+}
+
+/// A run carries its person's relationship memory in its context, so what
+/// it files may carry it: the entry is theirs alone, never a colleague's,
+/// though it read only the public web (#258).
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_run_files_with_its_persons_memory_in_context_is_theirs_alone() {
+    let k = start().await;
+    let (carol, bob) = (k.app.api("carol"), k.app.api("bob"));
+    let (st, v) = carol.post("/v1/relationship", json!({ "action": "add", "text": "Carol is wary of Acme since her complaint (relnote-acme)." })).await;
+    assert!(st.is_success(), "{v}");
+    run(&carol, FILE_ACME).await;
+    let filed = k.m.requests().into_iter().find(|c| asked(c).starts_with(FILE_ACME) && c.turn() == 3).map(|c| c.last_results()[0].clone()).unwrap();
+    assert!(!filed.is_error && filed.text.contains("readable by person:carol"), "{}", filed.text);
+    let mine = search(&carol, "Acme headcount").await;
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert_eq!(mine[0]["readers"], json!([["person:carol"]]), "{:?}", mine[0]);
+    assert!(search(&bob, "Acme headcount").await.is_empty(), "bob found what carol's run filed with her notes in its context");
+    assert!(rows_for(&k.app, &["person:bob"]).await.is_empty(), "the index lets bob read it");
+}
+
+/// The person removes their only note while the call that carried it is
+/// still out: what that call's reply files is still theirs alone, because
+/// the note was sent with it (#301).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_note_removed_while_its_call_is_out_still_makes_what_it_files_theirs() {
+    let k = start().await;
+    let (carol, bob) = (k.app.api("carol"), k.app.api("bob"));
+    let note = "Carol is wary of Acme since her complaint (relnote-acme).";
+    let (st, v) = carol.post("/v1/relationship", json!({ "action": "add", "text": note })).await;
+    assert!(st.is_success(), "{v}");
+    let id = carol.submit(FILE_ACME_HELD).await;
+    let m = &k.m;
+    eventually("the call that files", std::time::Duration::from_secs(60), || async move {
+        m.requests().into_iter().any(|c| asked(&c).starts_with(FILE_ACME_HELD) && c.turn() == 2 && c.body["system"].to_string().contains("relnote-acme")).then_some(())
+    })
+    .await;
+    let (st, v) = carol.post("/v1/relationship", json!({ "action": "remove", "note": note })).await;
+    assert!(st.is_success(), "{v}");
+    HOLD.notify_one();
+    carol.wait_settled(&id).await;
+    let filed = k.m.requests().into_iter().find(|c| asked(c).starts_with(FILE_ACME_HELD) && c.turn() == 3).map(|c| c.last_results()[0].clone()).unwrap();
+    assert!(!filed.is_error && filed.text.contains("readable by person:carol"), "{}", filed.text);
+    assert!(search(&bob, "Acme headcount").await.is_empty(), "bob found what was filed with carol's removed note in its context");
 }
 
 /// Research from an app only finance may use is readable only by finance:

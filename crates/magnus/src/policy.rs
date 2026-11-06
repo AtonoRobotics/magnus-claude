@@ -160,3 +160,74 @@ pub fn decide(
         Outcome::Deny { reason, rule: forbidden }
     })
 }
+
+/// A grant's policy (#235), written by the kernel from what the person
+/// chose: their own actions in the grant's apps, less what stays excluded.
+/// Moving money always stays excluded (the kernel cannot measure an
+/// amount, so no spend limit could hold), as does anything prohibited; so
+/// do irreversible actions (deleting, committing them to anything) and
+/// sends (a change that reaches someone beyond the person), unless the
+/// person lifted that exclusion (`allow`: `irreversible`, `send`).
+pub fn grant_cedar(person: &str, apps: &[String], allow: &[String]) -> Result<String> {
+    let q = |s: &str| serde_json::to_string(s).map_err(|e| anyhow!("{e}"));
+    let within = apps.iter().map(|a| Ok(format!("resource in App::{}", q(a)?))).collect::<Result<Vec<_>>>()?.join(" || ");
+    if within.is_empty() {
+        return Err(anyhow!("a grant covers at least one app"));
+    }
+    let mut p = format!("permit(principal == Person::{}, action == Action::\"execute\", resource)\n  when {{ {within} }};\n", q(person)?);
+    p.push_str("forbid(principal, action, resource) when { resource.risk == \"financial\" };\n");
+    p.push_str("forbid(principal, action, resource) when { resource.risk == \"prohibited\" };\n");
+    if !allow.iter().any(|a| a == "irreversible") {
+        p.push_str("forbid(principal, action, resource) when { resource.risk == \"irreversible\" };\n");
+    }
+    if !allow.iter().any(|a| a == "send") {
+        p.push_str("forbid(principal, action, resource) when { resource.audience != \"private\" && resource.risk != \"read\" && resource.risk != \"sandbox\" };\n");
+    }
+    validate(&p)?;
+    Ok(p)
+}
+
+/// Whether a grant's policy lets `person` take this action without asking:
+/// its own rules alone decide, evaluated as any layer is.
+pub fn grant_covers(cedar: &str, person: &Person, tool: &ToolFacts) -> Result<bool> {
+    let ents = entities(person, tool)?;
+    let req = Request::new(uid("Person", &person.id)?, uid("Action", "execute")?, uid("Tool", tool.name)?, Context::empty(), None).map_err(|e| anyhow!("{e}"))?;
+    Ok(eval(cedar, "grant", &req, &ents)?.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn person(id: &str) -> Person {
+        serde_json::from_value(serde_json::json!({ "id": id, "groups": ["staff"] })).unwrap()
+    }
+
+    /// A grant covers its person's actions in its apps, never moving money
+    /// or anyone else's actions, and sends and irreversible actions only
+    /// once lifted.
+    #[test]
+    fn a_grant_covers_its_apps_less_what_stays_excluded() {
+        let carol = person("carol");
+        let t = |name: &'static str, app: &'static str, risk: Risk, audience: Audience| ToolFacts { name, app, risk, audience };
+        let save = t("crm__update_record", "crm", Risk::ReversibleWrite, Audience::Private);
+        let post = t("team__post", "team", Risk::ReversibleWrite, Audience::Internal);
+        let delete = t("crm__delete_all", "crm", Risk::Irreversible, Audience::Private);
+        let pay = t("crm__pay", "crm", Risk::Financial, Audience::Private);
+        let other = t("notes__save", "notes", Risk::ReversibleWrite, Audience::Private);
+        let apps = vec!["crm".to_string(), "team".to_string()];
+        let none = grant_cedar("carol", &apps, &[]).unwrap();
+        assert!(grant_covers(&none, &carol, &save).unwrap());
+        for x in [&post, &delete, &pay, &other] {
+            assert!(!grant_covers(&none, &carol, x).unwrap(), "{} covered by default", x.name);
+        }
+        assert!(!grant_covers(&none, &person("bob"), &save).unwrap(), "someone else's action covered");
+        let all = grant_cedar("carol", &apps, &["send".into(), "irreversible".into()]).unwrap();
+        assert!(grant_covers(&all, &carol, &post).unwrap() && grant_covers(&all, &carol, &delete).unwrap());
+        assert!(!grant_covers(&all, &carol, &pay).unwrap(), "moving money covered");
+        assert!(grant_cedar("carol", &[], &[]).is_err(), "a grant over no app");
+        // An app's name is quoted, never read as policy.
+        let odd = grant_cedar("carol", &["crm\" }; permit(principal, action, resource); //".into()], &[]).unwrap();
+        assert!(!grant_covers(&odd, &carol, &other).unwrap());
+    }
+}

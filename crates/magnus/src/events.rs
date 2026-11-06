@@ -110,6 +110,20 @@ pub struct ContextRef {
     /// its system context (`relationship.rs`); none when they have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relationship: Option<u32>,
+    /// Whether the call carried anything of its person's (notes, recent
+    /// messages, reactions, commitments): what the run then writes for
+    /// others is theirs (#258, #301).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub personal: bool,
+}
+
+impl ContextRef {
+    /// Whether the call carried anything of its person's. A call logged
+    /// before `personal` was recorded says so by the notes version it
+    /// carried (#304).
+    pub fn carried_person(&self) -> bool {
+        self.personal || self.relationship.is_some()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -556,6 +570,96 @@ pub enum Ev {
     ScheduleRemoved {
         id: String,
     },
+    /// A person's standing authority over a category of their own work
+    /// (behavior spec, Standing authority; #235): set when they chose
+    /// "Handle things like this" on a task proposal, or accepted a grant
+    /// card Magnus put to them. An edit sets it again with the same id.
+    /// `cedar` is the policy the kernel wrote from these fields: what it
+    /// covers in the tasks started under it.
+    GrantSet {
+        id: String,
+        person: String,
+        /// The category of work, in words (content).
+        #[serde(default)]
+        title: String,
+        /// The apps it covers, by name.
+        apps: Vec<String>,
+        /// Exclusions the person lifted: `send`, `irreversible`.
+        #[serde(default)]
+        allow: Vec<String>,
+        /// `day`, `week` or `month`: a rolling 1, 7 or 30 days.
+        period: String,
+        /// Model cost its tasks may spend in a period.
+        max_usd: f64,
+        /// The card it was set from, if any.
+        #[serde(default)]
+        card: Option<String>,
+        cedar: String,
+        /// The taint of the chat turn whose words its title is, when they
+        /// were not the person's own.
+        #[serde(default)]
+        label: Option<Label>,
+    },
+    /// The person revoked a grant: it covers nothing from now on.
+    GrantRevoked {
+        id: String,
+        person: String,
+    },
+    /// An action a policy asked about went ahead under a grant.
+    GrantUsed {
+        grant: String,
+        task: String,
+        run: String,
+        call_id: String,
+        tool: String,
+    },
+    /// Something the person or Magnus said they would do (behavior spec,
+    /// the commitment ledger; #236), recognised by Magnus in a run of the
+    /// person's: `who` (`person` or `magnus`) will do `what`, for `to`, by
+    /// `by` (a date or a time). `quote` is the words it was recognised
+    /// from, found verbatim in the person's own words of the run or in the
+    /// result of a call it read (`source`). `label` is the run's taint.
+    CommitmentRecorded {
+        id: String,
+        person: String,
+        who: String,
+        #[serde(default)]
+        what: String,
+        #[serde(default)]
+        to: Option<String>,
+        #[serde(default)]
+        by: Option<String>,
+        /// `{kind: conversation, thread, task}` or `{kind: app, app, tool, task, call}`.
+        #[serde(default)]
+        source: Value,
+        #[serde(default)]
+        quote: String,
+        #[serde(default)]
+        label: Label,
+    },
+    /// A commitment corrected (its words, for whom, by when) or its status
+    /// changed (`open`, `done`, `released`), by the person or by Magnus.
+    /// What is given replaces what it had; an empty `to` or `by` clears it.
+    CommitmentChanged {
+        id: String,
+        person: String,
+        #[serde(default)]
+        what: Option<String>,
+        #[serde(default)]
+        to: Option<String>,
+        #[serde(default)]
+        by: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    /// The person removed a commitment; the content of its events is
+    /// deleted with a `removed` event that follows.
+    CommitmentRemoved {
+        id: String,
+        person: String,
+    },
     /// A due schedule could not start its task.
     ScheduleFailed {
         id: String,
@@ -619,6 +723,10 @@ pub enum Ev {
         /// The scope the person confirmed for the schedule that started it.
         #[serde(default)]
         scope: Option<String>,
+        /// The grant it runs under (#235): its policy asks within the
+        /// grant go ahead without asking.
+        #[serde(default)]
+        grant: Option<String>,
     },
     /// A file the person added: to the library, a project, or a chat
     /// message. Its content is private data, never instructions.
@@ -1068,6 +1176,9 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("disagreement_outcome", &["outcome"]),
     ("card_declined", &["reason"]),
     ("schedule_ended", &["reason"]),
+    ("grant_set", &["title"]),
+    ("commitment_recorded", &["what", "to", "quote"]),
+    ("commitment_changed", &["what", "to", "note"]),
 ];
 
 /// The content fields of one kind of event; none for most.
@@ -1111,6 +1222,7 @@ impl Ev {
             | Failed { run, .. }
             | Cancelled { run }
             | ApprovalUsed { run, .. }
+            | GrantUsed { run, .. }
             | Wait { run, .. }
             | BudgetExtended { run, .. }
             | Memory { run, .. }
@@ -1126,6 +1238,17 @@ impl Ev {
 
 #[cfg(test)]
 mod tests {
+    /// A call logged before `personal` was recorded, carrying the person's
+    /// notes, still counts as carrying them when replayed (#304).
+    #[test]
+    fn a_call_logged_before_personal_with_notes_carried_its_person() {
+        let old: super::ContextRef = serde_json::from_value(serde_json::json!({ "through_seq": 7, "instructions": "v1", "tools_hash": "h", "relationship": 3 })).unwrap();
+        assert!(!old.personal);
+        assert!(old.carried_person());
+        let none: super::ContextRef = serde_json::from_value(serde_json::json!({ "through_seq": 7, "instructions": "v1", "tools_hash": "h" })).unwrap();
+        assert!(!none.carried_person());
+    }
+
     /// Every kind and field the content list names is one `Ev` has, so a
     /// misspelling cannot leave content in the log; and each has a default,
     /// so an event whose content was deleted still reads.
