@@ -309,3 +309,18 @@ fn the_console_and_keycloak_helpers_never_wait_forever_on_an_answer() {
         }
     }
 }
+
+/// The mail stand-in's docker commands give up after `DOCKER_PATIENCE`
+/// seconds and say which command stalled: a container engine stalled under
+/// load held the invite test silently until the runner killed it at 600 s,
+/// on master's runs 42152977968 and 42164793481 (#246).
+#[test]
+fn the_mail_stand_in_never_waits_forever_on_docker() {
+    let secs: u64 = magnus_scratch::mail::DOCKER_PATIENCE.parse().unwrap();
+    assert!(secs < 600, "a docker command outlasts the runner's own limit");
+    let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mail.rs")).unwrap();
+    for (i, _) in text.match_indices("Command::new(") {
+        let call = &text[i..i + text[i..].find(')').unwrap()];
+        assert!(!call.contains("\"docker\""), "mail.rs runs docker with no time limit: {call}");
+    }
+}

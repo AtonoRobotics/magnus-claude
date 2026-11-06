@@ -1,0 +1,3 @@
+# The mail stand-in never waits forever on docker (2026-11-06)
+
+- The mail stand-in's docker commands (`inspect`, `run`, `logs`, and `rm -f` on drop) run under `timeout 60`. A stall fails the test and names the command. The invite test, the only one that starts the mail container, hung until the runner's 600 s kill on master's runs 42152977968 and 42164793481. The second run already had #240's HTTP limits, so the hang was outside them. The build box was loaded at 50–98 both times. A minute is far above what these commands take on an idle box. Test: `the_mail_stand_in_never_waits_forever_on_docker`.

@@ -24,12 +24,20 @@ pub struct Inbox {
 
 impl Drop for Inbox {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("docker").args(["rm", "-f", &self.container]).output();
+        let _ = std::process::Command::new("timeout").args([DOCKER_PATIENCE, "docker", "rm", "-f", &self.container]).output();
     }
 }
 
+/// How long a docker command may take, in seconds, before the test fails
+/// naming it: a container engine stalled under load held the invite test
+/// silently until the runner killed it at 600 s (#246). A minute is far
+/// above what these commands take on an idle box (under a second).
+pub const DOCKER_PATIENCE: &str = "60";
+
 fn docker(args: &[&str]) -> String {
-    let out = std::process::Command::new("docker").args(args).output().expect("run docker");
+    let out = std::process::Command::new("timeout").arg(DOCKER_PATIENCE).arg("docker").args(args).output().expect("run docker");
+    // `timeout` exits 124 when it had to stop the command.
+    assert!(out.status.code() != Some(124), "docker {} did not finish in {DOCKER_PATIENCE} s", args.join(" "));
     assert!(out.status.success(), "docker {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -52,7 +60,7 @@ impl Inbox {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        let logs = std::process::Command::new("docker").args(["logs", &inbox.container]).output().map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
+        let logs = std::process::Command::new("timeout").args([DOCKER_PATIENCE, "docker", "logs", &inbox.container]).output().map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
         panic!("the mail server beside Keycloak did not start: {logs}");
     }
 
