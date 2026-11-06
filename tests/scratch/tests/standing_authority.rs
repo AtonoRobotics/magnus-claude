@@ -139,6 +139,11 @@ struct World {
 }
 
 async fn world() -> World {
+    world_with(false).await
+}
+
+/// The same apps, with the verifier on or off.
+async fn world_with(verifier: bool) -> World {
     let m = FakeModel::start(model()).await;
     let (crm, team, finance, mail) = (mcp::crm().start().await, mcp::chat().start().await, mcp::finance().start().await, mcp::mail().start().await);
     let spec = Spec::default()
@@ -146,6 +151,8 @@ async fn world() -> World {
         .app("team", &team, "internal", "principal", &[("post", "reversible_write"), ("list_posts", "read")])
         .app("finance", &finance, "private", "principal", &[("get_report", "financial")])
         .app("mail", &mail, "private", "private+untrusted", &[("list_inbox", "read")]);
+    let mut spec = spec;
+    spec.verifier = verifier;
     let app = Appliance::start(spec, &m).await;
     assert!(app.api("alice").put_policy("org", STRICT).await.is_success());
     World { crm, team, _finance: finance, _mail: mail, app, m }
@@ -477,4 +484,23 @@ async fn a_grants_budget_holds_across_its_tasks_and_deleting_one_gives_nothing_b
     eventually("the resumed task asked the model again", PATIENCE, || async { (calls(&w.m) > before).then_some(()) }).await;
     alice.wait_settled(&second).await;
     assert!(alice.open_items(&second, "notice").await.iter().all(|n| n["details"]["reason"] != "grant_budget"), "it stopped again after its person resumed it");
+}
+
+/// Once a grant's budget for the period is spent, no paid call of a task
+/// under it goes out: not the verifier's (here, its review of the contract
+/// the spending reply recorded) any more than the agent's (review of #284,
+/// #286).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spent_grant_stops_the_verifiers_calls_too() {
+    let w = world_with(true).await;
+    let alice = w.app.api("alice");
+    // Its first reply spends all of it.
+    let g = grant(&alice, fields("Keep the CRM current", &["crm"], 0.000001)).await;
+    let t = run(&alice, "update", Some(&g)).await.expect("no task started");
+    // It stops for its budget: the run's own is what was left of the grant's.
+    let stop = alice.wait_item(&t, "notice").await;
+    assert!(matches!(stop["details"]["reason"].as_str(), Some("grant_budget" | "budget")), "{stop}");
+    let reviews = w.m.requests().into_iter().filter(|c| system(c).contains("You review a task's acceptance criteria")).count();
+    assert_eq!(reviews, 0, "the verifier was asked after the grant's budget was spent");
+    assert_eq!(w.crm.effects("update_record"), 0);
 }

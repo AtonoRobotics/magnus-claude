@@ -448,6 +448,10 @@ impl Kernel {
     /// owner's rule: only a value that cannot carry instructions is endorsed
     /// without a person).
     async fn extract_value(&self, run: &Run, from: &str, spec: &Value) -> Result<Option<(String, Value)>> {
+        // A paid call: not once the run's grant's budget is spent (#286).
+        if self.grant_spent(&run.id).is_some() {
+            return Ok(None);
+        }
         let Some(e) = self.knowledge_shown(from).await? else { return Ok(None) };
         let (key, kind) = (spec["key"].as_str().unwrap_or_default(), spec["type"].as_str().unwrap_or_default());
         let options: Vec<String> = spec["options"].as_array().into_iter().flatten().filter_map(|o| o.as_str().map(String::from)).collect();
