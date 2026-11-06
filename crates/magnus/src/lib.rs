@@ -50,6 +50,7 @@ pub mod settings;
 pub mod spawn;
 pub mod speech;
 pub mod state;
+pub mod suggestions;
 pub mod tls;
 pub mod tools;
 pub mod trash;

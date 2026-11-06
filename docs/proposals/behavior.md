@@ -74,13 +74,17 @@ admin console.
      Decline with a reason. A task proposal: noticed (what and where),
      outcome, why now, needs (permissions, estimated cost, input); Approve
      (starts the task), Dismiss with a reason, Handle things like this
-     (opens a standing-authority grant).
+     (opens a standing-authority grant). The automation suggestion is done
+     (#253, `decisions/2026-11-06-253-suggestion-cards.md`); the task proposal
+     is next.
    - The validator refuses a card whose evidence does not point at something
      real: an event in the log, or an item in a connected app that Magnus
      actually read (recorded when read). Schedule cards become suggestions.
+     Done for suggestions (#253): a tool result the turn read, or a task of
+     the person's.
    - Every card and its answer go in the suggestion ledger, which the model
      reads before it suggests again; a declined one comes back only when
-     circumstances changed, saying what changed.
+     circumstances changed, saying what changed. Done (#253).
    - At cold start, and for each newly connected app, Magnus looks at what it
      may see and proposes two or three things it could take over.
 5. **Standing authority.**

@@ -515,9 +515,26 @@ pub enum Ev {
     ScheduleResumed {
         id: String,
     },
-    /// The person declined a schedule proposed in chat.
+    /// The person declined a card proposed in chat (a schedule or a
+    /// suggestion), with their reason (none in logs from before #253).
     CardDeclined {
         card: String,
+        #[serde(default)]
+        person: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// The person answered "Not now" to a card proposed in chat.
+    CardDeferred {
+        card: String,
+        #[serde(default)]
+        person: Option<String>,
+    },
+    /// The person accepted a suggestion with no timing: it started this task.
+    CardAccepted {
+        card: String,
+        person: String,
+        task: String,
     },
     ScheduleRemoved {
         id: String,
@@ -1032,6 +1049,7 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("spoken_written", &["script"]),
     ("disagreement_recorded", &["position", "decision"]),
     ("disagreement_outcome", &["outcome"]),
+    ("card_declined", &["reason"]),
     ("schedule_ended", &["reason"]),
 ];
 

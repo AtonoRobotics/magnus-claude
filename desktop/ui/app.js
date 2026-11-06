@@ -882,7 +882,7 @@ async function showNewChat(main, project) {
 async function showThread(main, thread) {
   if (!await chatLayout(main, thread)) return;
   // An answer being written shows as it streams; `live` holds its text so far.
-  const ui = { editing: null, sharing: null, people: [], live: {} };
+  const ui = { editing: null, sharing: null, declining: null, people: [], live: {} };
   const listening = {};
   const listen = entries => {
     const running = new Set(entries.filter(e => e.kind === "turn" && e.status === "running").map(e => e.task_id));
@@ -994,11 +994,19 @@ async function showThread(main, thread) {
     }
     const b = e.target.closest("[data-decide]");
     if (!b) return;
-    const card = b.closest("[data-card]").dataset.card;
+    const card = b.closest("[data-card]").dataset.card, decision = b.dataset.decide;
+    // Decline asks for the reason first; Magnus reads it before suggesting again.
+    if (decision === "decline-open" || decision === "decline-cancel") { ui.declining = decision === "decline-open" ? card : null; return draw(); }
+    const body = { decision };
+    if (decision === "decline") {
+      body.reason = ($(`#why-${CSS.escape(card)}`, main)?.value || "").trim();
+      if (!body.reason) return toast("Say why, so Magnus knows.");
+    }
     b.disabled = true;
     try {
-      await api("POST", `/v1/chat/cards/${enc(card)}`, { decision: b.dataset.decide });
-      toast(b.dataset.decide === "confirm" ? "Scheduled." : "Declined.");
+      const r = await api("POST", `/v1/chat/cards/${enc(card)}`, body);
+      toast(decision === "decline" ? "Declined." : decision === "later" ? "Not now." : r.task ? "Started." : "Scheduled.");
+      ui.declining = null; delete drafts[`why-${card}`];
       await refresh();
     } catch (err) { toast(err.message); b.disabled = false; }
   };
@@ -1096,9 +1104,24 @@ function scheduleText(sc) {
   const last = sc.last;
   return `${sc.paused ? `Paused: ${sc.paused}` : `Next run ${until(sc.next)}`} · ${sc.last_failed ? `Last firing could not start: ${sc.last_failed.error}` : last ? `Last result: ${(STATUS[last.status] || ["", last.status])[1]}, ${when(last.ended_at || last.created_at)}` : "No results yet"}`;
 }
+// A card's answers: accept, Not now, or Decline, which asks for the reason.
+function cardActs(e, ui, accept, more = "") {
+  if (ui.declining === e.card) return `<div class="row cc-act decline-why"><label class="sr" for="why-${esc(e.card)}">Why not?</label>
+    <input id="why-${esc(e.card)}" data-draft="why-${esc(e.card)}" placeholder="Why not? Magnus reads this before suggesting again">
+    <button class="primary" data-decide="decline">Decline</button><button class="link" data-decide="decline-cancel">Cancel</button></div>`;
+  return `<div class="row cc-act"><button class="primary" data-decide="confirm">${esc(accept)}</button>${more}<button data-decide="later">Not now</button><button class="link" data-decide="decline-open">Decline</button></div>`;
+}
+
+// What became of a card that is no longer open, other than a schedule it made.
+function cardOutcome(e) {
+  if (e.state === "declined") return `<p class="small"><span class="chip">Declined</span> ${esc(e.title || "")}${e.reason ? ` <span class="muted">· ${esc(e.reason)}</span>` : ""}</p>`;
+  if (e.state === "later") return `<p class="small"><span class="chip">Not now</span> ${esc(e.title || "")}</p>`;
+  if (e.started) return `<p class="small"><span class="chip ok">Accepted</span> ${esc(e.title || "")} <a href="#/task/${enc(e.started)}" data-open="task:${esc(e.started)}">See the task</a></p>`;
+  return "";
+}
+
 function scheduleLine(e) {
-  if (e.state === "declined") return `<p class="small"><span class="chip">Declined</span></p>`;
-  if (e.state !== "confirmed") return "";
+  if (e.state !== "confirmed") return cardOutcome(e);
   const sc = App.schedules.find(x => x.id === e.schedule);
   if (!sc) return `<p class="small" data-schedule-gone="${esc(e.schedule || "")}"><span class="chip">Cancelled</span> ${esc(e.title || "This schedule")} no longer runs.</p>`;
   const act = (k, label) => `<button class="link small" data-sched-act="${k}" data-schedule-id="${esc(sc.id)}">${label}</button>`;
@@ -1238,15 +1261,27 @@ function entry(e, ui = {}) {
       ${e.view ? shownFrame(e.id, "The deliverable") : ""}
       ${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}<a class="small see" href="#/task/${enc(e.task_id)}" data-open="task:${esc(e.task_id)}">See the outcome</a></div>`;
     case "connector_card": return appOfferCard(e);
+    case "suggestion_card": {
+      if (e.state !== "open") return `<div data-card="${esc(e.card)}">${e.schedule ? scheduleLine(e) : cardOutcome(e)}</div>`;
+      const timed = e.every_minutes || e.daily_at;
+      return `<div class="confirm chatcard suggestion" data-card="${esc(e.card)}"><div class="cc-head"><span class="st sch">${icon(timed ? "calendar" : "tasks")}</span><strong>${esc(e.title)}</strong></div>
+        <p class="cc-text">${esc(e.plan)}</p>
+        ${e.changed ? `<p class="small"><strong>What changed:</strong> ${esc(e.changed)}</p>` : ""}
+        <div class="sugg-part"><span class="small muted">Why</span><ul class="sugg-list">${(e.evidence || []).map(x => `<li>${esc(x.shows)} <span class="small muted">(${x.call ? `from ${esc(x.tool)}` : `task: ${esc(x.title || "your request")}`})</span></li>`).join("")}</ul></div>
+        <div class="sugg-part"><span class="small muted">What it may do</span><ul class="sugg-list">${(e.permissions || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>
+        ${timed ? `<div class="tiles"><div><span>When</span><strong>${esc(rule(e))}</strong></div><div><span>Ends</span><strong>${esc(ends(e))}</strong></div></div>` : ""}
+        <p class="small muted">It acts for you (${esc(e.acts_for)}), with your access; what it needs from you shows under Needs you.</p>${taintNote(e.taint)}
+        ${cardActs(e, ui, "Accept")}</div>`;
+    }
     case "schedule_card": {
       const b = e.budget || {};
-      if (e.state !== "open") return `<div data-card="${esc(e.card)}">${scheduleLine(e)}</div>`;
+      if (e.state !== "open") return `<div data-card="${esc(e.card)}">${e.state === "confirmed" ? scheduleLine(e) : cardOutcome(e)}</div>`;
       return `<div class="confirm chatcard" data-card="${esc(e.card)}"><div class="cc-head"><span class="st sch">${icon("calendar")}</span><strong>Start this schedule?</strong></div>
         <p class="cc-text">${esc(e.text)}</p>
         <div class="tiles"><div><span>When</span><strong>${esc(rule(e))}</strong></div><div><span>What</span><strong>${esc(e.scope || "")}</strong></div><div><span>Ends</span><strong>${esc(ends(e))}</strong></div>
           <div><span>Budget</span><strong class="num">Up to $${esc(b.max_usd)} a run</strong><span class="small">${esc(b.max_model_calls)} model calls, ${esc(b.max_actions)} actions</span></div></div>
         <p class="small muted">It acts for you (${esc(e.acts_for)}), with your access; what it needs from you shows under Needs you.</p>${taintNote(e.taint)}
-        <div class="row cc-act"><button class="primary" data-decide="confirm">Start schedule</button><button data-act="change-schedule">Change</button><button class="link" data-decide="decline">Not now</button></div></div>`;
+        ${cardActs(e, ui, "Start schedule", `<button data-act="change-schedule">Change</button>`)}</div>`;
     }
     default: return "";
   }

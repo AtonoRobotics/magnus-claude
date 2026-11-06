@@ -221,7 +221,10 @@ impl Kernel {
         let recent = self.recent_to(&run.person, thread.as_deref(), run.created_at).await?;
         // Their reactions and open disagreements, as they stood when it started (#233).
         let (reactions, open) = self.read(|s| (crate::reactions::reactions_before(s, &run.person, run.created_at), crate::reactions::open_before(s, &run.person, run.created_at)));
-        Ok((format!("{}{}", section(&notes, &recent), crate::reactions::section(&reactions, &open)), (!notes.is_empty()).then_some(version)))
+        // Their suggestion ledger, as it stood when it started (#253).
+        let ledger = self.read(|s| crate::suggestions::ledger(s, &run.person, run.created_at));
+        let sections = format!("{}{}{}", section(&notes, &recent), crate::reactions::section(&reactions, &open), crate::suggestions::section(&ledger));
+        Ok((sections, (!notes.is_empty()).then_some(version)))
     }
 }
 
