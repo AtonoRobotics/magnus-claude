@@ -406,10 +406,12 @@ impl crate::kernel::Kernel {
     }
 
     /// A watched tool answered for the person: diff its items against
-    /// the baseline, waking a review for new ones (#369). The first
-    /// sighting seeds silently; the baseline advances only when the
-    /// wake starts a review, so a dropped wake retries on the next
-    /// read instead of losing the items.
+    /// the last two answers, waking a review for new ones (#369). The
+    /// first sighting seeds silently; the window advances only when
+    /// the wake starts a review, so a dropped wake retries on the next
+    /// read instead of losing the items. Two answers, not all history
+    /// (#409): no cap to evict from, so an unchanged answer diffs
+    /// empty however large it is, and memory stays two answers deep.
     pub(crate) async fn note_watched(self: &Arc<Self>, person: &str, app: &str, remote: &str, data: &Value) {
         let watches: Vec<crate::config::Watch> =
             self.cfg.connectors.iter().find(|c| c.name == app).map(|c| c.watch.clone()).unwrap_or_default();
@@ -417,20 +419,21 @@ impl crate::kernel::Kernel {
             let mut ids = watched_ids(data, &w.items, &w.id);
             ids.sort();
             ids.dedup();
-            let known = self.read(|s| s.watched_seen.get(&(person.to_string(), app.to_string(), remote.to_string())).cloned());
-            let Some(known) = known else {
+            let window = self.read(|s| s.watched_seen.get(&(person.to_string(), app.to_string(), remote.to_string())).cloned());
+            let Some(window) = window else {
                 let _ = self
                     .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
                     .await;
                 continue;
             };
-            let fresh: Vec<String> = ids.into_iter().filter(|id| !known.contains(id)).collect();
+            let fresh: Vec<&String> = ids.iter().filter(|id| !window.iter().any(|w| w.contains(*id))).collect();
             if fresh.is_empty() {
                 continue;
             }
-            if self.review_wake_items(person, app, fresh.len()).await {
+            let n = fresh.len();
+            if self.review_wake_items(person, app, n).await {
                 let _ = self
-                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids: fresh })
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
                     .await;
             }
         }

@@ -1018,11 +1018,13 @@ pub enum Ev {
         id: String,
     },
     /// A watched read answered: these item ids were seen for the
-    /// person's app tool, merged into its baseline (#369).
+    /// person's app tool, becoming the newest of its two-answer
+    /// window (#369, #409).
     WatchedSeen {
         person: String,
         app: String,
         tool: String,
+        #[serde(default)]
         ids: Vec<String>,
     },
     /// A scheduled poll of a watched read started (#406): the poll
@@ -1307,6 +1309,7 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("grant_set", &["title"]),
     ("commitment_recorded", &["what", "to", "quote"]),
     ("commitment_changed", &["what", "to", "note"]),
+    ("watched_seen", &["ids"]),
 ];
 
 /// The content fields of one kind of event; none for most.
