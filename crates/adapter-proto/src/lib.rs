@@ -48,6 +48,16 @@ pub enum Request {
     },
     /// Run one model turn. Answered with a stream ending in `done` or `error`.
     Complete(CompleteParams),
+    /// Price a call that has not happened, from the adapter's own prices.
+    /// Answered with one `quote` event or an `error`. Local: no provider
+    /// round trip, no credential needed. The quote scales linearly in
+    /// output tokens: an adapter whose pricing tiers quotes the top tier.
+    Quote {
+        settings: Value,
+        model: String,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     /// Start a sign-in. Answered with an `auth_step` event or an `error`.
     AuthBegin { settings: Value },
     /// Finish a sign-in with what the person brought back (callback URL, code).
@@ -186,6 +196,10 @@ pub enum Event {
     Catalog {
         models: Vec<ModelInfo>,
     },
+    /// The worst-case dollars for quoted token counts: the prompt at
+    /// input prices, the full output at output prices, with no cache
+    /// benefit assumed.
+    Quote { input_usd: f64, output_usd: f64 },
     /// What the person must do to sign in: open `url`, or enter `user_code`.
     /// `flow` is opaque and comes back in `auth_complete`.
     AuthStep {

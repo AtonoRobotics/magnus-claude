@@ -13,7 +13,7 @@ use crate::events::{ContextRef, Ev};
 use crate::kernel::Kernel;
 use crate::state::Status;
 use anyhow::Result;
-use magnus_adapter_proto::ErrorClass;
+use magnus_adapter_proto::{ErrorClass, Message, ToolSpec};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,6 +72,32 @@ impl Kernel {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    /// The output tokens this call may write: the full allowance when its
+    /// worst case fits what is left, fewer when only fewer fit, and none —
+    /// the run stops for budget — when the prompt alone does not fit. A
+    /// quote the adapter cannot give falls back to the full allowance: a
+    /// down adapter charges nothing, and the call fails through the retry
+    /// path below.
+    async fn clamped_max_tokens(self: &Arc<Self>, run_id: &str, adapter: &str, model: &str, input_tokens: u64, max_tokens: u32) -> Result<Option<u32>> {
+        let Some(run) = self.read(|s| s.runs.get(run_id).cloned()) else { return Ok(None) };
+        let left = run.config.budget.max_usd - run.usd;
+        let (input_usd, output_usd) = match self.adapters.quote(adapter, model, input_tokens, max_tokens).await {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!("quote for {run_id}: {e:#}; asking without a worst-case check");
+                return Ok(Some(max_tokens));
+            }
+        };
+        match clamp_output_for_budget(left, input_usd, output_usd, max_tokens) {
+            Some(n) => Ok(Some(n)),
+            None => {
+                let why = format!("Stopped: the next model call (about ${:.2} worst case) would pass the task's ${:.2} limit.", input_usd + output_usd, run.config.budget.max_usd);
+                self.suspend_with_notice(run_id, "budget", why, json!({ "usd": run.usd, "limit": run.config.budget.max_usd, "next_call_usd": input_usd + output_usd })).await?;
+                Ok(None)
+            }
+        }
     }
 
     pub async fn drive(self: Arc<Self>, run: &str) -> Result<()> {
@@ -134,6 +160,9 @@ impl Kernel {
         };
         let step = run.replies.len() as u32;
         let (adapter, model) = run.model();
+        // The prompt's tokens, estimated once: the quote below prices the
+        // same prompt every attempt, while what is left is re-read.
+        let input_tokens = estimated_input_tokens(&system, &messages, &tools);
         let mut attempt = 0u32;
         loop {
             // Each attempt, a retry too, reads the run as it is now: a failed
@@ -142,6 +171,14 @@ impl Kernel {
             if !self.may_ask_model(run_id).await? {
                 return Ok(Flow::Stop);
             }
+            // The call's worst case against what is left: the prompt plus
+            // the full output, at the model's prices. What is left bounds
+            // the output; when the prompt alone does not fit, the run stops
+            // for budget here, before anything is asked (#273).
+            let max_tokens = match self.clamped_max_tokens(run_id, adapter, model, input_tokens, run.config.max_tokens).await? {
+                Some(n) => n,
+                None => return Ok(Flow::Stop),
+            };
             self.emit(
                 "kernel",
                 Ev::ModelCall {
@@ -156,7 +193,7 @@ impl Kernel {
             let rid = run_id.to_string();
             let out = self
                 .adapters
-                .complete(adapter, model, &system, messages.clone(), tools.clone(), run.config.max_tokens, |t| live.send(&rid, t))
+                .complete(adapter, model, &system, messages.clone(), tools.clone(), max_tokens, |t| live.send(&rid, t))
                 .await;
             live.end(&rid);
             match out {
@@ -256,5 +293,62 @@ impl Kernel {
                 }
             }
         }
+    }
+}
+
+/// Prompt bytes per token when pricing a call that has not happened: the
+/// developer views estimate unreported usage the same way.
+const CHARS_PER_TOKEN: usize = 4;
+
+/// The prompt's tokens, estimated from what goes out: the system prompt,
+/// the messages and the tools as sent.
+fn estimated_input_tokens(system: &str, messages: &[Message], tools: &[ToolSpec]) -> u64 {
+    let chars = system.len() + serde_json::to_string(messages).map(|s| s.len()).unwrap_or(0) + serde_json::to_string(tools).map(|s| s.len()).unwrap_or(0);
+    ((chars + CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN) as u64
+}
+
+/// The output tokens the dollars left allow: the full allowance when the
+/// quoted worst case fits, fewer when only fewer fit, none when the
+/// prompt alone does not fit. The quote scales linearly in output tokens
+/// (the adapter contract), so what is left over the prompt prices the
+/// headroom.
+fn clamp_output_for_budget(remaining_usd: f64, input_usd: f64, output_usd_full: f64, max_tokens: u32) -> Option<u32> {
+    if input_usd > remaining_usd {
+        return None;
+    }
+    if output_usd_full <= 0.0 {
+        return Some(max_tokens);
+    }
+    let unit = output_usd_full / max_tokens.max(1) as f64;
+    if unit <= 0.0 {
+        return Some(max_tokens);
+    }
+    let affordable = ((remaining_usd - input_usd) / unit).floor().clamp(0.0, max_tokens as f64) as u32;
+    if affordable < 1 {
+        None
+    } else {
+        Some(affordable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_output_for_budget;
+
+    /// $10 a million output tokens, the 16000-token allowance: the full
+    /// allowance when it fits, fewer when only fewer fit, none when the
+    /// prompt alone does not (#273).
+    #[test]
+    fn the_dollars_left_bound_the_call_output() {
+        // $1 left, $0.01 in, $0.16 out: the full 16000.
+        assert_eq!(clamp_output_for_budget(1.0, 0.01, 0.16, 16000), Some(16000));
+        // $0.050001 left, $0.01 in: 4000 fit.
+        assert_eq!(clamp_output_for_budget(0.050001, 0.01, 0.16, 16000), Some(4000));
+        // $0.010009 left: nothing writable fits.
+        assert_eq!(clamp_output_for_budget(0.010009, 0.01, 0.16, 16000), None);
+        // The prompt alone past what is left: no call.
+        assert_eq!(clamp_output_for_budget(0.001, 0.01, 0.16, 16000), None);
+        // Free output (or unpriced): the full allowance while the prompt fits.
+        assert_eq!(clamp_output_for_budget(0.05, 0.01, 0.0, 16000), Some(16000));
     }
 }

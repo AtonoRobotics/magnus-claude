@@ -177,7 +177,7 @@ async fn client_version(http: &reqwest::Client, url: &str, refresh_s: u64) -> Re
 
 async fn handle(http: reqwest::Client, mut req: Request, mut sink: Sink) -> anyhow::Result<()> {
     let settings = match &mut req {
-        Request::Hello {} | Request::AuthRevoke { .. } => None,
+        Request::Hello {} | Request::AuthRevoke { .. } | Request::Quote { .. } => None,
         Request::Catalog { settings, .. } | Request::AuthBegin { settings } | Request::AuthComplete { settings, .. } => Some(settings),
         Request::Complete(p) => Some(&mut p.settings),
     };
@@ -196,6 +196,11 @@ async fn handle(http: reqwest::Client, mut req: Request, mut sink: Sink) -> anyh
             "responses" => responses::complete(&http, p, &mut sink).await,
             _ => chat::complete(&http, p, &mut sink).await,
         },
+        Request::Quote { settings, model, input_tokens, output_tokens } => {
+            let input_usd = cost(&settings, &model, &Usage { input_tokens, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0.0 });
+            let output_usd = cost(&settings, &model, &Usage { input_tokens: 0, output_tokens, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0.0 });
+            sink.send(&Event::Quote { input_usd, output_usd }).await
+        }
         Request::AuthBegin { settings } => auth::begin(&http, &settings, &mut sink).await,
         Request::AuthComplete { settings, flow, input } => auth::complete(&http, &settings, &flow, &input, &mut sink).await,
         Request::AuthRevoke { settings, credential } => auth::revoke(&http, &settings, &credential, &mut sink).await,
