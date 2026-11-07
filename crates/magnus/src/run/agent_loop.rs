@@ -8,12 +8,12 @@
 //! What to do next is always the model's decision.
 
 use crate::grants::Spent;
-use crate::boundary::{Action, Issuer, Verdict};
+use crate::boundary::{clamp_output_for_budget, estimated_input_tokens, Action, Issuer, Verdict};
 use crate::events::{ContextRef, Ev};
 use crate::kernel::Kernel;
 use crate::state::Status;
 use anyhow::Result;
-use magnus_adapter_proto::{ErrorClass, Message, ToolSpec};
+use magnus_adapter_proto::ErrorClass;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -304,56 +304,4 @@ impl Kernel {
     }
 }
 
-/// The prompt's tokens from the kernel's bytes: the fallback when the
-/// adapter cannot measure what it would send. The live path asks the
-/// adapter, which drops what it cannot send.
-fn estimated_input_tokens(system: &str, messages: &[Message], tools: &[ToolSpec]) -> u64 {
-    let chars = system.len() + serde_json::to_string(messages).map(|s| s.len()).unwrap_or(0) + serde_json::to_string(tools).map(|s| s.len()).unwrap_or(0);
-    magnus_adapter_proto::chars_to_tokens(chars)
-}
 
-/// The output tokens the dollars left allow: the full allowance when the
-/// quoted worst case fits, fewer when only fewer fit, none when the
-/// prompt alone does not fit. The quote scales linearly in output tokens
-/// (the adapter contract), so what is left over the prompt prices the
-/// headroom.
-fn clamp_output_for_budget(remaining_usd: f64, input_usd: f64, output_usd_full: f64, max_tokens: u32) -> Option<u32> {
-    if input_usd > remaining_usd {
-        return None;
-    }
-    if output_usd_full <= 0.0 {
-        return Some(max_tokens);
-    }
-    let unit = output_usd_full / max_tokens.max(1) as f64;
-    if unit <= 0.0 {
-        return Some(max_tokens);
-    }
-    let affordable = ((remaining_usd - input_usd) / unit).floor().clamp(0.0, max_tokens as f64) as u32;
-    if affordable < 1 {
-        None
-    } else {
-        Some(affordable)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::clamp_output_for_budget;
-
-    /// $10 a million output tokens, the 16000-token allowance: the full
-    /// allowance when it fits, fewer when only fewer fit, none when the
-    /// prompt alone does not (#273).
-    #[test]
-    fn the_dollars_left_bound_the_call_output() {
-        // $1 left, $0.01 in, $0.16 out: the full 16000.
-        assert_eq!(clamp_output_for_budget(1.0, 0.01, 0.16, 16000), Some(16000));
-        // $0.050001 left, $0.01 in: 4000 fit.
-        assert_eq!(clamp_output_for_budget(0.050001, 0.01, 0.16, 16000), Some(4000));
-        // $0.010009 left: nothing writable fits.
-        assert_eq!(clamp_output_for_budget(0.010009, 0.01, 0.16, 16000), None);
-        // The prompt alone past what is left: no call.
-        assert_eq!(clamp_output_for_budget(0.001, 0.01, 0.16, 16000), None);
-        // Free output (or unpriced): the full allowance while the prompt fits.
-        assert_eq!(clamp_output_for_budget(0.05, 0.01, 0.0, 16000), Some(16000));
-    }
-}
