@@ -1,0 +1,46 @@
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+import {join,dirname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+const root=join(dirname(fileURLToPath(import.meta.url)),'../..');
+const {chromium}=createRequire(import.meta.url)(join(root,'browser/node_modules/playwright-core'));
+const browser=await chromium.launch({executablePath:process.env.MAGNUS_CHROMIUM,args:['--no-sandbox','--disable-dev-shm-usage']});
+const context=await browser.newContext({permissions:['clipboard-read','clipboard-write']});
+const page=await context.newPage(); const errors=[];page.on('pageerror',e=>errors.push(e.message));
+try {
+  await page.goto(process.env.MAGNUS_URL);
+  await page.getByLabel('Username').fill(process.env.MAGNUS_PERSON);await page.getByLabel('Password').fill(process.env.MAGNUS_PASSWORD);
+  await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.locator('#msg').fill('Show the Markdown fixture');await page.locator('#send').click();
+  const entry=page.locator('.entry[data-kind=answer]').last();await entry.getByRole('heading',{name:'Readable answer'}).waitFor();
+  assert.equal(await entry.locator('.markdown strong').textContent(),'Bold');assert.equal(await entry.locator('table td').count(),2);
+  assert.equal(await entry.locator('script, a[href^="javascript:"]').count(),0);assert.equal(await page.evaluate(()=>window.pwned),undefined);
+  await entry.getByRole('button',{name:'Copy code'}).click();assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'const answer = 42;');
+  assert.ok(await entry.locator('.msg-actions > button, .msg-actions > .message-menu-wrap > button').count()<=3);
+  assert.equal(await entry.locator('[role=toolbar], .verdict').count(),0);
+  const more=entry.getByRole('button',{name:'More message actions'});await more.focus();await page.keyboard.press('Enter');
+  const menu=entry.getByRole('menu');await menu.waitFor();assert.equal(await more.getAttribute('aria-expanded'),'true');
+  assert.equal(await page.evaluate(()=>document.activeElement.textContent.trim()),'Retry');
+  await page.keyboard.press('End');assert.equal(await page.evaluate(()=>document.activeElement.textContent.trim()),'Delete message');
+  await page.keyboard.press('Home');await page.keyboard.press('ArrowDown');assert.equal(await page.evaluate(()=>document.activeElement.textContent.trim()),'Branch');
+  await page.evaluate(()=>{ document.querySelector('#thread')._html=''; return App.redraw(); });
+  assert.equal(await page.evaluate(()=>document.activeElement.textContent.trim()),'Branch','poll redraw preserves the open menu and its focused item');
+  await page.keyboard.press('Escape');assert.equal(await more.getAttribute('aria-expanded'),'false');assert.ok(await more.evaluate(el=>el===document.activeElement));
+  await more.click();await page.keyboard.press('Tab');assert.equal(await more.getAttribute('aria-expanded'),'false');assert.equal(await menu.isVisible(),false);
+  await more.click();await page.locator('#msg').click();assert.equal(await menu.isVisible(),false);
+  await more.click();await menu.getByRole('menuitem',{name:'Feedback',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Feedback'});await dialog.waitFor();await dialog.getByRole('button',{name:'That was great'}).click();await dialog.waitFor({state:'hidden'});
+  await more.click();await menu.getByRole('menuitem',{name:'Feedback',exact:true}).click();assert.equal(await dialog.getByRole('button',{name:'That was great'}).getAttribute('aria-pressed'),'true');
+  await dialog.getByRole('button',{name:'Close feedback'}).click();
+  // A cold hover, focus timing, Escape suppression and usable viewport bounds.
+  const copy=entry.getByRole('button',{name:'Copy response',exact:true});await page.locator('#msg').focus();await page.mouse.move(0,0);await page.waitForTimeout(1100);
+  await copy.hover();await page.waitForTimeout(200);assert.equal(await page.getByRole('tooltip').count(),0);
+  await page.getByRole('tooltip').waitFor();assert.equal(await copy.getAttribute('title'),null);
+  const box=await page.getByRole('tooltip').boundingBox();assert.ok(box.x>=0 && box.y>=0 && box.x+box.width<=1280);
+  await page.keyboard.press('Escape');await page.waitForTimeout(200);assert.equal(await page.getByRole('tooltip').count(),0);
+  await page.mouse.move(0,0);await copy.focus();await page.getByRole('tooltip').waitFor({timeout:1000});
+  assert.ok((await copy.getAttribute('aria-describedby')).includes('magnus-tooltip'));
+  await page.keyboard.press('Escape');await page.waitForTimeout(200);assert.equal(await page.getByRole('tooltip').count(),0);
+  // In-place removal cannot leave an orphaned tooltip.
+  await page.locator('#msg').focus();await copy.focus();await page.getByRole('tooltip').waitFor();await copy.evaluate(el=>el.remove());await page.getByRole('tooltip').waitFor({state:'hidden'});
+  assert.deepEqual(errors,[]);console.log('browser: safe Markdown/copy, compact actions, feedback, menu keyboard/focus/outside click and tooltip timing/suppression/removal passed');
+} finally {await browser.close();}

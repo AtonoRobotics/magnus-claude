@@ -23,7 +23,12 @@ const d = await open(wd, app, process.env.MAGNUS_SHOTS, "chat-actions");
 
 // The entry whose text is `text`, of `kind` (message or answer).
 const entry = (kind, text) => `//div[@data-entry][@data-kind='${kind}'][.//div[normalize-space()='${text}']]`;
-const act = (kind, text, label) => d.click(d.xpath(`${entry(kind, text)}//div[@role='toolbar']//button[normalize-space()='${label}']`));
+const act = async (kind, text, label) => {
+  const row = entry(kind,text);
+  if (label === "Copy" || label === "Edit") return d.click(d.xpath(`${row}//button[@aria-label='${label === "Copy" ? "Copy response" : "Edit"}']`));
+  await d.click(d.xpath(`${row}//button[@aria-label='More message actions']`));
+  return d.click(d.xpath(`${row}//button[@role='menuitem'][normalize-space()='${label === "Delete" ? "Delete message" : label}']`));
+};
 const count = xp => d.run(`return document.evaluate(arguments[0], document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength`, xp);
 const gone = async (what, xp) => d.until(what, async () => (await count(xp)) === 0 || null);
 const accept = d.answer;
@@ -85,11 +90,19 @@ await d.step("make a task", async () => {
 await d.step("react to started tasks", async () => {
   // Started tasks take reactions like any message of Magnus's (#360): the tasks entry
   // offers great/annoying, pressing marks it, pressing again takes it back.
-  const btn = "//div[@data-kind='tasks']//div[@role='toolbar']//button[normalize-space()='That was great']";
+  const feedback = async () => {
+    await d.click(d.xpath("//div[@data-kind='tasks']//button[@aria-label='More message actions']"));
+    await d.click(d.xpath("//div[@data-kind='tasks']//button[@role='menuitem'][normalize-space()='Feedback']"));
+  };
+  await feedback();
+  const btn = "//dialog//button[normalize-space()='That was great']";
   await d.click(d.xpath(btn));
-  await d.until("the pressed reaction", async () => (await d.attr(d.xpath(btn), "aria-pressed")) === "true" || null);
+  await feedback();
+  if (await d.attr(d.xpath(btn),"aria-pressed") !== "true") throw new Error("reaction was not recorded");
   await d.click(d.xpath(btn));
-  await d.until("the reaction taken back", async () => (await d.attr(d.xpath(btn), "aria-pressed")) === "false" || null);
+  await feedback();
+  if (await d.attr(d.xpath(btn),"aria-pressed") !== "false") throw new Error("reaction was not removed");
+  await d.click(d.xpath("//dialog//button[normalize-space()='Close feedback']"));
 });
 
 await d.step("share with a colleague", async () => {

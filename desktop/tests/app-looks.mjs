@@ -75,7 +75,7 @@ await step("a conversation to look at, with Needs you open beside it", async () 
 
 await step("Settings > Appearance offers mode, material, accent and motion", async () => {
   await appearance();
-  const offered = JSON.parse(await run(`return JSON.stringify([...document.querySelectorAll("[data-look]")].map(b => b.dataset.look + ":" + (b.getAttribute("title") || b.innerText.trim())))`));
+  const offered = JSON.parse(await run(`return JSON.stringify([...document.querySelectorAll("[data-look]")].map(b => b.dataset.look + ":" + (b.getAttribute("data-tooltip") || b.innerText.trim())))`));
   for (const want of ["mode:Light", "mode:Dark", "mode:Match computer", "material:Solid", "material:Glass", "accent:Blue", "accent:Teal", "accent:Clay", "accent:Graphite", "motion:Full", "motion:Reduced", "motion:Off"]) {
     if (!offered.includes(want)) throw new Error(`Appearance does not offer ${want}: ${offered.join(", ")}`);
   }
@@ -87,7 +87,7 @@ for (const [mode, material] of [["light", "solid"], ["light", "glass"], ["dark",
     await appearance();
     await choose("mode", mode);
     await choose("material", material);
-    await click(xpath("//nav//a[contains(@title,'Hello')]"));
+    await click(xpath("//nav//a[contains(@data-tooltip,'Hello')]"));
     await click(xpath("//nav//button[contains(@class,'needs')]"));
     await xpath("//aside[@id='detail']//h2[normalize-space()='Needs you']");
     // Let the panel settle before measuring what is under each text.
@@ -107,7 +107,7 @@ for (const [mode, material] of [["light", "solid"], ["light", "glass"], ["dark",
 await step("the accent colors what acts", async () => {
   await appearance();
   await choose("accent", "teal");
-  await click(xpath("//nav//a[contains(@title,'Hello')]"));
+  await click(xpath("//nav//a[contains(@data-tooltip,'Hello')]"));
   const send = await until("Send in teal", () => run("const b = getComputedStyle(document.getElementById('send')).backgroundColor; return b === 'rgb(31, 122, 109)' && b"));
   if (!send) throw new Error("Send is not teal");
 });
@@ -119,7 +119,7 @@ await step("motion: full glides the panel in, off moves nothing", async () => {
   if (!moving) throw new Error("the panel did not glide in with motion on Full");
   await appearance();
   await choose("motion", "off");
-  await click(xpath("//nav//a[contains(@title,'Hello')]"));
+  await click(xpath("//nav//a[contains(@data-tooltip,'Hello')]"));
   await click(xpath("//nav//button[contains(@class,'needs')]"));
   await xpath("//aside[@id='detail']//h2[normalize-space()='Needs you']");
   const still = await run("return document.getAnimations().length");
