@@ -45,6 +45,30 @@ pub enum SignInError {
     NeedsCode,
 }
 
+/// Whether a person may sign in: invited until they accept, active after,
+/// disabled when turned off. Nobody recorded counts as active, so everyone
+/// already here stays signed in (#429).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Invited,
+    Active,
+    Disabled,
+}
+
+/// A live invitation: who it is for, where the link went, and until when
+/// it accepts. Stored by the hash of its token; the token itself is shown
+/// once, at the invite.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Invite {
+    pub person: String,
+    pub email: Option<String>,
+    pub expires: DateTime<Utc>,
+}
+
+/// Days an invitation stays usable.
+const INVITE_DAYS: i64 = 7;
+
 pub struct Accounts {
     dir: PathBuf,
     cfg: SignIn,
@@ -112,7 +136,67 @@ pub fn enroll_totp(state_dir: &Path, person: &str) -> Result<String> {
     Ok(format!("otpauth://totp/Magnus:{label}?secret={}&issuer=Magnus&digits=6&period=30", secret.trim_end_matches('=')))
 }
 
-/// Set a person's password. Used by the CLI on the appliance itself.
+/// Invite a person: a single-use token, good for 7 days, is stored by its
+/// hash and returned to pass on; the person must already be in the config
+/// (the local user store lifts that in a later #429 slice). Someone with
+/// neither a password nor a record is marked invited; anyone else keeps
+/// their status, so an invite never revokes working access.
+pub fn invite(state_dir: &Path, person: &str, email: Option<&str>) -> Result<String> {
+    let d = dir(state_dir);
+    std::fs::create_dir_all(&d)?;
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700))?;
+    let path = d.join("invites.json");
+    let mut all: BTreeMap<String, Invite> = read_json(&path)?;
+    let now = Utc::now();
+    all.retain(|_, inv| inv.expires > now);
+    let mut raw = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut raw);
+    let token = hex::encode(raw);
+    all.retain(|_, inv| inv.person != person);
+    all.insert(token_hash(&token), Invite { person: person.to_string(), email: email.map(str::to_string), expires: now + Duration::days(INVITE_DAYS) });
+    write_private(&path, &serde_json::to_vec_pretty(&all)?)?;
+    let passwords: BTreeMap<String, String> = read_json(&d.join("passwords.json"))?;
+    let spath = d.join("status.json");
+    let mut statuses: BTreeMap<String, Status> = read_json(&spath)?;
+    if !statuses.contains_key(person) && !passwords.contains_key(person) {
+        statuses.insert(person.to_string(), Status::Invited);
+        write_private(&spath, &serde_json::to_vec_pretty(&statuses)?)?;
+    }
+    Ok(token)
+}
+
+/// Accept an invitation: the token with the new password activates the
+/// person. The person it activated, or None for a bad, used or expired
+/// token (all answered alike).
+pub fn accept(state_dir: &Path, cfg: &SignIn, token: &str, password: &str) -> Result<Option<String>> {
+    accept_at(state_dir, cfg, token, password, Utc::now())
+}
+
+/// `accept` at `at`, for tests.
+pub fn accept_at(state_dir: &Path, cfg: &SignIn, token: &str, password: &str, at: DateTime<Utc>) -> Result<Option<String>> {
+    // The password is judged before the token is touched, so a short one
+    // does not burn the invitation.
+    anyhow::ensure!(password.chars().count() >= cfg.min_password_length, "a password needs at least {} characters", cfg.min_password_length);
+    let d = dir(state_dir);
+    let path = d.join("invites.json");
+    let mut all: BTreeMap<String, Invite> = read_json(&path)?;
+    all.retain(|_, inv| inv.expires > at);
+    let Some(inv) = all.remove(&token_hash(token.trim())) else {
+        write_private(&path, &serde_json::to_vec_pretty(&all)?)?;
+        return Ok(None);
+    };
+    write_private(&path, &serde_json::to_vec_pretty(&all)?)?;
+    set_password(state_dir, cfg, &inv.person, password)?;
+    let spath = d.join("status.json");
+    let mut statuses: BTreeMap<String, Status> = read_json(&spath)?;
+    statuses.insert(inv.person.clone(), Status::Active);
+    write_private(&spath, &serde_json::to_vec_pretty(&statuses)?)?;
+    Ok(Some(inv.person))
+}
+
+/// Set a person's password. Used by the CLI on the appliance itself. A
+/// password completes an invitation by any path, so someone invited becomes
+/// active; anyone disabled stays disabled until explicitly turned back on.
 pub fn set_password(state_dir: &Path, cfg: &SignIn, person: &str, password: &str) -> Result<()> {
     anyhow::ensure!(
         password.chars().count() >= cfg.min_password_length,
@@ -127,7 +211,14 @@ pub fn set_password(state_dir: &Path, cfg: &SignIn, person: &str, password: &str
     let salt = SaltString::generate(&mut OsRng);
     let phc = Argon2::default().hash_password(password.as_bytes(), &salt).map_err(|e| anyhow::anyhow!("hash: {e}"))?.to_string();
     all.insert(person.to_string(), phc);
-    write_private(&path, &serde_json::to_vec_pretty(&all)?)
+    write_private(&path, &serde_json::to_vec_pretty(&all)?)?;
+    let spath = d.join("status.json");
+    let mut statuses: BTreeMap<String, Status> = read_json(&spath)?;
+    if statuses.get(person) == Some(&Status::Invited) {
+        statuses.insert(person.to_string(), Status::Active);
+        write_private(&spath, &serde_json::to_vec_pretty(&statuses)?)?;
+    }
+    Ok(())
 }
 
 impl Accounts {
@@ -155,6 +246,25 @@ impl Accounts {
     /// CLI may have enrolled it).
     pub fn has_totp(&self, person: &str) -> bool {
         read_json::<BTreeMap<String, String>>(&self.dir.join("totp.json")).map(|m| m.contains_key(person)).unwrap_or(false)
+    }
+
+    /// Whether the person may sign in: active unless recorded otherwise
+    /// (read fresh: the CLI may have changed it).
+    pub fn status(&self, person: &str) -> Status {
+        read_json::<BTreeMap<String, Status>>(&self.dir.join("status.json")).map(|m| m.get(person).copied().unwrap_or(Status::Active)).unwrap_or(Status::Active)
+    }
+
+    /// Turn a person on or off. Disabling ends their live sessions at once
+    /// and returns the ids of those ended, for the caller to record.
+    pub fn set_status(&self, person: &str, status: Status) -> Result<Vec<String>> {
+        let path = self.dir.join("status.json");
+        let mut all: BTreeMap<String, Status> = read_json(&path)?;
+        all.insert(person.to_string(), status);
+        write_private(&path, &serde_json::to_vec_pretty(&all)?)?;
+        if status == Status::Disabled {
+            return self.end_all(person);
+        }
+        Ok(vec![])
     }
 
     /// Until when a person may not try another password, after too many
@@ -294,6 +404,12 @@ impl Accounts {
             if all.contains_key(person) {
                 self.failed(counter);
             }
+            return Ok(Err(SignInError::Rejected));
+        }
+        // After the password, so timing does not tell the status apart, and
+        // before the code, so no NeedsCode betrays a right password for
+        // someone turned off. Uncounted: the password was not wrong.
+        if self.status(person) != Status::Active {
             return Ok(Err(SignInError::Rejected));
         }
         // The password was right, so the person is known: a wrong code
@@ -503,6 +619,74 @@ mod tests {
         let next = crate::totp::generate(&secret, step + 2, 6);
         let later = chrono::DateTime::from_timestamp((step + 2) as i64 * 30 + 5, 0).unwrap();
         assert!(matches!(accounts.sign_in_counted_with_code_at("ada", "a-long-password", Some(&next), &counter, later), Ok(Ok(()))), "the next step's code did not sign in");
+    }
+
+    /// An invitation activates on accept: invited cannot sign in, the token
+    /// with a password activates once, and a second use, a bad token or an
+    /// expired one answers nothing (#429).
+    #[test]
+    fn invite_accept_activates_and_consumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SignIn { session_days: 1, max_failures: 5, lockout_minutes: 15, min_password_length: 10, oidc: None };
+        let accounts = Accounts::open(dir.path(), cfg.clone()).unwrap();
+        let token = invite(dir.path(), "ada", Some("ada@example.com")).unwrap();
+        assert_eq!(accounts.status("ada"), Status::Invited, "an invite did not mark the person invited");
+        let counter = Accounts::network_counter("ada");
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "whatever-password", None, &counter), Ok(Err(SignInError::Rejected))), "an invited person signed in");
+        assert_eq!(accept(dir.path(), &cfg, &token, "a-long-password").unwrap(), Some("ada".to_string()), "accepting the invite did not activate");
+        assert_eq!(accounts.status("ada"), Status::Active, "accepting left the person invited");
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "a-long-password", None, &counter), Ok(Ok(()))), "the accepted person cannot sign in");
+        assert_eq!(accept(dir.path(), &cfg, &token, "another-long-password").unwrap(), None, "the invite worked twice");
+        assert_eq!(accept(dir.path(), &cfg, "deadbeef", "another-long-password").unwrap(), None, "a bad token accepted");
+        let stale = invite(dir.path(), "ada", None).unwrap();
+        let past = chrono::Utc::now() + chrono::Duration::days(8);
+        assert_eq!(accept_at(dir.path(), &cfg, &stale, "another-long-password", past).unwrap(), None, "an expired invite accepted");
+        let kept = invite(dir.path(), "ada", None).unwrap();
+        assert!(accept(dir.path(), &cfg, &kept, "short").is_err(), "a short password accepted");
+        assert_eq!(accept(dir.path(), &cfg, &kept, "another-long-password").unwrap(), Some("ada".to_string()), "the short password burned the invite");
+        // A password set directly completes the invitation too — but never a
+        // disabling.
+        let cfg2 = SignIn { session_days: 1, max_failures: 5, lockout_minutes: 15, min_password_length: 10, oidc: None };
+        invite(dir.path(), "bea", None).unwrap();
+        set_password(dir.path(), &cfg2, "bea", "bea-long-password").unwrap();
+        assert_eq!(accounts.status("bea"), Status::Active, "a set password left the invitee invited");
+        accounts.set_status("bea", Status::Disabled).unwrap();
+        set_password(dir.path(), &cfg2, "bea", "bea-newer-password").unwrap();
+        assert_eq!(accounts.status("bea"), Status::Disabled, "a set password re-enabled a disabled person");
+    }
+
+    /// Turning a person off refuses sign-in and ends their live sessions;
+    /// turning them back on restores sign-in (#429).
+    #[test]
+    fn disabled_refuses_and_ends_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SignIn { session_days: 1, max_failures: 5, lockout_minutes: 15, min_password_length: 10, oidc: None };
+        set_password(dir.path(), &cfg, "ada", "a-long-password").unwrap();
+        let accounts = Accounts::open(dir.path(), cfg).unwrap();
+        let (session, token) = accounts.open_session("ada", "app", None).unwrap();
+        let counter = Accounts::network_counter("ada");
+        let ended = accounts.set_status("ada", Status::Disabled).unwrap();
+        assert_eq!(ended, vec![session.id.clone()], "disabling did not end the live session");
+        assert!(accounts.session(&token).is_none(), "the session survived disabling");
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "a-long-password", None, &counter), Ok(Err(SignInError::Rejected))), "a disabled person signed in");
+        accounts.set_status("ada", Status::Active).unwrap();
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "a-long-password", None, &counter), Ok(Ok(()))), "re-enabling did not restore sign-in");
+    }
+
+    /// Inviting someone already active (a resend) hands them a token without
+    /// deactivating them (#429).
+    #[test]
+    fn invite_keeps_an_active_person_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SignIn { session_days: 1, max_failures: 5, lockout_minutes: 15, min_password_length: 10, oidc: None };
+        set_password(dir.path(), &cfg, "ada", "a-long-password").unwrap();
+        let accounts = Accounts::open(dir.path(), cfg.clone()).unwrap();
+        assert_eq!(accounts.status("ada"), Status::Active, "a person with no record is not active");
+        let token = invite(dir.path(), "ada", None).unwrap();
+        assert_eq!(accounts.status("ada"), Status::Active, "inviting deactivated an active person");
+        assert_eq!(accept(dir.path(), &cfg, &token, "a-new-long-password").unwrap(), Some("ada".to_string()), "the resend token did not accept");
+        let counter = Accounts::network_counter("ada");
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "a-new-long-password", None, &counter), Ok(Ok(()))), "the resent password did not take");
     }
 
     /// Without an enrolled second factor, the code path behaves exactly as
