@@ -112,6 +112,11 @@ for (const [name, look] of LOOKS) {
   for (const [what,key,want] of [['content text','body',r.text],['conversation','main',r.main],['result text','cardText',r.text]]) expect(name,what,got[key],want);
   const chrome = await page.locator('nav.side').evaluate(el => getComputedStyle(el).color);
   expect(name,'chrome text',chrome,r.chromeText);
+  const avatarContrast = await page.locator('nav.side .avatar').evaluate(el => {
+    const hex = value => '#' + value.match(/\d+/g).slice(0,3).map(v => Number(v).toString(16).padStart(2,'0')).join('');
+    const css = getComputedStyle(el); return Theme.contrast(hex(css.color), hex(css.backgroundColor));
+  });
+  if (avatarContrast < 4.5) failures.push(`${name}: avatar initial contrast ${avatarContrast.toFixed(2)}:1`);
   const expectedSide = look.material === 'glass' ? `rgba(${rgba(r.side).slice(0,3).join(',')},0.92)` : r.side;
   expect(name,'navigation surface',got.side,expectedSide);
   const prior = await page.locator('iframe.composed').first().evaluate(f => ({html:f.contentDocument.body.innerHTML,scroll:f.contentWindow.scrollY}));

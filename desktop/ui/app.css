@@ -587,7 +587,7 @@ blockquote.asked { margin: 0 0 6px; padding: 4px 10px; border-left: 3px solid va
 
 /* Workspace baseline v1.2: chrome and content have independent aliases. */
 nav.side, .conv-head, .workspace-bar {
-  --fg: var(--chrome-text); --fg2: var(--chrome-text);
+  --fg: var(--chrome-text); --fg2: var(--chrome-text); --avatar: var(--chrome-selected);
   --muted: var(--chrome-muted); --faint: var(--chrome-muted);
   --focus: var(--chrome-focus); --accent: var(--chrome-focus);
   --accent-text: var(--chrome-focus); --accent-fg: var(--chrome-accent-fg);

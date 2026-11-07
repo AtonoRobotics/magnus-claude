@@ -228,6 +228,7 @@
     const next = { ...current, ...change };
     if (change.theme && change.theme !== "custom") next.followComputer = false;
     if (change.followComputer === true) next.theme = Theme.os().dark ? "dark" : "light";
+    if (change.followComputer === false && next.theme === "custom" && next.mode === "system") next.mode = Theme.look.mode;
     if (change.mode || change.accent) { next.theme = "custom"; next.followComputer = change.mode === "system"; }
     current = preferences(next);
     Theme.saved = true;

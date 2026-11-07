@@ -43,5 +43,10 @@ U.scope('appliance-b','alice');assert.equal(U.prefs().theme,'custom');U.set({the
 U.scope('appliance-a','bob');assert.equal(U.prefs().theme,'custom');U.scope('appliance-a','alice');assert.equal(U.prefs().theme,'corporate');
 fail=true;U.set({theme:'dark'});assert.equal(U.saved,false);assert.equal(U.look.theme,'dark');assert.equal(JSON.parse(store.get('magnus.ui.v2.appliance-a.alice')).theme,'corporate');
 assert.equal(JSON.parse(store.get('magnus.appearance')).accent,'clay');
+fail=false; store.set('magnus.appearance', JSON.stringify({mode:'system',accent:'clay'}));
+U.os=()=>({dark:true});U.scope('appliance-c','alice');assert.equal(U.look.mode,'dark');
+U.set({followComputer:false});assert.equal(U.prefs().mode,'dark');
+U.os=()=>({dark:false});U.apply();assert.equal(U.look.mode,'dark','disabled Follow computer must freeze migrated system mode');
+assert.equal(U.prefs().accent,'clay');
 assert.ok(events.some(e=>e.type==='magnus-theme'));
 console.log('v2: 4 presets × 2 materials, extreme-backdrop contrast, 72 legacy combinations, isolation and storage failure passed');
