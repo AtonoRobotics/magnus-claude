@@ -374,7 +374,7 @@ pub fn chat_specs() -> Vec<ToolSpec> {
             description: d("bundle_share"),
             input_schema: obj(json!({ "path": { "type": "string" }, "groups": { "type": "array", "items": { "type": "string" } }, "everyone": { "type": "boolean" } }), &["path"]),
         },
-        ToolSpec { name: "list_tasks".into(), description: d("list_tasks"), input_schema: obj(json!({}), &[]) },
+        ToolSpec { name: "list_tasks".into(), description: d("list_tasks"), input_schema: obj(json!({ "limit": { "type": "integer" } }), &[]) },
         ToolSpec { name: "list_schedules".into(), description: d("list_schedules"), input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "get_task".into(), description: d("get_task"), input_schema: obj(json!({ "id": { "type": "string" } }), &["id"]) },
         ToolSpec { name: "get_schedule".into(), description: d("get_schedule"), input_schema: obj(json!({ "id": { "type": "string" } }), &["id"]) },
