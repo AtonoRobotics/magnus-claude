@@ -119,7 +119,9 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
 pub const WEB_LOOKUPS: &str = "kernel:web_lookups";
 
 fn is_chat_tool(f: &Facts) -> bool {
-    f.connector.is_none() && f.app == "chat"
+    // Sharing is the one bundle write that belongs to conversation, as the
+    // controls do (#299): the person's say after seeing the text.
+    f.connector.is_none() && (f.app == "chat" || f.name == "bundle_share")
 }
 
 pub fn has_rights(person: &Person, f: &Facts) -> bool {
@@ -1199,7 +1201,7 @@ impl Kernel {
                 }
                 // memory_search is answered in execute(), with its taint from the same lookup.
                 "knowledge_search" => Ok(self.knowledge_search(&a.run, &s("query")).await?),
-                "bundle_read" | "bundle_search" | "bundle_write" => Ok(self.bundle_tool(&a.run, &a.tool, &a.input).await?),
+                "bundle_read" | "bundle_search" | "bundle_write" | "bundle_share" => Ok(self.bundle_tool(&a.run, &a.tool, &a.input).await?),
                 "relationship_note" => Ok(self.relationship_tool(&a.run, &a.input).await?),
                 "disagreement" => Ok(self.disagreement_tool(&a.run, &a.input).await?),
                 "record_commitment" => Ok(self.record_commitment_tool(a, key).await?),

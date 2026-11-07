@@ -101,7 +101,8 @@ impl Kernel {
         referenced_by.retain(|p| !entities.contains(p));
         Ok(json!({
             "path": d.path, "kind": d.kind, "frontmatter": c["frontmatter"], "body": c["body"], "version": d.version(), "label": d.label,
-            "sources": d.sources, "writer": d.writer, "versions": versions, "entities": entities, "referenced_by": referenced_by,
+            "sources": d.sources, "writer": d.writer, "shared": d.shared, "shared_everyone": d.shared_everyone, "shared_by": d.shared_by,
+            "versions": versions, "entities": entities, "referenced_by": referenced_by,
             "relations": if d.kind == "type" { json!(relations(&c["frontmatter"])) } else { c["frontmatter"]["relations"].clone() },
             "last_used": self.last_read(path),
         }))
