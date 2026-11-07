@@ -204,7 +204,7 @@ impl Index {
 /// An entry as people and the model see it: its record and what it says.
 fn shown(e: &KnowledgeEntry, says: &Value) -> Value {
     json!({ "id": e.id, "title": e.title, "text": says["text"], "readers": e.readers, "integrity": e.integrity, "source": says["source"],
-        "author": e.author, "run": e.run, "at": e.at, "verification": says["verification"], "value": says["value"], "endorsed": e.endorsed })
+        "author": e.author, "run": e.run, "at": e.at, "verification": says["verification"], "value": says["value"], "endorsed": e.endorsed, "shared": e.shared })
 }
 
 fn text_of(says: &Value) -> &str {
@@ -594,6 +594,7 @@ pub fn router() -> Router<Arc<Kernel>> {
     Router::new()
         .route("/v1/knowledge", get(list).post(add))
         .route("/v1/knowledge/{id}/endorsement", post(request_endorsement))
+        .route("/v1/knowledge/{id}/share", post(share))
 }
 
 #[derive(serde::Deserialize)]
@@ -680,6 +681,46 @@ async fn request_endorsement(State(k): State<Arc<Kernel>>, h: HeaderMap, Path(id
     }
     match k.ask_endorsement(&id, &p.id).await {
         Ok(item) => (StatusCode::CREATED, Json(json!({ "item": item }))).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// A reader shares an entry with groups or everyone (#299): widening only,
+/// recorded as theirs. Anyone who may read it may share it, after seeing
+/// its text.
+async fn share(State(k): State<Arc<Kernel>>, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let Some(e) = k.read(|s| s.knowledge.get(&id).cloned()).filter(|e| can_read(&p, &e.readers)) else {
+        return err(StatusCode::NOT_FOUND, "no such entry");
+    };
+    if e.readers.is_empty() {
+        return err(StatusCode::CONFLICT, "it is already shared with everyone");
+    }
+    let readers: Vec<Vec<String>> = if b["everyone"] == true {
+        vec![]
+    } else {
+        let groups: Vec<String> = b["groups"].as_array().into_iter().flatten().filter_map(|g| g.as_str()).map(|g| format!("group:{g}")).collect();
+        if groups.is_empty() {
+            return err(StatusCode::BAD_REQUEST, "share with groups or everyone");
+        }
+        e.readers.iter().map(|c| c.iter().cloned().chain(groups.iter().cloned()).collect::<BTreeSet<_>>().into_iter().collect()).collect()
+    };
+    if readers == e.readers {
+        return err(StatusCode::CONFLICT, "they may already read it");
+    }
+    let ev = Ev::KnowledgeShared { id: id.clone(), readers, by: p.id.clone() };
+    if let Err(e) = k.emit(&format!("person:{}", p.id), ev).await {
+        return internal(e);
+    }
+    if let Err(err) = k.index_id(&id).await {
+        tracing::warn!("index a shared entry: {err:#}");
+    }
+    match k.knowledge_shown(&id).await {
+        Ok(Some(shown)) => Json(shown).into_response(),
+        Ok(None) => err(StatusCode::NOT_FOUND, "no such entry"),
         Err(e) => internal(e),
     }
 }

@@ -1110,6 +1110,23 @@ pub enum Ev {
         item: Option<String>,
         note: Option<String>,
     },
+    /// A reader widened who may read an entry (share, #299): the new
+    /// readers, and who shared it.
+    KnowledgeShared {
+        id: String,
+        readers: Vec<Vec<String>>,
+        by: String,
+    },
+    /// The writer of an org document shared it (#299): principals added
+    /// to who may see it, or everyone, and who shared it.
+    BundleShared {
+        path: String,
+        #[serde(default)]
+        add: Vec<String>,
+        #[serde(default)]
+        everyone: bool,
+        by: String,
+    },
     /// One model call with no tools that read an entry's sources for a typed value.
     KnowledgeExtraction {
         run: String,
