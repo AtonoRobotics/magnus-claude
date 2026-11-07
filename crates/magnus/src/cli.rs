@@ -29,6 +29,8 @@ pub fn main() {
             Some("invite") => invite(&args),
             Some("person-status") => person_status(&args),
             Some("person-role") => person_role(&args),
+            Some("person-add") => person_add(&args),
+            Some("person-remove") => person_remove(&args),
             Some("sign-in-code") => sign_in_code(&args),
             Some("restore") => restore(&args).await,
             Some("check") => check(&args).await,
@@ -37,7 +39,7 @@ pub fn main() {
                 Ok(())
             }
             _ => {
-                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus totp-enroll --config <file> --person <id>   (prints the enrollment URI)\n       magnus invite --config <file> --person <id> [--email <address>]   (prints the invite token)\n       magnus person-status --config <file> --person <id> --status active|disabled\n       magnus person-role --config <file> --person <id> --role admin|member\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>\n       magnus check --config <file>   (reads the log and the vault, as a new release must)\n       magnus version");
+                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus totp-enroll --config <file> --person <id>   (prints the enrollment URI)\n       magnus invite --config <file> --person <id> [--email <address>]   (prints the invite token)\n       magnus person-status --config <file> --person <id> --status active|disabled\n       magnus person-role --config <file> --person <id> --role admin|member\n       magnus person-add --config <file> --person <id> [--name <name>] [--email <address>]\n       magnus person-remove --config <file> --person <id>\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>\n       magnus check --config <file>   (reads the log and the vault, as a new release must)\n       magnus version");
                 std::process::exit(2);
             }
         }
@@ -223,12 +225,56 @@ mod tests {
     }
 }
 
+/// Open the accounts store for a person managed here: in the config, or
+/// kept by the appliance itself (#429).
+fn managed_accounts(cfg: &crate::config::Config, person: &str) -> Result<crate::accounts::Accounts> {
+    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+    anyhow::ensure!(cfg.person(person).is_some() || accounts.is_local(person), "{person} is not a person here");
+    Ok(accounts)
+}
+
+/// Whether the person signs in with a local password: anyone the
+/// appliance itself keeps, or a config person allowed one.
+fn local_password(cfg: &crate::config::Config, accounts: &crate::accounts::Accounts, person: &str) -> bool {
+    accounts.is_local(person) || cfg.may_use_password(person)
+}
+
+/// Add a person to the appliance's own directory: they sign in with a
+/// local password once invited or given one (#429). Refuses an id the
+/// config already has, which would never resolve to them.
+fn person_add(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    let person = arg(args, "--person").context("--person is required")?;
+    let name = arg(args, "--name").unwrap_or_else(|| person.clone());
+    anyhow::ensure!(cfg.person(&person).is_none(), "{person} is already a person in the config");
+    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+    accounts.add_person(&person, &name, arg(args, "--email").as_deref())?;
+    eprintln!("added {person}");
+    Ok(())
+}
+
+/// Remove a person from the appliance's own directory, with every local
+/// trace: password, authenticator, status, role, invites, sessions.
+/// Refuses the organisation's last enabled admin.
+fn person_remove(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    let person = arg(args, "--person").context("--person is required")?;
+    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+    let ended = accounts.remove_person(&person)?;
+    if ended.is_empty() {
+        eprintln!("removed {person}");
+    } else {
+        eprintln!("removed {person}; ended sessions: {}", ended.join(", "));
+    }
+    Ok(())
+}
+
 /// Set a person's password from standard input (one line).
 fn password(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
-    anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only the owner keeps a password on the appliance, as a backup");
+    let accounts = managed_accounts(&cfg, &person)?;
+    anyhow::ensure!(local_password(&cfg, &accounts, &person), "{person} signs in through the identity provider; only the owner keeps a password on the appliance, as a backup");
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let pw = line.trim_end_matches(['\r', '\n']);
@@ -244,8 +290,8 @@ fn password(args: &[String]) -> Result<()> {
 fn totp_enroll(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
-    anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only local passwords take a second factor");
+    let accounts = managed_accounts(&cfg, &person)?;
+    anyhow::ensure!(local_password(&cfg, &accounts, &person), "{person} signs in through the identity provider; only local passwords take a second factor");
     println!("{}", crate::accounts::enroll_totp(&cfg.appliance.state_dir, &person)?);
     eprintln!("enrolled {person}: add the URI above to an authenticator app");
     Ok(())
@@ -253,13 +299,12 @@ fn totp_enroll(args: &[String]) -> Result<()> {
 
 /// Invite a person to local password sign-in: print the single-use token
 /// (good for 7 days) to pass on; they accept it with their new password
-/// at `/v1/invites/accept`. The person must already be in the config.
+/// at `/v1/invites/accept`.
 fn invite(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
-    anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only local passwords are invited");
-    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+    let accounts = managed_accounts(&cfg, &person)?;
+    anyhow::ensure!(local_password(&cfg, &accounts, &person), "{person} signs in through the identity provider; only local passwords are invited");
     println!("{}", accounts.invite(&person, arg(args, "--email").as_deref())?);
     eprintln!("invited {person}: pass them the token above within 7 days");
     Ok(())
@@ -270,14 +315,13 @@ fn invite(args: &[String]) -> Result<()> {
 fn person_status(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
-    anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only local sign-in is switched here");
+    let accounts = managed_accounts(&cfg, &person)?;
+    anyhow::ensure!(local_password(&cfg, &accounts, &person), "{person} signs in through the identity provider; only local sign-in is switched here");
     let status = match arg(args, "--status").as_deref() {
         Some("active") => crate::accounts::Status::Active,
         Some("disabled") => crate::accounts::Status::Disabled,
         x => anyhow::bail!("--status is active or disabled, not {}", x.unwrap_or("(missing)")),
     };
-    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
     let ended = accounts.set_status(&person, status)?;
     if ended.is_empty() {
         eprintln!("{person} is now {}", if status == crate::accounts::Status::Disabled { "disabled" } else { "active" });
@@ -293,14 +337,13 @@ fn person_status(args: &[String]) -> Result<()> {
 fn person_role(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
-    anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only local sign-in takes a local role");
+    let accounts = managed_accounts(&cfg, &person)?;
+    anyhow::ensure!(local_password(&cfg, &accounts, &person), "{person} signs in through the identity provider; only local sign-in takes a local role");
     let role = match arg(args, "--role").as_deref() {
         Some("admin") => crate::accounts::Role::Admin,
         Some("member") => crate::accounts::Role::Member,
         x => anyhow::bail!("--role is admin or member, not {}", x.unwrap_or("(missing)")),
     };
-    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
     accounts.set_role(&person, role)?;
     eprintln!("{person} is now {}", if role == crate::accounts::Role::Admin { "an admin" } else { "a member" });
     Ok(())

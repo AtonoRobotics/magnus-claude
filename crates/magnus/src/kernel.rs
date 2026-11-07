@@ -18,6 +18,18 @@ use std::time::{Duration, Instant};
 
 pub const HARNESS_VERSION: &str = concat!("magnus-", env!("CARGO_PKG_VERSION"));
 
+/// The record a sign-in resolves: the config first, the appliance's own
+/// directory when the config does not know them. A local person arrives
+/// with no token, no groups and no roles: a member, nothing more. Split
+/// out so tests reach it without booting a kernel (which needs Postgres).
+pub(crate) fn resolve_person(cfg: &Config, accounts: &crate::accounts::Accounts, id: &str) -> Option<Person> {
+    if let Some(p) = cfg.person(id) {
+        return Some(p.clone());
+    }
+    let local = accounts.local_person(id)?;
+    Some(Person { id: id.to_string(), name: local.name, token: None, groups: vec![], roles: vec![] })
+}
+
 pub struct Kernel {
     pub cfg: Config,
     pub(crate) log: Log,
@@ -405,7 +417,7 @@ impl Kernel {
     }
 
     pub fn person(&self, id: &str) -> Option<Person> {
-        let mut p = self.cfg.person(id)?.clone();
+        let mut p = resolve_person(&self.cfg, &self.accounts, id)?;
         if let Some(r) = self.read(|s| s.roles_set.get(id).cloned()) {
             p.roles = r;
         }
@@ -950,5 +962,29 @@ impl Live {
     pub fn subscribe(&self, run: &str) -> (String, tokio::sync::broadcast::Receiver<(String, String)>) {
         let so_far = self.so_far.lock().unwrap();
         (so_far.get(run).cloned().unwrap_or_default(), self.tx.subscribe())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Sign-ins resolve the config first and the appliance's own directory
+    /// after: a config person keeps their record even with a local namesake,
+    /// a local person arrives as a plain member, and nobody else resolves.
+    #[test]
+    fn sign_ins_resolve_config_first_then_local() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("magnus.toml");
+        std::fs::write(&p, "[appliance]\nstate_dir = \"/s\"\nlisten = \"127.0.0.1:0\"\n[database]\nurl = \"postgres://x\"\n[model]\nname = \"m\"\nadapter = \"a\"\nmax_tokens = 1\n[[people]]\nid = \"sam\"\nname = \"Sam\"\nroles = [\"owner\"]\n").unwrap();
+        let cfg = super::Config::load(&p).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let accounts = crate::accounts::Accounts::open(state.path(), cfg.sign_in.clone()).unwrap();
+        accounts.add_person("sam", "Intruder", None).unwrap();
+        accounts.add_person("ada", "Ada", None).unwrap();
+        let sam = super::resolve_person(&cfg, &accounts, "sam").unwrap();
+        assert_eq!((sam.name.as_str(), sam.is_owner()), ("Sam", true), "the config lost to a local namesake");
+        let ada = super::resolve_person(&cfg, &accounts, "ada").unwrap();
+        assert_eq!(ada.name.as_str(), "Ada", "the local record came back wrong");
+        assert!(!ada.is_owner() && !ada.is_developer() && ada.token.is_none() && ada.groups.is_empty(), "a local person arrived with powers");
+        assert!(super::resolve_person(&cfg, &accounts, "ghost").is_none(), "nobody resolved");
     }
 }
