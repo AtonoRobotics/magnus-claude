@@ -608,6 +608,30 @@ async fn a_review_stopped_by_its_budget_ends_quietly_and_reviews_go_on() {
     .await;
 }
 
+/// Background cleanup puts away only a review's plumbing: an interruption
+/// is one of its outputs, so it stays until the person reads it (#446
+/// review: the sweep dismissed interruptions within half a second).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_interruption_stays_open_after_the_sweep() {
+    let calls = Arc::new(Mutex::new(vec![(
+        "interrupt".to_string(),
+        json!({ "what": "The deploy failed", "why": "The site is down" }),
+    )]));
+    let m = FakeModel::start(model(calls)).await;
+    let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
+    let bob = app.api("bob");
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+
+    let item = wait_open(&bob, "interrupt").await;
+    let id = item["id"].clone();
+    let me = bob.clone();
+    never("the sweep put away the review's interruption", Duration::from_secs(3), || {
+        let (me, id) = (me.clone(), id.clone());
+        async move { me.inbox().await.iter().any(|i| i["id"] == id && i["status"] != "open") }
+    })
+    .await;
+}
+
 /// A review proposes a task the person approves into a real task (#393):
 /// the proposal lands in the inbox (not the thread), grounded in the
 /// cited evidence, and accepting starts the task with the approved budget
