@@ -308,3 +308,31 @@ async fn a_deleted_opener_conversation_is_listed_by_its_title_and_does_not_open_
     assert!(opened(&carol).await.is_empty(), "a conversation opened again");
     assert_eq!(m.requests().into_iter().filter(opening).count(), turns, "the opener ran again after its conversation was deleted");
 }
+
+/// Her cold-start opening takes reactions like any message of Magnus's:
+/// accepted, shown on the thread, and carried into her later runs (#359).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_opener_takes_reactions() {
+    let m = FakeModel::start(model()).await;
+    let app = start(&m).await;
+    let carol = app.api("carol");
+    assert!(set_password(&app, "carol", PASSWORD));
+    sign_in(&app, "carol").await;
+    let (t, es) = the_opened(&carol).await;
+    let thread = t["thread"].as_str().unwrap();
+    let entry = es[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(es[0]["kind"], "opener", "{es:?}");
+
+    let (st, v) = carol.post(&format!("/v1/chat/{thread}/entries/{entry}/reaction"), json!({ "reaction": "annoying" })).await;
+    assert!(st.is_success(), "{v}");
+
+    let es = entries(&carol, thread).await;
+    assert_eq!(es[0]["reaction"], json!("annoying"), "{es:?}");
+
+    // Her next run reads it beside the others.
+    let (st, v) = carol.post("/v1/chat", json!({ "text": "What else is on?" })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    carol.wait_settled(v["task_id"].as_str().unwrap()).await;
+    let sys = m.requests().into_iter().find(|c| c.turn() == 0 && said(c) == "What else is on?").map(|c| system(&c)).unwrap_or_else(|| panic!("no model call for her message"));
+    assert!(sys.contains("that was annoying"), "{sys}");
+}
