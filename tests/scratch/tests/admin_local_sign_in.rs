@@ -80,6 +80,8 @@ async fn an_admin_signs_in_locally_and_a_member_and_a_wrong_password_do_not() {
     let c = launch(p).await;
     let api = |path: &str| format!("{url}/api/v1{path}");
     let b = browser(&c, false);
+    // Browsers send Origin on form posts; the test does as they do (#456).
+    let post = |path: String| b.post(path).header("origin", url.clone());
 
     // The form is there, naming the local way in.
     let r = b.get(format!("{url}/auth/local")).send().await.unwrap();
@@ -89,15 +91,28 @@ async fn an_admin_signs_in_locally_and_a_member_and_a_wrong_password_do_not() {
 
     // A wrong password, an unknown name and a member refuse alike, with no session.
     for (who, pw) in [("alice", "wrong-password"), ("nobody", "whatever-password"), ("carol", "carol-long-password")] {
-        let r = b.post(format!("{url}/auth/local")).form(&[("person", who), ("password", pw), ("then", "/")]).send().await.unwrap();
+        let r = post(format!("{url}/auth/local")).form(&[("person", who), ("password", pw), ("then", "/")]).send().await.unwrap();
         assert_eq!(r.status(), StatusCode::OK, "{who} was not refused");
         assert!(sid_of(&r).is_none(), "{who} was given a console session");
         let body = r.text().await.unwrap();
         assert!(body.contains("wrong"), "{who} got no alike refusal: {body}");
     }
 
-    // The admin signs in with the password; she is stepped up from it.
+    // A cross-origin post with the right password, and one with no origin
+    // to judge, both refuse: the form answers only its own pages (#456).
+    let r = b
+        .post(format!("{url}/auth/local"))
+        .header("origin", "https://evil.test")
+        .form(&[("person", "alice"), ("password", "alice-long-password"), ("then", "/")])
+        .send()
+        .await
+        .unwrap();
+    assert!(sid_of(&r).is_none(), "a cross-origin post signed in");
     let r = b.post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("then", "/")]).send().await.unwrap();
+    assert!(sid_of(&r).is_none(), "a post with no origin signed in");
+
+    // The admin signs in with the password; she is stepped up from it.
+    let r = post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("then", "/")]).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::SEE_OTHER, "the password did not sign in");
     let sid = sid_of(&r).expect("no session cookie on local sign-in");
     let me: Value = with_cookie(b.get(api("/session")), &sid).send().await.unwrap().json().await.unwrap();
@@ -105,9 +120,9 @@ async fn an_admin_signs_in_locally_and_a_member_and_a_wrong_password_do_not() {
     let csrf = me["csrf"].as_str().unwrap().to_string();
 
     // A change without the session's token is refused; with it, done.
-    let r = with_cookie(b.post(api("/session/step-up")), &sid).send().await.unwrap();
+    let r = with_cookie(post(api("/session/step-up")), &sid).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::FORBIDDEN, "a change without the CSRF token was taken");
-    let r = with_cookie(b.post(api("/session/step-up")), &sid).header("x-csrf-token", &csrf).send().await.unwrap();
+    let r = with_cookie(post(api("/session/step-up")), &sid).header("x-csrf-token", &csrf).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NO_CONTENT, "a fresh step-up did not count");
 
     // Step-up for a local session goes to the local form, which confirms
@@ -116,7 +131,7 @@ async fn an_admin_signs_in_locally_and_a_member_and_a_wrong_password_do_not() {
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
     let to = r.headers().get(reqwest::header::LOCATION).unwrap().to_str().unwrap().to_string();
     assert!(to.contains("/auth/local/step-up"), "local step-up did not route locally: {to}");
-    let r = with_cookie(b.post(format!("{url}/auth/local/step-up")), &sid).form(&[("password", "alice-long-password"), ("then", "/auth/done")]).send().await.unwrap();
+    let r = with_cookie(post(format!("{url}/auth/local/step-up")), &sid).form(&[("password", "alice-long-password"), ("then", "/auth/done")]).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::SEE_OTHER, "the password did not confirm the step-up");
 
     // Disabling ends the session at the next check, within seconds.
@@ -130,11 +145,11 @@ async fn an_admin_signs_in_locally_and_a_member_and_a_wrong_password_do_not() {
     // shows the code screen, and with the code she is in again.
     // (Enrolled last so no code is ever used twice in this test.)
     let uri = enroll(&app, "alice");
-    let r = b.post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("then", "/")]).send().await.unwrap();
+    let r = post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("then", "/")]).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     assert!(sid_of(&r).is_none(), "the password alone opened a session past the code");
     assert!(r.text().await.unwrap().contains("6-digit code"), "no code screen");
-    let r = b.post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("code", &code(&uri)), ("then", "/")]).send().await.unwrap();
+    let r = post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("code", &code(&uri)), ("then", "/")]).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::SEE_OTHER, "the code did not sign in");
     let sid = sid_of(&r).expect("no session cookie past the code");
 
