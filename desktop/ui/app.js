@@ -1295,7 +1295,10 @@ const ICONS = {
 // by its tooltip and, for screen readers, by hidden text.
 function msgActions(e, ui) {
   if (!e.id) return "";
-  const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn", said = magnus || e.kind === "result";
+  const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn";
+  // Every kind the server takes reactions on (reactions.rs MAGNUS, #359): its answers, turns,
+  // results, started tasks, proposed cards, and its own openings (#360).
+  const said = ["answer", "turn", "result", "tasks", "proposal_card", "grant_card", "suggestion_card", "schedule_card", "connector_card", "opener"].includes(e.kind);
   const acts = [["copy", "Copy"], mine && ["edit", "Edit"], magnus && ["retry", "Retry"], e.kind === "answer" && ["listen", "Read aloud"], e.kind === "answer" && ["hush", "Stop"],
     said && ["great", "That was great"], said && ["annoying", "That was annoying"], ["branch", "Branch"], ["share", "Share"],
     ["export", "Export"], ["save", "Save to Files"], ["task", "Make a task"], ["delete", "Delete"]].filter(Boolean);
