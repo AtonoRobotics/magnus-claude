@@ -364,7 +364,7 @@ impl crate::kernel::Kernel {
             let window = self.read(|s| s.watched_seen.get(&(person.to_string(), app.to_string(), remote.to_string())).cloned());
             let Some(window) = window else {
                 let _ = self
-                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids, full: true })
                     .await;
                 continue;
             };
@@ -375,7 +375,7 @@ impl crate::kernel::Kernel {
             let n = fresh.len();
             if self.review_wake_items(person, app, n).await {
                 let _ = self
-                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids, full: true })
                     .await;
             }
         }

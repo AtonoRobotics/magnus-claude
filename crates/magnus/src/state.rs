@@ -1595,9 +1595,13 @@ impl State {
             Ev::HomeOpened { person } => {
                 self.home_last_open.insert(person.clone(), e.at);
             }
-            Ev::WatchedSeen { person, app, tool, ids } => {
+            Ev::WatchedSeen { person, app, tool, ids, full } => {
                 let window = self.watched_seen.entry((person.clone(), app.clone(), tool.clone())).or_default();
-                window.push(ids.iter().cloned().collect());
+                // History's deltas union onto the newest entry they extend
+                // (#415); whole answers push as they come.
+                let mut entry: HashSet<String> = if *full { HashSet::new() } else { window.last().cloned().unwrap_or_default() };
+                entry.extend(ids.iter().cloned());
+                window.push(entry);
                 if window.len() > 2 {
                     window.remove(0);
                 }
@@ -2614,5 +2618,35 @@ mod tests {
         // Cancelling removes it, as before.
         s.apply(&ev(5, "person:alice", json!({ "kind": "schedule_removed", "id": "s1" })));
         assert!(!s.schedules.contains_key("s1"), "a cancelled schedule stayed");
+    }
+
+    /// Pre-#411 history holds fresh-only ids after the seed (#415):
+    /// replay unions each onto the newest entry, reconstructing the
+    /// answers instead of misreading deltas as wholes.
+    #[test]
+    fn old_delta_events_replay_as_full_answers() {
+        let mut s = State::default();
+        let w = |ids: Vec<&str>| json!({ "kind": "watched_seen", "person": "bob", "app": "mail", "tool": "list_inbox", "ids": ids });
+        s.apply(&ev(1, "person:bob", w(vec!["a"])));
+        s.apply(&ev(2, "person:bob", w(vec!["b"])));
+        s.apply(&ev(3, "person:bob", w(vec!["c"])));
+        let window = &s.watched_seen[&("bob".to_string(), "mail".to_string(), "list_inbox".to_string())];
+        assert_eq!(window.len(), 2, "replay kept {window:?}");
+        assert_eq!(window[0], std::collections::HashSet::from(["a".to_string(), "b".to_string()]), "the middle answer lost its seed");
+        assert_eq!(window[1], std::collections::HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]), "the last answer lost its history");
+    }
+
+    /// New events carry whole answers (#415): replay pushes them as they
+    /// come, with no unioning.
+    #[test]
+    fn full_answer_events_replay_whole() {
+        let mut s = State::default();
+        let w = |ids: Vec<&str>| json!({ "kind": "watched_seen", "person": "bob", "app": "mail", "tool": "list_inbox", "ids": ids, "full": true });
+        s.apply(&ev(1, "person:bob", w(vec!["a"])));
+        s.apply(&ev(2, "person:bob", w(vec!["b"])));
+        let window = &s.watched_seen[&("bob".to_string(), "mail".to_string(), "list_inbox".to_string())];
+        assert_eq!(window.len(), 2, "replay kept {window:?}");
+        assert_eq!(window[0], std::collections::HashSet::from(["a".to_string()]));
+        assert_eq!(window[1], std::collections::HashSet::from(["b".to_string()]));
     }
 }
