@@ -64,4 +64,7 @@ pub trait Identity: Send + Sync {
     /// they are bound to (`sub`), when they are. Their sessions here end
     /// once it does not.
     async fn active(&self, username: &str, sub: Option<&str>) -> Result<bool>;
+    /// Whether the organisation's directory (the realm's people) holds this
+    /// address: a recipient-provenance source at the send gate (#211).
+    async fn in_directory(&self, address: &str) -> Result<bool>;
 }

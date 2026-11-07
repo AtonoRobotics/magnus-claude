@@ -691,12 +691,13 @@ impl Kernel {
         let transmits = !is_chat_tool(f) && !own_memory && !f.reaches_self && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private && !own_account_read));
         // These override a policy ask: the approval must then cover this exact
         // action, not a broader scope granted for policy reasons.
-        // A send whose every recipient the person wrote themselves, or has
-        // mailed before, goes where they asked, whatever the task read:
-        // injected text can choose neither who they named nor, read from
-        // the draft at the gate, who it goes to (#176, #210; approvals
-        // spec, recipient provenance). That the content is what they wanted
-        // is theirs to judge (owner, 2026-11-04).
+        // A send whose every recipient the person wrote themselves, has
+        // mailed before, or the directory holds goes where they asked,
+        // whatever the task read: injected text can choose neither who
+        // they named nor, read from the draft at the gate, who it goes to
+        // (#176, #210, #211; approvals spec, recipient provenance). That
+        // the content is what they wanted is theirs to judge (owner,
+        // 2026-11-04).
         let theirs = match shown {
             Some(s) if transmits && untrusted && private => {
                 let named = self.named_by_person(run).await?;
@@ -706,7 +707,16 @@ impl Kernel {
                         continue;
                     }
                     // The spec's second source (#210): mailed before.
-                    if !self.mailed_before(f, &run.person, r).await? {
+                    if self.mailed_before(f, &run.person, r).await? {
+                        continue;
+                    }
+                    // The spec's third source (#211): the organisation's
+                    // directory. No provider, no waiver.
+                    let held = match self.identity() {
+                        Some(idp) => idp.in_directory(r).await?,
+                        None => false,
+                    };
+                    if !held {
                         all = false;
                         break;
                     }

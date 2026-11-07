@@ -393,6 +393,29 @@ impl Provider {
         Ok(Some(Account::of(user, &creds)))
     }
 
+    /// Whether the realm has a person with this address (#211): its admin
+    /// API's users, asked as the status client. Whatever stops the read
+    /// counts as not there: the gate asks rather than passing on an
+    /// unchecked claim.
+    pub async fn in_directory(&self, address: &str) -> Result<bool> {
+        let found: Result<bool> = async {
+            let d = self.discovery().await?;
+            let (admin, token) = self.status_admin(d).await?;
+            let mut u = url::Url::parse(&format!("{admin}/users"))?;
+            u.query_pairs_mut().append_pair("email", address).append_pair("exact", "true");
+            let users: Vec<Value> = self.admin_http.get(u).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
+            Ok(users.iter().any(|u| u["email"].as_str().is_some_and(|e| e.eq_ignore_ascii_case(address))))
+        }
+        .await;
+        match found {
+            Ok(b) => Ok(b),
+            Err(e) => {
+                tracing::warn!("directory: cannot tell whether {address} is a realm person: {e:#}");
+                Ok(false)
+            }
+        }
+    }
+
     /// The account with this id (`sub`), as `account`; None when the
     /// provider no longer has it.
     async fn account_by_id(&self, d: &Discovery, id: &str) -> Result<Option<Account>> {
@@ -554,6 +577,9 @@ impl crate::identity::Identity for Provider {
     async fn active(&self, username: &str, sub: Option<&str>) -> Result<bool> {
         Provider::active(self, username, sub).await
     }
+    async fn in_directory(&self, address: &str) -> Result<bool> {
+        Provider::in_directory(self, address).await
+    }
 }
 
 #[cfg(test)]
@@ -632,6 +658,43 @@ mod tests {
         assert_eq!(p.signed_in(&d, &token("n-1"), Some("n-1"), now).unwrap().0, "carol");
         assert!(p.signed_in(&d, &token("n-2"), Some("n-1"), now).is_err(), "a token for another sign-in was taken");
         assert!(p.signed_in(&d, &json!({ "id_token": format!("{}.{}.sig", b64(&json!({})), b64(&json!({ "iss": iss, "aud": "magnus", "exp": now.timestamp() + 60, "preferred_username": "carol" }))) }), Some("n-1"), now).is_err(), "a token with no nonce was taken");
+    }
+
+    /// The directory holds a realm person's address and no other; a read
+    /// that fails counts as not there, so the gate asks (#211).
+    #[tokio::test]
+    async fn the_directory_holds_only_realm_addresses() {
+        use axum::{routing::get, Router};
+        let idp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", idp.local_addr().unwrap());
+        let iss = format!("{base}/realms/org");
+        let (i, b) = (iss.clone(), base.clone());
+        let app = Router::new()
+            .route("/realms/org/.well-known/openid-configuration", get(move || async move { axum::Json(json!({ "issuer": i, "token_endpoint": format!("{b}/realms/org/token") })) }))
+            .route("/realms/org/token", axum::routing::post(move || async { axum::Json(json!({ "access_token": "t" })) }))
+            .route(
+                "/admin/realms/org/users",
+                get(|q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    // A loose server: answers whatever the case.
+                    let hit = q.get("email").is_some_and(|e| e.eq_ignore_ascii_case("bob@corp.example")) && q.get("exact").is_some_and(|e| e == "true");
+                    axum::Json(if hit { json!([{ "id": "u1", "email": "bob@corp.example" }]) } else { json!([]) })
+                }),
+            );
+        tokio::spawn(async move { axum::serve(idp, app).await });
+        let cfg: Cfg =
+            toml::from_str(&format!("issuer = \"{iss}\"\nclient_id = \"magnus\"\nstatus_client = \"status\"\nstatus_credential = \"status-secret\"\n")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Arc::new(crate::vault::Vault::open(dir.path()).unwrap());
+        vault.put("status-secret", "s3cret").unwrap();
+        let p = Provider::new(cfg, vault).unwrap();
+        assert!(p.in_directory("bob@corp.example").await.unwrap());
+        assert!(p.in_directory("BOB@corp.example").await.unwrap(), "addresses compare case-blind");
+        assert!(!p.in_directory("mallory@evil.example").await.unwrap());
+        // No status client, no read: not there, never an error out.
+        let cfg: Cfg = toml::from_str(&format!("issuer = \"{iss}\"\nclient_id = \"magnus\"\n")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let p = Provider::new(cfg, Arc::new(crate::vault::Vault::open(dir.path()).unwrap())).unwrap();
+        assert!(!p.in_directory("bob@corp.example").await.unwrap());
     }
 
     #[test]
