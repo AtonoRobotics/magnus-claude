@@ -6,6 +6,7 @@
 use magnus_invariants::*;
 use magnus_scratch::{control, reconfigure};
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -154,4 +155,87 @@ async fn watches_the_person_cannot_use_are_not_polled() {
     assert!(polls.iter().any(|t| t == "mail"), "the connected watch never polled: {polls:?}");
     assert!(!polls.iter().any(|t| t == "cal"), "the unconnected watch polled: {polls:?}");
     assert!(!polls.iter().any(|t| t == "cal2"), "the turned-off watch polled: {polls:?}");
+}
+
+/// A poll whose read fails transiently retries and still ends
+/// quietly (#419): headroom for one retry, no budget notice in
+/// the inbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_poll_with_a_transient_read_error_retries_quietly() {
+    let fail_next = Arc::new(AtomicUsize::new(0));
+    let fail_in = fail_next.clone();
+    let mail = FakeMcp::builder()
+        .world("inbox", json!([{ "from": "cfo@corp.example", "subject": "Q3 numbers", "body": "Confidential: revenue 41.7M" }]))
+        .honor_idempotency(true)
+        .tool("list_inbox", "List messages in the inbox.", json!({ "type": "object", "properties": {} }), move |w, _, _| {
+            // Exactly one error per arming: swap, never fetch_sub past zero.
+            if fail_in.swap(0, Ordering::SeqCst) > 0 {
+                mcp::err("the server hiccuped")
+            } else {
+                mcp::ok(json!({ "messages": w["inbox"] }))
+            }
+        })
+        .start()
+        .await;
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_prompts = prompts.clone();
+    let m = FakeModel::start(script(move |c| {
+        let seen_prompts = seen_prompts.clone();
+        async move {
+            if c.body["system"].to_string().contains(REVIEW) {
+                seen_prompts.lock().unwrap().push(c.text());
+                return done("Reviewed quietly.");
+            }
+            if c.text().contains("Poll ") {
+                let read_ok = c.last_results().iter().any(|r| !r.is_error);
+                if !read_ok && c.turn() < 4 {
+                    return tool("mail__list_inbox", json!({}));
+                }
+                return done("Polled.");
+            }
+            if c.turn() == 0 {
+                return tool("mail__list_inbox", json!({}));
+            }
+            return tool("task_fail", json!({ "reason": "checked the inbox" }));
+        }
+    }))
+    .await;
+    let app = Appliance::start(
+        Spec::default()
+            .proactive(json!({ "on": true }))
+            .app("mail", &mail, "public", "private", &[("list_inbox", "read")])
+            .watch_poll("mail", "list_inbox", "/messages", "subject", 1),
+        &m,
+    )
+    .await;
+    let bob = app.api("bob");
+    drain_reviews(&bob).await;
+    let first = bob.submit("Check the inbox.").await;
+    assert_eq!(bob.wait_settled(&first).await["status"], "failed");
+    drain_reviews(&bob).await;
+    assert!(!seen(&prompts, "new in mail"), "the seeding read woke a review");
+    // The next read fails once; a message arrives behind it. The
+    // poll retries, reads, and wakes — with no budget notice.
+    fail_next.store(1, Ordering::SeqCst);
+    mail.set_world(
+        "inbox",
+        json!([
+            { "from": "cfo@corp.example", "subject": "Q3 numbers", "body": "Confidential: revenue 41.7M" },
+            { "from": "boss@corp.example", "subject": "First", "body": "Read this now." },
+        ]),
+    );
+    eventually("the poll retried and woke a review", Duration::from_secs(150), || {
+        let prompts = prompts.clone();
+        async move { seen(&prompts, "1 new in mail").then_some(()) }
+    })
+    .await;
+    let (_, v) = bob.get("/v1/inbox").await;
+    let budget: Vec<_> = v["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| i["kind"] == "notice" && i["details"]["reason"] == "budget")
+        .collect();
+    assert!(budget.is_empty(), "the retrying poll suspended on budget: {budget:?}");
 }
