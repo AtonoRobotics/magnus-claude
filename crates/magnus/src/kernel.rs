@@ -266,24 +266,35 @@ impl Kernel {
         Ok(es)
     }
 
-    /// Debug builds only, for the sweep race test: while
-    /// `<state_dir>/sweep-gate` exists, a schedule firing waits here, at
-    /// the recheck before its run is created, after writing its schedule
-    /// id to `<state_dir>/sweep-gated` so the test knows it arrived.
+    /// Debug builds only, for the sweep interleaving tests: while
+    /// `<state_dir>/<gate>` exists, the sweep waits here after writing
+    /// `what` to `<state_dir>/<ack>` so the test knows it arrived.
     /// Removing the gate lets it go on. Release builds, the only ones
     /// shipped, have none of this.
     #[cfg(debug_assertions)]
-    async fn sweep_gate(&self, schedule: &str) {
+    async fn debug_gate(&self, gate: &str, ack: &str, what: &str) {
         let dir = &self.cfg.appliance.state_dir;
-        if !dir.join("sweep-gate").exists() {
+        if !dir.join(gate).exists() {
             return;
         }
-        let _ = std::fs::write(dir.join("sweep-gated"), schedule);
+        let _ = std::fs::write(dir.join(ack), what);
         let start = std::time::Instant::now();
-        while dir.join("sweep-gate").exists() && start.elapsed() < std::time::Duration::from_secs(120) {
+        while dir.join(gate).exists() && start.elapsed() < std::time::Duration::from_secs(120) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let _ = std::fs::remove_file(dir.join("sweep-gated"));
+        let _ = std::fs::remove_file(dir.join(ack));
+    }
+
+    /// Debug builds only: the firing gate for the sweep race test (#261).
+    #[cfg(debug_assertions)]
+    async fn sweep_gate(&self, schedule: &str) {
+        self.debug_gate("sweep-gate", "sweep-gated", schedule).await;
+    }
+
+    /// Debug builds only: the release gate for the stale-release test (#318).
+    #[cfg(debug_assertions)]
+    async fn release_gate(&self, schedule: &str) {
+        self.debug_gate("release-gate", "release-gated", schedule).await;
     }
 
     /// Debug builds only, for the crash tests: the process ends at once,
@@ -627,7 +638,17 @@ impl Kernel {
                 self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: Some(task), admin: false }), ("kernel", notice)]).await;
             }
             for id in release {
-                let _ = self.emit("kernel", Ev::ScheduleResumed { id }).await;
+                #[cfg(debug_assertions)]
+                self.release_gate(&id).await;
+                // The hold's end was read before the notifications above
+                // went out; a pause that landed since must not be resumed
+                // here. Only a schedule still paused on a run that no
+                // longer waits goes on (#318).
+                let ended = self.read(|s| s.held_by_person(&id).is_none());
+                let held_pause = self.read(|s| s.schedules.get(&id).is_some_and(|x| x.paused_on.is_some()));
+                if ended && held_pause {
+                    let _ = self.emit("kernel", Ev::ScheduleResumed { id }).await;
+                }
             }
             let due_schedules: Vec<crate::state::Schedule> =
                 self.read(|s| if s.kill_switch { vec![] } else { s.schedules.values().filter(|x| x.next_due().is_some_and(|t| t <= now)).cloned().collect() });
