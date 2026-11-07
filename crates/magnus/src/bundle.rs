@@ -48,6 +48,32 @@ pub fn place(path: &str) -> Result<(&'static str, Option<String>), String> {
     Ok((kind, user))
 }
 
+/// A person id as a `/users/` path segment: every id the appliance
+/// accepts maps to a valid one, and two ids never map to the same one
+/// (#244). Bytes the path rule takes stay (`-` doubles, so it cannot
+/// start an escape); every other byte is `-` with its uppercase hex.
+/// The only post-pass: an id of `.` or `..` would refuse as a segment,
+/// and an empty id would vanish, so those escape their first byte.
+pub fn user_segment(person: &str) -> String {
+    let mut out = String::new();
+    for b in person.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'.' || b == b'_' {
+            out.push(b as char);
+        } else if b == b'-' {
+            out.push_str("--");
+        } else {
+            out.push_str(&format!("-{b:02X}"));
+        }
+    }
+    if out.is_empty() {
+        return "-".into();
+    }
+    if out == "." || out == ".." {
+        out.replace_range(0..1, "-2E");
+    }
+    out
+}
+
 /// The fields each kind needs beyond OKF's `type`, and the `type` it must
 /// carry (an entity's is its type document's title).
 fn required(kind: &str) -> (&'static [&'static str], Option<&'static str>) {
@@ -256,8 +282,8 @@ pub fn validate(path: &str, fm: &Value, body: &str, type_doc: impl Fn(&str) -> O
     }
     // Scope: a person's own documents are theirs alone; the rest are the org's.
     match (&user, fm.get("scope").and_then(Value::as_str)) {
-        (Some(u), Some("user")) if fm.get("owner_user").and_then(Value::as_str) == Some(u) => {}
-        (Some(u), _) => return Err(format!("{path}: a document under /users/{u}/ has scope: user and owner_user: {u}")),
+        (Some(u), Some("user")) if fm.get("owner_user").and_then(Value::as_str).is_some_and(|o| user_segment(o) == *u) => {}
+        (Some(u), _) => return Err(format!("{path}: a document under /users/{u}/ has scope: user and its person's id in owner_user")),
         (None, Some("org")) => {}
         (None, _) => return Err(format!("{path}: an org document has scope: org")),
     }
@@ -413,8 +439,11 @@ impl Kernel {
     /// Write a version of a document for `person`'s run: checked first, and
     /// refused with the reason when it breaks a rule (K8, K9).
     pub async fn bundle_write(&self, person: &str, run: &str, path: &str, fm: &Value, body: &str) -> Result<u32, String> {
-        let (kind, user) = place(path)?;
-        if user.as_deref().is_some_and(|u| u != person) {
+        // A run that writes its raw id names a directory that is not
+        // theirs when the id maps: the refusal names the one that is.
+        let dir = format!("/users/{}/", user_segment(person));
+        let (kind, user) = place(path).map_err(|e| if path.starts_with("/users/") { format!("{e}; your documents are under {dir}") } else { e })?;
+        if user.as_deref().is_some_and(|u| u != user_segment(person)) {
             return Err(format!("{path}: another person's document"));
         }
         let existing = self.read(|s| s.bundle.get(path).cloned());
@@ -487,7 +516,10 @@ impl Kernel {
             version: 0,
             doc_kind: kind.into(),
             scope: if user.is_some() { "user".into() } else { "org".into() },
-            owner_user: user,
+            // The person's id, not the path's segment: the two differ
+            // when the id maps (#244), and the id is what the readers,
+            // the erasure and the content owners compare.
+            owner_user: if user.is_some() { Some(person.to_string()) } else { None },
             actor: format!("magnus/{}", crate::update::version()),
             run: Some(run.into()),
             label,
@@ -610,6 +642,29 @@ mod tests {
         assert!(validate("/sources/hubspot.md", &user, "", customer_type).unwrap_err().contains("scope: org"));
         assert!(validate("/users/alice/n.md", &json!({ "type": "Note", "scope": "user", "owner_user": "bob" }), "", customer_type).is_err());
         validate("/users/alice/n.md", &json!({ "type": "Note", "scope": "user", "owner_user": "alice" }), "", customer_type).unwrap();
+    }
+
+    #[test]
+    fn every_person_id_maps_to_one_valid_user_segment() {
+        for (id, seg) in [
+            ("alice", "alice"),
+            ("sam@example.com", "sam-40example.com"),
+            ("a-b", "a--b"),
+            ("-40", "--40"),
+            ("sam three", "sam-20three"),
+            ("Zoë", "Zo-C3-AB"),
+            (".", "-2E"),
+            ("..", "-2E."),
+            ("", "-"),
+        ] {
+            assert_eq!(user_segment(id), seg, "{id}");
+            assert_eq!(place(&format!("/users/{seg}/n.md")).unwrap(), ("user", Some(seg.to_string())));
+        }
+        // Raw and mapped never collide: the writer's directory is one only.
+        assert_ne!(user_segment("sam@example.com"), user_segment("sam-40example.com"));
+        // The frontmatter still names the raw id; the directory its mapping.
+        validate("/users/sam-40example.com/n.md", &json!({ "type": "Note", "scope": "user", "owner_user": "sam@example.com" }), "", customer_type).unwrap();
+        assert!(validate("/users/sam-40example.com/n.md", &json!({ "type": "Note", "scope": "user", "owner_user": "sam-40example.com" }), "", customer_type).is_err());
     }
 
     #[test]

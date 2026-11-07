@@ -37,7 +37,7 @@ pub const BUDGET: usize = crate::bundle::INDEX_CAP;
 
 /// Where a person's relationship memory is kept.
 pub fn path(person: &str) -> String {
-    format!("/users/{person}/relationship.md")
+    format!("/users/{}/relationship.md", crate::bundle::user_segment(person))
 }
 
 /// One change to the notes, by the person or by Magnus.
