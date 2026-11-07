@@ -1007,10 +1007,22 @@ impl Person {
 /// without `:port`, or a range. A port is 1-5 digits, as there. Checked at
 /// load so a bad entry fails here naming itself, instead of stopping the
 /// sidecar with only "the browser sidecar did not start" (#242).
+/// As the sidecar's `net.isIPv6`, which accepts a zone: exactly one `%`,
+/// and what follows it is not empty (Node 24: `fe80::1%eth0` and even
+/// `fe80::1%eth0:8080` parse; `fe80::1%`, a second `%`, or nothing before
+/// it do not). Rust's parser takes no zone at all, so it is tested
+/// without.
+fn is_ipv6(s: &str) -> bool {
+    match s.split_once('%') {
+        None => s.parse::<std::net::Ipv6Addr>().is_ok(),
+        Some((ip, zone)) => !zone.is_empty() && !zone.contains('%') && ip.parse::<std::net::Ipv6Addr>().is_ok(),
+    }
+}
+
 fn browser_allow_ok(entry: &str) -> bool {
     let lower = entry.trim().to_lowercase();
     let s = lower.strip_suffix('.').unwrap_or(&lower);
-    if s.contains('/') || s.parse::<std::net::Ipv6Addr>().is_ok() {
+    if s.contains('/') || is_ipv6(s) {
         return range_ok(s);
     }
     // `[host]` or `[host]:port`.
@@ -1100,10 +1112,10 @@ mod tests {
     /// `parseAllow` (`browser/destinations.js`).
     #[test]
     fn a_bad_browser_allow_entry_fails_at_load_naming_itself() {
-        for good in ["\"printer\"", "\"printer.lan\"", "\"printer.lan:631\"", "\"intranet.\"", "\"EXAMPLE.com:443\"", "\"10.1.2.3\"", "\"10.1.2.3:8080\"", "\"[::1]:8080\"", "\"::1\"", "\"10.1.0.0/16\"", "\"fc00::/7\"", "\"10.1.0.0/8\""] {
+        for good in ["\"printer\"", "\"printer.lan\"", "\"printer.lan:631\"", "\"intranet.\"", "\"EXAMPLE.com:443\"", "\"10.1.2.3\"", "\"10.1.2.3:8080\"", "\"[::1]:8080\"", "\"::1\"", "\"10.1.0.0/16\"", "\"fc00::/7\"", "\"10.1.0.0/8\"", "\"fe80::1%eth0\"", "\"FE80::1%ETH0\"", "\"fe80::1%eth0:8080\""] {
             assert!(load_browser(good).is_ok(), "{good}");
         }
-        for bad in ["\"\"", "\"10.0.0.0/33\"", "\"10.0.0.0/8/8\"", "\"10.0.0.0/-1\"", "\"[::1\"", "\"[::1]x\"", "\"printer.lan:\"", "\"printer.lan:123456\"", "\"a:b:c\"", "\":8080\""] {
+        for bad in ["\"\"", "\"10.0.0.0/33\"", "\"10.0.0.0/8/8\"", "\"10.0.0.0/-1\"", "\"[::1\"", "\"[::1]x\"", "\"printer.lan:\"", "\"printer.lan:123456\"", "\"a:b:c\"", "\":8080\"", "\"fe80::1%\"", "\"fe80::1%a%b\""] {
             let e = load_browser(bad).unwrap_err();
             assert!(format!("{e:#}").contains("[browser] allow") && format!("{e:#}").contains(bad.trim_matches('"')), "{bad}: {e:#}");
         }
