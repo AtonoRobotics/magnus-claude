@@ -218,7 +218,7 @@ fn normal(s: &str) -> String {
 /// Where a tool result came from, for telling independent sources apart:
 /// a web page's host, an app, or the tool.
 fn source_of(tool: &str, input: &Value) -> String {
-    if let Some(url) = input["url"].as_str().filter(|_| tool == "web_fetch" || tool == "browser_open") {
+    if let Some(url) = input["url"].as_str().filter(|_| tool == "web_fetch" || tool == "browser_navigate") {
         return url::Url::parse(url)
             .ok()
             // The host alone: two ports of one host are one source.
@@ -677,5 +677,23 @@ async fn request_endorsement(State(k): State<Arc<Kernel>>, h: HeaderMap, Path(id
     match k.ask_endorsement(&id, &p.id).await {
         Ok(item) => (StatusCode::CREATED, Json(json!({ "item": item }))).into_response(),
         Err(e) => internal(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Two browser pages from one host count as one source, as two fetched
+    /// pages do: the browser's tool is `browser_navigate`, and there is no
+    /// `browser_open` (#180).
+    #[test]
+    fn two_browser_pages_from_one_host_count_as_one_source() {
+        let a = source_of("browser_navigate", &json!({ "url": "https://example.com/a" }));
+        let b = source_of("browser_navigate", &json!({ "url": "https://example.com:8443/b" }));
+        assert_eq!((a.as_str(), b.as_str()), ("web:example.com", "web:example.com"));
+        assert_eq!(source_of("browser_navigate", &json!({ "url": "https://other.org/" })).as_str(), "web:other.org");
+        assert_eq!(source_of("web_fetch", &json!({ "url": "https://example.com/c" })).as_str(), "web:example.com");
     }
 }
