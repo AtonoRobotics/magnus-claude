@@ -244,6 +244,9 @@ pub struct Task {
     pub schedule: Option<String>,
     /// A proactive review run's task: the loop's own wake, not work (#237).
     pub review: bool,
+    /// A scheduled watch poll's task: a quiet read, hidden from the
+    /// person's lists (#406).
+    pub poll: bool,
     /// The event that created it: where its words are recalled from.
     pub seq: i64,
     /// Library files the person gave it.
@@ -877,6 +880,10 @@ pub struct State {
     /// and tool. New ids wake a review; the set caps at five thousand
     /// per watch, enough for any inbox and bounded for any firehose.
     pub watched_seen: HashMap<(String, String, String), HashSet<String>>,
+    /// When each watched read was last polled on schedule, per
+    /// person, app and tool (#406): the next poll is due an interval
+    /// after this, or at once when there is no entry yet.
+    pub watch_last_polled: HashMap<(String, String, String), DateTime<Utc>>,
     /// When each inbox item was first presented to its person (#367).
     pub items_opened: HashMap<String, DateTime<Utc>>,
     /// When each inbox item was decided, for the feed (#367).
@@ -1541,6 +1548,9 @@ impl State {
                 self.last_sign_in.remove(person);
                 self.app_connections.retain(|(p, _), _| p != person);
                 self.openers.retain(|(p, _)| p != person);
+                // Their poll clocks: whoever is next known by their
+                // name starts polling fresh (#406).
+                self.watch_last_polled.retain(|(p, _, _), _| p != person);
                 // The rights they held go with them: whoever is next known by
                 // their name starts from the organisation's config.
                 self.roles_set.remove(person);
@@ -1600,6 +1610,9 @@ impl State {
                         seen.remove(&id);
                     }
                 }
+            }
+            Ev::WatchPolled { person, app, tool } => {
+                self.watch_last_polled.insert((person.clone(), app.clone(), tool.clone()), e.at);
             }
             Ev::ItemOpened { id } => {
                 // First presentation stands: opened is when it was
@@ -1909,6 +1922,7 @@ impl State {
                         // Known from the start, so its first step knows it is scheduled.
                         schedule: e.actor.strip_prefix("schedule:").map(String::from),
                         review: e.actor == "review",
+                        poll: e.actor == "poll",
                         seq: e.seq,
                         files: files.clone(),
                         project: project.clone(),

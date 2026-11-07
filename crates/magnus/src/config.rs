@@ -928,11 +928,15 @@ pub struct Connector {
 /// One watched read of an app (#369): `tool` names the remote tool,
 /// `items` points at its answer's array, `id` names each item's
 /// stable id. Items without an id are skipped, never waked on.
+/// `poll_minutes`, when set, polls the read on schedule so items
+/// nobody reads still wake (#406); unset watches diff only reads.
 #[derive(Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
 pub struct Watch {
     pub tool: String,
     pub items: String,
     pub id: String,
+    #[serde(default)]
+    pub poll_minutes: Option<u64>,
 }
 
 /// How the gate asks whether the person has mailed an address before, a

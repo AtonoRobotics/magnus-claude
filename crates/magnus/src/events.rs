@@ -1025,6 +1025,13 @@ pub enum Ev {
         tool: String,
         ids: Vec<String>,
     },
+    /// A scheduled poll of a watched read started (#406): the poll
+    /// clock for the person's app tool restarts here.
+    WatchPolled {
+        person: String,
+        app: String,
+        tool: String,
+    },
     Approval {
         id: String,
         item: String,
