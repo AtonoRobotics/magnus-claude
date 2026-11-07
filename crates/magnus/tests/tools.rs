@@ -334,7 +334,12 @@ async fn the_browser_refuses_metadata_link_local_and_private_network_addresses()
 async fn a_name_resolving_to_a_private_address_is_refused_unless_the_owner_allows_it() {
     use std::sync::atomic::Ordering;
     let (port, hits) = private_site().await;
-    let (name, ips) = own_name(port).await;
+    // `localhost`, not this machine's name: DNS here answers the machine's
+    // name with a stale address it does not have (#426), so navigating to
+    // it is roulette. localhost resolves to loopback everywhere, which is
+    // still a name resolving to a private address.
+    let name = "localhost".to_string();
+    let ips: Vec<_> = tokio::net::lookup_host((name.as_str(), port)).await.unwrap().map(|a| a.ip()).collect();
     assert!(!ips.is_empty(), "{name} does not resolve");
     let dir = tempfile::tempdir().unwrap();
     let b = Browser::new(Some(sidecar(&[])), dir.path());
