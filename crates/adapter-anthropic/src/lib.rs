@@ -54,6 +54,12 @@ async fn handle(http: reqwest::Client, req: Request, mut sink: Sink) -> anyhow::
             })
             .await
         }
+        Request::EstimatePrompt(p) => {
+            // What a turn would send: the same body, measured, not asked.
+            let body = request_body(&p.model, &p.settings, &p.system, &p.messages, &p.tools, 0);
+            let chars = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
+            sink.send(&Event::PromptSize { input_tokens: proto::chars_to_tokens(chars) }).await
+        }
         Request::AuthRevoke { .. } => {
             let detail = "an API key is revoked in the Anthropic console (https://console.anthropic.com/settings/keys)".into();
             sink.send(&Event::AuthRevoked { at_provider: false, detail }).await
@@ -197,27 +203,33 @@ fn classify_status(status: u16, body: &str) -> (ErrorClass, String) {
     (class, format!("Anthropic returned {status}: {detail}"))
 }
 
-async fn complete(http: &reqwest::Client, p: proto::CompleteParams, sink: &mut Sink) -> anyhow::Result<()> {
-    let Some(key) = p.credential.clone() else {
-        return sink.error(ErrorClass::AuthExpired, "no API key in the vault").await;
-    };
+/// The request body a turn sends: one builder for the asking and the
+/// measuring, so the estimate can never drift from what goes out.
+fn request_body(model: &str, settings: &Value, system: &str, messages: &[proto::Message], tools: &[proto::ToolSpec], max_tokens: u32) -> Value {
     let mut body = json!({
-        "model": p.model,
-        "max_tokens": p.max_tokens,
-        "system": p.system,
-        "messages": p.messages.iter().map(to_anthropic).collect::<Vec<_>>(),
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": messages.iter().map(to_anthropic).collect::<Vec<_>>(),
         "stream": true,
     });
-    if !p.tools.is_empty() {
-        body["tools"] = p
-            .tools
+    if !tools.is_empty() {
+        body["tools"] = tools
             .iter()
             .map(|t| json!({ "name": t.name, "description": t.description, "input_schema": t.input_schema }))
             .collect();
     }
-    if let Some(budget) = p.settings["thinking_budget"].as_u64() {
+    if let Some(budget) = settings["thinking_budget"].as_u64() {
         body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
     }
+    body
+}
+
+async fn complete(http: &reqwest::Client, p: proto::CompleteParams, sink: &mut Sink) -> anyhow::Result<()> {
+    let Some(key) = p.credential.clone() else {
+        return sink.error(ErrorClass::AuthExpired, "no API key in the vault").await;
+    };
+    let body = request_body(&p.model, &p.settings, &p.system, &p.messages, &p.tools, p.max_tokens);
 
     let resp = http
         .post(format!("{}/v1/messages", base(&p.settings)))

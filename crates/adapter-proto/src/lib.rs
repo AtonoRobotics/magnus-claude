@@ -58,6 +58,13 @@ pub enum Request {
         input_tokens: u64,
         output_tokens: u64,
     },
+    /// Measure a prompt as this adapter would send it: what its request
+    /// body holds for these messages, in the shared chars-a-token
+    /// estimate. Answered with one `prompt_size` event or an `error`.
+    /// Local: no provider round trip, no credential needed. An adapter
+    /// that drops what it cannot send (a document on a text-only API)
+    /// measures what goes out, not what came in.
+    EstimatePrompt(EstimateParams),
     /// Start a sign-in. Answered with an `auth_step` event or an `error`.
     AuthBegin { settings: Value },
     /// Finish a sign-in with what the person brought back (callback URL, code).
@@ -83,6 +90,26 @@ pub struct CompleteParams {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
     pub max_tokens: u32,
+}
+
+/// A prompt to measure, without asking: the same system, messages and
+/// tools a turn would send.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct EstimateParams {
+    pub model: String,
+    /// Adapter configuration from the owner, minus the credential name.
+    pub settings: Value,
+    pub system: String,
+    pub messages: Vec<Message>,
+    pub tools: Vec<ToolSpec>,
+}
+
+/// Prompt bytes per token when pricing a call that has not happened.
+pub const CHARS_PER_TOKEN: usize = 4;
+
+/// The shared estimate: rendered characters to tokens, rounded up.
+pub fn chars_to_tokens(chars: usize) -> u64 {
+    chars.div_ceil(CHARS_PER_TOKEN) as u64
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +227,8 @@ pub enum Event {
     /// input prices, the full output at output prices, with no cache
     /// benefit assumed.
     Quote { input_usd: f64, output_usd: f64 },
+    /// A prompt's measured tokens, as this adapter would send it.
+    PromptSize { input_tokens: u64 },
     /// What the person must do to sign in: open `url`, or enter `user_code`.
     /// `flow` is opaque and comes back in `auth_complete`.
     AuthStep {

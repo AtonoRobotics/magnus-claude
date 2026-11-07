@@ -265,6 +265,21 @@ impl Adapters {
         }
     }
 
+    /// The prompt's tokens as adapter `id` would send them: what its
+    /// request body holds for these messages, not the kernel's bytes. Local
+    /// to the adapter: no provider round trip.
+    pub async fn estimate_prompt(&self, id: &str, model: &str, system: &str, messages: Vec<Message>, tools: Vec<ToolSpec>) -> Result<u64> {
+        let r = self.get(id).await?;
+        let (settings, _) = Self::split_settings(&r.cfg);
+        let params = proto::EstimateParams { model: model.into(), settings, system: system.into(), messages, tools };
+        let mut call = proto::Call::open(&r.socket, Request::EstimatePrompt(params)).await?;
+        match call.next().await?.ok_or_else(|| anyhow!("adapter closed the connection"))? {
+            Event::PromptSize { input_tokens } => Ok(input_tokens),
+            Event::Error { class, message, .. } => Err(anyhow!("adapter {id} would not measure a prompt for {model}: {class:?}: {message}")),
+            ev => Err(anyhow!("adapter {id} answered an estimate with {ev:?}")),
+        }
+    }
+
     /// Price a call that has not happened, from the adapter's own prices:
     /// the prompt's dollars and the full output's dollars, with no cache
     /// benefit assumed. Local to the adapter: no provider round trip.

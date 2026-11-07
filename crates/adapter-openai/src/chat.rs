@@ -75,10 +75,12 @@ fn messages(p: &CompleteParams) -> Vec<Value> {
     out
 }
 
-pub async fn complete(http: &reqwest::Client, p: CompleteParams, sink: &mut Sink) -> anyhow::Result<()> {
+/// The request body a turn sends: one builder for the asking and the
+/// measuring, so the estimate can never drift from what goes out.
+pub fn request_body(p: &CompleteParams) -> Value {
     let mut body = json!({
         "model": p.model,
-        "messages": messages(&p),
+        "messages": messages(p),
         "stream": true,
         "stream_options": { "include_usage": true },
     });
@@ -95,7 +97,11 @@ pub async fn complete(http: &reqwest::Client, p: CompleteParams, sink: &mut Sink
             body[k.as_str()] = v.clone();
         }
     }
+    body
+}
 
+pub async fn complete(http: &reqwest::Client, p: CompleteParams, sink: &mut Sink) -> anyhow::Result<()> {
+    let body = request_body(&p);
     let mut force = false;
     let resp = loop {
         let (token, account, refreshed) = match bearer(http, &p.settings, &p.credential, force).await {
