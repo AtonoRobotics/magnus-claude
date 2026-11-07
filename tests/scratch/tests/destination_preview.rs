@@ -141,3 +141,29 @@ async fn changed_preview_read_definition_denies_the_send() {
     assert!(review["details"]["summary"].as_str().unwrap_or_default().contains("Denied"), "the send was not denied: {review}");
     assert_eq!(drafts.effects("send_draft"), 0, "the send went out under a changed read definition");
 }
+
+/// The developer trace shows the preview read and the send as two actions:
+/// sharing the send's call ID merged them into one read carrying the
+/// send's result (#373).
+#[tokio::test(flavor = "multi_thread")]
+async fn trace_shows_preview_and_send_as_two_actions() {
+    let model = FakeModel::start(steps(vec![
+        contract_unchecked("send the Q3 draft", "it is sent"),
+        tool("drafts__send_draft", json!({ "draft_id": "d1" })),
+        complete("sent"),
+    ]))
+    .await;
+    let (_drafts, app) = drafts_app(json!({ "d1": { "to": "bob@corp.example", "subject": "Q3", "body": "hi" } }), json!([{ "to": "bob@corp.example", "subject": "Q2" }]), &model).await;
+    let alice = app.api("alice");
+    let id = alice.submit("Send the Q3 draft.").await;
+    alice.wait_settled(&id).await;
+
+    let run = alice.task(&id).await["run_id"].as_str().unwrap().to_string();
+    let (_, ins) = app.api("dana").get(&format!("/v1/dev/runs/{run}")).await;
+    let actions = ins["actions"].as_array().cloned().unwrap_or_default();
+    let preview = actions.iter().find(|a| a["tool"] == "drafts__get_draft").expect("no preview action in the trace");
+    assert!(preview["decisions"].as_array().unwrap().iter().any(|d| d["stage"] == "destinations"), "preview has no destinations decision: {preview}");
+    assert!(preview["result"].is_null(), "the preview carries the send's result: {preview}");
+    let send = actions.iter().find(|a| a["tool"] == "drafts__send_draft").expect("no send action in the trace");
+    assert!(send["result"].is_object(), "the send has no result of its own: {send}");
+}

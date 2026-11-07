@@ -1214,7 +1214,7 @@ impl Kernel {
         if changed || !pinned {
             return Err(format!("{}'s definition changed and is disabled until the owner re-approves it, so who {} goes to cannot be read. {nothing}", rf.name, a.tool));
         }
-        let preview = Action { run: a.run.clone(), call_id: a.call_id.clone(), step_id: a.step_id.clone(), tool: read_name.clone(), input: json!({ d.id.as_str(): id }), issuer: Issuer::Model };
+        let preview = Action { run: a.run.clone(), call_id: format!("preview:{}", a.call_id), step_id: a.step_id.clone(), tool: read_name.clone(), input: json!({ d.id.as_str(): id }), issuer: Issuer::Model };
         let policies = self.read(|s| s.policies.clone());
         let rfacts = ToolFacts { name: &rf.name, app: &rf.app, risk: rf.risk, audience: rf.audience };
         match policy::decide(&policies, person, Some(&run.task), &rfacts, run.untrusted, run.private) {
