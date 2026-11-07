@@ -13,6 +13,7 @@
 use chrono::Timelike;
 use magnus_invariants::model::Script;
 use magnus_invariants::*;
+use magnus_scratch::reconfigure;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -256,6 +257,47 @@ async fn second_interrupt_same_day_queues_when_budget_spent() {
         "{:?}",
         both.1
     );
+}
+
+/// Cadence and an event due together start one review, not two: the
+/// event goes first, and the cadence waits its turn (#381).
+#[tokio::test(flavor = "multi_thread")]
+async fn cadence_and_event_due_together_start_one_review() {
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = prompts.clone();
+    let m = FakeModel::start(script(move |c| {
+        let seen = seen.clone();
+        async move {
+            seen.lock().unwrap().push(c.text());
+            done("Reviewed quietly.")
+        }
+    }))
+    .await;
+    // Boot with the loop off: no boot reviews, so the first sweep after
+    // enabling has cadence (never reviewed) and the event due together.
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let bob = app.api("bob");
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" } })).await;
+    reconfigure(&mut app, |cfg| {
+        cfg["proactive"].as_table_mut().unwrap().insert("on".into(), toml::Value::Boolean(true));
+    })
+    .await;
+    let bob = app.api("bob");
+    // Wait for a finished review: a buggy second starts in the same sweep,
+    // so it exists by then.
+    eventually("a finished review", Duration::from_secs(60), || {
+        let me = bob.clone();
+        async move {
+            let (_, v) = me.get("/v1/tasks").await;
+            let reviews: Vec<_> = v["tasks"].as_array().cloned().unwrap_or_default().into_iter().filter(|t| t["review"] == true).collect();
+            (reviews.iter().any(|t| t["status"] == "completed" || t["status"] == "failed")).then_some(())
+        }
+    })
+    .await;
+    let (_, v) = bob.get("/v1/tasks").await;
+    let reviews: Vec<_> = v["tasks"].as_array().cloned().unwrap_or_default().into_iter().filter(|t| t["review"] == true).collect();
+    assert_eq!(reviews.len(), 1, "one sweep started {} reviews", reviews.len());
+    assert!(prompts.lock().unwrap().iter().any(|p| p.contains("coming up")), "the event did not go first");
 }
 
 /// A failed task wakes a review that names the task and why it failed:
