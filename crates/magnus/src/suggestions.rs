@@ -47,6 +47,23 @@ impl Card {
     }
 }
 
+/// A task proposal's checked parts: the card's words, what it needs,
+/// and its evidence resolved to something real.
+struct ProposalParts {
+    title: String,
+    text: String,
+    what: String,
+    place: String,
+    outcome: String,
+    why_now: String,
+    permissions: Vec<String>,
+    cost: f64,
+    input: Option<String>,
+    evidence: Vec<Value>,
+    again: Option<String>,
+    changed: Option<String>,
+}
+
 /// The person's cards as their conversations show them (one in the trash,
 /// deleted, or in a conversation in the trash, is left out), schedules and
 /// suggestions, not an app's offer.
@@ -196,39 +213,92 @@ impl Kernel {
         Ok(Ok((evidence, again, changed)))
     }
 
-    /// `propose_task` from a chat turn: a card for one task, with what
-    /// Magnus noticed and where, the outcome, why now and what it needs.
-    /// Nothing starts until the person approves it, and the task then
-    /// spends at most the cost they approved (#254).
-    pub(crate) async fn propose_task(&self, a: &Action, key: &str) -> anyhow::Result<(String, bool, Option<Value>)> {
-        let no = |why: String| Ok((format!("No card: {why}"), true, None));
-        let Some(run) = self.chat_run(a) else { return no("propose_task is for chat.".into()) };
-        let (i, needs) = (&a.input, &a.input["needs"]);
+    /// The checks a task proposal passes wherever it is proposed from:
+    /// its words, what it needs, and evidence pointing at something real.
+    async fn proposal_parts(&self, run: &Run, input: &Value) -> anyhow::Result<Result<ProposalParts, String>> {
+        let needs = &input["needs"];
         let (Some(title), Some(text), Some(what), Some(place), Some(outcome), Some(why_now)) =
-            (field(i, "title"), field(i, "text"), field(&i["noticed"], "what"), field(&i["noticed"], "where"), field(i, "outcome"), field(i, "why_now"))
+            (field(input, "title"), field(input, "text"), field(&input["noticed"], "what"), field(&input["noticed"], "where"), field(input, "outcome"), field(input, "why_now"))
         else {
-            return no("title, text, noticed (what and where), outcome and why_now are needed. A retry without them will not help.".into());
+            return Ok(Err("title, text, noticed (what and where), outcome and why_now are needed. A retry without them will not help.".into()));
         };
         let permissions = texts(&needs["permissions"]);
         if permissions.is_empty() {
-            return no("needs.permissions are needed: what it reads, changes and sends, one per item. A retry without them will not help.".into());
+            return Ok(Err("needs.permissions are needed: what it reads, changes and sends, one per item. A retry without them will not help.".into()));
         }
         let max = self.cfg.budget.max_usd;
         let Some(cost) = needs["estimated_cost_usd"].as_f64().filter(|c| *c > 0.0 && *c <= max) else {
-            return no(format!("needs.estimated_cost_usd must be above 0 and at most the appliance's {max}. A retry with the same estimate will not help."));
+            return Ok(Err(format!("needs.estimated_cost_usd must be above 0 and at most the appliance's {max}. A retry with the same estimate will not help.")));
         };
-        let (evidence, again, changed) = match self.grounded(&run, i, &title).await? {
+        let (evidence, again, changed) = match self.grounded(run, input, &title).await? {
             Ok(g) => g,
-            Err(why) => return no(why),
+            Err(why) => return Ok(Err(why)),
         };
+        Ok(Ok(ProposalParts {
+            title,
+            text,
+            what,
+            place,
+            outcome,
+            why_now,
+            permissions,
+            cost,
+            input: field(needs, "input"),
+            evidence,
+            again,
+            changed,
+        }))
+    }
+
+    /// `propose_task` from a run with no thread (a review, a task): the
+    /// proposal as an inbox item, carrying what a chat card carries (#393).
+    async fn inbox_proposal(&self, run: &Run, a: &Action, p: ProposalParts) -> anyhow::Result<(String, bool, Option<Value>)> {
+        if let Some(denied) = self.loop_deny(run, "suggest", None) {
+            return Ok((format!("No card: {denied}. A retry will not help."), true, None));
+        }
         // The task spends no more than the cost the person approved.
         let mut budget = self.cfg.budget.clone();
-        budget.max_usd = cost;
+        budget.max_usd = p.cost;
+        let scope = p.permissions.join("; ");
+        let item = self
+            .item(
+                run,
+                "task_proposal",
+                format!("The worker proposes a task: {}", p.title),
+                json!({
+                    "title": p.title, "text": p.text, "noticed": { "what": p.what, "where": p.place }, "outcome": p.outcome, "why_now": p.why_now,
+                    "needs": { "permissions": p.permissions, "estimated_cost_usd": p.cost, "input": p.input }, "evidence": p.evidence,
+                    "scope": scope, "budget": budget, "again": p.again, "changed": p.changed, "call_id": a.call_id,
+                }),
+            )
+            .await?;
+        Ok((format!("Proposal {item} is in the person's inbox. Nothing starts until they approve it."), false, None))
+    }
+
+    /// `propose_task` from a chat turn: a card for one task, with what
+    /// Magnus noticed and where, the outcome, why now and what it needs.
+    /// Nothing starts until the person approves it, and the task then
+    /// spends at most the cost they approved (#254). From a run with no
+    /// thread the proposal goes in the inbox instead (#393).
+    pub(crate) async fn propose_task(&self, a: &Action, key: &str) -> anyhow::Result<(String, bool, Option<Value>)> {
+        let no = |why: String| Ok((format!("No card: {why}"), true, None));
+        let Some(run) = self.read(|s| s.runs.get(&a.run).cloned()) else { return no("no such run.".into()) };
+        let p = match self.proposal_parts(&run, &a.input).await? {
+            Ok(p) => p,
+            Err(why) => return no(why),
+        };
+        if !self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.is_chat_turn())) {
+            return self.inbox_proposal(&run, a, p).await;
+        }
+        // The task spends no more than the cost the person approved.
+        let mut budget = self.cfg.budget.clone();
+        budget.max_usd = p.cost;
+        let scope = p.permissions.join("; ");
         let card = crate::chat::derived("card", key);
         let data = json!({
-            "card": card, "proposal": true, "title": title, "text": text, "noticed": { "what": what, "where": place }, "outcome": outcome, "why_now": why_now,
-            "needs": { "permissions": permissions, "estimated_cost_usd": cost, "input": field(needs, "input") }, "evidence": evidence,
-            "scope": permissions.join("; "), "budget": budget, "again": again, "changed": changed,
+            "card": card, "proposal": true, "title": p.title, "text": p.text, "noticed": { "what": p.what, "where": p.place }, "outcome": p.outcome, "why_now": p.why_now,
+            "needs": { "permissions": p.permissions, "estimated_cost_usd": p.cost, "input": p.input }, "evidence": p.evidence,
+            "scope": scope, "budget": budget, "again": p.again, "changed": p.changed,
         });
         Ok((format!("A card for this task proposal ({card}) is in the thread. Nothing starts until the person approves it."), false, Some(data)))
     }
