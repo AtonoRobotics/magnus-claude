@@ -105,3 +105,11 @@ id = "draft_id"
 recipients = ["/message/to", "/message/cc", "/message/bcc"]
 content = ["/message/subject", "/message/body", "/message/attachments"]
 bound = ["/message/digest"]
+
+# Whether the person has mailed an address before: sent mail searched for
+# it, a recipient-provenance source beside their own words (#210).
+[sent]
+read = "search_threads"
+input = "query"
+query = "in:sent to:{address}"
+found = "/threads"
