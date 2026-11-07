@@ -533,6 +533,9 @@ pub enum Ev {
         /// until its person resumes it.
         #[serde(default)]
         task: Option<String>,
+        /// An admin's suspension: only an admin lifts it.
+        #[serde(default)]
+        admin: bool,
     },
     /// When a schedule runs and when it ends, changed by its person (or the
     /// owner or an admin); what each run does stays.

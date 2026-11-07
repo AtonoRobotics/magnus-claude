@@ -103,21 +103,31 @@ impl Kernel {
     }
 
     /// Pause a schedule: no more runs start until it is resumed; a run
-    /// already going goes on.
+    /// already going goes on. Pausing one held on its waiting run keeps
+    /// the person's pause: the hold's end does not resume it. An admin's
+    /// suspension is not paused over.
     pub async fn pause_schedule(&self, who: &Person, id: &str) -> Result<(), Refused> {
         let sc = self.schedule_owned(who, id)?;
-        if sc.paused.is_some() {
+        if sc.paused_by_admin {
+            return Err(Refused::Conflict("it is suspended by an admin: only an admin lifts it".into()));
+        }
+        if sc.paused.is_some() && sc.paused_on.is_none() {
             return Err(Refused::Conflict("the schedule is already paused".into()));
         }
         let reason = if who.id == sc.person { "Paused by you".to_string() } else { format!("Paused by {}", who.name) };
-        self.emit(&format!("person:{}", who.id), Ev::SchedulePaused { id: id.into(), reason, task: None }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        self.emit(&format!("person:{}", who.id), Ev::SchedulePaused { id: id.into(), reason, task: None, admin: false }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
         Ok(())
     }
 
+    /// Resume a schedule its person paused. An admin's suspension is
+    /// lifted only by an admin (or the owner), here or in the console.
     pub async fn resume_schedule(&self, who: &Person, id: &str) -> Result<(), Refused> {
         let sc = self.schedule_owned(who, id)?;
         if sc.paused.is_none() {
             return Err(Refused::Conflict("the schedule is not paused".into()));
+        }
+        if sc.paused_by_admin && !(who.is_owner() || who.has_role("admin")) {
+            return Err(Refused::Conflict("it is suspended by an admin: only an admin lifts it".into()));
         }
         if sc.paused_on.is_some() {
             return Err(Refused::Conflict("its run is waiting on you: answer it, or resume or cancel that task, and the schedule goes on".into()));

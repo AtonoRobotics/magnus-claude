@@ -11,6 +11,8 @@
 //! - one that keeps failing pauses itself until its person resumes it, and
 //!   the app can resume it and stop it;
 //! - one cancelled or paused while the sweep starts it gets no run;
+//! - one held on its waiting run can be paused by its person, and stays
+//!   paused when the hold ends;
 //! - a proposed schedule keeps the budget and taint of the run that
 //!   proposed it.
 
@@ -393,4 +395,52 @@ async fn a_schedule_paused_while_starting_gets_no_run_until_resumed() {
     // Resumed, it fires as usual: the pause stopped a run, not the schedule.
     assert_eq!(alice.post(&format!("/v1/schedules/{id}/resume"), json!({})).await.0.as_u16(), 204);
     eventually("a run after the resume", MINUTE * 2, || async { tasks_with(&alice, "Hold the press.").await.first().map(|_| ()) }).await;
+}
+
+/// A person can pause a schedule held on them, and the hold's end does
+/// not resume it: their pause is kept (#262).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_can_pause_a_schedule_held_on_them_and_it_stays_paused() {
+    let m = FakeModel::start(script(|c| async move {
+        if c.offered_tools().is_empty() && c.text().contains("The agent's criteria") {
+            return Reply::Text("The criteria cover the request.".into());
+        }
+        if c.offered_tools().contains(&"verdict".to_string()) {
+            return tool("verdict", json!({ "criteria": [{ "id": "c1", "holds": true, "evidence": "held, then answered" }] }));
+        }
+        if !c.body.to_string().contains("Watch the gate.") {
+            return tool("task_fail", json!({ "reason": "not scripted" }));
+        }
+        match c.turn() {
+            0 => simple_contract(),
+            1 => tool("ask_principal", json!({ "question": "Raise the alarm too?" })),
+            _ => done("Watched the gate."),
+        }
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    every_minute(&mut app, 0).await;
+    let alice = app.api("alice");
+    let id = add(&alice, json!({ "text": "Watch the gate.", "every_minutes": 1 })).await;
+
+    let first = eventually("the schedule's first run", MINUTE, || async { tasks_with(&alice, "Watch the gate.").await.first().map(|t| t["task_id"].as_str().unwrap().to_string()) }).await;
+    alice.wait_item(&first, "question").await;
+    eventually("the schedule held on its waiting run", PATIENCE, || async { schedule(&alice, &id).await.filter(|s| s["paused_on"] == first.as_str()) }).await;
+
+    // Pausing a held schedule works.
+    assert_eq!(alice.post(&format!("/v1/schedules/{id}/pause"), json!({})).await.0.as_u16(), 204);
+    let s = schedule(&alice, &id).await.unwrap();
+    assert!(s["paused_on"].is_null() && s["paused"].as_str().unwrap().contains("Paused by you"), "{s}");
+
+    // The hold ends with its run; the person's pause is kept, not resumed.
+    // (The run is cancelled rather than answered: answering needs a run
+    // that completes, which the loaded build box does not give; #313.)
+    assert!(alice.post(&format!("/v1/tasks/{first}/cancel"), json!({})).await.0.is_success());
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let s = schedule(&alice, &id).await.unwrap();
+    assert!(!s["paused"].is_null(), "the hold's end resumed the person's pause: {s}");
+
+    // Resumed, it fires again as usual.
+    assert_eq!(alice.post(&format!("/v1/schedules/{id}/resume"), json!({})).await.0.as_u16(), 204);
+    eventually("a second run after the resume", MINUTE * 2, || async { (tasks_with(&alice, "Watch the gate.").await.len() == 2).then_some(()) }).await;
 }

@@ -74,7 +74,7 @@ impl Kernel {
             if sc.paused.is_some() {
                 return Err((StatusCode::CONFLICT, "the schedule is already suspended".into()));
             }
-            self.emit(actor, Ev::SchedulePaused { id: id.into(), reason: format!("Suspended by {by}, an admin"), task: None }).await.map_err(failed)?;
+            self.emit(actor, Ev::SchedulePaused { id: id.into(), reason: format!("Suspended by {by}, an admin"), task: None, admin: true }).await.map_err(failed)?;
         }
         Ok(json!({ "id": id, "paused": !on }))
     }
