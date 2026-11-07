@@ -233,6 +233,13 @@ pub enum Ev {
         ok: bool,
         detail: String,
     },
+    /// The backups directory was mirrored off host after a backup (#297):
+    /// whether the copy held, and why not.
+    BackupCopied {
+        file: String,
+        ok: bool,
+        detail: String,
+    },
     /// Removed content is still in backups kept: rewriting `files` failed
     /// (why, in `detail`). Those have had the removals up to `from` only;
     /// every removal after it, through `through`, is not yet out of them.

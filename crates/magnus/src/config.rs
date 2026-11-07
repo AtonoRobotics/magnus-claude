@@ -425,6 +425,15 @@ pub struct Backup {
     /// an hour, so a transient fault (a full disk) can clear.
     #[serde(default = "retry_wait_secs")]
     pub retry_wait_secs: u32,
+    /// Where each backup is mirrored after it is made and old ones are
+    /// dropped (#297): an rsync destination, a path or `host:path`, from
+    /// configuration only. None configured, no off-host copy.
+    #[serde(default)]
+    pub copy_to: Option<String>,
+    /// Seconds an off-host copy may take before it is stopped and recorded
+    /// as failed (#297).
+    #[serde(default = "copy_timeout_secs")]
+    pub copy_timeout_secs: u32,
 }
 
 /// Daily: with a month kept, a month of daily restore points.
@@ -440,6 +449,9 @@ fn fallback_wait_secs() -> u32 {
 fn retry_wait_secs() -> u32 {
     3600
 }
+fn copy_timeout_secs() -> u32 {
+    300
+}
 
 impl Default for Backup {
     fn default() -> Self {
@@ -451,6 +463,8 @@ impl Default for Backup {
             databases: Vec::new(),
             fallback_wait_secs: fallback_wait_secs(),
             retry_wait_secs: retry_wait_secs(),
+            copy_to: None,
+            copy_timeout_secs: copy_timeout_secs(),
         }
     }
 }
@@ -1147,6 +1161,16 @@ mod tests {
         let set = load_backup("fallback_wait_secs = 7\nretry_wait_secs = 120\n").unwrap().backup;
         assert_eq!(set.fallback_wait_secs, 7);
         assert_eq!(set.retry_wait_secs, 120);
+    }
+
+    /// The off-host destination comes from `[backup]` only (#297): none
+    /// configured, no off-host copy.
+    #[test]
+    fn backup_copy_comes_from_config() {
+        let unset = load_backup("").unwrap().backup;
+        assert_eq!((unset.copy_to, unset.copy_timeout_secs), (None, 300));
+        let set = load_backup("copy_to = \"strix-beta:/backups\"\ncopy_timeout_secs = 60\n").unwrap().backup;
+        assert_eq!((set.copy_to.as_deref(), set.copy_timeout_secs), (Some("strix-beta:/backups"), 60));
     }
 
     fn load_browser(allow: &str) -> anyhow::Result<Config> {
