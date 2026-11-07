@@ -5,7 +5,16 @@
 //! review.
 
 use chrono::{DateTime, TimeZone, Timelike, Utc};
+use crate::tools::Label;
 use std::sync::Arc;
+
+/// The ended task that woke a review: its ID, its outcome line, and the
+/// taint it ended with, which the review starts with (#383, #390).
+pub(crate) struct Ended {
+    pub task: String,
+    pub outcome: String,
+    pub label: Label,
+}
 
 /// Minutes since midnight for a "HH:MM" time, in the person's timezone.
 fn at(hhmm: &str) -> Option<u32> {
@@ -201,7 +210,7 @@ impl crate::kernel::Kernel {
                 self.start_review(&person, "overnight".into(), None).await;
             }
             for (reason, ended) in self.read(|s| {
-                let mut out: Vec<(String, Option<(String, String)>)> = vec![];
+                let mut out: Vec<(String, Option<Ended>)> = vec![];
                 for sc in s
                     .schedules
                     .values()
@@ -252,7 +261,7 @@ impl crate::kernel::Kernel {
                 // so the fast wake had its chance, gets its review from
                 // this sweep. The mark lands from the reason when the
                 // review starts, exactly as for the fast wake.
-                if let Some((id, verb, outcome)) = s
+                if let Some((id, verb, outcome, label)) = s
                     .tasks
                     .values()
                     .filter(|t| t.person == person && !t.review && !t.chat.as_ref().is_some_and(|c| c.turn))
@@ -270,12 +279,13 @@ impl crate::kernel::Kernel {
                         if s.wake_marks.contains_key(&format!("{person}:task {}", t.task_id)) {
                             return None;
                         }
-                        Some((ended, t.task_id.clone(), verb, r.summary.clone().unwrap_or_default()))
+                        let label = Label { untrusted: r.untrusted, private: r.private };
+                        Some((ended, t.task_id.clone(), verb, r.summary.clone().unwrap_or_default(), label))
                     })
-                    .max_by_key(|(ended, _, _, _)| *ended)
-                    .map(|(_, id, verb, outcome)| (id, verb, outcome))
+                    .max_by_key(|(ended, _, _, _, _)| *ended)
+                    .map(|(_, id, verb, outcome, label)| (id, verb, outcome, label))
                 {
-                    out.push((format!("task {id} {verb}"), Some((id, outcome))));
+                    out.push((format!("task {id} {verb}"), Some(Ended { task: id, outcome, label })));
                 }
                 out
             }) {
@@ -290,13 +300,13 @@ impl crate::kernel::Kernel {
     /// used to skip when any review had woken within five minutes, which
     /// silently dropped failures after a cadence review or a boot; a
     /// per-task mark is the precise dedup (a task ends once).
-    pub async fn review_wake(self: &Arc<Self>, person: &str, reason: String, ended: Option<(String, String)>) {
+    pub async fn review_wake(self: &Arc<Self>, person: &str, reason: String, ended: Option<Ended>) {
         if !self.cfg.proactive.on {
             return;
         }
         if self.read(|s| {
             s.review_runs.values().any(|p| p == person)
-                || ended.as_ref().is_some_and(|(id, _)| s.wake_marks.contains_key(&format!("{person}:task {id}")))
+                || ended.as_ref().is_some_and(|e| s.wake_marks.contains_key(&format!("{person}:task {}", e.task)))
         }) {
             return;
         }
@@ -305,7 +315,7 @@ impl crate::kernel::Kernel {
 
     /// Start the review run itself: the review instruction over the
     /// person's state, on a small wake budget (#237).
-    async fn start_review(self: &Arc<Self>, person: &str, reason: String, ended: Option<(String, String)>) {
+    async fn start_review(self: &Arc<Self>, person: &str, reason: String, ended: Option<Ended>) {
         let context = self.review_context(person, ended.as_ref()).await;
         let text = format!("Review the person's state ({reason}).\n\n{context}");
         let budget = crate::config::Budget {
@@ -321,6 +331,9 @@ impl crate::kernel::Kernel {
                 vec![],
                 crate::kernel::NewRun {
                     budget: Some(budget),
+                    // The outcome can quote what the task read: the review
+                    // starts with the ended run's taint, never clean (#390).
+                    label: ended.map(|e| e.label),
                     ..Default::default()
                 },
             )
@@ -346,7 +359,7 @@ impl crate::kernel::Kernel {
     /// The review's context: the ended task that woke it, if any, then
     /// unfinished work, schedules, approvals, disagreements and
     /// commitments (#237, #383).
-    async fn review_context(&self, person: &str, ended: Option<&(String, String)>) -> String {
+    async fn review_context(&self, person: &str, ended: Option<&Ended>) -> String {
         let (tasks, schedules, approvals, disagreements, commitments) = self.read(|s| {
             let tasks = s
                 .tasks
@@ -461,7 +474,7 @@ impl crate::kernel::Kernel {
         };
         // The ended task first: the unfinished-work section excludes it,
         // and the review cannot judge the failure without it (#383).
-        let woke = ended.map(|(id, outcome)| format!("The task that woke this review:\n- {id}: {}\n\n", outcome.chars().take(500).collect::<String>())).unwrap_or_default();
+        let woke = ended.map(|e| format!("The task that woke this review:\n- {}: {}\n\n", e.task, e.outcome.chars().take(500).collect::<String>())).unwrap_or_default();
         format!(
             "{woke}{}{}{}{}{}",
             section("Unfinished work", open),

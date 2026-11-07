@@ -11,7 +11,9 @@ thirty seconds ago so the fast wake had its chance. The newest first:
 yesterday's unreviewed failure does not starve today's. The reason
 reuses the fast wake's shape (`task {id} done|failed`), so the wake
 mark lands from `ReviewWoken` exactly as for the fast wake, and the
-`Ended` pair rides the same `start_review` parameter (#383).
+`Ended` struct rides the same `start_review` parameter (#383),
+label included, so a backstopped review starts tainted like a
+fast-woken one (#390).
 
 The thirty-second grace is a settling window, not a cadence: the fast
 wake fires within milliseconds when no review is active, so anything
