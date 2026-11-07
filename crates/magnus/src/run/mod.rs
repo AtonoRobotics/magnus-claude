@@ -1155,7 +1155,17 @@ fn strip_descriptions(v: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{harness_text, scope_line, CHAT_INSTRUCTIONS, INSTRUCTIONS};
+    use super::{harness_text, scope_line, CHAT_INSTRUCTIONS, INSTRUCTIONS, REVIEW_INSTRUCTIONS};
+
+    /// The review instruction names only tools a review can use (#382):
+    /// no `propose_task` (chat-only), with automations proposed as
+    /// schedules and tasks surfaced as observations instead.
+    #[test]
+    fn review_names_only_tools_a_review_can_use() {
+        assert!(!REVIEW_INSTRUCTIONS.contains("propose_task"), "reviews cannot propose tasks");
+        assert!(REVIEW_INSTRUCTIONS.contains("propose_schedule"), "reviews can propose automations");
+        assert!(REVIEW_INSTRUCTIONS.contains("observe"), "tasks to start go out as observations");
+    }
 
     /// The harness section names only what is offered (#270): no web
     /// search, no sandbox, no browser without them.
