@@ -35,6 +35,15 @@ pub fn instructions_version() -> String {
     version_of("agent.md", INSTRUCTIONS)
 }
 
+/// Magnus's one character, and its version: logged with every model reply
+/// separately, so alpha feedback traces to the character that produced it
+/// even as the per-person context varies the sent instructions (#269).
+pub const CHARACTER: &str = include_str!("../../instructions/character.md");
+
+pub fn character_version() -> String {
+    version_of("character.md", CHARACTER)
+}
+
 /// What Magnus opens a conversation with by itself (`openers.rs`): at the
 /// person's cold start, and for an app they connected (`{app}` its name).
 pub const OPENER: &str = include_str!("../../instructions/opener.md");

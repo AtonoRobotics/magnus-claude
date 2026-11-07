@@ -375,15 +375,16 @@ impl Kernel {
         let shown = if e["view"].is_array() { format!("\n\nShown below the answer: {}", e["view"]) } else { String::new() };
         let msg = Message { role: Role::User, content: vec![Block::Text { text: format!("{}{shown}", text_of(e)) }], state: None };
         let (adapter, model) = (run.model().0.to_string(), run.model().1.to_string());
+        let system = format!("{LISTENING}\n{}", crate::run::CHARACTER);
         // No dollars for a script: the answer itself is heard as it is.
-        let Some(allowance) = self.aux_max_tokens(&run.id, "spoken script", &adapter, &model, LISTENING, vec![msg.clone()], vec![], run.config.max_tokens).await
+        let Some(allowance) = self.aux_max_tokens(&run.id, "spoken script", &adapter, &model, &system, vec![msg.clone()], vec![], run.config.max_tokens).await
         else {
             return Ok(text_of(e));
         };
-        let out = self.adapters.complete(&adapter, &model, LISTENING, vec![msg], vec![], allowance, |_| {}).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let out = self.adapters.complete(&adapter, &model, &system, vec![msg], vec![], allowance, |_| {}).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let script = out.blocks.iter().filter_map(|b| if let Block::Text { text } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n").trim().to_string();
         let script: String = script.chars().take(crate::compose::MAX_SPOKEN).collect();
-        self.emit("kernel:spoken", Ev::SpokenWritten { run: run.id.clone(), model: format!("{adapter}/{model}"), script: script.clone(), usage: out.usage }).await?;
+        self.emit("kernel:spoken", Ev::SpokenWritten { run: run.id.clone(), model: format!("{adapter}/{model}"), script: script.clone(), usage: out.usage, character: Some(crate::run::character_version()) }).await?;
         Ok(script)
     }
 }

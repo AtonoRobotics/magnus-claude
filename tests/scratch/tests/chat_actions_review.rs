@@ -152,3 +152,41 @@ async fn make_a_task_keeps_the_files_and_a_branch_reuses_the_spoken_script() {
     }
     assert_eq!(listened(), before, "reading a branch's copy aloud called the model again");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_aloud_speaks_as_the_character_and_logs_it() {
+    let (app, m) = start().await;
+    let alice = app.api("alice");
+    let (thread, turn) = say(&alice, "Say hello", None).await;
+    let (st, s) = act(&alice, &thread, &format!("a:{turn}"), "spoken", json!({})).await;
+    assert_eq!(st.as_u16(), 200, "{s}");
+    let heard = m.requests().into_iter().find(|c| c.body["system"].to_string().contains(LISTEN)).expect("no read-aloud call");
+    assert!(heard.body["system"].to_string().contains("chief of staff"), "read aloud without the character: {}", heard.body["system"]);
+    let db = app.db.admin().await;
+    let rows: Vec<Value> = db.query("SELECT body FROM public.events WHERE kind = 'spoken_written'", &[]).await.unwrap().iter().map(|r| r.get::<_, Value>(0)).collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0]["character"].as_str().is_some_and(|c| c.starts_with("character.md@")), "no character logged: {rows:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_model_reply_logs_the_character_separate_from_the_persons_context() {
+    let (app, _m) = start().await;
+    let (bob, carol) = (app.api("bob"), app.api("carol"));
+    // Carol's note enters her context, so her sent instructions differ from
+    // Bob's; the character both speak with does not.
+    let (st, v) = carol.post("/v1/relationship", json!({ "action": "add", "text": "Keep it brief (character-note)." })).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    say(&carol, "What is on today?", None).await;
+    say(&bob, "What is on my list?", None).await;
+    let task = carol.submit("File the vendor summary.").await;
+    carol.wait_settled(&task).await;
+    let db = app.db.admin().await;
+    let logged: Vec<Value> = db.query("SELECT body FROM public.events WHERE kind = 'model_call'", &[]).await.unwrap().iter().map(|r| r.get::<_, Value>(0)).collect();
+    assert!(!logged.is_empty());
+    let characters: std::collections::BTreeSet<String> = logged.iter().map(|b| b["context"]["character"].as_str().unwrap_or_default().to_string()).collect();
+    assert_eq!(characters.len(), 1, "the character varies or is missing: {characters:?}");
+    let only = characters.into_iter().next().unwrap();
+    assert!(only.starts_with("character.md@"), "{only}");
+    let instructions: std::collections::BTreeSet<String> = logged.iter().map(|b| b["context"]["instructions"].as_str().unwrap_or_default().to_string()).collect();
+    assert!(instructions.len() > 1, "the sent instructions do not vary: {instructions:?}");
+}

@@ -13,7 +13,6 @@
 //! - `max_tokens_field`: the request field for the output limit, or null to omit
 //! - `store`, `include`: Responses options (stateless use: `store: false`,
 //!   `include: ["reasoning.encrypted_content"]`)
-//! - `instructions_prefix`: text some backends require at the start of instructions
 //! - `send_reasoning`: chat only, send `reasoning_content` back with each turn
 //! - `fixed_models`: model ids that name one fixed version
 //! - `prices`: { "<model id prefix>": { input, output, cache_read } } in USD per million tokens
