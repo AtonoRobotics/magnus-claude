@@ -497,6 +497,11 @@ pub enum Ev {
         person: String,
         session: String,
     },
+    /// The person opened the app's home: what the feed showed them
+    /// then is seen, so the next open starts here (#367).
+    HomeOpened {
+        person: String,
+    },
     /// A computer was paired and Cloudflare signed its certificate. The
     /// certificate and its key are not here; the key never was.
     DevicePaired {
@@ -1006,6 +1011,11 @@ pub enum Ev {
         scope: Option<String>,
         #[serde(default)]
         text: Option<String>,
+    },
+    /// The app presented an inbox item to its person (#367): when it
+    /// was first seen, for opened-tracking.
+    ItemOpened {
+        id: String,
     },
     Approval {
         id: String,
