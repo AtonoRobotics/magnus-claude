@@ -361,6 +361,29 @@ impl crate::kernel::Kernel {
     /// answers; a failed start leaves it due, retrying next sweep.
     /// Headroom for one retry past the read (#419): a transient error
     /// must not suspend the poll onto the person's inbox.
+    /// Emit a poll mark that survives a hiccuping event store (#438):
+    /// the store is Postgres, and a lost mark re-polls every sweep.
+    /// Three attempts with a short backoff; the caller warns loudly
+    /// on final failure instead of silently dropping the mark.
+    pub(crate) async fn emit_poll_mark<F, Fut>(mut emit: F) -> anyhow::Result<()>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let mut attempt = 0;
+        loop {
+            match emit().await {
+                Ok(()) => return Ok(()),
+                Err(err) if attempt < 2 => {
+                    attempt += 1;
+                    tracing::debug!("poll mark emit failed, retrying ({attempt}/2): {err:#}");
+                    tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     async fn start_poll(self: &Arc<Self>, person: &str, app: &str, watch: &crate::config::Watch) {
         let budget =
             crate::config::Budget { max_model_calls: 5, max_actions: 3, max_usd: self.cfg.proactive.wake_max_usd };
@@ -368,9 +391,15 @@ impl crate::kernel::Kernel {
         match self.create_run("poll", person, text, vec![], crate::kernel::NewRun { budget: Some(budget), ..Default::default() }).await
         {
             Ok(_) => {
-                let _ = self
-                    .emit("kernel", crate::events::Ev::WatchPolled { person: person.into(), app: app.into(), tool: watch.tool.clone() })
-                    .await;
+                if let Err(e) = Self::emit_poll_mark(|| async {
+                    self.emit("kernel", crate::events::Ev::WatchPolled { person: person.into(), app: app.into(), tool: watch.tool.clone() })
+                        .await
+                        .map(|_| ())
+                })
+                .await
+                {
+                    tracing::warn!("watch poll mark lost for {person} {app} after retries, polling again next sweep: {e:#}");
+                }
             }
             Err(e) => {
                 tracing::warn!("watch poll for {person} {app}: {e:#}");
@@ -430,9 +459,19 @@ impl crate::kernel::Kernel {
             ids.dedup();
             // A fresh read postpones the next poll (#413). The start mark
             // stays the bound for polls whose reads never answer.
-            let _ = self
-                .emit(&format!("person:{person}"), crate::events::Ev::WatchPolled { person: person.into(), app: app.into(), tool: remote.into() })
-                .await;
+            if let Err(e) = Self::emit_poll_mark(|| async {
+                self.emit(&format!("person:{person}"), crate::events::Ev::WatchPolled {
+                    person: person.into(),
+                    app: app.into(),
+                    tool: remote.into(),
+                })
+                .await
+                .map(|_| ())
+            })
+            .await
+            {
+                tracing::warn!("watch answer mark lost for {person} {app}, polling on the old schedule: {e:#}");
+            }
             let window = self.read(|s| s.watched_seen.get(&(person.to_string(), app.to_string(), remote.to_string())).cloned());
             let Some(window) = window else {
                 let _ = self
@@ -853,5 +892,54 @@ mod tests {
             .to_rfc3339(),
             "2026-11-08T09:00:00+00:00"
         );
+    }
+
+    /// A poll mark survives a hiccuping event store (#438): transient
+    /// failures retry, then a loud error instead of a silent drop.
+    #[tokio::test]
+    async fn poll_mark_emit_retries_transient_failures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Fail twice, then succeed: three attempts, Ok.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let r = crate::kernel::Kernel::emit_poll_mark(|| {
+            let c = c.clone();
+            async move {
+                if c.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(anyhow::anyhow!("the store hiccuped"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert!(r.is_ok(), "the mark never landed: {r:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "transient failures did not retry");
+        // Always failing: three attempts, then the error.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let r = crate::kernel::Kernel::emit_poll_mark(|| {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::anyhow!("the store is down"))
+            }
+        })
+        .await;
+        assert!(r.is_err(), "a dead store reported Ok");
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "a dead store did not get every attempt");
+        // Succeeding at once: one attempt, no retry.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let r = crate::kernel::Kernel::emit_poll_mark(|| {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await;
+        assert!(r.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a healthy store was retried");
     }
 }
