@@ -226,7 +226,7 @@ jobs:
         run: |
           set --
           [ -z "${MAGNUS_FILTER:-}" ] || set -- -E "$MAGNUS_FILTER"
-          cargo nextest run --profile ci -p magnus -p magnus-brokered-kit -p magnus-brokered-google -p magnus-gmail -p magnus-calendar -p magnus-chat -p magnus-slack -p magnus-invariants -p magnus-scratch --no-fail-fast --no-tests=pass "$@"
+          cargo nextest run --profile ci -p magnus -p magnus-adapter-openai -p magnus-brokered-kit -p magnus-brokered-google -p magnus-gmail -p magnus-calendar -p magnus-chat -p magnus-slack -p magnus-invariants -p magnus-scratch --no-fail-fast --no-tests=pass "$@"
       # After the suite, not beside it. Compiling these on every core during
       # the tests made browser clicks and sign-ins time out (run 41267885346,
       # and again 41949527809: 7 failures, 407 passes). nice did not keep
