@@ -4,6 +4,12 @@
 # shared runner until the job's 150 minutes ran out (runs 41877670131,
 # 41902140293) and every pull request behind it waited.
 [profile.default]
+# Eight tests at once, not thirty-two: each scratch test drives an
+# appliance with docker and sometimes a browser, and the 32-core build box
+# is shared by two CI jobs, the developers working on it, and the test
+# services. Uncapped, overlapping suites paged 16 GB to swap and held load
+# past 100 until sign-ins and clicks timed out (#294).
+test-threads = 8
 slow-timeout = { period = "60s", terminate-after = 5 }
 
 # The admin console's browser suites and the microVM connector suites are
@@ -16,4 +22,5 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 # CI's: every failure is reported, not only the first.
 [profile.ci]
 fail-fast = false
+test-threads = 8
 slow-timeout = { period = "60s", terminate-after = 5 }

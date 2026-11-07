@@ -261,7 +261,9 @@ jobs:
           MAGNUS_DESKTOP_APP: ${{ runner.temp }}/app/usr/bin/magnus-desktop
           MAGNUS_SHOTS: ${{ runner.temp }}/shots
           MAGNUS_UPDATE_BUILDS: ${{ runner.temp }}/update-test
-        run: cargo test -p magnus-scratch --test desktop_app -- --ignored
+        # Eight tests at once (.config/nextest.toml): libtest does not read
+        # that file, so the cap is repeated here.
+        run: cargo test -p magnus-scratch --test desktop_app -- --ignored --test-threads=8
       - name: Keep the screenshots of a failure on the build box
         if: failure()
         run: |
