@@ -453,7 +453,7 @@ impl Kernel {
 
         // Where it goes, read from what it acts on before anything is decided
         // about it. Nothing read here reaches the model.
-        let shown = match self.destinations(a, &f, &run.person).await {
+        let shown = match self.destinations(a, &f, &run, &person).await {
             Ok(s) => s,
             Err(why) => return self.deny(a, "destinations", &why, true, None).await,
         };
@@ -1176,17 +1176,17 @@ impl Kernel {
         Some((body, threads, participants, out.usage))
     }
 
-    async fn destinations(&self, a: &Action, f: &Facts, person: &str) -> std::result::Result<Option<Shown>, String> {
+    async fn destinations(&self, a: &Action, f: &Facts, run: &Run, person: &Person) -> std::result::Result<Option<Shown>, String> {
         let Some((c, d)) = f.connector.as_ref().and_then(|c| c.destinations.get(&f.remote).map(|d| (c, d))) else { return Ok(None) };
         let nothing = format!("Nothing was sent to {}.", f.app);
         let Some(id) = a.input.get(&d.id).filter(|v| !v.is_null()) else {
             return Err(format!("{} names no {}, so who it goes to cannot be read. {nothing}", a.tool, d.id));
         };
-        if self.read(|s| s.turned_off.contains(person)) {
-            return Err(format!("{person}'s account is turned off at the organisation's sign-in. {nothing}"));
+        if self.read(|s| s.turned_off.contains(&person.id)) {
+            return Err(format!("{}'s account is turned off at the organisation's sign-in. {nothing}", person.id));
         }
         let secret = match &c.credential {
-            Some(_) => match self.connector_secret(c, person).await {
+            Some(_) => match self.connector_secret(c, &person.id).await {
                 Ok(Some(s)) => Some(s),
                 Ok(None) => return Err(format!("{} is not connected for the person this task is for (or their sign-in expired), so who {} goes to cannot be read. {nothing}", f.app, a.tool)),
                 Err(e) => return Err(format!("{e:#}. {nothing}")),
@@ -1194,8 +1194,43 @@ impl Kernel {
             None => None,
         };
         let bearer = secret.as_ref().map(|s| s.expose());
+        // The preview read is authorized like any read (#184): its own
+        // access check, pin validation and policy decision, audited as a
+        // Decision of its own. Nothing read here reaches the model, but
+        // the read still goes to the provider, so a task layer forbidding
+        // it denies the send. Ask fails closed the same way: the send
+        // cannot show where it goes without the read.
+        let read_name = format!("{}__{}", f.app, d.read);
+        let Some(rf) = facts(self, &read_name) else {
+            return Err(format!("{}'s destination read {} is not a known classified tool, so who {} goes to cannot be read. {nothing}", f.app, d.read, a.tool));
+        };
+        if !has_rights(person, &rf) {
+            return Err(format!("{} does not have access to {} (identity-provider groups), so who {} goes to cannot be read. {nothing}", person.id, f.app, a.tool));
+        }
+        if let Err(why) = self.check_pin(c, &rf, &person.id).await {
+            return Err(format!("{why}, so who {} goes to cannot be read. {nothing}", a.tool));
+        }
+        let (pinned, changed) = self.read(|s| (s.pins.contains_key(&rf.name), s.changed.contains_key(&rf.name)));
+        if changed || !pinned {
+            return Err(format!("{}'s definition changed and is disabled until the owner re-approves it, so who {} goes to cannot be read. {nothing}", rf.name, a.tool));
+        }
+        let preview = Action { run: a.run.clone(), call_id: a.call_id.clone(), step_id: a.step_id.clone(), tool: read_name.clone(), input: json!({ d.id.as_str(): id }), issuer: Issuer::Model };
+        let policies = self.read(|s| s.policies.clone());
+        let rfacts = ToolFacts { name: &rf.name, app: &rf.app, risk: rf.risk, audience: rf.audience };
+        match policy::decide(&policies, person, Some(&run.task), &rfacts, run.untrusted, run.private) {
+            Ok(Outcome::Allow { rule }) => self.decision(&preview, "allow", "destinations", "permitted", Some(rule)).await.map_err(|e| format!("{e:#}"))?,
+            Ok(Outcome::Deny { reason, rule }) => {
+                self.decision(&preview, "deny", "destinations", &reason, rule).await.map_err(|e| format!("{e:#}"))?;
+                return Err(format!("policy forbids the destination read ({read_name}): {reason}. {nothing}"));
+            }
+            Ok(Outcome::Ask { rule }) => {
+                self.decision(&preview, "deny", "destinations", &format!("policy asks before the destination read ({rule})"), Some(rule)).await.map_err(|e| format!("{e:#}"))?;
+                return Err(format!("policy asks before the destination read ({read_name}), so who {} goes to cannot be shown without it. {nothing}", a.tool));
+            }
+            Err(e) => return Err(format!("the destination read ({read_name}) cannot be judged: {e:#}. {nothing}")),
+        }
         let args = json!({ d.id.as_str(): id });
-        let out = self.connector_call(c, person, &f.app, bearer, &d.read, &args).await;
+        let out = self.connector_call(c, &person.id, &f.app, bearer, &d.read, &args).await;
         let read = match out {
             Ok(o) if !o.is_error => o.structured.or_else(|| serde_json::from_str(&o.text).ok()).unwrap_or(Value::Null),
             Ok(o) => return Err(format!("{} could not read {id} to see who {} goes to: {}. {nothing}", f.app, a.tool, o.text)),
