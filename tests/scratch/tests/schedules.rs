@@ -10,6 +10,7 @@
 //! - a schedule ends after its runs, at its time, or when its own run ends it;
 //! - one that keeps failing pauses itself until its person resumes it, and
 //!   the app can resume it and stop it;
+//! - one cancelled or paused while the sweep starts it gets no run;
 //! - a proposed schedule keeps the budget and taint of the run that
 //!   proposed it.
 
@@ -314,4 +315,82 @@ async fn a_proposed_schedule_keeps_the_budget_and_taint_of_the_run_that_proposed
     let run = eventually("the proposed schedule's run", MINUTE, || async { tasks_with(&alice, "Summarise the inbox.").await.first().map(|t| t["task_id"].as_str().unwrap().to_string()) }).await;
     assert_eq!(alice.task(&run).await["taint"], json!({ "untrusted": true, "private": true }), "the proposed schedule's run started clean");
     notice(&alice, "A schedule ended", &id).await;
+}
+
+/// Past several sweep ticks after the gate lifts: a firing let through
+/// would have created its run.
+const SETTLE: Duration = Duration::from_secs(30);
+
+/// Arm the sweep gate, so the next firing waits at the recheck before
+/// its run is created.
+fn arm_gate(app: &Appliance) {
+    std::fs::write(app.state_dir.join("sweep-gate"), "").unwrap();
+}
+
+/// The firing the gate holds, once it arrives. A gate that never trips
+/// fails the wait: it cannot pass vacuously.
+async fn gated(app: &Appliance, id: &str) {
+    eventually(&format!("the sweep holds {id} at the gate"), MINUTE, || async {
+        std::fs::read_to_string(app.state_dir.join("sweep-gated")).ok().filter(|s| s == id).map(|_| ())
+    })
+    .await;
+}
+
+fn lift_gate(app: &Appliance) {
+    std::fs::remove_file(app.state_dir.join("sweep-gate")).unwrap();
+}
+
+/// A schedule cancelled while the sweep is starting it starts no run:
+/// the sweep rechecks at creation that it still exists (#261). The gate
+/// holds the firing mid-flight, so the cancel lands there by
+/// construction, not by timing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_schedule_cancelled_while_starting_gets_no_run() {
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => simple_contract(),
+            _ => done("Raced the sweep."),
+        }
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    every_minute(&mut app, 0).await;
+    arm_gate(&app);
+    let alice = app.api("alice");
+    let id = add(&alice, json!({ "text": "Race the sweep.", "every_minutes": 1 })).await;
+
+    gated(&app, &id).await;
+    assert!(alice.send(reqwest::Method::DELETE, &format!("/v1/schedules/{id}"), None).await.0.is_success());
+    assert!(schedule(&alice, &id).await.is_none(), "it is cancelled but still set");
+    lift_gate(&app);
+    tokio::time::sleep(SETTLE).await;
+    assert!(tasks_with(&alice, "Race the sweep.").await.is_empty(), "a run started for the cancelled schedule");
+}
+
+/// A schedule paused while the sweep is starting it starts no run, and
+/// runs again once resumed: pausing stops future runs only (#261).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_schedule_paused_while_starting_gets_no_run_until_resumed() {
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => simple_contract(),
+            _ => done("Held, then ran."),
+        }
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    every_minute(&mut app, 0).await;
+    arm_gate(&app);
+    let alice = app.api("alice");
+    let id = add(&alice, json!({ "text": "Hold the press.", "every_minutes": 1 })).await;
+
+    gated(&app, &id).await;
+    assert_eq!(alice.post(&format!("/v1/schedules/{id}/pause"), json!({})).await.0.as_u16(), 204);
+    lift_gate(&app);
+    tokio::time::sleep(SETTLE).await;
+    assert!(tasks_with(&alice, "Hold the press.").await.is_empty(), "a run started for the paused schedule");
+
+    // Resumed, it fires as usual: the pause stopped a run, not the schedule.
+    assert_eq!(alice.post(&format!("/v1/schedules/{id}/resume"), json!({})).await.0.as_u16(), 204);
+    eventually("a run after the resume", MINUTE * 2, || async { tasks_with(&alice, "Hold the press.").await.first().map(|_| ()) }).await;
 }
