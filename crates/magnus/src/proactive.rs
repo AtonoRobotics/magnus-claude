@@ -196,9 +196,9 @@ impl crate::kernel::Kernel {
                     now.signed_duration_since(t).num_minutes() >= st.every_minutes as i64
                 })
             {
-                self.start_review(&person, "cadence".into()).await;
+                self.start_review(&person, "cadence".into(), None).await;
             } else if !in_window(m, st.working) && overnight.as_deref() != Some(today.as_str()) {
-                self.start_review(&person, "overnight".into()).await;
+                self.start_review(&person, "overnight".into(), None).await;
             }
             for reason in self.read(|s| {
                 let mut out = vec![];
@@ -248,34 +248,34 @@ impl crate::kernel::Kernel {
                 }
                 out
             }) {
-                self.start_review(&person, reason).await;
+                self.start_review(&person, reason, None).await;
                 break;
             }
         }
     }
 
     /// Wake one review for an event (a task done or failed), unless one is
-    /// already going or one just woke (#237).
-    pub async fn review_wake(self: &Arc<Self>, person: &str, reason: String) {
+    /// already going or this task already woke one (#237, #383). The wake
+    /// used to skip when any review had woken within five minutes, which
+    /// silently dropped failures after a cadence review or a boot; a
+    /// per-task mark is the precise dedup (a task ends once).
+    pub async fn review_wake(self: &Arc<Self>, person: &str, reason: String, ended: Option<(String, String)>) {
         if !self.cfg.proactive.on {
             return;
         }
-        let now = Utc::now();
         if self.read(|s| {
             s.review_runs.values().any(|p| p == person)
-                || s.reviews_last
-                    .get(person)
-                    .is_some_and(|t| now.signed_duration_since(*t).num_minutes() < 5)
+                || ended.as_ref().is_some_and(|(id, _)| s.wake_marks.contains_key(&format!("{person}:task {id}")))
         }) {
             return;
         }
-        self.start_review(person, reason).await;
+        self.start_review(person, reason, ended).await;
     }
 
     /// Start the review run itself: the review instruction over the
     /// person's state, on a small wake budget (#237).
-    async fn start_review(self: &Arc<Self>, person: &str, reason: String) {
-        let context = self.review_context(person).await;
+    async fn start_review(self: &Arc<Self>, person: &str, reason: String, ended: Option<(String, String)>) {
+        let context = self.review_context(person, ended.as_ref()).await;
         let text = format!("Review the person's state ({reason}).\n\n{context}");
         let budget = crate::config::Budget {
             max_model_calls: 10,
@@ -312,9 +312,10 @@ impl crate::kernel::Kernel {
         }
     }
 
-    /// The review's context: unfinished work first, then schedules,
-    /// approvals, disagreements and commitments (#237).
-    async fn review_context(&self, person: &str) -> String {
+    /// The review's context: the ended task that woke it, if any, then
+    /// unfinished work, schedules, approvals, disagreements and
+    /// commitments (#237, #383).
+    async fn review_context(&self, person: &str, ended: Option<&(String, String)>) -> String {
         let (tasks, schedules, approvals, disagreements, commitments) = self.read(|s| {
             let tasks = s
                 .tasks
@@ -427,8 +428,11 @@ impl crate::kernel::Kernel {
                 )
             }
         };
+        // The ended task first: the unfinished-work section excludes it,
+        // and the review cannot judge the failure without it (#383).
+        let woke = ended.map(|(id, outcome)| format!("The task that woke this review:\n- {id}: {}\n\n", outcome.chars().take(500).collect::<String>())).unwrap_or_default();
         format!(
-            "{}{}{}{}{}",
+            "{woke}{}{}{}{}{}",
             section("Unfinished work", open),
             section("Schedules", schedules),
             section("Approvals waiting", approvals),

@@ -235,8 +235,9 @@ pub enum Ev {
         usage: magnus_adapter_proto::Usage,
     },
     /// The proactive loop woke a review run for the person: why (cadence,
-    /// overnight, a task done or failed, an approval waiting, a schedule
-    /// coming up, a commitment due), for the loop's own scheduling (#237).
+    /// overnight, a task's end (`task {id} done|failed`), an approval
+    /// waiting, a schedule coming up, a commitment due), for the loop's
+    /// own scheduling (#237).
     ReviewWoken {
         run: String,
         task: String,
