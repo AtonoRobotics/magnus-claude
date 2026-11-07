@@ -417,6 +417,14 @@ pub struct Backup {
     /// each, and `magnus restore` puts them back.
     #[serde(default)]
     pub databases: Vec<String>,
+    /// Seconds to wait when the scheduled wait cannot be converted to a
+    /// sleep (#289): a floor, never the plan, so a minute.
+    #[serde(default = "fallback_wait_secs")]
+    pub fallback_wait_secs: u32,
+    /// Seconds after a failed scheduled backup before trying again (#289):
+    /// an hour, so a transient fault (a full disk) can clear.
+    #[serde(default = "retry_wait_secs")]
+    pub retry_wait_secs: u32,
 }
 
 /// Daily: with a month kept, a month of daily restore points.
@@ -426,10 +434,24 @@ fn every_hours() -> u32 {
 fn keep_days() -> u32 {
     30
 }
+fn fallback_wait_secs() -> u32 {
+    60
+}
+fn retry_wait_secs() -> u32 {
+    3600
+}
 
 impl Default for Backup {
     fn default() -> Self {
-        Backup { dir: None, key_file: None, every_hours: every_hours(), keep_days: keep_days(), databases: Vec::new() }
+        Backup {
+            dir: None,
+            key_file: None,
+            every_hours: every_hours(),
+            keep_days: keep_days(),
+            databases: Vec::new(),
+            fallback_wait_secs: fallback_wait_secs(),
+            retry_wait_secs: retry_wait_secs(),
+        }
     }
 }
 
@@ -1105,6 +1127,26 @@ mod tests {
         assert_eq!(load(&brokered).unwrap().connectors[0].idempotency, "none");
         // A remote app may say it honors the header.
         assert!(load("url = \"https://a.example/mcp\"\nidempotency = \"header\"\n").is_ok());
+    }
+
+    fn load_backup(backup: &str) -> anyhow::Result<Config> {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("magnus.toml");
+        let text = format!("[appliance]\nstate_dir = \"/s\"\nlisten = \"127.0.0.1:0\"\n[database]\nurl = \"postgres://x\"\n[model]\nname = \"m\"\nadapter = \"a\"\nmax_tokens = 1\n[backup]\n{backup}");
+        std::fs::write(&p, text).unwrap();
+        Config::load(&p)
+    }
+
+    /// The schedule's waits come from `[backup]` (#289): a set value lands,
+    /// an absent one keeps the old default.
+    #[test]
+    fn backup_waits_come_from_config() {
+        let unset = load_backup("").unwrap().backup;
+        assert_eq!(unset.fallback_wait_secs, 60);
+        assert_eq!(unset.retry_wait_secs, 3600);
+        let set = load_backup("fallback_wait_secs = 7\nretry_wait_secs = 120\n").unwrap().backup;
+        assert_eq!(set.fallback_wait_secs, 7);
+        assert_eq!(set.retry_wait_secs, 120);
     }
 
     fn load_browser(allow: &str) -> anyhow::Result<Config> {

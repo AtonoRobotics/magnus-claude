@@ -433,6 +433,8 @@ pub fn schedule(k: Arc<Kernel>) {
     let every = k.cfg.backup.every_hours;
     let dir = k.cfg.backup_dir();
     let keep = k.cfg.backup.keep_days;
+    let fallback_secs = k.cfg.backup.fallback_wait_secs;
+    let retry_secs = k.cfg.backup.retry_wait_secs;
     let drop_old = move |dir: &Path| {
         if let Err(e) = prune(dir, keep) {
             tracing::error!("dropping old backups: {e:#}");
@@ -445,21 +447,52 @@ pub fn schedule(k: Arc<Kernel>) {
     tokio::spawn(async move {
         let period = chrono::Duration::hours(every as i64);
         loop {
-            let wait = match newest(&dir) {
-                Some(at) => (at + period - chrono::Utc::now()).max(chrono::Duration::seconds(60)),
-                None => chrono::Duration::minutes(10).min(period),
-            };
-            tokio::time::sleep(wait.to_std().unwrap_or(std::time::Duration::from_secs(60))).await;
+            let wait = next_wait(newest(&dir), chrono::Utc::now(), period, fallback_secs);
+            tokio::time::sleep(wait).await;
             if let Err(e) = k.back_up("kernel:backup").await {
                 tracing::error!("scheduled backup: {e:#}");
             }
             drop_old(&dir);
-            // A failing backup is tried again after an hour, not at once.
-            if newest(&dir).is_none_or(|at| chrono::Utc::now() - at > period) {
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            // A failing backup is tried again after the configured wait,
+            // not at once.
+            if let Some(wait) = retry_wait(newest(&dir), chrono::Utc::now(), period, retry_secs) {
+                tokio::time::sleep(wait).await;
             }
         }
     });
+}
+
+/// How long before the next scheduled backup: from the last backup, or soon
+/// after the first start when there is none yet.
+fn next_wait(
+    newest: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    period: chrono::Duration,
+    fallback_secs: u32,
+) -> std::time::Duration {
+    let wait = match newest {
+        Some(at) => (at + period - now).max(chrono::Duration::seconds(60)),
+        None => chrono::Duration::minutes(10).min(period),
+    };
+    to_std_or(wait, fallback_secs)
+}
+
+/// How long after this round before the next, when the round left no fresh
+/// backup behind: the configured retry wait, else nothing.
+fn retry_wait(
+    newest: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    period: chrono::Duration,
+    retry_secs: u32,
+) -> Option<std::time::Duration> {
+    let stale = newest.is_none_or(|at| now - at > period);
+    stale.then(|| std::time::Duration::from_secs(retry_secs as u64))
+}
+
+/// A chrono wait as the sleeper takes it, or the configured fallback when it
+/// cannot be converted.
+fn to_std_or(wait: chrono::Duration, fallback_secs: u32) -> std::time::Duration {
+    wait.to_std().unwrap_or(std::time::Duration::from_secs(fallback_secs as u64))
 }
 
 /// `magnus restore`: a backup into an empty event log and an empty vault.
@@ -558,4 +591,57 @@ fn try_list(dir: &Path) -> std::io::Result<Vec<(String, u64)>> {
     }
     out.sort();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_fallback_wait_is_honoured() {
+        // A wait that cannot be converted sleeps the configured fallback.
+        assert_eq!(
+            to_std_or(chrono::Duration::seconds(-1), 7),
+            std::time::Duration::from_secs(7)
+        );
+        // A wait that converts is untouched by it.
+        assert_eq!(
+            to_std_or(chrono::Duration::seconds(30), 7),
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn configured_retry_wait_is_honoured() {
+        let now = chrono::Utc::now();
+        let period = chrono::Duration::hours(24);
+        // No backup, or none within the period: the configured retry wait.
+        assert_eq!(
+            retry_wait(None, now, period, 120),
+            Some(std::time::Duration::from_secs(120))
+        );
+        assert_eq!(
+            retry_wait(Some(now - chrono::Duration::hours(25)), now, period, 120),
+            Some(std::time::Duration::from_secs(120))
+        );
+        // A fresh backup: no retry wait at all.
+        assert_eq!(retry_wait(Some(now - chrono::Duration::hours(1)), now, period, 120), None);
+        // The defaults keep the old behaviour: a minute, an hour.
+        let cfg = crate::config::Backup::default();
+        assert_eq!(cfg.fallback_wait_secs, 60);
+        assert_eq!(cfg.retry_wait_secs, 3600);
+    }
+
+    #[test]
+    fn next_wait_counts_from_the_last_backup() {
+        let now = chrono::Utc::now();
+        let period = chrono::Duration::hours(24);
+        // A backup an hour ago: about 23 hours hence.
+        let wait = next_wait(Some(now - chrono::Duration::hours(1)), now, period, 60);
+        assert!(wait > std::time::Duration::from_secs(22 * 3600));
+        assert!(wait <= std::time::Duration::from_secs(23 * 3600));
+        // None yet: soon after the first start.
+        let wait = next_wait(None, now, period, 60);
+        assert_eq!(wait, std::time::Duration::from_secs(600));
+    }
 }
