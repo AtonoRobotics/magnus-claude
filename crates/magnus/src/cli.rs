@@ -25,6 +25,7 @@ pub fn main() {
             Some("serve") => serve(&args).await,
             Some("conformance") => conformance(&args).await,
             Some("password") => password(&args),
+            Some("totp-enroll") => totp_enroll(&args),
             Some("sign-in-code") => sign_in_code(&args),
             Some("restore") => restore(&args).await,
             Some("check") => check(&args).await,
@@ -33,7 +34,7 @@ pub fn main() {
                 Ok(())
             }
             _ => {
-                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>\n       magnus check --config <file>   (reads the log and the vault, as a new release must)\n       magnus version");
+                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus totp-enroll --config <file> --person <id>   (prints the enrollment URI)\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>\n       magnus check --config <file>   (reads the log and the vault, as a new release must)\n       magnus version");
                 std::process::exit(2);
             }
         }
@@ -230,6 +231,20 @@ fn password(args: &[String]) -> Result<()> {
     let pw = line.trim_end_matches(['\r', '\n']);
     crate::accounts::set_password(&cfg.appliance.state_dir, &cfg.sign_in, &person, pw)?;
     eprintln!("password set for {person}");
+    Ok(())
+}
+
+/// Enroll a person's authenticator app for local password sign-in: print
+/// the enrollment URI (scan it or type its secret into the app). Only
+/// someone with a shell on the appliance's machine can run this, so the
+/// secret it prints never crosses the network.
+fn totp_enroll(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    let person = arg(args, "--person").context("--person is required")?;
+    anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
+    anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only local passwords take a second factor");
+    println!("{}", crate::accounts::enroll_totp(&cfg.appliance.state_dir, &person)?);
+    eprintln!("enrolled {person}: add the URI above to an authenticator app");
     Ok(())
 }
 
