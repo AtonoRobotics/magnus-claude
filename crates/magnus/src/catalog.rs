@@ -172,6 +172,7 @@ pub fn connector(m: &Manifest) -> Connector {
         handoff: m.handoff.clone(),
         destinations: m.destinations.clone(),
         sent: m.sent.clone(),
+        watch: vec![],
     }
 }
 

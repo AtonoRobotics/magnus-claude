@@ -1017,6 +1017,14 @@ pub enum Ev {
     ItemOpened {
         id: String,
     },
+    /// A watched read answered: these item ids were seen for the
+    /// person's app tool, merged into its baseline (#369).
+    WatchedSeen {
+        person: String,
+        app: String,
+        tool: String,
+        ids: Vec<String>,
+    },
     Approval {
         id: String,
         item: String,

@@ -917,6 +917,22 @@ pub struct Connector {
     /// (#210): a read tool called with a query naming the address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent: Option<SentSearch>,
+    /// Watched reads (#369): when any run's call of `tool` answers,
+    /// the items at `items` (a JSON pointer into the answer, `""` for
+    /// the answer itself) are diffed by their `id` field against what
+    /// was last seen, and new ones wake a review for the person.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub watch: Vec<Watch>,
+}
+
+/// One watched read of an app (#369): `tool` names the remote tool,
+/// `items` points at its answer's array, `id` names each item's
+/// stable id. Items without an id are skipped, never waked on.
+#[derive(Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
+pub struct Watch {
+    pub tool: String,
+    pub items: String,
+    pub id: String,
 }
 
 /// How the gate asks whether the person has mailed an address before, a

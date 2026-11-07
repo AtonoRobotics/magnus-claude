@@ -58,6 +58,10 @@ pub struct Connector {
     /// (`Spec::sent`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sent: Option<Value>,
+    /// Watched reads (`Spec::watch`): tool answers diffed for new
+    /// items that wake a review.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub watch: Vec<Value>,
 }
 
 #[derive(Clone)]
@@ -124,7 +128,17 @@ impl Spec {
             tools: tools.iter().map(|(t, r)| (t.to_string(), Tool { risk: r.to_string() })).collect(),
             destinations: BTreeMap::new(),
             sent: None,
+            watch: vec![],
         });
+        self
+    }
+
+    /// `tool` of `app` is watched: its answers' items at `items` (a
+    /// JSON pointer, `""` for the answer itself) are diffed by their
+    /// `id` field, and new ones wake a review for the person (#369).
+    pub fn watch(mut self, app: &str, tool: &str, items: &str, id: &str) -> Self {
+        let c = self.connectors.iter_mut().find(|c| c.name == app).expect("app");
+        c.watch.push(json!({ "tool": tool, "items": items, "id": id }));
         self
     }
 

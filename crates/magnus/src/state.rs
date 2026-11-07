@@ -873,6 +873,10 @@ pub struct State {
     /// When each person last opened the app's home: the feed starts
     /// here (#367).
     pub home_last_open: HashMap<String, DateTime<Utc>>,
+    /// Watched baselines (#369): item ids last seen per person, app
+    /// and tool. New ids wake a review; the set caps at five thousand
+    /// per watch, enough for any inbox and bounded for any firehose.
+    pub watched_seen: HashMap<(String, String, String), HashSet<String>>,
     /// When each inbox item was first presented to its person (#367).
     pub items_opened: HashMap<String, DateTime<Utc>>,
     /// When each inbox item was decided, for the feed (#367).
@@ -1587,6 +1591,15 @@ impl State {
             }
             Ev::HomeOpened { person } => {
                 self.home_last_open.insert(person.clone(), e.at);
+            }
+            Ev::WatchedSeen { person, app, tool, ids } => {
+                let seen = self.watched_seen.entry((person.clone(), app.clone(), tool.clone())).or_default();
+                seen.extend(ids.iter().cloned());
+                while seen.len() > 5000 {
+                    if let Some(id) = seen.iter().next().cloned() {
+                        seen.remove(&id);
+                    }
+                }
             }
             Ev::ItemOpened { id } => {
                 // First presentation stands: opened is when it was
