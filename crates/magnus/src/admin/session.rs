@@ -208,6 +208,24 @@ fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>()
 }
 
+/// Whether a form submission came from the console's own pages: its Origin
+/// names this host, or its Referer is one of this host's pages. Checked
+/// before credentials, so a forged post neither signs in nor burns the
+/// account's lockout (#456). Refuses when both are absent: every browser
+/// that submits a cross-origin form sends Origin.
+fn same_origin(h: &HeaderMap, host: &str) -> bool {
+    let ours = format!("https://{host}");
+    if let Some(o) = h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        return o == ours;
+    }
+    h.get(header::REFERER).and_then(|v| v.to_str().ok()).is_some_and(|r| r == ours || r.starts_with(&format!("{ours}/")))
+}
+
+fn console_host<'a>(c: &'a Console, h: &'a HeaderMap) -> &'a str {
+    // The host is the console's own (checked before any route runs).
+    h.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or(&c.hostname)
+}
+
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
@@ -253,9 +271,13 @@ fn session_cookie(sid: &str) -> String {
     format!("{COOKIE}={sid}; Path=/; Secure; HttpOnly; SameSite=Strict")
 }
 
-pub async fn local_login_post(State(c): State<Arc<Console>>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>, Form(f): Form<LocalLogin>) -> Response {
+pub async fn local_login_post(State(c): State<Arc<Console>>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>, h: HeaderMap, Form(f): Form<LocalLogin>) -> Response {
     let person = f.person.trim().to_lowercase();
     let then = local_path(f.then.as_ref());
+    if !same_origin(&h, console_host(&c, &h)) {
+        tracing::warn!("admin console: local sign-in for {person} refused: not from the console's own page");
+        return local_form("/auth/local", &then, &person, None, false, Some("This sign-in did not come from the console's own page. Open the console and sign in there."));
+    }
     let v = match c.kernel.call(Method::POST, "/v1/admin/console-sign-in", Some(&json!({ "person": person, "password": f.password, "code": f.code }))).await {
         Ok(v) => v,
         Err(e) => {
@@ -314,6 +336,10 @@ pub async fn local_step_up_post(State(c): State<Arc<Console>>, axum::extract::Co
     }
     let then = local_path(f.then.as_ref());
     let form = |code_needed: bool, error: &str| local_form("/auth/local/step-up", &then, &s.sub, Some(&s.name), code_needed, Some(error));
+    if !same_origin(&h, console_host(&c, &h)) {
+        tracing::warn!("admin console: local step-up for {} refused: not from the console's own page", s.sub);
+        return form(false, "This confirmation did not come from the console's own page. Open the console and confirm there.");
+    }
     let v = match c.kernel.call(Method::POST, "/v1/admin/console-sign-in", Some(&json!({ "person": s.sub, "password": f.password, "code": f.code }))).await {
         Ok(v) => v,
         Err(e) => {
@@ -577,5 +603,35 @@ pub async fn confirm(axum::Extension(a): axum::Extension<Admin>) -> Response {
     match a.step_up() {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(r) => r,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(origin: Option<&str>, referer: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(o) = origin {
+            h.insert(header::ORIGIN, o.parse().unwrap());
+        }
+        if let Some(r) = referer {
+            h.insert(header::REFERER, r.parse().unwrap());
+        }
+        h
+    }
+
+    /// The form answers its own pages: an exact Origin, else a Referer on
+    /// the host; anything else, or nothing to judge, refuses (#456).
+    #[test]
+    fn origin_binding_judges_submissions() {
+        let host = "admin.magnus.test:20392";
+        assert!(same_origin(&headers(Some("https://admin.magnus.test:20392"), None), host), "the console's own Origin refused");
+        assert!(same_origin(&headers(None, Some("https://admin.magnus.test:20392/auth/local")), host), "the console's own Referer refused");
+        assert!(!same_origin(&headers(Some("https://evil.test"), None), host), "a cross-origin post accepted");
+        assert!(!same_origin(&headers(Some("https://admin.magnus.test.evil.test"), None), host), "a lookalike Origin accepted");
+        assert!(!same_origin(&headers(Some("http://admin.magnus.test:20392"), None), host), "a downgraded Origin accepted");
+        assert!(!same_origin(&headers(None, Some("https://evil.test/auth/local")), host), "a cross-origin Referer accepted");
+        assert!(!same_origin(&headers(None, None), host), "a post with nothing to judge accepted");
     }
 }
