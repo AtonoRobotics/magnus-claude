@@ -873,10 +873,13 @@ pub struct State {
     /// When each person last opened the app's home: the feed starts
     /// here (#367).
     pub home_last_open: HashMap<String, DateTime<Utc>>,
-    /// Watched baselines (#369): item ids last seen per person, app
-    /// and tool. New ids wake a review; the set caps at five thousand
-    /// per watch, enough for any inbox and bounded for any firehose.
-    pub watched_seen: HashMap<(String, String, String), HashSet<String>>,
+    /// Watched baselines (#369): the last two answers' item ids per
+    /// person, app and tool, newest last. New ids wake a review. A
+    /// window, not an accumulation (#409): two answers bound the
+    /// memory whatever the source holds, an unchanged answer always
+    /// diffs empty against its own window, and an item absent for one
+    /// read stays known while one gone for two wakes again on return.
+    pub watched_seen: HashMap<(String, String, String), Vec<HashSet<String>>>,
     /// When each inbox item was first presented to its person (#367).
     pub items_opened: HashMap<String, DateTime<Utc>>,
     /// When each inbox item was decided, for the feed (#367).
@@ -1593,12 +1596,10 @@ impl State {
                 self.home_last_open.insert(person.clone(), e.at);
             }
             Ev::WatchedSeen { person, app, tool, ids } => {
-                let seen = self.watched_seen.entry((person.clone(), app.clone(), tool.clone())).or_default();
-                seen.extend(ids.iter().cloned());
-                while seen.len() > 5000 {
-                    if let Some(id) = seen.iter().next().cloned() {
-                        seen.remove(&id);
-                    }
+                let window = self.watched_seen.entry((person.clone(), app.clone(), tool.clone())).or_default();
+                window.push(ids.iter().cloned().collect());
+                if window.len() > 2 {
+                    window.remove(0);
                 }
             }
             Ev::ItemOpened { id } => {
