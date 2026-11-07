@@ -138,6 +138,8 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/search", get(search))
         .route("/v1/inbox", get(inbox_list))
         .route("/v1/inbox/{id}", post(respond))
+        .route("/v1/inbox/opened", post(inbox_opened))
+        .route("/v1/home/opened", post(home_opened))
         .route("/v1/policies", get(policies))
         .route("/v1/policies/{*layer}", put(put_policy))
         .route("/v1/secrets", get(secret_names))
@@ -1257,6 +1259,96 @@ async fn verdict(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Jso
         Ok(_) => Json(json!({ "ok": true })).into_response(),
         Err(e) => internal(e),
     }
+}
+
+/// Opening the app's home: what changed since the last open — ended
+/// tasks, decided cards and new arrivals — with the queued
+/// observations, newest first; the open itself is recorded so the next
+/// one starts here (#367). A first open looks back a day.
+async fn home_opened(State(k): K, h: HeaderMap) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let words = match k.person_words(&p.id).await {
+        Ok(w) => w,
+        Err(e) => return internal(e),
+    };
+    let now = chrono::Utc::now();
+    let (since, mut ended, mut arrived, mut decided, mut observations) = k.read(|s| {
+        let since = s.home_last_open.get(&p.id).cloned().unwrap_or(now - chrono::Duration::hours(24));
+        let mut ended: Vec<(chrono::DateTime<chrono::Utc>, Value)> = vec![];
+        let mut arrived: Vec<(chrono::DateTime<chrono::Utc>, Value)> = vec![];
+        let mut decided: Vec<(chrono::DateTime<chrono::Utc>, Value)> = vec![];
+        let mut observations: Vec<(chrono::DateTime<chrono::Utc>, Value)> = vec![];
+        for t in s.tasks.values().filter(|t| visible_task(&p, t) && !t.is_chat_turn() && !t.review) {
+            if let Some(r) = s.runs.get(&t.run_id) {
+                if matches!(r.status, Status::Completed | Status::Failed) && r.ended_at.is_some_and(|e| e > since) {
+                    ended.push((r.ended_at.unwrap(), task_row(&k, s, &p, t, r, &words)));
+                }
+            }
+        }
+        for i in s.items.values().filter(|i| inbox::visible(&p, i)) {
+            let row = inbox::render(s, &p, i);
+            if i.created_at > since {
+                arrived.push((i.created_at, row.clone()));
+            }
+            if i.resolution.is_some() && s.items_resolved_at.get(&i.id).is_some_and(|a| *a > since) {
+                decided.push((s.items_resolved_at[&i.id], row.clone()));
+            }
+            if i.resolution.is_none() && (i.kind == "observation" || i.kind == "interrupt") {
+                observations.push((i.created_at, row));
+            }
+        }
+        (since, ended, arrived, decided, observations)
+    });
+    for feed in [&mut ended, &mut arrived, &mut decided, &mut observations] {
+        feed.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    }
+    let feed = Json(json!({
+        "since": since,
+        "ended": ended.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+        "arrived": arrived.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+        "decided": decided.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+        "observations": observations.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+    }));
+    match k.emit(&format!("person:{}", p.id), Ev::HomeOpened { person: p.id.clone() }).await {
+        // The feed was built before the open landed: if the open did
+        // not land, the next open shows it all again.
+        Ok(_) => feed.into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// The app presented inbox items to its person: record each visible
+/// one opened, first presentation standing (#367). Unknown ids, and
+/// another person's, are ignored, so a stale app never fails the open.
+async fn inbox_opened(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    let p = match who(&k, &h) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let (marked, fresh): (Vec<String>, Vec<String>) = k.read(|s| {
+        let mut marked = vec![];
+        let mut fresh = vec![];
+        for id in b["ids"].as_array().cloned().unwrap_or_default().into_iter().filter_map(|v| v.as_str().map(String::from)) {
+            if s.items.get(&id).is_some_and(|i| inbox::visible(&p, i)) {
+                marked.push(id.clone());
+                if !s.items_opened.contains_key(&id) {
+                    fresh.push(id);
+                }
+            }
+        }
+        (marked, fresh)
+    });
+    if !fresh.is_empty() {
+        let actor = format!("person:{}", p.id);
+        let evs: Vec<(&str, Ev)> = fresh.iter().map(|id| (actor.as_str(), Ev::ItemOpened { id: id.clone() })).collect();
+        if let Err(e) = k.emit_all(evs).await {
+            return internal(e);
+        }
+    }
+    Json(json!({ "opened": marked })).into_response()
 }
 
 async fn inbox_list(State(k): K, h: HeaderMap) -> Response {

@@ -1655,16 +1655,35 @@ async function respond(btn, root) {
 
 // Needs you: every decision waiting on the person (U1), most pressing
 // first, each the same card as in its conversation, with a way there.
+// Compact rows for the home feed: ended tasks link to their detail,
+// items to the inbox below, where the open ones already wait (#367).
+function feedRows(feed) {
+  const rows = [];
+  for (const t of feed.ended) rows.push(`<div class="feed-row"><a href="#/task/${enc(t.task_id)}">${esc(t.title || "A task")}</a> <span class="chip ${t.status === "failed" ? "bad" : "ok"}">${esc(t.status)}</span></div>`);
+  for (const i of feed.arrived) rows.push(`<div class="feed-row"><a href="#/inbox">${esc(i.summary || i.kind)}</a> <span class="small muted">new ${esc(i.kind)}</span></div>`);
+  for (const i of feed.decided) rows.push(`<div class="feed-row"><a href="#/inbox">${esc(i.summary || i.kind)}</a> <span class="small muted">${esc(i.resolution?.decision || "decided")}</span></div>`);
+  return rows.join("");
+}
+
 function needsView(composed) {
   const mine = App.inbox, open = mine.filter(i => i.status === "open");
+  // Presented observations and interruptions are recorded opened, once
+  // each: the panel draws again on every refresh (#367).
+  App.reported ??= new Set();
+  const present = open.filter(i => (i.kind === "observation" || i.kind === "interrupt") && !App.reported.has(i.id));
+  if (present.length) {
+    for (const i of present) App.reported.add(i.id);
+    api("POST", "/v1/inbox/opened", { ids: present.map(i => i.id) }).catch(() => {});
+  }
   const now = open.filter(i => i.can_respond && i.blocking), later = open.filter(i => i.can_respond && !i.blocking), others = open.filter(i => !i.can_respond);
   const done = mine.filter(i => i.status !== "open").sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, 15);
+  const feed = App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) ? `<h3>Since you were last here</h3>${feedRows(App.feed)}` : "";
   const where = i => {
     const t = i.thread && App.threads.find(x => x.thread === i.thread);
     return t ? `<div class="small where">In <a href="#/chat/${enc(t.thread)}">${esc(t.title)}</a></div>` : "";
   };
   const list = items => items.map(i => `<div class="needs-item" data-needs="${esc(i.id)}">${where(i)}${card(i, composed)}</div>`).join("");
-  return `<h3>A task is waiting ${now.length ? `<span class="badge">${now.length}</span>` : ""}</h3>
+  return `${feed}<h3>A task is waiting ${now.length ? `<span class="badge">${now.length}</span>` : ""}</h3>
     ${now.length ? list(now) : `<p class="empty">No task is waiting on you.</p>`}
     <h3>When you have a moment</h3>
     ${later.length ? list(later) : `<p class="empty">Nothing else.</p>`}
@@ -2749,6 +2768,11 @@ async function boot() {
   showWhatsNew();
   App.prefs = await api("GET", "/v1/preferences").catch(() => null);
   await Promise.all([refresh(), pollVersions()]);
+  // Opening the app shows what changed since the last session: with
+  // news, and landing on home, the needs panel opens beside it (#367).
+  App.reported = new Set();
+  App.feed = await api("POST", "/v1/home/opened", {}).catch(() => null);
+  if (App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) && (!location.hash || location.hash === "#/home")) App.openAfter = "needs";
   background = [setInterval(refresh, 3000), setInterval(pollVersions, 30000)];
   go();
 }
@@ -2759,7 +2783,7 @@ function stop() {
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   window.onhashchange = null;
   Panel.what = null;
-  App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null;
+  App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null; App.feed = null; App.reported = new Set();
   // What one person was typing or filtering by is not the next one's here.
   Panel.lib = { q: "", project: "" };
   for (const k of Object.keys(drafts)) delete drafts[k];
