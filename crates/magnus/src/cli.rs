@@ -26,6 +26,8 @@ pub fn main() {
             Some("conformance") => conformance(&args).await,
             Some("password") => password(&args),
             Some("totp-enroll") => totp_enroll(&args),
+            Some("invite") => invite(&args),
+            Some("person-status") => person_status(&args),
             Some("sign-in-code") => sign_in_code(&args),
             Some("restore") => restore(&args).await,
             Some("check") => check(&args).await,
@@ -34,7 +36,7 @@ pub fn main() {
                 Ok(())
             }
             _ => {
-                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus totp-enroll --config <file> --person <id>   (prints the enrollment URI)\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>\n       magnus check --config <file>   (reads the log and the vault, as a new release must)\n       magnus version");
+                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus totp-enroll --config <file> --person <id>   (prints the enrollment URI)\n       magnus invite --config <file> --person <id> [--email <address>]   (prints the invite token)\n       magnus person-status --config <file> --person <id> --status active|disabled\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>\n       magnus check --config <file>   (reads the log and the vault, as a new release must)\n       magnus version");
                 std::process::exit(2);
             }
         }
@@ -245,6 +247,41 @@ fn totp_enroll(args: &[String]) -> Result<()> {
     anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only local passwords take a second factor");
     println!("{}", crate::accounts::enroll_totp(&cfg.appliance.state_dir, &person)?);
     eprintln!("enrolled {person}: add the URI above to an authenticator app");
+    Ok(())
+}
+
+/// Invite a person to local password sign-in: print the single-use token
+/// (good for 7 days) to pass on; they accept it with their new password
+/// at `/v1/invites/accept`. The person must already be in the config.
+fn invite(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    let person = arg(args, "--person").context("--person is required")?;
+    anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
+    anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only local passwords are invited");
+    println!("{}", crate::accounts::invite(&cfg.appliance.state_dir, &person, arg(args, "--email").as_deref())?);
+    eprintln!("invited {person}: pass them the token above within 7 days");
+    Ok(())
+}
+
+/// Turn a local-password person on or off. Disabling ends their live
+/// sessions at once; the ids of those ended are printed.
+fn person_status(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    let person = arg(args, "--person").context("--person is required")?;
+    anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
+    anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only local sign-in is switched here");
+    let status = match arg(args, "--status").as_deref() {
+        Some("active") => crate::accounts::Status::Active,
+        Some("disabled") => crate::accounts::Status::Disabled,
+        x => anyhow::bail!("--status is active or disabled, not {}", x.unwrap_or("(missing)")),
+    };
+    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+    let ended = accounts.set_status(&person, status)?;
+    if ended.is_empty() {
+        eprintln!("{person} is now {}", if status == crate::accounts::Status::Disabled { "disabled" } else { "active" });
+    } else {
+        eprintln!("{person} is now disabled; ended sessions: {}", ended.join(", "));
+    }
     Ok(())
 }
 

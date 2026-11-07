@@ -119,6 +119,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/sign-in/browser/finish", post(browser_finish))
         .route("/v1/sign-in/device", post(device_start))
         .route("/v1/sign-in/device/{flow}", post(device_poll))
+        .route("/v1/invites/accept", post(accept_invite))
         .route("/v1/sign-out", post(sign_out))
         .route("/v1/tasks/{id}/live", get(live))
         .route("/v1/tasks/{id}/outputs/{out}", get(output))
@@ -687,6 +688,25 @@ async fn browser_finish(State(k): K, Extension(t): Extension<Transport>, Connect
     match id.finish(state, code, b["iss"].as_str()).await {
         Ok(polled) => provider_answered(&k, t, id.label(), polled, device_of(&k, peer, &h)).await,
         Err(e) => err(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+/// Accept an invitation: the token with the new password activates the
+/// person, who then signs in normally. A bad, used or expired token, or
+/// one for someone no longer here, answers alike.
+async fn accept_invite(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let token = b["token"].as_str().unwrap_or_default();
+    let password = b["password"].as_str().unwrap_or_default();
+    if password.chars().count() < k.cfg.sign_in.min_password_length {
+        return err(StatusCode::BAD_REQUEST, format!("a password needs at least {} characters", k.cfg.sign_in.min_password_length));
+    }
+    match crate::accounts::accept(&k.cfg.appliance.state_dir, &k.cfg.sign_in, token, password) {
+        Ok(Some(person)) if k.cfg.person(&person).is_some() => Json(json!({ "person": person })).into_response(),
+        Ok(_) => err(StatusCode::UNAUTHORIZED, "The invitation is wrong or expired."),
+        Err(e) => internal(e),
     }
 }
 
