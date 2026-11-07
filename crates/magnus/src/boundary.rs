@@ -163,8 +163,10 @@ fn render_thread(messages: &[Value]) -> String {
 
 fn is_chat_tool(f: &Facts) -> bool {
     // Sharing is the one bundle write that belongs to conversation, as the
-    // controls do (#299): the person's say after seeing the text.
-    f.connector.is_none() && (f.app == "chat" || f.name == "bundle_share")
+    // controls do (#299): the person's say after seeing the text. A task
+    // proposal is not chat-only: a run with no thread puts it in the
+    // inbox instead (#393).
+    f.connector.is_none() && (f.app == "chat" || f.name == "bundle_share") && f.name != "propose_task"
 }
 
 /// A send the reviewer judges: the model's own action, changing the world

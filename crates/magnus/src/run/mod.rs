@@ -332,6 +332,10 @@ impl Kernel {
             specs.retain(|t| tools::builtin(&t.name).is_some_and(|b| b.risk == Risk::Read || b.app == "memory"));
             specs.extend(tools::chat_specs());
         }
+        // A review proposes tasks to the inbox, having no thread (#393).
+        if self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.review)) {
+            specs.extend(tools::chat_specs().into_iter().filter(|t| t.name == "propose_task"));
+        }
         // project_read only where there are reference files to read.
         if !self.read(|s| s.tasks.get(&run.task).and_then(|t| t.project.as_ref()).is_some_and(|p| !p.files.is_empty())) {
             specs.retain(|t| t.name != "project_read");
@@ -1168,14 +1172,13 @@ fn strip_descriptions(v: &Value) -> Value {
 mod tests {
     use super::{harness_text, scope_line, CHAT_INSTRUCTIONS, INSTRUCTIONS, REVIEW_INSTRUCTIONS};
 
-    /// The review instruction names only tools a review can use (#382):
-    /// no `propose_task` (chat-only), with automations proposed as
-    /// schedules and tasks surfaced as observations instead.
+    /// The review instruction names only tools a review can use (#382,
+    /// #393): tasks proposed to the inbox, automations as schedules.
     #[test]
     fn review_names_only_tools_a_review_can_use() {
-        assert!(!REVIEW_INSTRUCTIONS.contains("propose_task"), "reviews cannot propose tasks");
+        assert!(REVIEW_INSTRUCTIONS.contains("propose_task"), "reviews can propose tasks to the inbox");
         assert!(REVIEW_INSTRUCTIONS.contains("propose_schedule"), "reviews can propose automations");
-        assert!(REVIEW_INSTRUCTIONS.contains("observe"), "tasks to start go out as observations");
+        assert!(REVIEW_INSTRUCTIONS.contains("observe"), "waiting news goes out as observations");
     }
 
     /// The harness section names only what is offered (#270): no web
