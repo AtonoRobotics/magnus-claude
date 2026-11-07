@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Register the appliance as a client of a Keycloak realm, for sign-in with
-the device-code grant (RFC 8628). Run once, as root, on the Keycloak host:
+the device-code grant (RFC 8628). Run once, as root, on the Keycloak host,
+naming the live identity's admin origin, admin file and CA (#428: the
+retired deployment's defaults are gone):
 
-    sudo python3 -I config/keycloak-client.py
+    sudo python3 -I config/keycloak-client.py --admin-url https://127.0.0.1:19446 --admin-file identity/admin.json --ca identity-ca.pem
 
 It signs in to Keycloak's admin API with the administrator in --admin-file
 (JSON with "username" and "password"), then creates the client or updates it
@@ -31,10 +33,10 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-p.add_argument("--admin-url", default="https://127.0.0.1:19446", help="Keycloak's private administration origin")
-p.add_argument("--admin-file", default="/var/lib/magnus-production-operator/identity-admin.json")
+p.add_argument("--admin-url", required=True, help="Keycloak's private administration origin ([sign_in.oidc] status_admin_url)")
+p.add_argument("--admin-file", required=True, help="JSON with the administrator's username and password (identity/admin.json beside the config)")
 p.add_argument("--admin-realm", default="master")
-p.add_argument("--ca", default="/etc/magnus-production-origin/ca.pem", help="CA that signed the administration origin's certificate")
+p.add_argument("--ca", required=True, help="CA that signed the administration origin's certificate ([sign_in.oidc] status_admin_ca)")
 p.add_argument("--realm", default="magnus")
 p.add_argument("--client-id", default="magnus-claude")
 p.add_argument("--name", default="Magnus appliance")
