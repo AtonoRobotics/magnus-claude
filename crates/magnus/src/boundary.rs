@@ -516,7 +516,7 @@ impl Kernel {
             // A reference file carries its own taint (M1, M2).
             let label = self.project_file(&a.run, a.input["name"].as_str().unwrap_or_default()).map_or(Label::PRINCIPAL, |f| f.label);
             (label, vec![f.app.clone()])
-        } else if is_chat_tool(&f) && (a.tool == "list_tasks" || a.tool == "list_schedules") {
+        } else if is_chat_tool(&f) && (a.tool == "list_tasks" || a.tool == "list_schedules" || a.tool == "get_task" || a.tool == "get_schedule") {
             // The summaries it lists carry what their runs read.
             let d = out.as_ref().ok().and_then(|(_, _, d)| d.clone()).unwrap_or_default();
             self.listed_taint(&d)

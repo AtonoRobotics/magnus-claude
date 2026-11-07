@@ -221,3 +221,59 @@ async fn a_listed_task_summary_taints_the_turn_that_reads_it() {
     assert_eq!(t["status"], "suspended", "the turn sent the summary out without asking: {t}");
     assert!(web.hits().is_empty(), "the summary went out: {:?}", web.hits());
 }
+
+/// One task or schedule by id in conversation (#265): its status, its
+/// result so far, and what it did; under the same who-may-control rule as
+/// every other control.
+#[tokio::test(flavor = "multi_thread")]
+async fn magnus_gets_one_task_and_schedule_by_id_in_conversation() {
+    let calls = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start(model(calls.clone())).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (alice, bob, carol) = (app.api("alice"), app.api("bob"), app.api("carol"));
+    let task = bob.submit("Draft the quarterly numbers.").await;
+    bob.wait_item(&task, "question").await;
+
+    // One task by id: its status and what it did so far.
+    let got = ask(&bob, &calls, "How is the quarterly numbers task going?", "get_task", json!({ "id": task })).await;
+    assert!(got.contains(&task) && got.contains("suspended"), "{got}");
+    assert!(got.contains("already_done"), "no report of what it did: {got}");
+
+    // Not Carol's to see; the owner sees anyone's.
+    let refused = ask(&carol, &calls, "How is Bob's task going?", "get_task", json!({ "id": task })).await;
+    assert!(refused.contains("no such task"), "{refused}");
+    let got = ask(&alice, &calls, "How is Bob's task going?", "get_task", json!({ "id": task })).await;
+    assert!(got.contains(&task), "{got}");
+
+    // One schedule by id: when it runs and its latest run.
+    let (st, v) = bob.post("/v1/schedules", json!({ "text": "Water the plants.", "daily_at": "03:00" })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    let got = ask(&bob, &calls, "When do the plants get watered?", "get_schedule", json!({ "id": id })).await;
+    assert!(got.contains(&id) && got.contains("03:00"), "{got}");
+    let refused = ask(&carol, &calls, "When do Bob's plants get watered?", "get_schedule", json!({ "id": id })).await;
+    assert!(refused.contains("no such schedule"), "{refused}");
+}
+
+/// The list holds the newest 30 unless asked wider (#265): an older task
+/// is reachable again.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_tasks_limit_reaches_past_the_newest_30() {
+    let calls = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start(model(calls.clone())).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let bob = app.api("bob");
+    let mut ids = vec![];
+    for i in 0..32 {
+        ids.push(bob.submit(&format!("Numbered chore {i}.")).await);
+    }
+
+    // The default list ends at 30: the oldest chore is past it.
+    let listed = ask(&bob, &calls, "What am I working on?", "list_tasks", json!({})).await;
+    let listed: Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["tasks"].as_array().unwrap().len(), 30, "{listed}");
+    assert!(!listed.to_string().contains(&ids[0]), "the default list reached past 30: {listed}");
+    // Asked wider, it reaches the oldest one.
+    let listed = ask(&bob, &calls, "What am I working on, all of it?", "list_tasks", json!({ "limit": 50 })).await;
+    assert!(listed.contains(&ids[0]) && listed.contains(&ids[31]), "{listed}");
+}

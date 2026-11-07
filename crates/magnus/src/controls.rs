@@ -33,6 +33,27 @@ fn may_control(who: &Person, owner: &str) -> bool {
     who.id == owner || who.is_owner() || who.has_role("admin")
 }
 
+/// One task as the list and `get_task` carry it: its status and its result
+/// so far.
+fn task_row(t: &crate::state::Task, r: &crate::state::Run) -> Value {
+    json!({ "id": t.task_id, "person": t.person, "status": crate::api::status_str(r.status), "created_at": t.created_at, "schedule": t.schedule, "summary": r.summary })
+}
+
+/// The latest run of a schedule, if it has run.
+fn latest_run(s: &crate::state::State, schedule: &str) -> Option<Value> {
+    s.tasks.values().filter(|t| t.schedule.as_deref() == Some(schedule)).max_by_key(|t| t.created_at).and_then(|t| {
+        s.runs.get(&t.run_id).map(|r| json!({ "task": t.task_id, "status": crate::api::status_str(r.status), "at": t.created_at, "summary": r.summary }))
+    })
+}
+
+/// One schedule as the list and `get_schedule` carry it, with its latest run.
+fn schedule_row(x: &crate::state::Schedule, latest: Option<Value>) -> Value {
+    json!({
+        "id": x.id, "person": x.person, "every_minutes": x.every_minutes, "daily_at": x.daily_at, "until": x.until, "max_runs": x.max_runs,
+        "runs": x.started, "paused": x.paused, "next": x.next_due(), "latest": latest,
+    })
+}
+
 impl Kernel {
     /// The tasks `who` controls (their own; everyone's for the owner and
     /// admins), newest first.
@@ -41,8 +62,7 @@ impl Kernel {
             s.tasks
                 .values()
                 .filter(|t| may_control(who, &t.person) && t.chat.as_ref().is_none_or(|c| !c.turn))
-                .filter_map(|t| s.runs.get(&t.run_id).map(|r| (t, r)))
-                .map(|(t, r)| json!({ "id": t.task_id, "person": t.person, "status": crate::api::status_str(r.status), "created_at": t.created_at, "schedule": t.schedule, "summary": r.summary }))
+                .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(t, r)))
                 .collect()
         });
         v.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
@@ -52,19 +72,30 @@ impl Kernel {
 
     /// The schedules `who` controls.
     pub fn schedules_for(&self, who: &Person) -> Vec<Value> {
-        self.read(|s| {
-            s.schedules
-                .values()
-                .filter(|x| may_control(who, &x.person))
-                .map(|x| {
-                    let latest = s.tasks.values().filter(|t| t.schedule.as_deref() == Some(&x.id)).max_by_key(|t| t.created_at).and_then(|t| s.runs.get(&t.run_id).map(|r| json!({ "task": t.task_id, "status": crate::api::status_str(r.status), "at": t.created_at, "summary": r.summary })));
-                    json!({
-                        "id": x.id, "person": x.person, "every_minutes": x.every_minutes, "daily_at": x.daily_at, "until": x.until, "max_runs": x.max_runs,
-                        "runs": x.started, "paused": x.paused, "next": x.next_due(), "latest": latest,
-                    })
-                })
-                .collect()
-        })
+        self.read(|s| s.schedules.values().filter(|x| may_control(who, &x.person)).map(|x| schedule_row(x, latest_run(s, &x.id))).collect())
+    }
+
+    /// One task by id: its row, and what its run did so far, split the way
+    /// a cancel report splits it.
+    pub async fn get_task(&self, who: &Person, id: &str) -> Result<Value, Refused> {
+        let found = self.read(|s| s.tasks.get(id).filter(|t| may_control(who, &t.person)).and_then(|t| s.runs.get(&t.run_id).map(|r| (task_row(t, r), r.clone()))));
+        let Some((row, run)) = found else { return Err(Refused::NotFound("task")) };
+        let mut row = self.as_policy_allows(who, vec![row]).await?.pop().unwrap_or(Value::Null);
+        let (cannot_be_undone, already_done, possibly_done) = self.stopped_run_report(&run);
+        if let Some(o) = row.as_object_mut() {
+            o.insert("cannot_be_undone".into(), json!(cannot_be_undone));
+            o.insert("already_done".into(), json!(already_done));
+            o.insert("possibly_done".into(), json!(possibly_done));
+        }
+        Ok(json!({ "task": row }))
+    }
+
+    /// One schedule by id: its row, with its latest run.
+    pub async fn get_schedule(&self, who: &Person, id: &str) -> Result<Value, Refused> {
+        let row = self.read(|s| s.schedules.get(id).filter(|x| may_control(who, &x.person)).map(|x| schedule_row(x, latest_run(s, &x.id))));
+        let Some(row) = row else { return Err(Refused::NotFound("schedule")) };
+        let row = self.as_policy_allows(who, vec![row]).await?.pop().unwrap_or(Value::Null);
+        Ok(json!({ "schedule": row }))
     }
 
     /// Cancel a task: its run stops, the cancellation is in the log, and
@@ -228,7 +259,9 @@ impl Kernel {
     pub fn listed_taint(&self, listed: &Value) -> (Label, Vec<String>) {
         let tasks = listed["tasks"].as_array().into_iter().flatten().filter(|r| r["summary"].is_string()).filter_map(|r| r["id"].as_str());
         let latest = listed["schedules"].as_array().into_iter().flatten().map(|x| &x["latest"]).filter(|r| r["summary"].is_string()).filter_map(|r| r["task"].as_str());
-        let ids: Vec<&str> = tasks.chain(latest).collect();
+        let one = listed["task"].as_object().into_iter().filter(|r| r["summary"].is_string()).filter_map(|r| r["id"].as_str());
+        let one_latest = listed["schedule"]["latest"].as_object().into_iter().filter(|r| r["summary"].is_string()).filter_map(|r| r["task"].as_str());
+        let ids: Vec<&str> = tasks.chain(latest).chain(one).chain(one_latest).collect();
         self.read(|s| {
             let mut label = Label::PRINCIPAL;
             let mut from = std::collections::BTreeSet::new();
@@ -249,8 +282,13 @@ impl Kernel {
         let Some(who) = self.person(person) else { return ("no such person".into(), true, None) };
         let id = input["id"].as_str().unwrap_or_default();
         let r: Result<Value, Refused> = match tool {
-            "list_tasks" => self.as_policy_allows(&who, self.tasks_for(&who, 30)).await.map(|v| json!({ "tasks": v })),
+            "list_tasks" => {
+                let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(30).clamp(1, 200) as usize;
+                self.as_policy_allows(&who, self.tasks_for(&who, limit)).await.map(|v| json!({ "tasks": v }))
+            }
             "list_schedules" => self.as_policy_allows(&who, self.schedules_for(&who)).await.map(|v| json!({ "schedules": v })),
+            "get_task" => self.get_task(&who, id).await,
+            "get_schedule" => self.get_schedule(&who, id).await,
             "cancel_task" => self.cancel_task(&who, id).await,
             "pause_schedule" => self.pause_schedule(&who, id).await.map(|_| json!({ "paused": id })),
             "resume_schedule" => self.resume_schedule(&who, id).await.map(|_| json!({ "resumed": id })),
@@ -266,7 +304,8 @@ impl Kernel {
 }
 
 /// The control tools, as the model calls them.
-pub const TOOLS: [&str; 7] = ["list_tasks", "list_schedules", "cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule"];
+pub const TOOLS: [&str; 9] =
+    ["list_tasks", "list_schedules", "get_task", "get_schedule", "cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule"];
 
 /// How a recorded intent reads in a cancel report.
 #[derive(Debug, PartialEq)]
