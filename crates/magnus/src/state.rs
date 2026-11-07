@@ -606,6 +606,15 @@ pub struct Branch {
     pub at: DateTime<Utc>,
 }
 
+/// What a scoped drafting step wrote from: the threads (none for a new
+/// draft) and their participants' addresses (#178).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DraftSources {
+    pub person: String,
+    pub threads: Vec<String>,
+    pub participants: Vec<String>,
+}
+
 /// The person's answer to a card proposed in chat (a schedule or a
 /// suggestion), when they gave it and whose card it was.
 #[derive(Clone, Debug, PartialEq)]
@@ -928,6 +937,9 @@ pub struct State {
     /// card id: with the cards in their turns' results, the suggestion
     /// ledger (`suggestions::ledger`).
     pub cards: HashMap<String, CardState>,
+    /// Drafts written by scoped steps, by draft id: the threads whose
+    /// content they may hold and who is entitled to it (#178).
+    pub draft_sources: HashMap<String, DraftSources>,
     pub model: Option<(String, String)>,
     pub pins: HashMap<String, Pin>,
     /// Tools whose live definition differs from the pin, with the open item.
@@ -1486,6 +1498,8 @@ impl State {
                 self.disagreements.retain(|_, d| &d.person != person);
                 // Their answers to cards, a decline's reason among them.
                 self.cards.retain(|_, c| c.person.as_ref() != Some(person));
+                // What their drafts were written from.
+                self.draft_sources.retain(|_, d| &d.person != person);
                 // Their branched threads (the entries as shown then) and
                 // what their tasks had attached go too.
                 self.branches.retain(|_, b| &b.person != person);
@@ -1934,8 +1948,11 @@ impl State {
                     r.replies.push(Reply { step: *step, seq: e.seq, blocks: blocks.clone(), state: state.clone() });
                 }
             }
-            Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } | Ev::SpokenWritten { run, usage, .. } | Ev::KnowledgeExtraction { run, usage, .. } => {
+            Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } | Ev::SpokenWritten { run, usage, .. } | Ev::KnowledgeExtraction { run, usage, .. } | Ev::DraftScoped { run, usage, .. } => {
                 self.charge_grant(run, e.at, usage.cost_usd);
+                if let Ev::DraftScoped { draft, person, threads, participants, .. } = &e.ev {
+                    self.draft_sources.insert(draft.clone(), DraftSources { person: person.clone(), threads: threads.clone(), participants: participants.clone() });
+                }
                 if let Some(r) = self.runs.get_mut(run) {
                     if let Ev::SpokenWritten { script, .. } = &e.ev {
                         r.spoken = Some(script.clone());
@@ -2480,6 +2497,21 @@ mod tests {
         assert!(!s.branches.contains_key("b-bob"), "bob's branch kept his words");
         assert!(!s.attachments.contains_key("t-bob"), "bob's task kept what it had attached");
         assert!(s.branches.contains_key("b-alice") && s.attachments.contains_key("t-alice"), "alice's went with bob's");
+    }
+
+    /// A scoped draft records its threads and who is entitled to them, and
+    /// charges the run's call; erasing the person clears it (#178).
+    #[test]
+    fn a_scoped_draft_records_its_sources_and_charges_the_call() {
+        let mut s = State::default();
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        s.apply(&ev(1, "person:alice", json!({ "kind": "task_created", "task": "t1", "run": "r1", "person": "alice", "text": "Answer it.", "config": config })));
+        let usage = json!({ "input_tokens": 100, "output_tokens": 20, "cost_usd": 0.01 });
+        s.apply(&ev(2, "kernel", json!({ "kind": "draft_scoped", "run": "r1", "person": "alice", "draft": "d1", "threads": ["tA"], "participants": ["bob@corp.example"], "usage": usage })));
+        assert_eq!(s.draft_sources["d1"], super::DraftSources { person: "alice".into(), threads: vec!["tA".into()], participants: vec!["bob@corp.example".into()] });
+        assert_eq!((s.runs["r1"].model_calls, s.runs["r1"].usd), (1, 0.01));
+        s.apply(&ev(3, "admin:root", json!({ "kind": "person_erased", "person": "alice" })));
+        assert!(!s.draft_sources.contains_key("d1"), "alice's draft kept its sources");
     }
 
     /// An ended schedule stays in state, marked with why, its pause
