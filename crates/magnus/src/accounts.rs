@@ -52,6 +52,9 @@ pub struct Accounts {
     sessions: Mutex<BTreeMap<String, Session>>,
     /// Failed attempts per person: (count, first failure).
     failures: Mutex<BTreeMap<String, (u32, DateTime<Utc>)>>,
+    /// Last accepted authenticator step per person: a code signs in once,
+    /// and concurrent uses of it admit exactly one (#441).
+    totp_steps: Mutex<BTreeMap<String, i64>>,
 }
 
 fn token_hash(token: &str) -> String {
@@ -135,7 +138,8 @@ impl Accounts {
         let now = Utc::now();
         let mut sessions: BTreeMap<String, Session> = read_json(&d.join("sessions.json"))?;
         sessions.retain(|_, s| s.expires > now);
-        Ok(Accounts { dir: d, cfg, sessions: Mutex::new(sessions), failures: Mutex::new(BTreeMap::new()) })
+        let totp_steps: BTreeMap<String, i64> = read_json(&d.join("totp-steps.json"))?;
+        Ok(Accounts { dir: d, cfg, sessions: Mutex::new(sessions), failures: Mutex::new(BTreeMap::new()), totp_steps: Mutex::new(totp_steps) })
     }
 
     fn save(&self, sessions: &BTreeMap<String, Session>) -> Result<()> {
@@ -301,14 +305,26 @@ impl Accounts {
         };
         match code.map(str::trim).filter(|c| !c.is_empty()) {
             None => Ok(Err(SignInError::NeedsCode)),
-            Some(c) if crate::totp::verify(secret, c, at) => {
-                self.succeeded(counter);
-                Ok(Ok(()))
-            }
-            Some(_) => {
-                self.failed(counter);
-                Ok(Err(SignInError::Rejected))
-            }
+            Some(c) => match crate::totp::verify_step(secret, c, at) {
+                Some(matched) => {
+                    // Check and record under one lock, so concurrent uses of
+                    // the code admit exactly one; a used or passed step
+                    // rejects and counts, like a wrong code.
+                    let mut used = self.totp_steps.lock().unwrap();
+                    if used.get(person).is_some_and(|&last| matched <= last) {
+                        self.failed(counter);
+                        return Ok(Err(SignInError::Rejected));
+                    }
+                    used.insert(person.to_string(), matched);
+                    write_private(&self.dir.join("totp-steps.json"), &serde_json::to_vec_pretty(&*used)?)?;
+                    self.succeeded(counter);
+                    Ok(Ok(()))
+                }
+                None => {
+                    self.failed(counter);
+                    Ok(Err(SignInError::Rejected))
+                }
+            },
         }
     }
 
@@ -450,6 +466,43 @@ mod tests {
             let _ = accounts.sign_in_counted_with_code_at("ada", "a-long-password", Some("000000"), &counter, at);
         }
         assert!(accounts.locked(&counter).is_some(), "wrong codes did not lock the counter");
+    }
+
+    /// A code signs in once: replaying it within the window rejects and
+    /// counts, while the next step's code still works; eight threads racing
+    /// the same code admit exactly one (#441).
+    #[test]
+    fn a_code_signs_in_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SignIn { session_days: 1, max_failures: 100, lockout_minutes: 15, min_password_length: 10, oidc: None };
+        set_password(dir.path(), &cfg, "ada", "a-long-password").unwrap();
+        let accounts = Accounts::open(dir.path(), cfg).unwrap();
+        let uri = enroll_totp(dir.path(), "ada").unwrap();
+        let secret = uri.split("secret=").nth(1).and_then(|s| s.split('&').next()).unwrap();
+        let secret = crate::totp::base32_decode(secret).unwrap();
+        let counter = Accounts::network_counter("ada");
+        let at = chrono::Utc::now();
+        let step = at.timestamp().div_euclid(30) as u64;
+        let code = crate::totp::generate(&secret, step, 6);
+        assert!(matches!(accounts.sign_in_counted_with_code_at("ada", "a-long-password", Some(&code), &counter, at), Ok(Ok(()))), "the first use of the code did not sign in");
+        assert!(matches!(accounts.sign_in_counted_with_code_at("ada", "a-long-password", Some(&code), &counter, at), Ok(Err(SignInError::Rejected))), "replaying the code signed in again");
+        // Eight threads race the next step's code: every one of them verifies
+        // it (it is live), but the step admits exactly one.
+        let race_code = crate::totp::generate(&secret, step + 1, 6);
+        let admitted = std::sync::Mutex::new(0u32);
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    if matches!(accounts.sign_in_counted_with_code("ada", "a-long-password", Some(&race_code), &counter), Ok(Ok(()))) {
+                        *admitted.lock().unwrap() += 1;
+                    }
+                });
+            }
+        });
+        assert_eq!(*admitted.lock().unwrap(), 1, "the raced code did not admit exactly one thread");
+        let next = crate::totp::generate(&secret, step + 2, 6);
+        let later = chrono::DateTime::from_timestamp((step + 2) as i64 * 30 + 5, 0).unwrap();
+        assert!(matches!(accounts.sign_in_counted_with_code_at("ada", "a-long-password", Some(&next), &counter, later), Ok(Ok(()))), "the next step's code did not sign in");
     }
 
     /// Without an enrolled second factor, the code path behaves exactly as

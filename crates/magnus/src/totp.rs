@@ -81,16 +81,23 @@ pub fn generate(secret: &[u8], counter: u64, digits: u32) -> String {
 /// Whether `code` is the current code for the base32 `secret` at `at`,
 /// accepting one step of skew each way.
 pub fn verify(secret_b32: &str, code: &str, at: DateTime<Utc>) -> bool {
+    verify_step(secret_b32, code, at).is_some()
+}
+
+/// The step `code` matches for the base32 `secret` at `at`, lowest first,
+/// so a code always reports its own step while it is live (#441).
+pub fn verify_step(secret_b32: &str, code: &str, at: DateTime<Utc>) -> Option<i64> {
     let code = code.trim();
-    let Some(secret) = base32_decode(secret_b32) else { return false };
+    let secret = base32_decode(secret_b32)?;
     let step = at.timestamp().div_euclid(STEP);
-    let mut ok = false;
     for d in -WINDOW..=WINDOW {
         let Some(counter) = step.checked_add(d).and_then(|s| u64::try_from(s).ok()) else { continue };
         let want = generate(&secret, counter, DIGITS);
-        ok |= constant_eq(code.as_bytes(), want.as_bytes());
+        if constant_eq(code.as_bytes(), want.as_bytes()) {
+            return step.checked_add(d);
+        }
     }
-    ok
+    None
 }
 
 fn constant_eq(a: &[u8], b: &[u8]) -> bool {
@@ -121,6 +128,19 @@ mod tests {
         for (t, code) in [(59i64, "94287082"), (1111111109, "07081804"), (1111111111, "14050471"), (1234567890, "89005924"), (2000000000, "69279037"), (20000000000, "65353130")] {
             assert_eq!(generate(secret, (t / 30) as u64, 8), code, "at T={t}");
         }
+    }
+
+    /// The matched step comes back for replay tracking: a code for step N
+    /// reports N even when the clock has moved a step on (#441).
+    #[test]
+    fn verify_step_reports_the_matched_step() {
+        let secret = base32_encode(b"12345678901234567890");
+        let at = DateTime::from_timestamp(1234567890, 0).unwrap();
+        let step = 1234567890i64.div_euclid(30);
+        let code = generate(b"12345678901234567890", step as u64, 6);
+        assert_eq!(verify_step(&secret, &code, at), Some(step));
+        assert_eq!(verify_step(&secret, &code, at + chrono::Duration::seconds(30)), Some(step), "a step on, the code still reports its own step");
+        assert_eq!(verify_step(&secret, "000000", at), None, "a wrong code reported a step");
     }
 
     #[test]
