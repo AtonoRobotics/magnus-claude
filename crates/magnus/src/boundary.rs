@@ -943,6 +943,13 @@ impl Kernel {
             }
             return Ok(Gate::Pass);
         }
+        // Background work asks no one (owner, 2026-11-07): what would need
+        // the person's approval goes back to the model, which can put it in
+        // front of them as a suggestion instead.
+        if self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.background())) {
+            let reason = format!("{why}. This is background work, so no one is asked to approve it; if it is worth doing, suggest it to the person (observe, or propose_schedule for recurring work) and finish");
+            return Ok(Gate::Stop(self.deny(a, "approval", &reason, false, rule).await?));
+        }
         self.decision(a, "ask", "approval", why, rule.clone()).await?;
         let open = self.read(|s| {
             s.items
@@ -1023,6 +1030,10 @@ impl Kernel {
             }
             crate::run::reviewer::SendVerdict::Flag(reason) => {
                 let why = format!("the reviewer flagged this send: {reason}");
+                if self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.background())) {
+                    let reason = format!("{why}. This is background work, so no one is asked to approve it; if it is worth doing, suggest it to the person and finish");
+                    return Ok(Gate::Stop(self.deny(a, "reviewer", &reason, false, Some(REVIEWER_FLAG.into())).await?));
+                }
                 self.decision(a, "ask", "reviewer", &why, Some(REVIEWER_FLAG.into())).await?;
                 let open = self.read(|s| {
                     s.items

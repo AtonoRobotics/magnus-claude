@@ -331,7 +331,19 @@ impl Task {
     pub fn is_chat_turn(&self) -> bool {
         self.chat.as_ref().is_some_and(|c| c.turn)
     }
+
+    /// Magnus's own background work (a proactive review, a watch poll):
+    /// it reaches the person only through what it produces for them, never
+    /// through its own approvals, reviews, questions or notices (owner,
+    /// 2026-11-07). Developers see all of it in the run inspector.
+    pub fn background(&self) -> bool {
+        self.review || self.poll
+    }
 }
+
+/// What a background run may put in front of its person: what it produced
+/// for them. Anything else about it is its own plumbing (owner, 2026-11-07).
+pub const BACKGROUND_OUTPUTS: [&str; 4] = ["observation", "schedule_proposal", "task_proposal", "message"];
 
 #[derive(Clone, Debug)]
 pub struct Item {
