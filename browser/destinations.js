@@ -123,13 +123,27 @@ function policy(allowEntries) {
 
   // A connection to the first of the checked addresses that accepts one,
   // tried in order as Chromium would; never an address outside the list.
-  function connect(addrs, port, done) {
+  // Each attempt gets CONNECT_MS: without a cap a dead address holds the
+  // whole navigation for the kernel's minutes-long SYN timeout (#426: the
+  // CI runner's own name resolves to several addresses, and a stale one
+  // blackholed SYNs past the page budget). `opts` ({ dial, ms }) is the
+  // tests' seam; production passes none.
+  const CONNECT_MS = 10000;
+  function connect(addrs, port, done, opts) {
+    const dial = (opts && opts.dial) || net.connect;
+    const ms = (opts && opts.ms) || CONNECT_MS;
     let i = 0;
-    const next = err => {
-      if (i >= addrs.length) { done(err); return; }
-      const s = net.connect(port, addrs[i++]);
-      s.once('error', next);
-      s.once('connect', () => { s.removeListener('error', next); done(null, s); });
+    const next = () => {
+      if (i >= addrs.length) { done(new Error('no address accepted the connection')); return; }
+      const s = dial(port, addrs[i++]);
+      const timer = setTimeout(() => {
+        s.removeAllListeners('error');
+        s.on('error', () => {});
+        s.destroy();
+        next();
+      }, ms);
+      s.once('error', () => { clearTimeout(timer); next(); });
+      s.once('connect', () => { clearTimeout(timer); s.removeAllListeners('error'); done(null, s); });
     };
     next();
   }
@@ -191,7 +205,7 @@ function policy(allowEntries) {
     return server;
   }
 
-  return { destination, check, proxy };
+  return { destination, check, connect, proxy };
 }
 
 module.exports = { policy, notPublic, Refused };

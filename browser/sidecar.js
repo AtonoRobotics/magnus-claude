@@ -131,9 +131,7 @@ async function handle(req) {
   const p = await page(run);
   switch (op) {
     case 'navigate': {
-      // 90s, not 45s: a loaded CI runner starves chromium past 45s on
-      // local pages (#426). Real stalls just fail slower.
-      const resp = await p.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 90000 });
+      const resp = await p.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
       // A redirect the proxy refused ends on its refusal.
       if (resp && resp.headers()['x-magnus-refused']) throw new Error(await resp.text());
       await p.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});

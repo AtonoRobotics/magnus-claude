@@ -211,7 +211,9 @@ jobs:
       # build can reach an app. A draft skips this job.
       - name: Browser sidecar
         if: env.MAGNUS_TESTED != '1' && env.MAGNUS_SELECT != 'none'
-        run: npm ci --prefix browser
+        run: |
+          npm ci --prefix browser
+          node --test "browser/**/*.test.js"
       # Every test of every binary at once (cargo-nextest; `cargo test` runs
       # the binaries one after another: 18 minutes, against 5). Each test
       # has a time limit (.config/nextest.toml, profile ci).
