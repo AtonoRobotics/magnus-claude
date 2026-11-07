@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const REVIEW: &str = "reviewing one person's state";
+const MEMORY_PASS: &str = "long-term memory";
 
 fn done(summary: &str) -> Reply {
     tool("task_complete", json!({ "summary": summary, "deliverable": [{ "type": "text", "text": summary }] }))
@@ -295,4 +296,53 @@ async fn a_task_read_postpones_the_next_poll() {
     let calls = calls.lock().unwrap();
     let in_window: Vec<_> = calls.iter().filter(|t| **t > t0 + Duration::from_secs(55) && **t < t0 + Duration::from_secs(70)).collect();
     assert!(in_window.is_empty(), "a poll fired on a freshly-read watch: {in_window:?}");
+}
+
+/// A due watch polls exactly once (#425): one connected watch, three
+/// people, twenty seconds inside a one-minute interval — three poll
+/// runs and three marks, one per person. Only agent turns count:
+/// the memory pass also sees the Poll text (the six sightings that
+/// filed this issue were three polls plus three memory passes). One
+/// sweep loop and one kernel per log mean two sweeps cannot start
+/// two polls; this pins it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_due_watch_polls_exactly_once() {
+    let mail = mcp::mail().start().await;
+    let polls = Arc::new(Mutex::new(0_usize));
+    let seen_polls = polls.clone();
+    let m = FakeModel::start(script(move |c| {
+        let seen_polls = seen_polls.clone();
+        async move {
+            let system = c.body["system"].to_string();
+            if system.contains(REVIEW) {
+                return done("Reviewed quietly.");
+            }
+            if c.text().contains("Poll ") && !system.contains(MEMORY_PASS) {
+                *seen_polls.lock().unwrap() += 1;
+                return tool("task_fail", json!({ "reason": "not reading in this test" }));
+            }
+            return tool("task_fail", json!({ "reason": "no tasks in this test" }));
+        }
+    }))
+    .await;
+    // Boot with the loop off, so the first polls come from due sweeps.
+    let mut app = Appliance::start(
+        Spec::default()
+            .app("mail", &mail, "public", "private", &[("list_inbox", "read")])
+            .watch_poll("mail", "list_inbox", "/messages", "subject", 1),
+        &m,
+    )
+    .await;
+    reconfigure(&mut app, |cfg| {
+        cfg["proactive"].as_table_mut().unwrap().insert("on".into(), toml::Value::Boolean(true));
+    })
+    .await;
+    // Past the first due sweeps, inside the one-minute interval: each
+    // of the three people's watch polled exactly once, and marked.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert_eq!(*polls.lock().unwrap(), 3, "a due watch did not poll exactly once per person");
+    let db = app.db.admin().await;
+    let marks: i64 =
+        db.query_one("SELECT COUNT(*) FROM public.events WHERE body->>'kind' = 'watch_polled'", &[]).await.unwrap().get(0);
+    assert_eq!(marks, 3, "a poll did not mark its watch");
 }
