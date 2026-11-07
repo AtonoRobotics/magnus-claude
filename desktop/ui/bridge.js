@@ -116,10 +116,16 @@ const webBridge = {
   },
   async speak(text) {
     if (!("speechSynthesis" in window)) throw new Error("This browser cannot read aloud.");
-    speechSynthesis.cancel();
-    speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+    await this.stopSpeaking();
+    await new Promise((resolve, reject) => {
+      this._speakingDone = resolve;
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.onend = resolve;
+      utterance.onerror = e => ["canceled", "interrupted"].includes(e.error) ? resolve() : reject(new Error(`Read aloud: ${e.error}`));
+      speechSynthesis.speak(utterance);
+    });
   },
-  async stopSpeaking() { if ("speechSynthesis" in window) speechSynthesis.cancel(); },
+  async stopSpeaking() { if ("speechSynthesis" in window) speechSynthesis.cancel(); this._speakingDone?.(); this._speakingDone = null; },
   async download(path, name) {
     const a = document.createElement("a");
     a.href = path; a.download = name; document.body.append(a); a.click(); a.remove();
