@@ -27,17 +27,27 @@ impl Kernel {
             }
         });
         // A task done or failed wakes a review: not a review itself, and
-        // not a chat turn, whose person is already there (#237).
-        if let Some((person, ended)) = self.read(|s| s.runs.get(run.as_str()).map(|r| (r.person.clone(), s.tasks.get(&r.task).map(|t| (t.review, t.chat.as_ref().is_some_and(|c| c.turn), r.status))))) {
-            let reason = match ended {
-                Some((false, false, crate::state::Status::Completed)) => Some("task done"),
-                Some((false, false, crate::state::Status::Failed)) => Some("task failed"),
+        // not a chat turn, whose person is already there (#237). The wake
+        // carries the ended task's ID and outcome: the review's context
+        // excludes ended tasks, so without it the review cannot see what
+        // failed (#383).
+        if let Some((person, task, ended)) = self.read(|s| {
+            s.runs.get(run.as_str()).map(|r| {
+                let ended = s.tasks.get(&r.task).map(|t| (t.review, t.chat.as_ref().is_some_and(|c| c.turn), r.status, r.summary.clone()));
+                (r.person.clone(), r.task.clone(), ended)
+            })
+        }) {
+            // A failure's reason and a completion's summary both land in
+            // the run summary; the reason field is for suspensions.
+            let wake = match ended {
+                Some((false, false, crate::state::Status::Completed, summary)) => Some((format!("task {task} done"), summary.unwrap_or_default())),
+                Some((false, false, crate::state::Status::Failed, summary)) => Some((format!("task {task} failed"), summary.unwrap_or_default())),
                 _ => None,
             };
-            if let Some(reason) = reason.map(String::from) {
+            if let Some((reason, outcome)) = wake {
                 let k = self.clone();
                 tokio::spawn(async move {
-                    k.review_wake(&person, reason).await;
+                    k.review_wake(&person, reason, Some((task, outcome))).await;
                 });
             }
         }
