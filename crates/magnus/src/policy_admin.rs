@@ -115,6 +115,11 @@ fn loop_schema() -> &'static Schema {
     S.get_or_init(|| Schema::from_cedarschema_str(LOOP_SCHEMA).expect("the loop half parses").0)
 }
 
+fn served_schema() -> &'static Schema {
+    static S: std::sync::OnceLock<Schema> = std::sync::OnceLock::new();
+    S.get_or_init(|| Schema::from_cedarschema_str(SCHEMA).expect("the served schema parses").0)
+}
+
 /// Where an offset falls in the text: its line and column, from 1.
 fn place(text: &str, offset: usize) -> (usize, usize) {
     let before = &text[..offset.min(text.len())];
@@ -143,18 +148,25 @@ pub fn check(text: &str) -> Vec<Value> {
     let mut tools = HashSet::new();
     let mut controls = HashSet::new();
     let mut loops = HashSet::new();
+    let mut mixed = HashSet::new();
     let mut unqualified = vec![];
     for p in set.policies() {
         let id = p.id().to_string();
         let (t, c, l) = crate::policy::policy_sides(&p);
-        if t {
-            tools.insert(id.clone());
-        }
-        if c {
-            controls.insert(id.clone());
-        }
-        if l {
-            loops.insert(id.clone());
+        // A rule bearing on several sides validates against the whole
+        // schema: no half declares every action it names (#403).
+        if [t, c, l].iter().filter(|&&x| x).count() > 1 {
+            mixed.insert(id.clone());
+        } else {
+            if t {
+                tools.insert(id.clone());
+            }
+            if c {
+                controls.insert(id.clone());
+            }
+            if l {
+                loops.insert(id.clone());
+            }
         }
         if matches!(p.action_constraint(), ActionConstraint::Any) {
             unqualified.push((id, p.effect() == Effect::Forbid));
@@ -182,6 +194,11 @@ pub fn check(text: &str) -> Vec<Value> {
         let id = e.policy_id().to_string();
         loop_bad.insert(id.clone());
         if loops.contains(id.as_str()) {
+            out.push(problem(text, e, e.to_string()));
+        }
+    }
+    for e in Validator::new(served_schema().clone()).validate(&set, ValidationMode::Strict).validation_errors() {
+        if mixed.contains(e.policy_id().to_string().as_str()) {
             out.push(problem(text, e, e.to_string()));
         }
     }
@@ -341,6 +358,15 @@ mod tests {
     fn a_control_narrowing_fits_the_schema() {
         let narrowing = r#"forbid(principal, action == Action::"cancel_task", resource) when { context.is_admin && !(resource in principal) };"#;
         assert!(check(narrowing).is_empty(), "{:?}", check(narrowing));
+    }
+
+    /// A rule naming actions from two sides validates against the whole
+    /// schema, so one rule can constrain ordinary and autonomous calls
+    /// together; neither half-schema alone declares both actions (#403).
+    #[test]
+    fn a_mixed_tool_and_loop_rule_validates() {
+        let mixed = r#"forbid(principal, action in [Action::"execute", Action::"act"], resource in App::"mail");"#;
+        assert!(check(mixed).is_empty(), "{:?}", check(mixed));
     }
 
     /// An unqualified tool rule validates as a tool rule, so the group's
