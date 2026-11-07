@@ -233,6 +233,13 @@ pub enum Ev {
         ok: bool,
         detail: String,
     },
+    /// The backups directory was mirrored off host after a backup (#297):
+    /// whether the copy held, and why not.
+    BackupCopied {
+        file: String,
+        ok: bool,
+        detail: String,
+    },
     /// Removed content is still in backups kept: rewriting `files` failed
     /// (why, in `detail`). Those have had the removals up to `from` only;
     /// every removal after it, through `through`, is not yet out of them.
@@ -1109,6 +1116,23 @@ pub enum Ev {
         by: String,
         item: Option<String>,
         note: Option<String>,
+    },
+    /// A reader widened who may read an entry (share, #299): the new
+    /// readers, and who shared it.
+    KnowledgeShared {
+        id: String,
+        readers: Vec<Vec<String>>,
+        by: String,
+    },
+    /// The writer of an org document shared it (#299): principals added
+    /// to who may see it, or everyone, and who shared it.
+    BundleShared {
+        path: String,
+        #[serde(default)]
+        add: Vec<String>,
+        #[serde(default)]
+        everyone: bool,
+        by: String,
     },
     /// One model call with no tools that read an entry's sources for a typed value.
     KnowledgeExtraction {

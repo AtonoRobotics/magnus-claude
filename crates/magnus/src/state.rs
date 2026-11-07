@@ -378,6 +378,8 @@ pub struct KnowledgeEntry {
     pub author: String,
     pub run: Option<String>,
     pub endorsed: Option<Value>,
+    /// The last share, by whom and when: who widened the readers.
+    pub shared: Option<Value>,
     pub at: DateTime<Utc>,
     /// The last event that changed it, so the index knows it is current.
     pub version: i64,
@@ -418,6 +420,14 @@ pub struct BundleDoc {
     /// The person whose run wrote the current version, under whose grant
     /// its sources were read.
     pub writer: Option<String>,
+    /// Principals (`person:<id>`, `group:<id>`) the writer shared the
+    /// current version with, besides; cleared by every new version, so a
+    /// share covers only the text seen (#299).
+    pub shared: Vec<String>,
+    /// Shared with everyone (as `shared`, for the current version).
+    pub shared_everyone: bool,
+    /// Who shared the current version.
+    pub shared_by: Option<String>,
 }
 
 impl BundleDoc {
@@ -858,6 +868,8 @@ pub struct State {
     pub turned_off: std::collections::BTreeSet<String>,
     /// The latest backup's restore check: file, whether it restored, detail, when.
     pub last_backup: Option<(String, bool, String, DateTime<Utc>)>,
+    /// The latest backup's off-host copy: file, whether it held, detail, when.
+    pub last_copy: Option<(String, bool, String, DateTime<Utc>)>,
     /// Removed content some backups still hold, until they are rewritten.
     pub scrub_pending: Option<ScrubPending>,
     /// Each person erased with content, by their id then.
@@ -1356,6 +1368,9 @@ impl State {
             Ev::BackupChecked { file, ok, detail } => {
                 self.last_backup = Some((file.clone(), *ok, detail.clone(), e.at));
             }
+            Ev::BackupCopied { file, ok, detail } => {
+                self.last_copy = Some((file.clone(), *ok, detail.clone(), e.at));
+            }
             Ev::BackupScrubPending { from, through, files, detail } => {
                 self.scrub_pending = Some(ScrubPending { from: *from, through: *through, files: files.clone(), detail: detail.clone(), at: e.at });
                 self.erasures_pending(e);
@@ -1686,11 +1701,19 @@ impl State {
                         author: author.clone(),
                         run: run.clone(),
                         endorsed: None,
+                        shared: None,
                         at: e.at,
                         version: e.seq,
                         seq: e.seq,
                     },
                 );
+            }
+            Ev::KnowledgeShared { id, readers, by } => {
+                if let Some(k) = self.knowledge.get_mut(id) {
+                    k.readers = readers.clone();
+                    k.shared = Some(serde_json::json!({ "by": by, "at": e.at }));
+                    k.version = e.seq;
+                }
             }
             Ev::KnowledgeEndorsed { id, by, item, note } => {
                 if let Some(k) = self.knowledge.get_mut(id) {
@@ -2234,7 +2257,7 @@ impl State {
             }
             Ev::BundleWritten { path, version, doc_kind: kind, scope, owner_user, actor, run, label, sources, writer: named, .. } => {
                 let writer = named.clone().or_else(|| run.as_ref().and_then(|r| self.runs.get(r)).map(|r| r.person.clone()));
-                let d = self.bundle.entry(path.clone()).or_insert_with(|| BundleDoc { path: path.clone(), kind: kind.clone(), scope: scope.clone(), owner_user: owner_user.clone(), label: *label, sources: vec![], versions: vec![], writer: None });
+                let d = self.bundle.entry(path.clone()).or_insert_with(|| BundleDoc { path: path.clone(), kind: kind.clone(), scope: scope.clone(), owner_user: owner_user.clone(), label: *label, sources: vec![], versions: vec![], writer: None, shared: vec![], shared_everyone: false, shared_by: None });
                 // An admin's edit (no run, no writer named) keeps the writer
                 // whose run read its sources (K2).
                 if run.is_some() || named.is_some() {
@@ -2246,8 +2269,23 @@ impl State {
                 d.label = *label;
                 d.sources = sources.clone();
                 d.versions.push((*version, e.seq, e.at, actor.clone()));
+                // A new version is new text: an earlier share does not cover it.
+                d.shared.clear();
+                d.shared_everyone = false;
+                d.shared_by = None;
                 let last = self.bundle_last.entry(path.clone()).or_default();
                 *last = (*last).max(*version);
+            }
+            Ev::BundleShared { path, add, everyone, by } => {
+                if let Some(d) = self.bundle.get_mut(path) {
+                    for p in add {
+                        if !d.shared.contains(p) {
+                            d.shared.push(p.clone());
+                        }
+                    }
+                    d.shared_everyone |= *everyone;
+                    d.shared_by = Some(by.clone());
+                }
             }
             Ev::BundleRemoved { path } => {
                 self.bundle.remove(path);

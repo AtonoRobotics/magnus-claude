@@ -197,8 +197,40 @@ impl Kernel {
         };
         self.emit("kernel", Ev::BackupChecked { file: file.clone(), ok, detail: detail.clone() }).await?;
         let removed = prune(&dir, self.cfg.backup.keep_days)?;
-        Ok(json!({ "file": file, "through_seq": through, "events": rows.len(), "bytes": bytes.len(), "restored": ok, "detail": detail, "removed": removed }))
+        // Off host, when a destination is configured: the directory as it
+        // is now, pruned; a failed copy is recorded, not a failed backup.
+        let (copied, copy_detail) = match self.cfg.backup.copy_to.clone().filter(|d| !d.trim().is_empty()) {
+            Some(dest) => {
+                let (ok, detail) = mirror(&dir, &dest, self.cfg.backup.copy_timeout_secs).await;
+                self.emit("kernel", Ev::BackupCopied { file: file.clone(), ok, detail: detail.clone() }).await?;
+                (Some(ok), Some(detail))
+            }
+            None => (None, None),
+        };
+        Ok(json!({
+            "file": file, "through_seq": through, "events": rows.len(), "bytes": bytes.len(),
+            "restored": ok, "detail": detail, "removed": removed, "copied": copied, "copy_detail": copy_detail,
+        }))
     }
+}
+
+/// Mirror the backups directory to the configured off-host destination
+/// (#297): rsync, deletions included so a pruned backup leaves there too.
+/// Whether it held, and why not.
+async fn mirror(dir: &Path, dest: &str, timeout_secs: u32) -> (bool, String) {
+    let from = format!("{}/", dir.display());
+    let run = tokio::process::Command::new("rsync").args(["-a", "--delete", &from, dest]).output();
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs.max(1) as u64), run).await {
+        Err(_) => return (false, format!("the copy to {dest} took longer than {timeout_secs} seconds")),
+        Ok(Err(e)) => return (false, format!("the copy to {dest} would not start ({e:#})")),
+        Ok(Ok(out)) => out,
+    };
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr).trim().chars().take(300).collect::<String>();
+        return (false, format!("the copy to {dest} failed ({})", if why.is_empty() { out.status.to_string() } else { why }));
+    }
+    let n = std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0);
+    (true, format!("mirrored {n} files to {dest}"))
 }
 
 impl Kernel {

@@ -425,6 +425,15 @@ pub struct Backup {
     /// an hour, so a transient fault (a full disk) can clear.
     #[serde(default = "retry_wait_secs")]
     pub retry_wait_secs: u32,
+    /// Where each backup is mirrored after it is made and old ones are
+    /// dropped (#297): an rsync destination, a path or `host:path`, from
+    /// configuration only. None configured, no off-host copy.
+    #[serde(default)]
+    pub copy_to: Option<String>,
+    /// Seconds an off-host copy may take before it is stopped and recorded
+    /// as failed (#297).
+    #[serde(default = "copy_timeout_secs")]
+    pub copy_timeout_secs: u32,
 }
 
 /// Daily: with a month kept, a month of daily restore points.
@@ -440,6 +449,9 @@ fn fallback_wait_secs() -> u32 {
 fn retry_wait_secs() -> u32 {
     3600
 }
+fn copy_timeout_secs() -> u32 {
+    300
+}
 
 impl Default for Backup {
     fn default() -> Self {
@@ -451,6 +463,8 @@ impl Default for Backup {
             databases: Vec::new(),
             fallback_wait_secs: fallback_wait_secs(),
             retry_wait_secs: retry_wait_secs(),
+            copy_to: None,
+            copy_timeout_secs: copy_timeout_secs(),
         }
     }
 }
@@ -845,6 +859,45 @@ pub struct Connector {
     /// Where a tool's action goes, read from what it acts on, by tool.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub destinations: BTreeMap<String, Destination>,
+    /// How the gate asks whether the person has mailed an address before
+    /// (#210): a read tool called with a query naming the address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent: Option<SentSearch>,
+}
+
+/// How the gate asks whether the person has mailed an address before, a
+/// recipient-provenance source beside the person's own words (#210):
+/// `read` (a read tool of the same app) is called with `input` set to
+/// `query` with `{address}` replaced, through the person's own sign-in,
+/// and the address counts as mailed when `found` (a JSON pointer into
+/// what it returns) is not empty.
+#[derive(Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
+pub struct SentSearch {
+    pub read: String,
+    pub input: String,
+    pub query: String,
+    pub found: String,
+}
+
+impl SentSearch {
+    /// What is wrong with this declaration, given each tool's risk class:
+    /// it reads with a read tool of the same app, names its input, asks
+    /// about the address, and points at where the answer says found.
+    pub fn fault(&self, risk: impl Fn(&str) -> Option<String>) -> Option<String> {
+        if risk(&self.read).as_deref() != Some("read") {
+            return Some(format!("sent mail is searched with {}, which is not a read tool of the same app", self.read));
+        }
+        if self.input.is_empty() || self.query.is_empty() || self.found.is_empty() {
+            return Some("sent mail names no input, query or found pointer".into());
+        }
+        if !self.query.contains("{address}") {
+            return Some("sent mail's query does not ask about {address}".into());
+        }
+        if !self.found.starts_with('/') {
+            return Some(format!("sent mail's {:?} is not a JSON pointer", self.found));
+        }
+        None
+    }
 }
 
 /// Where an action goes, read at the gate from the object it acts on and
@@ -974,6 +1027,12 @@ impl Config {
                 let risk = |t: &str| c.tools.get(t).map(|class| class.risk.clone());
                 anyhow::ensure!(risk(t).is_some(), "connector {}: destinations for {t}, which is not one of its tools", c.name);
                 if let Some(why) = d.fault(t, risk) {
+                    anyhow::bail!("connector {}: {why}", c.name);
+                }
+            }
+            if let Some(s) = &c.sent {
+                let risk = |t: &str| c.tools.get(t).map(|class| class.risk.clone());
+                if let Some(why) = s.fault(risk) {
                     anyhow::bail!("connector {}: {why}", c.name);
                 }
             }
@@ -1147,6 +1206,16 @@ mod tests {
         let set = load_backup("fallback_wait_secs = 7\nretry_wait_secs = 120\n").unwrap().backup;
         assert_eq!(set.fallback_wait_secs, 7);
         assert_eq!(set.retry_wait_secs, 120);
+    }
+
+    /// The off-host destination comes from `[backup]` only (#297): none
+    /// configured, no off-host copy.
+    #[test]
+    fn backup_copy_comes_from_config() {
+        let unset = load_backup("").unwrap().backup;
+        assert_eq!((unset.copy_to, unset.copy_timeout_secs), (None, 300));
+        let set = load_backup("copy_to = \"strix-beta:/backups\"\ncopy_timeout_secs = 60\n").unwrap().backup;
+        assert_eq!((set.copy_to.as_deref(), set.copy_timeout_secs), (Some("strix-beta:/backups"), 60));
     }
 
     fn load_browser(allow: &str) -> anyhow::Result<Config> {

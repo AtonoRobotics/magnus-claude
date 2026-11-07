@@ -62,4 +62,6 @@ jobs:
       - name: Programs the suite launches
         run: cargo build --workspace --bins
       - name: Injection suite
-        run: cargo test -p magnus-scratch --test injection -- --nocapture
+        # Eight tests at once (.config/nextest.toml): libtest does not read
+        # that file, so the cap is repeated here.
+        run: cargo test -p magnus-scratch --test injection -- --nocapture --test-threads=8

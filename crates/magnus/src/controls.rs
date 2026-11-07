@@ -100,10 +100,21 @@ impl Kernel {
         self.read(|s| s.schedules.values().filter(|x| may_control(who, &x.person)).map(|x| schedule_row(s, x)).collect())
     }
 
-    /// One task by id, however old: the list's row, under the same
-    /// who-may-control rule; no such task when it is not theirs (#265).
+    /// One task by id, however old: the list's row, and what its run did
+    /// so far, split the way a cancel report splits it; under the same
+    /// who-may-control rule, no such task when it is not theirs (#340).
     pub fn get_task(&self, who: &Person, id: &str) -> Result<Value, Refused> {
-        self.read(|s| controlled_task(s, who, id)).ok_or(Refused::NotFound("task"))
+        let mut row = self.read(|s| controlled_task(s, who, id)).ok_or(Refused::NotFound("task"))?;
+        // The row above passed the control rule; its run is fetched as is.
+        let run = self.read(|s| s.tasks.get(id).and_then(|t| s.runs.get(&t.run_id).cloned()));
+        let Some(run) = run else { return Err(Refused::NotFound("task")) };
+        let (cannot_be_undone, already_done, possibly_done) = self.stopped_run_report(&run);
+        if let Some(o) = row.as_object_mut() {
+            o.insert("cannot_be_undone".into(), json!(cannot_be_undone));
+            o.insert("already_done".into(), json!(already_done));
+            o.insert("possibly_done".into(), json!(possibly_done));
+        }
+        Ok(row)
     }
 
     /// One schedule by id under the same rule (#265).
@@ -303,7 +314,10 @@ impl Kernel {
         let Some(who) = self.person(person) else { return ("no such person".into(), true, None) };
         let id = input["id"].as_str().unwrap_or_default();
         let r: Result<Value, Refused> = match tool {
-            "list_tasks" => self.as_policy_allows(&who, self.tasks_for(&who, 30)).await.map(|v| json!({ "tasks": v })),
+            "list_tasks" => {
+                let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(30).clamp(1, 200) as usize;
+                self.as_policy_allows(&who, self.tasks_for(&who, limit)).await.map(|v| json!({ "tasks": v }))
+            }
             "list_schedules" => self.as_policy_allows(&who, self.schedules_for(&who)).await.map(|v| json!({ "schedules": v })),
             "get_task" => match self.get_task(&who, id) {
                 Ok(row) => self.as_policy_allows(&who, vec![row]).await.map(|mut rows| json!({ "task": rows.pop().unwrap_or(Value::Null) })),

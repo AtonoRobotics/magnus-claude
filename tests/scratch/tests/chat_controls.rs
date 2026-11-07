@@ -301,6 +301,67 @@ async fn getting_a_tainted_task_taints_the_turn_that_reads_it() {
     assert!(web.hits().is_empty(), "the summary went out: {:?}", web.hits());
 }
 
+/// The list holds the newest 30 unless asked wider (#340): an older task
+/// is discoverable again.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_tasks_limit_reaches_past_the_newest_30() {
+    let calls = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start(model(calls.clone())).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let bob = app.api("bob");
+    let mut ids = vec![];
+    for i in 0..32 {
+        ids.push(bob.submit(&format!("Numbered chore {i}.")).await);
+    }
+
+    // The default list ends at 30: the oldest chore is past it.
+    let listed = ask(&bob, &calls, "What am I working on?", "list_tasks", json!({})).await;
+    let listed: Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["tasks"].as_array().unwrap().len(), 30, "{listed}");
+    assert!(!listed.to_string().contains(&ids[0]), "the default list reached past 30: {listed}");
+    // Asked wider, it reaches the oldest one.
+    let listed = ask(&bob, &calls, "What am I working on, all of it?", "list_tasks", json!({ "limit": 50 })).await;
+    assert!(listed.contains(&ids[0]) && listed.contains(&ids[31]), "{listed}");
+}
+
+/// One task by id says what its run did so far (#340), split the way a
+/// cancel report splits it.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_task_reports_what_the_run_did_so_far() {
+    let calls: Arc<Mutex<Vec<(String, String, Value)>>> = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start({
+        let calls = calls.clone();
+        script(move |c| {
+            let calls = calls.clone();
+            async move {
+            if !c.body["system"].to_string().contains("talking with the person you work for in a chat") {
+                return match c.turn() {
+                    0 => simple_contract(),
+                    1 => tool("memory_write", json!({ "fact": "the person prefers tea" })),
+                    _ => tool("ask_principal", json!({ "question": "Which quarter?" })),
+                };
+            }
+            let first = c.messages().first().cloned().unwrap_or_default();
+            let said = first["content"].as_array().and_then(|b| b.last()).and_then(|b| b["text"].as_str()).unwrap_or_default().to_string();
+            let found = calls.lock().unwrap().iter().find(|(s, _, _)| *s == said).cloned();
+            match (found, c.turn()) {
+                (Some((_, t, input)), 0) => tool(&t, input),
+                _ => Reply::Text(c.last_results().first().map(|r| r.text.clone()).unwrap_or_else(|| "Done.".into())),
+                }
+            }
+        })
+    })
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let bob = app.api("bob");
+    let task = bob.submit("Note my tea preference, then ask about quarters.").await;
+    bob.wait_item(&task, "question").await;
+
+    let got = ask(&bob, &calls, "What did the tea task do?", "get_task", json!({ "id": task })).await;
+    let got: Value = serde_json::from_str(&got).unwrap();
+    assert_eq!(got["task"]["already_done"], json!(["memory write"]), "{got}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_org_policy_can_stop_admins_cancelling_others_tasks() {
     let person = |id: &str, roles: &[&str]| Person {
@@ -340,3 +401,4 @@ async fn an_org_policy_can_stop_admins_cancelling_others_tasks() {
     let done = ask(&dave, &calls, "Cancel my own task.", "cancel_task", json!({ "id": own })).await;
     assert!(done.contains("cancelled"), "{done}");
 }
+
