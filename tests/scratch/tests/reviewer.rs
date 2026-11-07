@@ -198,3 +198,34 @@ async fn unchecked_criteria_go_to_the_reviewer_before_the_person() {
     let card = dana.wait_item(&flags, "review").await;
     assert!(card.to_string().contains("reviewer"), "the review card does not carry the reviewer's reason: {card}");
 }
+
+/// The completion reviewer judges with the run's tool results in front
+/// of it, not the summary alone: an overstated report, with no send in
+/// the results, is flagged for the person (#384).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_completion_reviewer_sees_the_runs_tool_results() {
+    let mail = mcp::mail().start().await;
+    let m = FakeModel::start(script(|c| async move {
+        if c.offered_tools().contains(&"review".to_string()) {
+            // Hold only when the run's results show the claimed send.
+            let sent = c.text().contains("mail__send") && c.text().contains("\"status\": \"done\"");
+            return tool("review", json!({ "criteria": [{ "id": "c1", "holds": sent, "evidence": if sent { "the results show the send" } else { "no send in the run's results" } }] }));
+        }
+        match c.turn() {
+            0 => contract_unchecked("email bob", "bob was emailed"),
+            1 => tool("mail__list_sent", json!({})),
+            _ => complete("emailed bob"),
+        }
+    }))
+    .await;
+    let s = spec().app("mail", &mail, "public", "private", &[("list_sent", "read")]);
+    let app = Appliance::start(s, &m).await;
+    let dana = app.api("dana");
+    let (t, _) = trial(&dana, "rev", "evidence", "Email bob hello.", json!({ "reviewer": true })).await;
+
+    let done = dana.wait_settled(&t).await;
+    assert_eq!(done["waiting_on"], "review", "the overstated report did not stay for the person: {done}");
+    let reviews: Vec<_> = m.requests().into_iter().filter(|c| c.offered_tools().contains(&"review".to_string())).collect();
+    assert!(!reviews.is_empty(), "the reviewer was never asked");
+    assert!(reviews.iter().any(|c| c.text().contains("mail__list_sent")), "the reviewer never saw the run's tool results");
+}

@@ -95,8 +95,9 @@ impl Kernel {
     pub(crate) async fn reviewer_on_completion(&self, run: &Run, goal: &str, criteria: Vec<Value>, summary: &str) -> Result<Vec<Value>> {
         let asked = self.asked(run).await?;
         let text = format!(
-            "The person asked:\n\n{asked}\n\nThe goal: {goal}\n\nThe criteria to judge:\n{}\n\nThe agent's own report, which is not evidence: {summary}",
-            serde_json::to_string_pretty(&criteria)?
+            "The person asked:\n\n{asked}\n\nThe goal: {goal}\n\nThe criteria to judge:\n{}\n\nThe run's tool calls and what each returned:\n{}\n\nThe agent's own report, which is not evidence: {summary}",
+            serde_json::to_string_pretty(&criteria)?,
+            evidence(run),
         );
         let msg = Message { role: Role::User, content: vec![Block::Text { text: super::clip(&text) }], state: None };
         let tools = vec![review_tool(
@@ -123,6 +124,29 @@ impl Kernel {
         }
         Ok(left)
     }
+}
+
+/// The run's record for the completion reviewer: each tool call with its
+/// outcome and what it returned, newest last, clipped to fit (#384).
+/// Results may hold untrusted content; the prompt reads them as data.
+fn evidence(run: &Run) -> String {
+    let lines: Vec<String> = run
+        .results_in_order()
+        .iter()
+        .map(|r| {
+            let text: String = r["text"].as_str().unwrap_or_default().chars().take(400).collect();
+            format!("- {} [{}]: {}", r["tool"].as_str().unwrap_or("?"), r["status"].as_str().unwrap_or("?"), text)
+        })
+        .collect();
+    if lines.is_empty() {
+        return "(no tool calls recorded)".into();
+    }
+    let mut out = lines.join("\n");
+    if out.chars().count() > 8000 {
+        let keep: String = out.chars().rev().take(8000).collect::<String>().chars().rev().collect();
+        out = format!("[earlier results omitted]\n{keep}");
+    }
+    out
 }
 
 /// What the reviewer said about each criterion: whether it holds, and the
