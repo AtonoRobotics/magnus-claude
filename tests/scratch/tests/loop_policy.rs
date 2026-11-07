@@ -101,6 +101,71 @@ async fn an_interrupt_deny_queues_an_observation_instead() {
     assert!(inbox.iter().any(|i| i["kind"] == "observation" && i["person"] == "bob"), "a denied interruption left nothing behind: {inbox:?}");
 }
 
+/// A denied suggestion stops the out-of-hours fallback too: with
+/// interrupt allowed, an interruption outside working hours queues
+/// nothing instead of bypassing through an observation (#402).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_suggest_deny_stops_the_out_of_hours_fallback() {
+    use chrono::Timelike;
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body["system"].to_string().contains(REVIEW) {
+            return tool("task_fail", json!({ "reason": "not under test" }));
+        }
+        if c.turn() == 0 {
+            return tool("interrupt", json!({ "what": "Something urgent happened", "why": "It cannot wait" }));
+        }
+        done()
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    assert!(app.api("alice").put_policy("org", &org_policy(r#"forbid(principal, action == Action::"suggest", resource);"#)).await.is_success());
+    // A one-hour window two hours from now: never the test's own run.
+    let h = (chrono::Utc::now().hour() as i64 + 2).rem_euclid(24);
+    let (st, v) = app
+        .api("bob")
+        .send(reqwest::Method::PUT, "/v1/preferences", Some(json!({ "working_hours": { "start": format!("{h:02}:00"), "end": format!("{:02}:01", (h + 1).rem_euclid(24)) } })))
+        .await;
+    assert!(st.is_success(), "{st} {v}");
+    enable_loop(&mut app).await;
+    let bob = app.api("bob");
+    drain_reviews(&bob).await;
+    let inbox = bob.inbox().await;
+    assert!(inbox.iter().all(|i| !(i["person"] == "bob" && (i["kind"] == "observation" || i["kind"] == "interrupt"))), "the fallback bypassed the suggest denial: {inbox:?}");
+}
+
+/// A denied suggestion stops the budget-spent fallback too: the first
+/// three interruptions deliver, the fourth queues nothing (#402).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_suggest_deny_stops_the_budget_spent_fallback() {
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body["system"].to_string().contains(REVIEW) {
+            return tool("task_fail", json!({ "reason": "not under test" }));
+        }
+        if c.turn() <= 3 {
+            return tool("interrupt", json!({ "what": "Something urgent happened", "why": "It cannot wait" }));
+        }
+        done()
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    assert!(app.api("alice").put_policy("org", &org_policy(r#"forbid(principal, action == Action::"suggest", resource);"#)).await.is_success());
+    let (st, v) = app
+        .api("bob")
+        .send(reqwest::Method::PUT, "/v1/preferences", Some(json!({ "working_hours": { "start": "00:00", "end": "23:59" } })))
+        .await;
+    assert!(st.is_success(), "{st} {v}");
+    enable_loop(&mut app).await;
+    let bob = app.api("bob");
+    drain_reviews(&bob).await;
+    let inbox = bob.inbox().await;
+    let (interrupts, observations) = (
+        inbox.iter().filter(|i| i["person"] == "bob" && i["kind"] == "interrupt").count(),
+        inbox.iter().filter(|i| i["person"] == "bob" && i["kind"] == "observation").count(),
+    );
+    assert_eq!(interrupts, 3, "the budget did not spend as expected: {inbox:?}");
+    assert_eq!(observations, 0, "the fallback bypassed the suggest denial: {inbox:?}");
+}
+
 /// A denied act stops that tool call in a loop run, per tool: the
 /// forbidden call never executes, the allowed one beside it does.
 #[tokio::test(flavor = "multi_thread")]

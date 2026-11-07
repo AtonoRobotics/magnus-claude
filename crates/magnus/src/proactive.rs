@@ -558,6 +558,12 @@ impl crate::kernel::Kernel {
             return Ok((format!("Interruptions and observations are not permitted ({denied}): nothing was queued."), true));
         }
         if !in_window(minutes_at(now, st.tz), st.working) {
+            // The fallback queues an observation, so it needs the
+            // suggest leave too: without it the denial would leak
+            // through here (#402).
+            if let Some(denied) = self.loop_deny(run, "suggest", None) {
+                return Ok((format!("Outside working hours, and observations are not permitted ({denied}): nothing was queued."), true));
+            }
             let at = window_next_start(now, st.tz, st.working).unwrap_or(now);
             let item = self.item(run, "observation", what.to_string(), serde_json::json!({ "why": why, "evidence": "queued: outside working hours", "call_id": call_id, "notify_at": at.to_rfc3339() })).await?;
             return Ok((format!(
@@ -574,6 +580,11 @@ impl crate::kernel::Kernel {
                 .unwrap_or(0)
         });
         if n >= st.per_day {
+            // As above: the fallback is an observation, gated on
+            // suggest (#402).
+            if let Some(denied) = self.loop_deny(run, "suggest", None) {
+                return Ok((format!("Interruption budget spent ({n} today), and observations are not permitted ({denied}): nothing was queued."), true));
+            }
             let at = quiet_ends_at(now, st.tz, st.quiet).unwrap_or(now);
             let item = self.item(run, "observation", what.to_string(), serde_json::json!({ "why": why, "evidence": "queued: interruption budget spent", "call_id": call_id, "notify_at": at.to_rfc3339() })).await?;
             return Ok((format!(
