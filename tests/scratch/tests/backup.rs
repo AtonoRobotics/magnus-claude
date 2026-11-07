@@ -5,7 +5,7 @@
 
 use magnus_invariants::appliance::bin;
 use magnus_invariants::*;
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_backup_restores_the_log_and_the_vault_after_both_are_lost() {
@@ -119,4 +119,52 @@ async fn a_database_the_appliance_depends_on_comes_back_from_the_backup() {
     assert!(out.status.success(), "restore failed: {}", String::from_utf8_lossy(&out.stderr));
     let name: String = idp.admin().await.query_one("SELECT name FROM realm", &[]).await.unwrap().get(0);
     assert_eq!(name, "magnus", "the identity provider's data did not come back");
+}
+
+/// After each backup and prune the backups directory is mirrored to the
+/// configured off-host destination (#297): new files arrive, pruned ones
+/// leave; a failed copy is recorded, not a failed backup.
+#[tokio::test(flavor = "multi_thread")]
+async fn backups_are_mirrored_off_host_after_each_backup_and_prune() {
+    let m = FakeModel::start(script(|_| async move { Reply::Text(String::new()) })).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    // None configured: the backup holds no copy either way.
+    let (st, b) = app.api("alice").post("/v1/backups", json!({})).await;
+    assert_eq!(st.as_u16(), 201, "{b}");
+    assert!(b["copied"].is_null(), "{b}");
+
+    let offhost = app.dir.path().join("offhost");
+    std::fs::create_dir_all(&offhost).unwrap();
+    // Junk off host that the mirror drops, as it drops pruned backups.
+    std::fs::write(offhost.join("stale.backup"), b"stale").unwrap();
+    magnus_scratch::reconfigure(&mut app, |c| {
+        let mut t = toml::Table::new();
+        t.insert("copy_to".into(), offhost.to_str().unwrap().into());
+        c.insert("backup".into(), toml::Value::Table(t));
+    })
+    .await;
+    let alice = app.api("alice");
+    let (st, b) = alice.post("/v1/backups", json!({})).await;
+    assert_eq!((st.as_u16(), b["copied"].clone()), (201, Value::Bool(true)), "{b}");
+    let file = b["file"].as_str().unwrap().to_string();
+    assert!(offhost.join(&file).exists(), "the backup was not mirrored: {b}");
+    assert!(!offhost.join("stale.backup").exists(), "the mirror left the stale file");
+    let (_, list) = alice.get("/v1/backups").await;
+    assert_eq!((list["copy_to"].clone(), list["copy"]["copied"].clone()), (json!(offhost.to_str().unwrap()), Value::Bool(true)), "{list}");
+
+    // A destination that fails: the backup still holds, the copy recorded.
+    magnus_scratch::reconfigure(&mut app, |c| {
+        let mut t = toml::Table::new();
+        t.insert("copy_to".into(), "/proc/no-such-place/backups".into());
+        c.insert("backup".into(), toml::Value::Table(t));
+    })
+    .await;
+    let alice = app.api("alice");
+    let (st, b) = alice.post("/v1/backups", json!({})).await;
+    assert_eq!((st.as_u16(), b["restored"].clone(), b["copied"].clone()), (201, Value::Bool(true), Value::Bool(false)), "{b}");
+    assert!(!b["copy_detail"].as_str().unwrap_or_default().is_empty(), "{b}");
+    let logged = app.db.admin().await.query("SELECT body::text FROM events WHERE kind = 'backup_copied' ORDER BY seq", &[]).await.unwrap();
+    assert_eq!(logged.len(), 2);
+    let last: Value = serde_json::from_str(logged[1].get(0)).unwrap();
+    assert_eq!((last["ok"].clone(), last["file"].clone()), (Value::Bool(false), b["file"].clone()), "{last}");
 }

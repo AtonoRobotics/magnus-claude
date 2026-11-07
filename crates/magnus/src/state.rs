@@ -868,6 +868,8 @@ pub struct State {
     pub turned_off: std::collections::BTreeSet<String>,
     /// The latest backup's restore check: file, whether it restored, detail, when.
     pub last_backup: Option<(String, bool, String, DateTime<Utc>)>,
+    /// The latest backup's off-host copy: file, whether it held, detail, when.
+    pub last_copy: Option<(String, bool, String, DateTime<Utc>)>,
     /// Removed content some backups still hold, until they are rewritten.
     pub scrub_pending: Option<ScrubPending>,
     /// Each person erased with content, by their id then.
@@ -1365,6 +1367,9 @@ impl State {
             }
             Ev::BackupChecked { file, ok, detail } => {
                 self.last_backup = Some((file.clone(), *ok, detail.clone(), e.at));
+            }
+            Ev::BackupCopied { file, ok, detail } => {
+                self.last_copy = Some((file.clone(), *ok, detail.clone(), e.at));
             }
             Ev::BackupScrubPending { from, through, files, detail } => {
                 self.scrub_pending = Some(ScrubPending { from: *from, through: *through, files: files.clone(), detail: detail.clone(), at: e.at });
