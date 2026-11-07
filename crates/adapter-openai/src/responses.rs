@@ -59,7 +59,9 @@ fn input(p: &CompleteParams) -> Vec<Value> {
     out
 }
 
-pub async fn complete(http: &reqwest::Client, p: CompleteParams, sink: &mut Sink) -> anyhow::Result<()> {
+/// The request body a turn sends: one builder for the asking and the
+/// measuring, so the estimate can never drift from what goes out.
+pub fn request_body(p: &CompleteParams) -> Value {
     let s = &p.settings;
     let instructions = match s["instructions_prefix"].as_str() {
         Some(pre) => format!("{pre}\n\n{}", p.system),
@@ -68,7 +70,7 @@ pub async fn complete(http: &reqwest::Client, p: CompleteParams, sink: &mut Sink
     let mut body = json!({
         "model": p.model,
         "instructions": instructions,
-        "input": input(&p),
+        "input": input(p),
         "stream": true,
         "store": s["store"].as_bool().unwrap_or(false),
         "tool_choice": "auto",
@@ -92,7 +94,12 @@ pub async fn complete(http: &reqwest::Client, p: CompleteParams, sink: &mut Sink
             body[k.as_str()] = v.clone();
         }
     }
+    body
+}
 
+pub async fn complete(http: &reqwest::Client, p: CompleteParams, sink: &mut Sink) -> anyhow::Result<()> {
+    let s = &p.settings;
+    let body = request_body(&p);
     let mut force = false;
     let resp = loop {
         let (token, account, refreshed) = match bearer(http, s, &p.credential, force).await {

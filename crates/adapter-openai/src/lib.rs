@@ -27,7 +27,7 @@ mod auth;
 mod chat;
 mod responses;
 
-use magnus_adapter_proto::{self as proto, ErrorClass, Event, ModelInfo, Request, Sink, Usage};
+use magnus_adapter_proto::{self as proto, CompleteParams, ErrorClass, Event, ModelInfo, Request, Sink, Usage};
 use serde_json::{json, Value};
 
 pub fn main() {
@@ -177,7 +177,7 @@ async fn client_version(http: &reqwest::Client, url: &str, refresh_s: u64) -> Re
 
 async fn handle(http: reqwest::Client, mut req: Request, mut sink: Sink) -> anyhow::Result<()> {
     let settings = match &mut req {
-        Request::Hello {} | Request::AuthRevoke { .. } | Request::Quote { .. } => None,
+        Request::Hello {} | Request::AuthRevoke { .. } | Request::Quote { .. } | Request::EstimatePrompt(..) => None,
         Request::Catalog { settings, .. } | Request::AuthBegin { settings } | Request::AuthComplete { settings, .. } => Some(settings),
         Request::Complete(p) => Some(&mut p.settings),
     };
@@ -200,6 +200,16 @@ async fn handle(http: reqwest::Client, mut req: Request, mut sink: Sink) -> anyh
             let input_usd = cost(&settings, &model, &Usage { input_tokens, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0.0 });
             let output_usd = cost(&settings, &model, &Usage { input_tokens: 0, output_tokens, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0.0 });
             sink.send(&Event::Quote { input_usd, output_usd }).await
+        }
+        Request::EstimatePrompt(p) => {
+            // What a turn would send: the same body, measured, not asked.
+            let full = CompleteParams { model: p.model, settings: p.settings, credential: None, system: p.system, messages: p.messages, tools: p.tools, max_tokens: 0 };
+            let body = match full.settings["api"].as_str().unwrap_or("chat") {
+                "responses" => responses::request_body(&full),
+                _ => chat::request_body(&full),
+            };
+            let chars = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
+            sink.send(&Event::PromptSize { input_tokens: proto::chars_to_tokens(chars) }).await
         }
         Request::AuthBegin { settings } => auth::begin(&http, &settings, &mut sink).await,
         Request::AuthComplete { settings, flow, input } => auth::complete(&http, &settings, &flow, &input, &mut sink).await,

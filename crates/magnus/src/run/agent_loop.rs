@@ -160,9 +160,17 @@ impl Kernel {
         };
         let step = run.replies.len() as u32;
         let (adapter, model) = run.model();
-        // The prompt's tokens, estimated once: the quote below prices the
-        // same prompt every attempt, while what is left is re-read.
-        let input_tokens = estimated_input_tokens(&system, &messages, &tools);
+        // The prompt's tokens, asked of the adapter once: what it would
+        // send, not the kernel's bytes (#323). The quote below prices the
+        // same prompt every attempt, while what is left is re-read. An
+        // adapter that cannot measure falls back to the kernel's bytes.
+        let input_tokens = match self.adapters.estimate_prompt(adapter, model, &system, messages.clone(), tools.clone()).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("prompt estimate for {run_id}: {e:#}; pricing the kernel's bytes");
+                estimated_input_tokens(&system, &messages, &tools)
+            }
+        };
         let mut attempt = 0u32;
         loop {
             // Each attempt, a retry too, reads the run as it is now: a failed
@@ -296,15 +304,12 @@ impl Kernel {
     }
 }
 
-/// Prompt bytes per token when pricing a call that has not happened: the
-/// developer views estimate unreported usage the same way.
-const CHARS_PER_TOKEN: usize = 4;
-
-/// The prompt's tokens, estimated from what goes out: the system prompt,
-/// the messages and the tools as sent.
+/// The prompt's tokens from the kernel's bytes: the fallback when the
+/// adapter cannot measure what it would send. The live path asks the
+/// adapter, which drops what it cannot send.
 fn estimated_input_tokens(system: &str, messages: &[Message], tools: &[ToolSpec]) -> u64 {
     let chars = system.len() + serde_json::to_string(messages).map(|s| s.len()).unwrap_or(0) + serde_json::to_string(tools).map(|s| s.len()).unwrap_or(0);
-    ((chars + CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN) as u64
+    magnus_adapter_proto::chars_to_tokens(chars)
 }
 
 /// The output tokens the dollars left allow: the full allowance when the
