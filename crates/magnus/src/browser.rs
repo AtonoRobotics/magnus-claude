@@ -62,7 +62,8 @@ impl Browser {
         let (r, mut w) = s.into_split();
         w.write_all(format!("{req}\n").as_bytes()).await?;
         let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(90), BufReader::new(r).read_line(&mut line))
+        // Past the sidecar's 90s navigation budget plus its overhead (#426).
+        tokio::time::timeout(Duration::from_secs(120), BufReader::new(r).read_line(&mut line))
             .await
             .map_err(|_| anyhow!("the browser did not answer in time"))??;
         let v: Value = serde_json::from_str(&line).map_err(|_| anyhow!("the browser sent an unreadable answer"))?;
