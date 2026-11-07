@@ -68,46 +68,72 @@ pub const CONTROL_ACTIONS: &[&str] =
 /// The actions that call a tool rather than control a task or a schedule.
 const TOOL_ACTIONS: &[&str] = &["execute", "request_approval"];
 
-/// True when a rule naming `uids` may bear on a control request (`control`)
-/// or a tool request. A rule is dropped from a partition only when every
-/// action it names is known to belong to the other side; a mixed rule, or
-/// one naming an unknown action, stays in both.
-fn rule_touches(uids: &[cedar_policy::EntityUid], control: bool) -> bool {
+/// The proactive loop's own actions (#368): suggest (observations and
+/// proposals), interrupt, and act (a loop run's tool calls). Suggest and
+/// interrupt spend a person's attention, so their resource is the
+/// person; acts touch apps, so theirs is the tool, as for execute.
+pub const LOOP_ACTIONS: &[&str] = &["suggest", "interrupt", "act"];
+
+/// Which evaluations a layer is partitioned for: tool calls, task and
+/// schedule control, or the loop's own actions.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Side {
+    Tool,
+    Control,
+    Loop,
+}
+
+/// True when a rule naming `uids` may bear on `side`'s requests. A rule
+/// is dropped from a partition only when every action it names is known
+/// to belong to another side; a mixed rule, or one naming an unknown
+/// action, stays everywhere it might bear.
+fn rule_touches(uids: &[cedar_policy::EntityUid], side: Side) -> bool {
     if uids.is_empty() {
         return true;
     }
-    let other = if control { TOOL_ACTIONS } else { CONTROL_ACTIONS };
+    let others: [&[&str]; 2] = match side {
+        Side::Tool => [CONTROL_ACTIONS, LOOP_ACTIONS],
+        Side::Control => [TOOL_ACTIONS, LOOP_ACTIONS],
+        Side::Loop => [TOOL_ACTIONS, CONTROL_ACTIONS],
+    };
     !uids.iter().all(|uid| {
-        uid.type_name().to_string() == "Action" && other.contains(&uid.id().unescaped())
+        uid.type_name().to_string() == "Action" && others.iter().any(|s| s.contains(&uid.id().unescaped()))
     })
 }
 
 /// Which evaluations a rule bears on: tool calls, task and schedule
-/// control, or both for a mixed or unknown action list.
-pub(crate) fn policy_sides(policy: &cedar_policy::Policy) -> (bool, bool) {
+/// control, the loop's actions — or several, for a mixed or unknown
+/// action list. Unqualified rules bear on tool calls only: before
+/// control was governed every unqualified rule could only mean tools,
+/// and that meaning is kept for the loop as well.
+pub(crate) fn policy_sides(policy: &cedar_policy::Policy) -> (bool, bool, bool) {
     match policy.action_constraint() {
-        ActionConstraint::Any => (true, false),
+        ActionConstraint::Any => (true, false, false),
         ActionConstraint::Eq(uid) => {
             let uids = std::slice::from_ref(&uid);
-            (rule_touches(uids, false), rule_touches(uids, true))
+            (rule_touches(uids, Side::Tool), rule_touches(uids, Side::Control), rule_touches(uids, Side::Loop))
         }
-        ActionConstraint::In(uids) => (rule_touches(&uids, false), rule_touches(&uids, true)),
+        ActionConstraint::In(uids) => (rule_touches(&uids, Side::Tool), rule_touches(&uids, Side::Control), rule_touches(&uids, Side::Loop)),
     }
 }
 
-/// Split a layer's rules into the ones that bear on `control` requests
-/// (task and schedule operations) or, when false, the tool boundary. The
-/// subset is re-rendered and policy ids renumbered, so diagnostics on a
-/// mixed layer name the rule's position within its partition.
-fn partition_layer(text: &str, control: bool) -> Result<String> {
-    if !control && !CONTROL_ACTIONS.iter().any(|a| text.contains(a)) {
+/// Split a layer's rules into the ones that bear on `side`'s requests.
+/// The subset is re-rendered and policy ids renumbered, so diagnostics
+/// on a mixed layer name the rule's position within its partition.
+fn partition_layer(text: &str, side: Side) -> Result<String> {
+    if side == Side::Tool && !CONTROL_ACTIONS.iter().chain(LOOP_ACTIONS.iter()).any(|a| text.contains(a)) {
         return Ok(text.to_string());
     }
     let set = PolicySet::from_str(text).map_err(|e| anyhow!("{e}"))?;
     let mut out = String::new();
     for policy in set.policies() {
-        let (tools, controls) = policy_sides(&policy);
-        if (controls && control) || (tools && !control) {
+        let (tools, controls, loops) = policy_sides(&policy);
+        let keep = match side {
+            Side::Tool => tools,
+            Side::Control => controls,
+            Side::Loop => loops,
+        };
+        if keep {
             if !out.is_empty() {
                 out.push('\n');
             }
@@ -174,13 +200,13 @@ pub fn control_allowed(policies: &BTreeMap<String, String>, person: &Person, t: 
     .map_err(|e| failed(e.to_string()))?;
     let req = Request::new(uid("Person", &person.id).map_err(|e| failed(format!("{e:#}")))?, uid("Action", t.op).map_err(|e| failed(format!("{e:#}")))?, uid(t.kind, t.id).map_err(|e| failed(format!("{e:#}")))?, ctx, None)
         .map_err(|e| failed(e.to_string()))?;
-    let org = format!("{}\n{DEFAULT_CONTROL}", partition_layer(&layers[0].1, true).map_err(|e| failed(format!("{e:#}")))?);
+    let org = format!("{}\n{DEFAULT_CONTROL}", partition_layer(&layers[0].1, Side::Control).map_err(|e| failed(format!("{e:#}")))?);
     let (mut ok, rule) = eval(&org, "org", &req, &ents).map_err(|e| failed(format!("{e:#}")))?;
     let mut reason = rule.first().cloned();
     for (name, text) in &layers[1..] {
         let narrowed = format!(
             "{}\n{CONTROL_PERMIT_ALL}",
-            partition_layer(text, true).map_err(|e| failed(format!("{e:#}")))?
+            partition_layer(text, Side::Control).map_err(|e| failed(format!("{e:#}")))?
         );
         let (allows, rules) = eval(&narrowed, name, &req, &ents).map_err(|e| failed(format!("{e:#}")))?;
         if !allows {
@@ -194,6 +220,100 @@ pub fn control_allowed(policies: &BTreeMap<String, String>, person: &Person, t: 
         Err(ControlDeny::Forbidden(match reason {
             Some(r) => format!("policy forbids {} for {} (rule {r})", t.op, person.id),
             None => format!("no policy permits {} for {}", t.op, person.id),
+        }))
+    }
+}
+
+/// The loop's actions in force until the owner writes narrower ones:
+/// the loop suggests, interrupts and acts (#368). An org narrows per
+/// resource from here; lower layers can only narrow further.
+pub const DEFAULT_LOOP: &str = r#"
+permit(principal, action in [Action::"suggest", Action::"interrupt", Action::"act"], resource);
+"#;
+
+const LOOP_PERMIT_ALL: &str =
+    "permit(principal, action in [Action::\"suggest\", Action::\"interrupt\", Action::\"act\"], resource);";
+
+fn loop_entities(person: &Person, tool: Option<&ToolFacts>) -> Result<Entities> {
+    let mut groups = HashSet::new();
+    let mut list = vec![];
+    for g in &person.groups {
+        let g = uid("Group", g)?;
+        groups.insert(g.clone());
+        list.push(Entity::new_no_attrs(g, HashSet::new()));
+    }
+    list.push(Entity::new_no_attrs(uid("Person", &person.id)?, groups));
+    if let Some(t) = tool {
+        let app = uid("App", t.app)?;
+        list.push(Entity::new_no_attrs(app.clone(), HashSet::new()));
+        let attrs: HashMap<String, RestrictedExpression> = [
+            ("risk".to_string(), RestrictedExpression::new_string(t.risk.as_str().into())),
+            ("audience".to_string(), RestrictedExpression::new_string(t.audience.as_str().into())),
+        ]
+        .into_iter()
+        .collect();
+        list.push(Entity::new(uid("Tool", t.name)?, attrs, [app].into_iter().collect()).map_err(|e| anyhow!("{e}"))?);
+    }
+    Entities::from_entities(list, None).map_err(|e| anyhow!("{e}"))
+}
+
+/// Why a loop output was refused: the policy forbids it, or the policy
+/// itself failed to evaluate.
+pub enum LoopDeny {
+    Forbidden(String),
+    Broken(String),
+}
+
+/// Whether the loop may `op` (`suggest`, `interrupt`, `act`) for
+/// `person`: the organization layer permits and no lower layer forbids
+/// (#368). Suggest and interrupt name the person as the resource whose
+/// attention they spend; act names the tool, as execute does. The
+/// allowing rule, or why not.
+pub fn loop_allowed(
+    policies: &BTreeMap<String, String>,
+    person: &Person,
+    op: &str,
+    tool: Option<&ToolFacts>,
+    untrusted: bool,
+    private: bool,
+) -> Result<String, LoopDeny> {
+    let failed = |e: String| LoopDeny::Broken(format!("policy failed to evaluate {op} for {}: {e}", person.id));
+    let ents = loop_entities(person, tool).map_err(|e| failed(format!("{e:#}")))?;
+    let layers = layers_for(policies, person, None);
+    let ctx = Context::from_pairs([
+        ("untrusted".to_string(), RestrictedExpression::new_bool(untrusted)),
+        ("private".to_string(), RestrictedExpression::new_bool(private)),
+    ])
+    .map_err(|e| failed(e.to_string()))?;
+    let resource = match tool {
+        Some(t) => uid("Tool", t.name).map_err(|e| failed(format!("{e:#}")))?,
+        None => uid("Person", &person.id).map_err(|e| failed(format!("{e:#}")))?,
+    };
+    let req = Request::new(
+        uid("Person", &person.id).map_err(|e| failed(format!("{e:#}")))?,
+        uid("Action", op).map_err(|e| failed(format!("{e:#}")))?,
+        resource,
+        ctx,
+        None,
+    )
+    .map_err(|e| failed(e.to_string()))?;
+    let org = format!("{}\n{DEFAULT_LOOP}", partition_layer(&layers[0].1, Side::Loop).map_err(|e| failed(format!("{e:#}")))?);
+    let (mut ok, rule) = eval(&org, "org", &req, &ents).map_err(|e| failed(format!("{e:#}")))?;
+    let mut reason = rule.first().cloned();
+    for (name, text) in &layers[1..] {
+        let narrowed = format!("{}\n{LOOP_PERMIT_ALL}", partition_layer(text, Side::Loop).map_err(|e| failed(format!("{e:#}")))?);
+        let (allows, rules) = eval(&narrowed, name, &req, &ents).map_err(|e| failed(format!("{e:#}")))?;
+        if !allows {
+            ok = false;
+            reason = rules.first().cloned().or_else(|| Some(name.clone()));
+        }
+    }
+    if ok {
+        Ok(reason.unwrap_or_default())
+    } else {
+        Err(LoopDeny::Forbidden(match reason {
+            Some(r) => format!("policy forbids {op} for {} (rule {r})", person.id),
+            None => format!("no policy permits {op} for {}", person.id),
         }))
     }
 }
@@ -299,7 +419,7 @@ pub fn decide(
     for action in ["execute", "request_approval"] {
         let req = Request::new(uid("Person", &person.id)?, uid("Action", action)?, uid("Tool", tool.name)?, ctx.clone(), None)
             .map_err(|e| anyhow!("{e}"))?;
-        let (org_ok, org_rules) = eval(&partition_layer(&layers[0].1, false)?, "org", &req, &ents)?;
+        let (org_ok, org_rules) = eval(&partition_layer(&layers[0].1, Side::Tool)?, "org", &req, &ents)?;
         let mut ok = org_ok;
         let mut rule = org_rules.first().cloned();
         if !org_ok && !org_rules.is_empty() {
@@ -309,7 +429,7 @@ pub fn decide(
             // With a permit-everything rule added, the layer denies only if one
             // of its own forbids matched.
             let narrowed =
-                format!("{}\npermit(principal, action, resource);", partition_layer(text, false)?);
+                format!("{}\npermit(principal, action, resource);", partition_layer(text, Side::Tool)?);
             let (allows, rules) = eval(&narrowed, name, &req, &ents)?;
             if !allows {
                 ok = false;

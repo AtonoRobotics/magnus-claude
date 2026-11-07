@@ -768,6 +768,13 @@ impl Kernel {
             Outcome::Ask { rule } => Some((format!("policy asks before {}", a.tool), Some(rule))),
             Outcome::Allow { .. } => None,
         };
+        // A loop run's tool calls need the act action too: the org can
+        // keep autonomous acts off an app the person's own tasks may
+        // still use (#368). Denied outright, never asked: there is no
+        // one to ask mid-sweep.
+        if let Some(why) = self.loop_deny(run, "act", Some(&facts)) {
+            return Ok(Err(self.deny(a, "policy", &why, false, None).await?));
+        }
         // Rule of Two and the audience rule are fixed in the kernel (K47).
         // A call carries data out if it changes state, fetches from the web, or
         // reaches an app whose audience is wider than the person (its inputs

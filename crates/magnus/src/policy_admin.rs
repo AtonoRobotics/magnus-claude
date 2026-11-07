@@ -39,6 +39,16 @@ action "cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "can
   resource: [Task, Schedule],
   context: { "is_owner": Bool, "is_admin": Bool }
 };
+action "suggest", "interrupt" appliesTo {
+  principal: [Person],
+  resource: [Person],
+  context: { "untrusted": Bool, "private": Bool }
+};
+action "act" appliesTo {
+  principal: [Person],
+  resource: [Tool],
+  context: { "untrusted": Bool, "private": Bool }
+};
 "#;
 
 /// The schema's tool half: people in groups, tools in apps, the two
@@ -80,6 +90,31 @@ fn control_schema() -> &'static Schema {
     S.get_or_init(|| Schema::from_cedarschema_str(CONTROL_SCHEMA).expect("the control half parses").0)
 }
 
+/// The schema's loop half (#368): suggest and interrupt spend a
+/// person's attention, so their resource is the person; acts touch
+/// apps, so theirs is the tool, as for execute.
+const LOOP_SCHEMA: &str = r#"
+entity Group;
+entity Person in [Group];
+entity App;
+entity Tool in [App] = { "risk": String, "audience": String };
+action "suggest", "interrupt" appliesTo {
+  principal: [Person],
+  resource: [Person],
+  context: { "untrusted": Bool, "private": Bool }
+};
+action "act" appliesTo {
+  principal: [Person],
+  resource: [Tool],
+  context: { "untrusted": Bool, "private": Bool }
+};
+"#;
+
+fn loop_schema() -> &'static Schema {
+    static S: std::sync::OnceLock<Schema> = std::sync::OnceLock::new();
+    S.get_or_init(|| Schema::from_cedarschema_str(LOOP_SCHEMA).expect("the loop half parses").0)
+}
+
 /// Where an offset falls in the text: its line and column, from 1.
 fn place(text: &str, offset: usize) -> (usize, usize) {
     let before = &text[..offset.min(text.len())];
@@ -107,23 +142,30 @@ pub fn check(text: &str) -> Vec<Value> {
     };
     let mut tools = HashSet::new();
     let mut controls = HashSet::new();
+    let mut loops = HashSet::new();
     let mut unqualified = vec![];
     for p in set.policies() {
         let id = p.id().to_string();
-        let (t, c) = crate::policy::policy_sides(&p);
+        let (t, c, l) = crate::policy::policy_sides(&p);
         if t {
             tools.insert(id.clone());
         }
         if c {
             controls.insert(id.clone());
         }
+        if l {
+            loops.insert(id.clone());
+        }
         if matches!(p.action_constraint(), ActionConstraint::Any) {
             unqualified.push((id, p.effect() == Effect::Forbid));
         }
     }
     let mut out = vec![];
+    let mut tool_bad = HashSet::new();
     for e in Validator::new(tool_schema().clone()).validate(&set, ValidationMode::Strict).validation_errors() {
-        if tools.contains(e.policy_id().to_string().as_str()) {
+        let id = e.policy_id().to_string();
+        tool_bad.insert(id.clone());
+        if tools.contains(id.as_str()) {
             out.push(problem(text, e, e.to_string()));
         }
     }
@@ -135,9 +177,32 @@ pub fn check(text: &str) -> Vec<Value> {
             out.push(problem(text, e, e.to_string()));
         }
     }
+    let mut loop_bad = HashSet::new();
+    for e in Validator::new(loop_schema().clone()).validate(&set, ValidationMode::Strict).validation_errors() {
+        let id = e.policy_id().to_string();
+        loop_bad.insert(id.clone());
+        if loops.contains(id.as_str()) {
+            out.push(problem(text, e, e.to_string()));
+        }
+    }
     for (id, is_forbid) in unqualified {
-        if is_forbid && !control_bad.contains(&id) {
-            out.push(json!({ "message": format!("for policy `{id}`, a forbid that names no action constrains tool calls only; name the task and schedule actions to constrain control"), "line": 1, "column": 1, "offset": Value::Null, "length": Value::Null }));
+        if is_forbid {
+            // One message naming every other side the forbid would fit
+            // if it named actions. Control keeps its existing signal
+            // (fits the control half); the loop guides only when the
+            // rule fails as tools but fits as loop — a Tool-scoped
+            // rule already works as tools, so loop guidance there
+            // would refuse legitimate policies (#368).
+            let mut sides = vec![];
+            if !control_bad.contains(&id) {
+                sides.push("name the task and schedule actions to constrain control");
+            }
+            if !loop_bad.contains(&id) && tool_bad.contains(&id) {
+                sides.push("name suggest, interrupt or act to constrain the loop");
+            }
+            if !sides.is_empty() {
+                out.push(json!({ "message": format!("for policy `{id}`, a forbid that names no action constrains tool calls only; {}", sides.join("; ")), "line": 1, "column": 1, "offset": Value::Null, "length": Value::Null }));
+            }
         }
     }
     out

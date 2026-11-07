@@ -698,16 +698,20 @@ impl Kernel {
                 let layer_ok = layer == "org" || layer.starts_with("group/") || layer.starts_with("user/");
                 match (layer_ok, crate::policy::validate(&cedar)) {
                     (true, Ok(())) => {
-                        let item = self
-                            .item(
-                                run,
-                                "policy_proposal",
-                                format!("The agent proposes a policy change for {layer}."),
-                                json!({ "layer": layer, "cedar": cedar, "rationale": input["rationale"], "call_id": call_id }),
-                            )
-                            .await?;
-                        self.result(rid, call_id, format!("Proposal {item} sent to whoever owns the {layer} policy. It changes nothing until they accept it."), false)
-                            .await?;
+                        if let Some(denied) = self.loop_deny(run, "suggest", None) {
+                            self.result(rid, call_id, format!("{denied}. A retry will not help."), true).await?;
+                        } else {
+                            let item = self
+                                .item(
+                                    run,
+                                    "policy_proposal",
+                                    format!("The agent proposes a policy change for {layer}."),
+                                    json!({ "layer": layer, "cedar": cedar, "rationale": input["rationale"], "call_id": call_id }),
+                                )
+                                .await?;
+                            self.result(rid, call_id, format!("Proposal {item} sent to whoever owns the {layer} policy. It changes nothing until they accept it."), false)
+                                .await?;
+                        }
                     }
                     (false, _) => self.result(rid, call_id, "Unknown layer: use org, group/<id> or user/<id>. A retry with the same layer will not help.", true).await?,
                     (_, Err(e)) => self.result(rid, call_id, format!("The policy does not parse: {e}. A retry with the same text will not help."), true).await?,
@@ -721,16 +725,20 @@ impl Kernel {
             }
             "propose_schedule" => match crate::api::rule_for(input, self.cfg.schedules.min_every_minutes).and_then(|r| crate::api::end_for(input).map(|e| (r, e))) {
                 Ok(((every, daily), (until, max_runs))) => {
-                    let text = input["text"].as_str().unwrap_or_default().to_string();
-                    let item = self
-                        .item(
-                            run,
-                            "schedule_proposal",
-                            format!("The worker proposes a recurring task: {text}"),
-                            json!({ "text": text, "every_minutes": every, "daily_at": daily, "until": until, "max_runs": max_runs, "call_id": call_id }),
-                        )
-                        .await?;
-                    self.result(rid, call_id, format!("Proposal {item} sent to the person. Nothing is scheduled until they accept it."), false).await?;
+                    if let Some(denied) = self.loop_deny(run, "suggest", None) {
+                        self.result(rid, call_id, format!("{denied}. A retry will not help."), true).await?;
+                    } else {
+                        let text = input["text"].as_str().unwrap_or_default().to_string();
+                        let item = self
+                            .item(
+                                run,
+                                "schedule_proposal",
+                                format!("The worker proposes a recurring task: {text}"),
+                                json!({ "text": text, "every_minutes": every, "daily_at": daily, "until": until, "max_runs": max_runs, "call_id": call_id }),
+                            )
+                            .await?;
+                        self.result(rid, call_id, format!("Proposal {item} sent to the person. Nothing is scheduled until they accept it."), false).await?;
+                    }
                 }
                 Err(m) => self.result(rid, call_id, format!("{m}. A retry with the same values will not help."), true).await?,
             },
@@ -766,6 +774,8 @@ impl Kernel {
                 let (what, why, evidence) = (input["what"].as_str().unwrap_or_default().trim(), input["why"].as_str().unwrap_or_default().trim(), input["evidence"].as_str().unwrap_or_default().trim());
                 if what.is_empty() || why.is_empty() || evidence.is_empty() {
                     self.result(rid, call_id, "observe needs what, why and evidence. A retry with the same values will not help.", true).await?;
+                } else if let Some(denied) = self.loop_deny(run, "suggest", None) {
+                    self.result(rid, call_id, format!("{denied}. A retry will not help."), true).await?;
                 } else {
                     let at = self.notify_due(&run.person);
                     let item = self.item(run, "observation", what.to_string(), json!({ "why": why, "evidence": evidence, "call_id": call_id, "notify_at": at.to_rfc3339() })).await?;
@@ -777,8 +787,8 @@ impl Kernel {
                 if what.is_empty() || why.is_empty() {
                     self.result(rid, call_id, "interrupt needs what and why. A retry with the same values will not help.", true).await?;
                 } else {
-                    let said = self.interrupt_for(run, what, why, call_id).await?;
-                    self.result(rid, call_id, said, false).await?;
+                    let (said, err) = self.interrupt_for(run, what, why, call_id).await?;
+                    self.result(rid, call_id, said, err).await?;
                 }
             }
             _ => self.result(rid, call_id, format!("{name} is not a run record."), true).await?,
