@@ -1,13 +1,15 @@
 # Magnus
 
-An autonomous digital worker shipped as an appliance. Start every session by reading:
+An autonomous digital worker shipped as an appliance. Start every session by reading newest-first, stopping once the task's context is covered:
 
-- `progress/` (newest file last), then `PROGRESS.md` (before 2026-11-06): where things stand and how to resume.
-- `decisions/`, then `DECISIONS.md` (before 2026-11-06): every choice made, with its reason.
-- `tests/invariants/`: the eight invariants as tests. Do not edit them without the owner's approval.
-- The open issues labelled `queue`: the backlog work starts from. The agent chooses the next one itself and claims it before coding ("How work lands").
+- `progress/`: the newest file only, then stop unless the task needs older context. `PROGRESS.md` (before 2026-11-06) only when touching that history.
+- `decisions/`: the newest file only, then stop unless the task needs older context. `DECISIONS.md` (before 2026-11-06) only when touching that history.
+- `tests/invariants/`: the listing (the eight invariant tests) when the session touches guarded areas; full bodies only then. Do not edit them without the owner's approval.
+- The open issues labelled `queue`: titles only, until one is chosen; the full body only for the chosen issue. The agent chooses the next one itself and claims it before coding ("How work lands").
 
 Rules: record each new decision as a file in `decisions/` and what changed as a file in `progress/` (`<date>-<issue>-<slug>.md`, one per pull request, so pull requests never edit the same lines), keep them current, commit working states, and revert failed attempts instead of patching them.
+
+This file is exempt from the issue-and-PR flow below: the owner, or an agent acting on the owner's explicit instruction in the session, edits `CLAUDE.md` directly on `master` with no issue and no pull request (owner, 2026-11-06).
 
 ## How work lands
 
