@@ -1,6 +1,7 @@
 // Every message action in the installed app: copy and delete, edit and
-// resend a message, retry an answer, save to the library, export as a file,
-// make a task, share with a colleague, and branch into a new chat.
+// resend a message, retry an answer, react to started tasks, save to the
+// library, export as a file, make a task, share with a colleague, and
+// branch into a new chat.
 //
 // MAGNUS_WEBDRIVER  tauri-driver's address      MAGNUS_APP  the app binary
 // MAGNUS_URL        the appliance (https)       MAGNUS_FINGERPRINT  what it printed
@@ -79,6 +80,16 @@ await d.step("make a task", async () => {
   await act("message", "Second, edited", "Make a task");
   await d.seen("Started a task.");
   await d.xpath("//div[@data-kind='tasks']");
+});
+
+await d.step("react to started tasks", async () => {
+  // Started tasks take reactions like any message of Magnus's (#360): the tasks entry
+  // offers great/annoying, pressing marks it, pressing again takes it back.
+  const btn = "//div[@data-kind='tasks']//div[@role='toolbar']//button[normalize-space()='That was great']";
+  await d.click(d.xpath(btn));
+  await d.until("the pressed reaction", async () => (await d.attr(d.xpath(btn), "aria-pressed")) === "true" || null);
+  await d.click(d.xpath(btn));
+  await d.until("the reaction taken back", async () => (await d.attr(d.xpath(btn), "aria-pressed")) === "false" || null);
 });
 
 await d.step("share with a colleague", async () => {
