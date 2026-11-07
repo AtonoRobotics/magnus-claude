@@ -142,6 +142,12 @@ impl Spec {
         self
     }
 
+    pub fn watch_poll(mut self, app: &str, tool: &str, items: &str, id: &str, poll_minutes: u64) -> Self {
+        let c = self.connectors.iter_mut().find(|c| c.name == app).expect("app");
+        c.watch.push(json!({ "tool": tool, "items": items, "id": id, "poll_minutes": poll_minutes }));
+        self
+    }
+
     pub fn access(mut self, app: &str, groups: &[&str]) -> Self {
         let c = self.connectors.iter_mut().find(|c| c.name == app).expect("app");
         c.access_groups = groups.iter().map(|s| s.to_string()).collect();

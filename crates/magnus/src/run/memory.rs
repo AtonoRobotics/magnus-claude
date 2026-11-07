@@ -26,14 +26,14 @@ impl Kernel {
                 tracing::warn!("memory pass on {run2}: {e:#}");
             }
         });
-        // A task done or failed wakes a review: not a review itself, and
-        // not a chat turn, whose person is already there (#237). The wake
-        // carries the ended task's ID and outcome: the review's context
-        // excludes ended tasks, so without it the review cannot see what
-        // failed (#383).
+        // A task done or failed wakes a review: not a review itself, not
+        // a poll (routine reads are not news, #406), and not a chat turn,
+        // whose person is already there (#237). The wake carries the ended
+        // task's ID and outcome: the review's context excludes ended tasks,
+        // so without it the review cannot see what failed (#383).
         if let Some((person, task, ended, label)) = self.read(|s| {
             s.runs.get(run.as_str()).map(|r| {
-                let ended = s.tasks.get(&r.task).map(|t| (t.review, t.chat.as_ref().is_some_and(|c| c.turn), r.status, r.summary.clone()));
+                let ended = s.tasks.get(&r.task).map(|t| (t.review || t.poll, t.chat.as_ref().is_some_and(|c| c.turn), r.status, r.summary.clone()));
                 let label = crate::tools::Label { untrusted: r.untrusted, private: r.private };
                 (r.person.clone(), r.task.clone(), ended, label)
             })

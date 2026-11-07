@@ -747,6 +747,8 @@ impl Kernel {
             // The proactive loop's own wakes: cadence, overnight, coming-up
             // schedules, due commitments and stale approvals (#237).
             self.review_due(now).await;
+            // Scheduled polls of watched reads (#406).
+            self.poll_due(now).await;
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
