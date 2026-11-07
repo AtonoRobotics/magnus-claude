@@ -96,23 +96,29 @@ pub(crate) fn reactions_before(s: &Projection, person: &str, before: DateTime<Ut
             }
             // Started tasks read their turn's run, named in the entry; a
             // card reads the run that proposed it (#267).
-            let (task, run) = match entry.split_once(':') {
+            let (run, origin) = match entry.split_once(':') {
                 Some(("t", id)) => {
-                    let run = s.runs.get(id)?;
-                    (s.tasks.get(&run.task).filter(|t| t.person == person && !s.trash.contains_key(&t.task_id))?, run)
+                    // Scheduled runs name their entry by task, chat turns
+                    // by run; either way it goes with its originating
+                    // answer, as the thread shows it (#353).
+                    let run = s.runs.get(id).or_else(|| s.tasks.get(id).and_then(|t| s.runs.get(&t.run_id)))?;
+                    s.tasks.get(&run.task).filter(|t| t.person == person && !s.trash.contains_key(&t.task_id))?;
+                    (run, Some(format!("a:{}", run.task)))
                 }
                 Some(("c", id)) => {
                     let run = card_runs.get(id).copied()?;
-                    (s.tasks.get(&run.task).filter(|t| t.person == person && !s.trash.contains_key(&t.task_id))?, run)
+                    let task = s.tasks.get(&run.task).filter(|t| t.person == person && !s.trash.contains_key(&t.task_id))?;
+                    let origin = task.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| s.runs.get(f)).map(|o| format!("a:{}", o.task));
+                    (run, origin)
                 }
                 _ => {
                     let task = entry.split_once(':').map(|(_, t)| t).filter(|t| !s.trash.contains_key(*t)).and_then(|t| s.tasks.get(t)).filter(|t| t.person == person)?;
                     let run = s.runs.get(&task.run_id)?;
-                    (task, run)
+                    // A result goes with the answer that started its task (review of #252).
+                    let origin = task.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| s.runs.get(f)).map(|o| format!("a:{}", o.task));
+                    (run, origin)
                 }
             };
-            // A result goes with the answer that started its task (review of #252).
-            let origin = task.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| s.runs.get(f)).map(|o| format!("a:{}", o.task));
             if origin.is_some_and(|o| hidden(&o)) {
                 return None;
             }
@@ -343,6 +349,52 @@ mod tests {
         let got = reactions_before(&s, "carol", at(4));
         assert_eq!(got.len(), 1, "{got:?}");
         assert!(got[0].1.starts_with("that was great"), "{got:?}");
+    }
+
+    /// A task-list reaction goes with its originating answer, and a
+    /// scheduled run's task-keyed entry resolves to its run (#353).
+    #[test]
+    fn task_list_reactions_follow_their_originating_answer() {
+        let mut s = Projection::default();
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        let t0 = Utc::now();
+        let ev = |s: &mut Projection, min: i64, e: Value| {
+            let seq = s.last_seq + 1;
+            s.apply(&Event {
+                seq,
+                at: t0 + chrono::Duration::minutes(min),
+                actor: "kernel".into(),
+                ev: serde_json::from_value(e).unwrap(),
+            });
+        };
+        let t1 = json!({ "kind": "task_created", "task": "t1", "run": "r1", "person": "carol", "text": "Hi.", "config": config, "chat": { "thread": "th", "turn": true } });
+        let t9 = json!({ "kind": "task_created", "task": "t9", "run": "r9", "person": "carol", "text": "Nightly.", "config": config, "chat": { "thread": "sched", "turn": false } });
+        ev(&mut s, 0, t1);
+        let c1 = json!({ "kind": "completed", "run": "r1", "summary": "Looking into it." });
+        ev(&mut s, 0, c1);
+        ev(&mut s, 0, t9);
+        let c9 = json!({ "kind": "completed", "run": "r9", "summary": "Nightly words." });
+        ev(&mut s, 0, c9);
+        let r1 = json!({ "kind": "reacted", "person": "carol", "thread": "th", "entry": "t:r1", "reaction": "great" });
+        let r9 = json!({ "kind": "reacted", "person": "carol", "thread": "sched", "entry": "t:t9", "reaction": "great" });
+        ev(&mut s, 1, r1);
+        ev(&mut s, 1, r9);
+        let at = |min: i64| t0 + chrono::Duration::minutes(min);
+        let got = reactions_before(&s, "carol", at(4));
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(
+            got.iter().any(|(_, l)| l.contains("Looking into it.")),
+            "{got:?}"
+        );
+        assert!(
+            got.iter().any(|(_, l)| l.contains("Nightly words.")),
+            "{got:?}"
+        );
+        let hide = json!({ "kind": "chat_hidden", "person": "carol", "thread": "th", "entries": ["a:t1"] });
+        ev(&mut s, 2, hide);
+        let got = reactions_before(&s, "carol", at(4));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].1.contains("Nightly words."), "{got:?}");
     }
 
     /// The person is told an outcome honestly whichever way it went,
