@@ -275,7 +275,7 @@ impl crate::kernel::Kernel {
                 if let Some((id, verb, outcome, label)) = s
                     .tasks
                     .values()
-                    .filter(|t| t.person == person && !t.review && !t.chat.as_ref().is_some_and(|c| c.turn))
+                    .filter(|t| t.person == person && !t.review && !t.poll && !t.chat.as_ref().is_some_and(|c| c.turn))
                     .filter_map(|t| {
                         let r = s.runs.get(&t.run_id)?;
                         let verb = match r.status {
@@ -310,6 +310,64 @@ impl crate::kernel::Kernel {
                 self.start_review(&person, "cadence".into(), None).await;
             } else if !in_window(m, st.working) && overnight.as_deref() != Some(today.as_str()) {
                 self.start_review(&person, "overnight".into(), None).await;
+            }
+        }
+    }
+
+    /// Poll watched reads whose interval has passed (#406). Called
+    /// from the sweep beside the review wakes. Each due watch starts
+    /// one minimal polling run; its answer diffs through the same hook
+    /// as any read, so items nobody reads still wake. Polls run even
+    /// while a review is active: a cheap read waits for nothing.
+    pub async fn poll_due(self: &Arc<Self>, now: DateTime<Utc>) {
+        if !self.cfg.proactive.on {
+            return;
+        }
+        let people: Vec<String> = self.cfg.people.iter().map(|p| p.id.clone()).collect();
+        for person in people {
+            if self.read(|s| s.turned_off.contains(&person)) {
+                continue;
+            }
+            let watches: Vec<(String, crate::config::Watch)> = self
+                .cfg
+                .connectors
+                .iter()
+                .flat_map(|c| c.watch.iter().map(|w| (c.name.clone(), w.clone())))
+                .filter(|(_, w)| w.poll_minutes.is_some())
+                .collect();
+            for (app, w) in watches {
+                let minutes = w.poll_minutes.unwrap_or(0).max(1) as i64;
+                let due = self.read(|s| {
+                    s.watch_last_polled
+                        .get(&(person.clone(), app.clone(), w.tool.clone()))
+                        .is_none_or(|t| now.signed_duration_since(*t).num_minutes() >= minutes)
+                });
+                if due {
+                    self.start_poll(&person, &app, &w).await;
+                }
+            }
+        }
+    }
+
+    /// Start one polling run: call the watched tool once, then end
+    /// (#406). Actor `poll`, so the task hides from the person's lists
+    /// and ends contract-free like a review's — but no review starts
+    /// and no wake mark lands. The read's own diff wakes when there is
+    /// news. The clock restarts when the run starts, not when it
+    /// answers; a failed start leaves it due, retrying next sweep.
+    async fn start_poll(self: &Arc<Self>, person: &str, app: &str, watch: &crate::config::Watch) {
+        let budget =
+            crate::config::Budget { max_model_calls: 3, max_actions: 1, max_usd: self.cfg.proactive.wake_max_usd };
+        let text = format!("Poll {app}: call {app}__{} once with no arguments, then end the task. Do nothing else.", watch.tool);
+        match self.create_run("poll", person, text, vec![], crate::kernel::NewRun { budget: Some(budget), ..Default::default() }).await
+        {
+            Ok(_) => {
+                let _ = self
+                    .emit("kernel", crate::events::Ev::WatchPolled { person: person.into(), app: app.into(), tool: watch.tool.clone() })
+                    .await;
+            }
+            Err(e) => {
+                tracing::warn!("watch poll for {person} {app}: {e:#}");
             }
         }
     }
@@ -349,11 +407,13 @@ impl crate::kernel::Kernel {
 
     /// A watched tool answered for the person: diff its items against
     /// the last two answers, waking a review for new ones (#369). The
-    /// first sighting seeds silently; the window advances only when
-    /// the wake starts a review, so a dropped wake retries on the next
-    /// read instead of losing the items. Two answers, not all history
-    /// (#409): no cap to evict from, so an unchanged answer diffs
-    /// empty however large it is, and memory stays two answers deep.
+    /// first sighting seeds silently; every read after advances the
+    /// window, news or not, so the window tracks reads, not wakes
+    /// (#414). A dropped wake advances nothing, so it retries on the
+    /// next read instead of losing the items. Two answers, not all
+    /// history (#409): no cap to evict from, so an unchanged answer
+    /// diffs empty however large it is, and memory stays two answers
+    /// deep.
     pub(crate) async fn note_watched(self: &Arc<Self>, person: &str, app: &str, remote: &str, data: &Value) {
         let watches: Vec<crate::config::Watch> =
             self.cfg.connectors.iter().find(|c| c.name == app).map(|c| c.watch.clone()).unwrap_or_default();
@@ -370,6 +430,11 @@ impl crate::kernel::Kernel {
             };
             let fresh: Vec<&String> = ids.iter().filter(|id| !window.iter().any(|w| w.contains(*id))).collect();
             if fresh.is_empty() {
+                // No news, but the read still counts: the window is the
+                // last two reads, whatever they held (#414).
+                let _ = self
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
+                    .await;
                 continue;
             }
             let n = fresh.len();
@@ -439,6 +504,7 @@ impl crate::kernel::Kernel {
                 .filter(|t| {
                     t.person == person
                         && !t.review
+                        && !t.poll
                         && s.runs.get(&t.run_id).is_some_and(|r| !r.status.terminal())
                 })
                 .map(|t| (t.person.clone(), t.seq))
@@ -517,6 +583,7 @@ impl crate::kernel::Kernel {
                     .filter(|t| {
                         t.person == person
                             && !t.review
+                            && !t.poll
                             && s.runs.get(&t.run_id).is_some_and(|r| !r.status.terminal())
                     })
                     .map(|t| {

@@ -835,6 +835,7 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool, words
         "thread": task.chat.as_ref().map(|c| c.thread.clone()),
         "verdict": task.verdict,
         "review": task.review,
+        "poll": task.poll,
     });
     // The apps this task asked the person to connect, each as they stand
     // with it now (connectors spec, Inside work).
@@ -973,7 +974,9 @@ async fn list_tasks(State(k): K, h: HeaderMap) -> Response {
     let tasks: Vec<Value> = k.read(|s| {
         s.tasks
             .values()
-            .filter(|t| visible_task(&p, t) && !t.is_chat_turn())
+            // Polls fire dozens a day: they stay out of the person's
+            // lists, auditable by id and in the log (#406).
+            .filter(|t| visible_task(&p, t) && !t.is_chat_turn() && !t.poll)
             .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(&k, s, &p, t, r, &words)))
             .collect()
     });
@@ -1029,7 +1032,7 @@ async fn search(State(k): K, h: HeaderMap, Query(q): Query<std::collections::Has
         let tasks: Vec<Value> = s
             .tasks
             .values()
-            .filter(|t| visible_task(&p, t) && !t.is_chat_turn())
+            .filter(|t| visible_task(&p, t) && !t.is_chat_turn() && !t.poll)
             .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(&k, s, &p, t, r, &words)))
             .filter(|v| all(&format!("{} {} {}", v["title"].as_str().unwrap_or_default(), v["text"].as_str().unwrap_or_default(), v["summary"].as_str().unwrap_or_default()).to_lowercase()))
             .collect();
@@ -1281,7 +1284,7 @@ async fn home_opened(State(k): K, h: HeaderMap) -> Response {
         let mut arrived: Vec<(chrono::DateTime<chrono::Utc>, Value)> = vec![];
         let mut decided: Vec<(chrono::DateTime<chrono::Utc>, Value)> = vec![];
         let mut observations: Vec<(chrono::DateTime<chrono::Utc>, Value)> = vec![];
-        for t in s.tasks.values().filter(|t| visible_task(&p, t) && !t.is_chat_turn() && !t.review) {
+        for t in s.tasks.values().filter(|t| visible_task(&p, t) && !t.is_chat_turn() && !t.review && !t.poll) {
             if let Some(r) = s.runs.get(&t.run_id) {
                 if matches!(r.status, Status::Completed | Status::Failed) && r.ended_at.is_some_and(|e| e > since) {
                     ended.push((r.ended_at.unwrap(), task_row(&k, s, &p, t, r, &words)));

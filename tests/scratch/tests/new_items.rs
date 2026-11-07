@@ -124,9 +124,10 @@ async fn a_new_item_in_a_connected_app_wakes_a_review() {
     .await;
 }
 
-/// The baseline is a window, not an accumulation (#409): an item
-/// absent for one read stays known, but one gone for two reads wakes
-/// again when it returns.
+/// The baseline is a window over reads, not an accumulation (#409,
+/// #414): an item absent for one read stays known, but one gone for
+/// two consecutive reads wakes again when it returns — even across
+/// a re-sighting between the absences.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_baseline_forgives_one_absence_but_not_two() {
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -162,11 +163,59 @@ async fn the_baseline_forgives_one_absence_but_not_two() {
     check(&bob, "Check the inbox.").await;
     woke(&prompts).await;
     drain_reviews(&bob).await;
-    // "a" sat out two reads: it left the window, so it wakes again.
+    // "a" sat out one read, reappeared, and sat out one more:
+    // single absences stay known, so no wake (#414).
+    prompts.lock().unwrap().clear();
+    mail.set_world("inbox", json!([msg("a")]));
+    check(&bob, "Check the inbox.").await;
+    drain_reviews(&bob).await;
+    assert!(!seen(&prompts, "new in mail"), "single absences across a re-sighting woke a review");
+    // Two consecutive absences: "a" left the window, so it wakes again.
+    mail.set_world("inbox", json!([msg("b")]));
+    check(&bob, "Check the inbox.").await;
+    woke(&prompts).await;
+    drain_reviews(&bob).await;
+    prompts.lock().unwrap().clear();
+    mail.set_world("inbox", json!([msg("c")]));
+    check(&bob, "Check the inbox.").await;
+    woke(&prompts).await;
+    drain_reviews(&bob).await;
     prompts.lock().unwrap().clear();
     mail.set_world("inbox", json!([msg("a")]));
     check(&bob, "Check the inbox.").await;
     woke(&prompts).await;
+}
+
+/// Empty answers count as reads too (#414): after two of them, a
+/// returning item wakes.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_empty_reads_forget_then_reappearance_wakes() {
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let m = FakeModel::start(watching_script(prompts.clone())).await;
+    let (mail, _app, bob) = watched_app(&m).await;
+    drain_reviews(&bob).await;
+    async fn check(bob: &Api) {
+        let t = bob.submit("Check the inbox.").await;
+        assert_eq!(bob.wait_settled(&t).await["status"], "failed");
+    }
+    mail.set_world("inbox", json!([msg("a")]));
+    check(&bob).await;
+    drain_reviews(&bob).await;
+    assert!(!seen(&prompts, "new in mail"), "the seeding read woke a review");
+    mail.set_world("inbox", json!([]));
+    check(&bob).await;
+    drain_reviews(&bob).await;
+    assert!(!seen(&prompts, "new in mail"), "the first empty read woke a review");
+    check(&bob).await;
+    drain_reviews(&bob).await;
+    assert!(!seen(&prompts, "new in mail"), "the second empty read woke a review");
+    mail.set_world("inbox", json!([msg("a")]));
+    check(&bob).await;
+    eventually("a review naming the returned mail", Duration::from_secs(60), || {
+        let prompts = prompts.clone();
+        async move { seen(&prompts, "1 new in mail").then_some(()) }
+    })
+    .await;
 }
 
 /// No cap on the baseline (#409): a large answer repeated wakes
