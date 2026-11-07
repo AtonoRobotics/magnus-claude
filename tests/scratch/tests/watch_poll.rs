@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const REVIEW: &str = "reviewing one person's state";
+const MEMORY_PASS: &str = "long-term memory";
 
 fn done(summary: &str) -> Reply {
     tool("task_complete", json!({ "summary": summary, "deliverable": [{ "type": "text", "text": summary }] }))
@@ -238,4 +239,110 @@ async fn a_poll_with_a_transient_read_error_retries_quietly() {
         .filter(|i| i["kind"] == "notice" && i["details"]["reason"] == "budget")
         .collect();
     assert!(budget.is_empty(), "the retrying poll suspended on budget: {budget:?}");
+}
+
+/// A task read postpones the next poll (#413): any watched answer
+/// restarts the poll clock, so a freshly-read watch is not polled
+/// on the old schedule. Timed from the first poll: after reads by
+/// everyone fifteen seconds in, nothing polls in the old window.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_read_postpones_the_next_poll() {
+    let mail = mcp::mail().start().await;
+    let calls = Arc::new(Mutex::new(Vec::<tokio::time::Instant>::new()));
+    let seen_calls = calls.clone();
+    let m = FakeModel::start(script(move |c| {
+        let seen_calls = seen_calls.clone();
+        async move {
+            if c.body["system"].to_string().contains(REVIEW) {
+                return done("Reviewed quietly.");
+            }
+            if c.text().contains("Poll ") {
+                seen_calls.lock().unwrap().push(tokio::time::Instant::now());
+                return tool("task_fail", json!({ "reason": "not reading in this test" }));
+            }
+            if c.turn() == 0 {
+                return tool("mail__list_inbox", json!({}));
+            }
+            return tool("task_fail", json!({ "reason": "checked the inbox" }));
+        }
+    }))
+    .await;
+    let app = Appliance::start(
+        Spec::default()
+            .proactive(json!({ "on": true }))
+            .app("mail", &mail, "public", "private", &[("list_inbox", "read")])
+            .watch_poll("mail", "list_inbox", "/messages", "subject", 1),
+        &m,
+    )
+    .await;
+    eventually("the first poll", Duration::from_secs(30), || {
+        let calls = calls.clone();
+        async move { (!calls.lock().unwrap().is_empty()).then_some(()) }
+    })
+    .await;
+    let t0 = calls.lock().unwrap().iter().min().cloned().expect("a first poll");
+    // Fifteen seconds after the first poll, everyone reads: each
+    // read restarts that person's poll clock.
+    tokio::time::sleep_until(t0 + Duration::from_secs(15)).await;
+    for who in ["alice", "bob", "carol"] {
+        let api = app.api(who);
+        let t = api.submit("Check the inbox.").await;
+        assert_eq!(api.wait_settled(&t).await["status"], "failed");
+        drain_reviews(&api).await;
+    }
+    // The old schedule would poll a minute after the first poll;
+    // the reads postponed every clock past the window.
+    tokio::time::sleep_until(t0 + Duration::from_secs(70)).await;
+    let calls = calls.lock().unwrap();
+    let in_window: Vec<_> = calls.iter().filter(|t| **t > t0 + Duration::from_secs(55) && **t < t0 + Duration::from_secs(70)).collect();
+    assert!(in_window.is_empty(), "a poll fired on a freshly-read watch: {in_window:?}");
+}
+
+/// A due watch polls exactly once (#425): one connected watch, three
+/// people, twenty seconds inside a one-minute interval — three poll
+/// runs and three marks, one per person. Only agent turns count:
+/// the memory pass also sees the Poll text (the six sightings that
+/// filed this issue were three polls plus three memory passes). One
+/// sweep loop and one kernel per log mean two sweeps cannot start
+/// two polls; this pins it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_due_watch_polls_exactly_once() {
+    let mail = mcp::mail().start().await;
+    let polls = Arc::new(Mutex::new(0_usize));
+    let seen_polls = polls.clone();
+    let m = FakeModel::start(script(move |c| {
+        let seen_polls = seen_polls.clone();
+        async move {
+            let system = c.body["system"].to_string();
+            if system.contains(REVIEW) {
+                return done("Reviewed quietly.");
+            }
+            if c.text().contains("Poll ") && !system.contains(MEMORY_PASS) {
+                *seen_polls.lock().unwrap() += 1;
+                return tool("task_fail", json!({ "reason": "not reading in this test" }));
+            }
+            return tool("task_fail", json!({ "reason": "no tasks in this test" }));
+        }
+    }))
+    .await;
+    // Boot with the loop off, so the first polls come from due sweeps.
+    let mut app = Appliance::start(
+        Spec::default()
+            .app("mail", &mail, "public", "private", &[("list_inbox", "read")])
+            .watch_poll("mail", "list_inbox", "/messages", "subject", 1),
+        &m,
+    )
+    .await;
+    reconfigure(&mut app, |cfg| {
+        cfg["proactive"].as_table_mut().unwrap().insert("on".into(), toml::Value::Boolean(true));
+    })
+    .await;
+    // Past the first due sweeps, inside the one-minute interval: each
+    // of the three people's watch polled exactly once, and marked.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert_eq!(*polls.lock().unwrap(), 3, "a due watch did not poll exactly once per person");
+    let db = app.db.admin().await;
+    let marks: i64 =
+        db.query_one("SELECT COUNT(*) FROM public.events WHERE body->>'kind' = 'watch_polled'", &[]).await.unwrap().get(0);
+    assert_eq!(marks, 3, "a poll did not mark its watch");
 }

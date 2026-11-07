@@ -130,6 +130,8 @@ impl Kernel {
         let mut ended = false;
         // An entry made a company fact is searched as one once it is written.
         let mut endorsed = None;
+        // A task an approval started is driven from now.
+        let mut started: Option<String> = None;
 
         match (item.kind.as_str(), decision.as_str()) {
             ("approval", "approve") => {
@@ -285,6 +287,61 @@ impl Kernel {
                     },
                 ));
             }
+            // A task a review proposed starts as a chat card's does: the
+            // card's budget, scope and title, the proposing run's model
+            // and taint, and it starts now (#393).
+            ("task_proposal", "accept") => {
+                if self.read(|s| s.kill_switch) {
+                    return Ok(Answer::Conflict("the kill switch is engaged"));
+                }
+                let from = self.read(|s| {
+                    item.run.as_ref().and_then(|r| s.runs.get(r)).map(|r| {
+                        (r.config.adapter.clone(), r.config.model.clone(), Label { untrusted: r.untrusted, private: r.private })
+                    })
+                });
+                let budget = serde_json::from_value(item.details["budget"].clone())
+                    .map(|b: crate::config::Budget| b.within(&self.cfg.budget))
+                    .unwrap_or_else(|_| self.cfg.budget.clone());
+                let (adapter, model) = from.as_ref().map(|f| (f.0.clone(), f.1.clone())).unwrap_or_else(|| self.default_model());
+                let (modules, escalate_to) = self.modules_for(&adapter, &model);
+                let m = &self.cfg.model;
+                let fresh = new_id("run");
+                evs.push((&actor, resolve(None)));
+                evs.push((
+                    &actor,
+                    Ev::TaskCreated {
+                        task: new_id("task"),
+                        run: fresh.clone(),
+                        person: item.person.clone(),
+                        text: item.details["text"].as_str().unwrap_or_default().into(),
+                        attachments: vec![],
+                        config: crate::events::RunConfig {
+                            adapter,
+                            model,
+                            max_retries: m.max_retries,
+                            max_tokens: m.max_tokens,
+                            budget,
+                            verifier: modules.get("verifier").copied().unwrap_or(false),
+                            modules,
+                            escalate_to,
+                            lost: self.cfg.modules.lost.clone(),
+                            verifier_model: self.cfg.verifier.model.clone(),
+                            instructions: crate::run::instructions_version(),
+                            harness: crate::kernel::HARNESS_VERSION.into(),
+                            playbook: self.read(|s| s.playbook_version),
+                        },
+                        experiment: None,
+                        chat: None,
+                        label: from.map(|f| f.2),
+                        title: item.details["title"].as_str().map(String::from),
+                        files: vec![],
+                        project: None,
+                        scope: item.details["scope"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from),
+                        grant: None,
+                    },
+                ));
+                started = Some(fresh);
+            }
             // An entry becomes a company fact; its source stays attached, and
             // who endorsed it, from which card, is in the log.
             ("endorsement", "endorse") => {
@@ -304,7 +361,7 @@ impl Kernel {
             ("deletion_request", "done") | ("deletion_request", "decline") => {
                 evs.push((&actor, resolve(None)));
             }
-            ("schedule_proposal", "reject") | ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("shared", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") | ("observation", "dismiss") | ("interrupt", "dismiss") => {
+            ("schedule_proposal", "reject") | ("task_proposal", "reject") | ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("shared", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") | ("observation", "dismiss") | ("interrupt", "dismiss") => {
                 evs.push((&actor, resolve(None)));
             }
             // Only the kernel's own notices (which name a reason) can continue a
@@ -377,6 +434,9 @@ impl Kernel {
         self.emit_all(evs).await?;
         if resumed {
             self.wake(&run);
+        }
+        if let Some(id) = started {
+            self.wake(&id);
         }
         if ended {
             self.on_stop(&run, true).await;

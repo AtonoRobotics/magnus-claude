@@ -1392,7 +1392,7 @@ route(/^#\/chat\/([^/]+)$/, async (main, thread) => {
 
 const KIND = {
   approval: "Approval", question: "Question", review: "Review", notice: "Stopped", message: "Note from the agent", observation: "Observation", interrupt: "Interruption",
-  policy_proposal: "Policy proposal", schedule_proposal: "Recurring task proposal", tool_change: "Changed tool", tool_review: "New app's tools",
+  policy_proposal: "Policy proposal", schedule_proposal: "Recurring task proposal", task_proposal: "Task proposal", tool_change: "Changed tool", tool_review: "New app's tools",
   contract_change: "Contract change", deletion_request: "Deletion request", shared: "Shared with you", endorsement: "Company fact?",
 };
 const TIER = { read: "reads", sandbox: "workspace only", reversible_write: "can be undone", irreversible: "cannot be undone", financial: "money", prohibited: "prohibited" };
@@ -1538,6 +1538,17 @@ function card(i, composed) {
         <div class="field"><span>When</span><span>${d.every_minutes ? `every ${esc(d.every_minutes)} minutes` : `daily at ${esc(d.daily_at)}`}</span></div>
         <div class="field"><span>Ends</span><span>${esc(ends(d))}</span></div></div>${taintNote(d.taint)}
         ${buttons(i, [["accept", "Schedule it", "primary"], ["reject", "Reject"]])}`;
+      break;
+    case "task_proposal":
+      body = `<div class="what"><div class="field"><span>Task</span><span>${esc(d.title)}</span></div>
+        <div class="field"><span>Does</span><span>${esc(d.text)}</span></div>
+        <div class="field"><span>Noticed</span><span>${esc(d.noticed?.what)} (${esc(d.noticed?.where)})</span></div>
+        <div class="field"><span>Outcome</span><span>${esc(d.outcome)}</span></div>
+        <div class="field"><span>Why now</span><span>${esc(d.why_now)}</span></div>
+        <div class="field"><span>Needs</span><span>${esc((d.needs?.permissions || []).join("; "))}</span></div>
+        <div class="field"><span>May spend</span><span>$${esc(d.budget?.max_usd)}</span></div></div>
+        ${(d.evidence || []).length ? `<div class="evidence"><div class="small muted">Evidence</div><ul class="small">${(d.evidence || []).map(c => `<li>${esc(c.title || c.call || "")}: “${esc(c.shows)}”</li>`).join("")}</ul></div>` : ""}${taintNote(d.taint)}
+        ${buttons(i, [["accept", "Start this task", "primary"], ["reject", "Dismiss"]])}`;
       break;
     case "message":
       body = `${taintNote(d.taint)}${buttons(i, [["dismiss", "Dismiss"]])}`;

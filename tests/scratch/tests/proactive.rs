@@ -607,3 +607,113 @@ async fn a_review_stopped_by_its_budget_ends_quietly_and_reviews_go_on() {
     })
     .await;
 }
+
+/// A review proposes a task the person approves into a real task (#393):
+/// the proposal lands in the inbox (not the thread), grounded in the
+/// cited evidence, and accepting starts the task with the approved budget
+/// while rejecting leaves no such task behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_proposes_a_task_the_person_approves() {
+    let prior = Arc::new(Mutex::new(String::new()));
+    let task_id = prior.clone();
+    let m = FakeModel::start(script(move |c| {
+        let task_id = task_id.clone();
+        async move {
+            if !c.body["system"].to_string().contains(REVIEW) {
+                return tool("task_fail", json!({ "reason": "not under test" }));
+            }
+            let first = c.messages().first().cloned().unwrap_or_default();
+            let said: String = first["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !said.contains("coming up") {
+                return done("Reviewed quietly.");
+            }
+            let proposal = |title: &str, text: &str| {
+                tool(
+                    "propose_task",
+                    json!({
+                        "title": title, "text": text,
+                        "noticed": { "what": "stale backup index", "where": "backups app" },
+                        "outcome": "a fresh backup index", "why_now": "backups overlap the morning run",
+                        "needs": {
+                            "permissions": ["Reads the backup index", "Rebuilds the backup index"],
+                            "estimated_cost_usd": 1.5
+                        },
+                        "evidence": [{ "task": task_id.lock().unwrap().clone(), "shows": "bob asked about backups before" }],
+                    }),
+                )
+            };
+            match c.turn() {
+                0 => proposal("Rebuild the backup index", "Rebuild the stale backup index."),
+                1 => proposal("Defragment the backup index", "Defragment the stale backup index."),
+                _ => done("Reviewed; nothing further."),
+            }
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
+    let bob = app.api("bob");
+    *prior.lock().unwrap() = bob.submit("Check the backups.").await;
+    trigger_review(
+        &bob,
+        json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() }),
+    )
+    .await;
+
+    // Both proposals land in the inbox, grounded and budgeted.
+    let me = bob.clone();
+    let items = eventually("two task proposals", Duration::from_secs(60), || {
+        let me = me.clone();
+        async move {
+            let open: Vec<_> =
+                me.inbox().await.into_iter().filter(|i| i["kind"] == "task_proposal" && i["status"] == "open").collect();
+            (open.len() == 2).then_some(open)
+        }
+    })
+    .await;
+    for item in &items {
+        let details = &item["details"];
+        assert!(details["evidence"].as_array().is_some_and(|e| !e.is_empty()), "ungrounded proposal: {item}");
+        assert_eq!(details["budget"]["max_usd"], 1.5, "proposal carries no budget: {item}");
+    }
+
+    // Accepting one starts the task; rejecting the other ends it quietly.
+    let accept = items
+        .iter()
+        .find(|i| i["details"]["title"] == "Rebuild the backup index")
+        .expect("the approval is missing");
+    let reject = items
+        .iter()
+        .find(|i| i["details"]["title"] == "Defragment the backup index")
+        .expect("the rejection is missing");
+    assert!(bob.respond(accept["id"].as_str().unwrap(), json!({ "decision": "accept" })).await.is_success());
+    let me = bob.clone();
+    let task = eventually("the accepted proposal's task", Duration::from_secs(60), || {
+        let me = me.clone();
+        async move {
+            let (_, v) = me.get("/v1/tasks").await;
+            v["tasks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|t| t["title"] == "Rebuild the backup index")
+                .cloned()
+        }
+    })
+    .await;
+    assert!(bob.respond(reject["id"].as_str().unwrap(), json!({ "decision": "reject" })).await.is_success());
+    let (_, detail) = bob.get(&format!("/v1/tasks/{}", task["task_id"].as_str().unwrap())).await;
+    assert_eq!(detail["budget"]["max_usd"], 1.5, "the run lost its approved budget: {detail}");
+    let rejected = bob.inbox().await.into_iter().find(|i| i["id"] == reject["id"]).expect("the rejection vanished");
+    assert_eq!(rejected["status"], "resolved", "the rejection is still open: {rejected}");
+    let (_, tasks) = bob.get("/v1/tasks").await;
+    assert!(
+        tasks["tasks"].as_array().into_iter().flatten().all(|t| t["title"] != "Defragment the backup index"),
+        "the rejected proposal started anyway: {tasks}"
+    );
+}

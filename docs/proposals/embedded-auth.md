@@ -70,6 +70,36 @@ emailed when the appliance can send mail, else shown in the console for
 the admin to pass on (the #352 pattern). Accepting sets the password and
 activates. The one-time password stays for people without email.
 
+### Administering from the console (#433)
+
+The console is structurally complete (71 routes, five sections, live on
+strix-alpha) yet cannot administer end to end: invites need mail the
+realm never had, and users, the appliance and context are not manageable
+from the panel in practice. #429 makes each area real, not merely
+present, and re-verifies every `docs/admin-console.md` claim live as its
+slice lands; a claim that proves false is fixed, not re-documented.
+
+Users: the whole lifecycle from the panel alone — invite, accept, role,
+disable and enable, end sessions, delete — against the local store, with
+the invite link shown in the console (no email dependency) and the
+one-time password staying for people without email. Acceptance: the owner
+adds a tester start to finish using only the panel.
+
+Appliance: updates install and rollback exercised live, health truthful
+on every service it names, the network allowlist and certificate renewal
+usable, the kill switch as today. Acceptance: an update installed and
+rolled back from the panel on the build-box appliance.
+
+Context: the bundle sections editable with their content visible, "as
+agents see it" matching the assembled context, memory and activity live
+and revertible. Acceptance: the owner edits a standing fact and sees it
+in the assembled context, and reverts one agent change.
+
+The console's own sign-in moves to the local store with this (above);
+the per-request role check and the `magnus_root` question are re-decided
+against embedded sessions as those slices land. Module install and
+remove still wait on the owner's open question 22.
+
 ### Cutover (#429)
 
 Flag day with re-enrollment, not migration: hashes cannot move, and the
