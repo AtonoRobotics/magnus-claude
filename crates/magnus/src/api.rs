@@ -1989,10 +1989,9 @@ async fn remove_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
         Ok(p) => p,
         Err(r) => return r,
     };
-    match controlled(k.cancel_schedule(&p, &id).await) {
-        r if r.status() == StatusCode::OK => StatusCode::NO_CONTENT.into_response(),
-        r => r,
-    }
+    // The report goes back with the status: what each stopped run had
+    // done, and how many actually stopped (#263).
+    controlled(k.cancel_schedule(&p, &id).await)
 }
 
 pub(crate) fn rule_for(b: &Value, min: u32) -> Result<(Option<u32>, Option<String>), String> {

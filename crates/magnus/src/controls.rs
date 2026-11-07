@@ -84,18 +84,41 @@ impl Kernel {
             return Err(Refused::Conflict(format!("the task has already ended ({})", crate::api::status_str(st))));
         }
         self.on_stop(&run.id, true).await;
-        let mut done: Vec<(bool, String)> = run
-            .intents
-            .values()
-            .filter(|i| i.result.as_ref().is_some_and(|r| !r.is_error))
-            .filter_map(|i| crate::boundary::facts(self, &i.tool).filter(|f| f.risk.changes_state()).map(|f| (matches!(f.risk, crate::tools::Risk::Irreversible | crate::tools::Risk::Financial), i.tool.replace("__", ": ").replace('_', " "))))
-            .collect();
-        done.sort_by(|a, b| b.0.cmp(&a.0));
+        // Reported from the run as it is now: results recorded while it
+        // stopped read done, not possibly done.
+        let now = self.read(|s| s.runs.get(&run.id).cloned()).unwrap_or(run);
+        let (cannot_be_undone, already_done, possibly_done) = self.stopped_run_report(&now);
         Ok(json!({
             "cancelled": id,
-            "cannot_be_undone": done.iter().filter(|d| d.0).map(|d| &d.1).collect::<Vec<_>>(),
-            "already_done": done.iter().filter(|d| !d.0).map(|d| &d.1).collect::<Vec<_>>(),
+            "cannot_be_undone": cannot_be_undone,
+            "already_done": already_done,
+            "possibly_done": possibly_done,
         }))
+    }
+
+    /// What a stopped run had done, for cancel reports: confirmed done
+    /// split by reversibility, plus what may have happened — still in
+    /// flight or outcome unknown — irreversible first.
+    fn stopped_run_report(&self, run: &crate::state::Run) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let mut done_irr = vec![];
+        let mut done_rev = vec![];
+        let mut maybe_irr = vec![];
+        let mut maybe_rev = vec![];
+        for i in run.intents.values() {
+            let Some(f) = crate::boundary::facts(self, &i.tool).filter(|f| f.risk.changes_state()) else { continue };
+            let name = i.tool.replace("__", ": ").replace('_', " ");
+            let irr = matches!(f.risk, crate::tools::Risk::Irreversible | crate::tools::Risk::Financial);
+            match report_class(i.result.as_ref()) {
+                ReportClass::Done if irr => done_irr.push(name),
+                ReportClass::Done => done_rev.push(name),
+                ReportClass::Possibly if irr => maybe_irr.push(name),
+                ReportClass::Possibly => maybe_rev.push(name),
+                ReportClass::Skip => {}
+            }
+        }
+        let mut possibly_done = maybe_irr;
+        possibly_done.extend(maybe_rev);
+        (done_irr, done_rev, possibly_done)
     }
 
     fn schedule_owned(&self, who: &Person, id: &str) -> Result<crate::state::Schedule, Refused> {
@@ -139,14 +162,21 @@ impl Kernel {
     /// Cancel a schedule: no more runs, and a run of it still going stops.
     pub async fn cancel_schedule(&self, who: &Person, id: &str) -> Result<Value, Refused> {
         self.schedule_owned(who, id)?;
-        let going: Vec<String> = self.read(|s| s.tasks.values().filter(|t| t.schedule.as_deref() == Some(id)).filter_map(|t| s.runs.get(&t.run_id)).filter(|r| !r.status.terminal()).map(|r| r.id.clone()).collect());
+        let going: Vec<(String, String)> = self.read(|s| s.tasks.values().filter(|t| t.schedule.as_deref() == Some(id)).filter_map(|t| s.runs.get(&t.run_id)).filter(|r| !r.status.terminal()).map(|r| (r.task.clone(), r.id.clone())).collect());
         self.emit(&format!("person:{}", who.id), Ev::ScheduleRemoved { id: id.into() }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
-        for run in &going {
+        let mut runs = vec![];
+        let mut stopped = 0;
+        for (task, run) in &going {
             if self.emit(&format!("person:{}", who.id), Ev::Cancelled { run: run.clone() }).await.is_ok() {
                 self.on_stop(run, true).await;
+                stopped += 1;
+                if let Some(now) = self.read(|s| s.runs.get(run).cloned()) {
+                    let (cannot_be_undone, already_done, possibly_done) = self.stopped_run_report(&now);
+                    runs.push(json!({ "task": task, "run": run, "cannot_be_undone": cannot_be_undone, "already_done": already_done, "possibly_done": possibly_done }));
+                }
             }
         }
-        Ok(json!({ "cancelled": id, "runs_stopped": going.len() }))
+        Ok(json!({ "cancelled": id, "runs_stopped": stopped, "runs": runs }))
     }
 
     /// Change when a schedule runs and when it ends. What each run does
@@ -237,3 +267,44 @@ impl Kernel {
 
 /// The control tools, as the model calls them.
 pub const TOOLS: [&str; 7] = ["list_tasks", "list_schedules", "cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule"];
+
+/// How a recorded intent reads in a cancel report.
+#[derive(Debug, PartialEq)]
+enum ReportClass {
+    Done,
+    Possibly,
+    Skip,
+}
+
+/// Done when its result says so; possibly done when it is still in
+/// flight or its outcome is unknown, whatever the error flag says;
+/// skipped when it failed or was never sent (#263).
+fn report_class(result: Option<&crate::state::ResultRec>) -> ReportClass {
+    match result {
+        None => ReportClass::Possibly,
+        Some(r) if r.status == "unknown" => ReportClass::Possibly,
+        Some(r) if !r.is_error => ReportClass::Done,
+        Some(_) => ReportClass::Skip,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{report_class, ReportClass};
+    use crate::state::ResultRec;
+
+    fn rec(status: &str, is_error: bool) -> ResultRec {
+        ResultRec { seq: 0, text: String::new(), is_error, status: status.into(), data: None }
+    }
+
+    /// In flight and outcome-unknown read possibly done; done reads
+    /// done; failed reads skipped (#263).
+    #[test]
+    fn cancel_reports_classify_intents_by_outcome() {
+        assert_eq!(report_class(None), ReportClass::Possibly);
+        assert_eq!(report_class(Some(&rec("unknown", true))), ReportClass::Possibly);
+        assert_eq!(report_class(Some(&rec("unknown", false))), ReportClass::Possibly);
+        assert_eq!(report_class(Some(&rec("done", false))), ReportClass::Done);
+        assert_eq!(report_class(Some(&rec("failed", true))), ReportClass::Skip);
+    }
+}
