@@ -73,6 +73,9 @@ pub struct Spec {
     pub missing_secrets: Vec<String>,
     /// Extra secrets to store, by name.
     pub secrets: Vec<(String, String)>,
+    /// The `[proactive]` config. Off by default, so reviews never wake in
+    /// tests that are not about the proactive loop (#237).
+    pub proactive: Value,
 }
 
 fn person(id: &str, groups: &[&str], roles: &[&str]) -> Person {
@@ -101,6 +104,7 @@ impl Default for Spec {
             verifier: false,
             missing_secrets: vec![],
             secrets: vec![],
+            proactive: json!({ "on": false }),
         }
     }
 }
@@ -167,6 +171,11 @@ impl Spec {
 
     pub fn model_retries(mut self, n: u32) -> Self {
         self.model_retries = n;
+        self
+    }
+
+    pub fn proactive(mut self, v: Value) -> Self {
+        self.proactive = v;
         self
     }
 
@@ -272,6 +281,7 @@ impl Appliance {
             // Openers (#255) run a model turn at a first sign-in and a first
             // app connection; tests that want them turn them on.
             "proposals": { "openers": false },
+            "proactive": spec.proactive,
             "sandbox": {
                 "firecracker": firecracker,
                 "kernel_image": kernel,

@@ -220,6 +220,15 @@ pub enum Ev {
         blocks: Vec<magnus_adapter_proto::Block>,
         usage: magnus_adapter_proto::Usage,
     },
+    /// The proactive loop woke a review run for the person: why (cadence,
+    /// overnight, a task done or failed, an approval waiting, a schedule
+    /// coming up, a commitment due), for the loop's own scheduling (#237).
+    ReviewWoken {
+        run: String,
+        task: String,
+        person: String,
+        reason: String,
+    },
     /// A backup of the log and the vault was written (K10).
     BackupMade {
         file: String,
@@ -1296,6 +1305,7 @@ impl Ev {
             | MemoryPass { run, .. }
             | SpokenWritten { run, .. }
             | KnowledgeExtraction { run, .. }
+            | ReviewWoken { run, .. }
             | Output { run, .. } => Some(run),
             Item { run, .. } | ScheduleEnded { run, .. } => run.as_deref(),
             _ => None,

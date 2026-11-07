@@ -832,6 +832,7 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool, words
         "summary": run.summary,
         "thread": task.chat.as_ref().map(|c| c.thread.clone()),
         "verdict": task.verdict,
+        "review": task.review,
     });
     // The apps this task asked the person to connect, each as they stand
     // with it now (connectors spec, Inside work).

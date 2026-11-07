@@ -55,6 +55,14 @@ pub fn chat_instructions_version() -> String {
     version_of("chat.md", &[CHAT_INSTRUCTIONS, OPENER, OPENER_APP].concat())
 }
 
+/// What a proactive review run runs under: read the person's state, decide
+/// nothing, an observation, an interruption, a proposal, or an act (#237).
+pub const REVIEW_INSTRUCTIONS: &str = concat!(include_str!("../../instructions/review.md"), "\n", include_str!("../../instructions/character.md"));
+
+pub fn review_instructions_version() -> String {
+    version_of("review.md", REVIEW_INSTRUCTIONS)
+}
+
 /// The instructions a model call was sent, as each call logs them: the
 /// run's instructions by name, hashed with exactly the system context sent,
 /// the person's relationship memory and recent messages included, so the
@@ -160,6 +168,7 @@ impl Kernel {
         let scope = task.as_ref().and_then(|t| words.opt(t.seq, "scope"));
         let project = task.as_ref().and_then(|t| t.project.clone());
         let chat = task.as_ref().and_then(|t| t.chat.clone());
+        let review = task.as_ref().is_some_and(|t| t.review);
         let mut first = vec![];
         // A chat turn sees the thread so far, as recorded when the person
         // wrote; a task from chat, the conversation that started it.
@@ -266,7 +275,7 @@ impl Kernel {
                 msgs.push(Message { role: Role::User, content: user, state: None });
             }
         }
-        let system = if chat.is_some_and(|c| c.turn) { CHAT_INSTRUCTIONS } else { INSTRUCTIONS };
+        let system = if review { REVIEW_INSTRUCTIONS } else if chat.is_some_and(|c| c.turn) { CHAT_INSTRUCTIONS } else { INSTRUCTIONS };
         let harness = self.harness_context(run);
         let (person, relationship) = self.person_context(run).await?;
         let personal = !person.is_empty();
@@ -602,7 +611,7 @@ impl Kernel {
         (id, Some(ev))
     }
 
-    async fn item(&self, run: &Run, kind: &str, summary: String, details: Value) -> Result<String> {
+    pub(crate) async fn item(&self, run: &Run, kind: &str, summary: String, details: Value) -> Result<String> {
         let (id, ev) = self.item_event(run, kind, summary, details);
         if let Some(ev) = ev {
             self.emit("kernel", ev).await?;
@@ -751,6 +760,25 @@ impl Kernel {
                 let m = input["message"].as_str().unwrap_or_default().to_string();
                 self.item(run, "message", m, json!({ "from": "agent", "call_id": call_id })).await?;
                 self.result(rid, call_id, "Sent.", false).await?;
+            }
+            "observe" => {
+                let (what, why, evidence) = (input["what"].as_str().unwrap_or_default().trim(), input["why"].as_str().unwrap_or_default().trim(), input["evidence"].as_str().unwrap_or_default().trim());
+                if what.is_empty() || why.is_empty() || evidence.is_empty() {
+                    self.result(rid, call_id, "observe needs what, why and evidence. A retry with the same values will not help.", true).await?;
+                } else {
+                    let at = self.notify_due(&run.person);
+                    let item = self.item(run, "observation", what.to_string(), json!({ "why": why, "evidence": evidence, "call_id": call_id, "notify_at": at.to_rfc3339() })).await?;
+                    self.result(rid, call_id, format!("Queued as observation {item} for the person's next session."), false).await?;
+                }
+            }
+            "interrupt" => {
+                let (what, why) = (input["what"].as_str().unwrap_or_default().trim(), input["why"].as_str().unwrap_or_default().trim());
+                if what.is_empty() || why.is_empty() {
+                    self.result(rid, call_id, "interrupt needs what and why. A retry with the same values will not help.", true).await?;
+                } else {
+                    let said = self.interrupt_for(run, what, why, call_id).await?;
+                    self.result(rid, call_id, said, false).await?;
+                }
             }
             _ => self.result(rid, call_id, format!("{name} is not a run record."), true).await?,
         }
@@ -905,6 +933,17 @@ impl Kernel {
         if spoken.as_ref().is_some_and(|t| t.chars().count() > crate::compose::MAX_SPOKEN) {
             self.result(rid, call_id, format!("The spoken script is longer than {} characters; shorten it.", crate::compose::MAX_SPOKEN), true).await?;
             return Ok(Flow::Continue);
+        }
+        // A review's work is the observations it queued, already in the
+        // log; there is nothing to check it against, and no person to
+        // review its criteria, so it completes without a contract (#237).
+        if run.contract.is_none() && self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.review)) {
+            let summary = input["summary"].as_str().unwrap_or_default().to_string();
+            self.result(rid, call_id, "Reviewed and completed.", false).await?;
+            self.emit("kernel", Ev::Completed { run: rid.into(), summary, view: Some(view), spoken }).await?;
+            self.on_stop(rid, true).await;
+            self.after_end(rid);
+            return Ok(Flow::Stop);
         }
         let Some(contract) = run.contract.clone() else {
             self.result(rid, call_id, "There is no task contract, so completion cannot be checked. Record one with task_contract, then retry.", true).await?;

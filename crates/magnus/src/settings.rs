@@ -19,13 +19,24 @@ type K = State<Arc<Kernel>>;
 /// something needs them now and when the agent changes, not for what can
 /// wait; problem reports leave the appliance only with consent.
 pub fn preferences(k: &Kernel, person: &str) -> Value {
-    let mut p = json!({ "notify_blocking": true, "notify_batched": false, "notify_agent_changes": true, "feedback_consent": false });
+    let mut p = json!({ "notify_blocking": true, "notify_batched": false, "notify_agent_changes": true, "feedback_consent": false, "timezone": "UTC", "working_hours": { "start": "09:00", "end": "17:00" }, "quiet_hours": { "start": "22:00", "end": "07:00" }, "review_every_minutes": k.cfg.proactive.review_every_minutes, "interruptions_per_day": k.cfg.proactive.interruptions_per_day });
     if let Some(set) = k.read(|s| s.preferences.get(person).cloned()) {
         for (key, v) in set.as_object().into_iter().flatten() {
             p[key] = v.clone();
         }
     }
     p
+}
+
+/// Whether a proactive loop setting holds what the loop can use (#237).
+fn proactive_ok(key: &str, v: &Value) -> bool {
+    let hhmm = |s: &str| s.split_once(':').is_some_and(|(h, m)| h.parse::<u32>().is_ok_and(|h| h < 24) && m.parse::<u32>().is_ok_and(|m| m < 60));
+    match key {
+        "timezone" => v.as_str().is_some_and(|z| z.parse::<chrono_tz::Tz>().is_ok()),
+        "working_hours" | "quiet_hours" => ["start", "end"].iter().all(|k| v.get(k).and_then(Value::as_str).is_some_and(hhmm)),
+        "review_every_minutes" | "interruptions_per_day" => v.as_u64().is_some_and(|n| n > 0),
+        _ => false,
+    }
 }
 
 /// The days the owner has to act on a request to delete a person's data
@@ -199,8 +210,8 @@ async fn get_preferences(State(k): K, h: HeaderMap) -> Response {
     }
 }
 
-/// Change some of the person's own settings; each must be a known one and
-/// a yes or no.
+/// Change some of the person's own settings; each must be a known one,
+/// a yes or no or, for the proactive loop's, what the loop can use.
 async fn put_preferences(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
     let p = match who(&k, &h) {
         Ok(p) => p,
@@ -212,8 +223,8 @@ async fn put_preferences(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Res
         if known.get(key).is_none() {
             return err(StatusCode::BAD_REQUEST, format!("no setting {key}"));
         }
-        if !v.is_boolean() {
-            return err(StatusCode::BAD_REQUEST, format!("{key} is true or false"));
+        if !v.is_boolean() && !proactive_ok(key, v) {
+            return err(StatusCode::BAD_REQUEST, format!("{key} holds the wrong shape"));
         }
     }
     match k.emit(&format!("person:{}", p.id), Ev::PreferencesSet { person: p.id.clone(), prefs: b }).await {

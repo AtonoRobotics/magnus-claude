@@ -55,7 +55,7 @@ pub fn parse_by(s: &str) -> Result<Option<String>, String> {
 }
 
 /// When a commitment falls due: a time as given, a date at its end (UTC).
-fn due(by: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn due(by: &str) -> Option<DateTime<Utc>> {
     if let Ok(t) = DateTime::parse_from_rfc3339(by) {
         return Some(t.to_utc());
     }

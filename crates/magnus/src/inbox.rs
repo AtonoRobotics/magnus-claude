@@ -303,7 +303,7 @@ impl Kernel {
             ("deletion_request", "done") | ("deletion_request", "decline") => {
                 evs.push((&actor, resolve(None)));
             }
-            ("schedule_proposal", "reject") | ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("shared", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") => {
+            ("schedule_proposal", "reject") | ("policy_proposal", "reject") | ("notice", "dismiss") | ("message", "dismiss") | ("shared", "dismiss") | ("tool_change", "reject") | ("tool_review", "reject") | ("observation", "dismiss") | ("interrupt", "dismiss") => {
                 evs.push((&actor, resolve(None)));
             }
             // Only the kernel's own notices (which name a reason) can continue a

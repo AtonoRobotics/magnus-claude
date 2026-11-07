@@ -119,7 +119,7 @@ impl Audience {
 }
 
 /// Run records the loop writes to the log itself, outside execute() (K21).
-pub const RECORDS: &[&str] = &["show", "task_contract", "task_plan", "task_complete", "task_fail", "ask_principal", "propose_policy", "propose_schedule", "end_schedule", "wait_until", "notify"];
+pub const RECORDS: &[&str] = &["show", "task_contract", "task_plan", "task_complete", "task_fail", "ask_principal", "propose_policy", "propose_schedule", "end_schedule", "wait_until", "notify", "observe", "interrupt"];
 
 /// Built-in actions that pass the boundary like app tools.
 pub struct Builtin {
@@ -510,6 +510,16 @@ pub fn builtin_specs(sandbox: bool, search: bool, browser: bool) -> Vec<ToolSpec
             name: "notify".into(),
             description: d("notify"),
             input_schema: obj(json!({ "message": { "type": "string" } }), &["message"]),
+        },
+        ToolSpec {
+            name: "observe".into(),
+            description: d("observe"),
+            input_schema: obj(json!({ "what": { "type": "string" }, "why": { "type": "string" }, "evidence": { "type": "string" } }), &["what", "why", "evidence"]),
+        },
+        ToolSpec {
+            name: "interrupt".into(),
+            description: d("interrupt"),
+            input_schema: obj(json!({ "what": { "type": "string" }, "why": { "type": "string" } }), &["what", "why"]),
         },
         ToolSpec {
             name: "web_fetch".into(),

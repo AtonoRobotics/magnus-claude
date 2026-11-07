@@ -20,11 +20,27 @@ impl Kernel {
     pub fn after_end(self: &Arc<Self>, run: &str) {
         let k = self.clone();
         let run = run.to_string();
+        let run2 = run.clone();
         tokio::spawn(async move {
-            if let Err(e) = k.memory_pass(&run).await {
-                tracing::warn!("memory pass on {run}: {e:#}");
+            if let Err(e) = k.memory_pass(&run2).await {
+                tracing::warn!("memory pass on {run2}: {e:#}");
             }
         });
+        // A task done or failed wakes a review: not a review itself, and
+        // not a chat turn, whose person is already there (#237).
+        if let Some((person, ended)) = self.read(|s| s.runs.get(run.as_str()).map(|r| (r.person.clone(), s.tasks.get(&r.task).map(|t| (t.review, t.chat.as_ref().is_some_and(|c| c.turn), r.status))))) {
+            let reason = match ended {
+                Some((false, false, crate::state::Status::Completed)) => Some("task done"),
+                Some((false, false, crate::state::Status::Failed)) => Some("task failed"),
+                _ => None,
+            };
+            if let Some(reason) = reason.map(String::from) {
+                let k = self.clone();
+                tokio::spawn(async move {
+                    k.review_wake(&person, reason).await;
+                });
+            }
+        }
     }
 
     async fn memory_pass(self: &Arc<Self>, run_id: &str) -> Result<()> {

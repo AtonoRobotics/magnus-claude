@@ -29,6 +29,8 @@ pub struct Config {
     pub proposals: Proposals,
     #[serde(default)]
     pub updates: Updates,
+    #[serde(default)]
+    pub proactive: Proactive,
     /// The file this was read from: a new release is checked against it.
     #[serde(skip)]
     pub path: PathBuf,
@@ -524,6 +526,44 @@ pub struct Proposals {
 impl Default for Proposals {
     fn default() -> Self {
         Proposals { openers: openers() }
+    }
+}
+
+fn proactive_on() -> bool {
+    true
+}
+
+fn review_every_minutes() -> u32 {
+    60
+}
+
+fn interruptions_per_day() -> u32 {
+    3
+}
+
+fn wake_max_usd() -> f64 {
+    0.25
+}
+
+/// The proactive loop's operating parameters (behavior step 7, #237):
+/// how often reviews wake, how many interruptions a day they may deliver,
+/// and what each wake may spend. People override the cadence and the
+/// budget with preferences; `on` is the deployment kill switch.
+#[derive(Deserialize, serde::Serialize, Clone, Debug)]
+pub struct Proactive {
+    #[serde(default = "proactive_on")]
+    pub on: bool,
+    #[serde(default = "review_every_minutes")]
+    pub review_every_minutes: u32,
+    #[serde(default = "interruptions_per_day")]
+    pub interruptions_per_day: u32,
+    #[serde(default = "wake_max_usd")]
+    pub wake_max_usd: f64,
+}
+
+impl Default for Proactive {
+    fn default() -> Self {
+        Proactive { on: proactive_on(), review_every_minutes: review_every_minutes(), interruptions_per_day: interruptions_per_day(), wake_max_usd: wake_max_usd() }
     }
 }
 

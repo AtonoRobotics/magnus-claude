@@ -239,6 +239,8 @@ pub struct Task {
     pub chat: Option<crate::events::ChatOrigin>,
     /// The schedule that started it, if any.
     pub schedule: Option<String>,
+    /// A proactive review run's task: the loop's own wake, not work (#237).
+    pub review: bool,
     /// The event that created it: where its words are recalled from.
     pub seq: i64,
     /// Library files the person gave it.
@@ -928,6 +930,16 @@ pub struct State {
     /// card id: with the cards in their turns' results, the suggestion
     /// ledger (`suggestions::ledger`).
     pub cards: HashMap<String, CardState>,
+    /// The proactive loop's scheduling, by person (#237): the last review
+    /// wake, the day of the last overnight review, and today's delivered
+    /// interruptions (day, count).
+    pub reviews_last: HashMap<String, DateTime<Utc>>,
+    pub reviews_overnight: HashMap<String, String>,
+    pub interrupts: HashMap<String, (String, u32)>,
+    /// Review runs still going, run to person: one per person at a time.
+    pub review_runs: HashMap<String, String>,
+    /// One-a-day wake marks (a coming-up schedule, a due commitment).
+    pub wake_marks: HashMap<String, String>,
     pub model: Option<(String, String)>,
     pub pins: HashMap<String, Pin>,
     /// Tools whose live definition differs from the pin, with the open item.
@@ -1486,6 +1498,12 @@ impl State {
                 self.disagreements.retain(|_, d| &d.person != person);
                 // Their answers to cards, a decline's reason among them.
                 self.cards.retain(|_, c| c.person.as_ref() != Some(person));
+                // The proactive loop's scheduling for them.
+                self.reviews_last.remove(person);
+                self.reviews_overnight.remove(person);
+                self.interrupts.remove(person);
+                self.review_runs.retain(|_, p| p != person);
+                self.wake_marks.retain(|k, _| k.split_once(':').is_some_and(|(p, _)| p != person));
                 // Their branched threads (the entries as shown then) and
                 // what their tasks had attached go too.
                 self.branches.retain(|_, b| &b.person != person);
@@ -1844,6 +1862,7 @@ impl State {
                         chat: chat.clone(),
                         // Known from the start, so its first step knows it is scheduled.
                         schedule: e.actor.strip_prefix("schedule:").map(String::from),
+                        review: e.actor == "review",
                         seq: e.seq,
                         files: files.clone(),
                         project: project.clone(),
@@ -2125,6 +2144,7 @@ impl State {
             // loses the race to the run's own end changes nothing, nor does
             // the run's end after a cancel.
             Ev::Completed { run, summary, view, spoken } => {
+                self.review_runs.remove(run);
                 if let Some(r) = self.runs.get_mut(run).filter(|r| !r.status.terminal()) {
                     r.status = Status::Completed;
                     r.summary = Some(summary.clone());
@@ -2136,6 +2156,7 @@ impl State {
                 }
             }
             Ev::Failed { run, reason, .. } => {
+                self.review_runs.remove(run);
                 if let Some(r) = self.runs.get_mut(run).filter(|r| !r.status.terminal()) {
                     r.status = Status::Failed;
                     r.summary = Some(reason.clone());
@@ -2145,6 +2166,7 @@ impl State {
                 }
             }
             Ev::Cancelled { run, .. } => {
+                self.review_runs.remove(run);
                 if let Some(r) = self.runs.get_mut(run).filter(|r| !r.status.terminal()) {
                     r.status = Status::Cancelled;
                     r.reason = None;
@@ -2167,6 +2189,27 @@ impl State {
                         resolution: None,
                     },
                 );
+                // A delivered interruption counts against the person's day
+                // (#237); observations and notices never do.
+                if item_kind == "interrupt" {
+                    let tz = self.preferences.get(person).map(crate::proactive::tz_of).unwrap_or(chrono_tz::Tz::UTC);
+                    let today = crate::proactive::day_key(e.at, tz);
+                    self.interrupts.entry(person.clone()).and_modify(|(day, n)| if *day == today { *n += 1 } else { *day = today.clone(); *n = 1 }).or_insert((today, 1));
+                }
+            }
+            Ev::ReviewWoken { run, person, reason, .. } => {
+                self.reviews_last.insert(person.clone(), e.at);
+                self.review_runs.insert(run.clone(), person.clone());
+                if reason == "overnight" {
+                    let tz = self.preferences.get(person).map(crate::proactive::tz_of).unwrap_or(chrono_tz::Tz::UTC);
+                    self.reviews_overnight.insert(person.clone(), crate::proactive::day_key(e.at, tz));
+                }
+                for (prefix, suffix) in [("schedule ", " coming up"), ("commitment ", " due"), ("approval ", " waiting")] {
+                    if let Some(id) = reason.strip_prefix(prefix).and_then(|r| r.strip_suffix(suffix)) {
+                        let tz = self.preferences.get(person).map(crate::proactive::tz_of).unwrap_or(chrono_tz::Tz::UTC);
+                        self.wake_marks.insert(format!("{person}:{prefix}{id}"), crate::proactive::day_key(e.at, tz));
+                    }
+                }
             }
             Ev::ItemResolved { id, decision, scope, text } => {
                 if let Some(i) = self.items.get_mut(id) {
