@@ -220,6 +220,20 @@ pub enum Ev {
         blocks: Vec<magnus_adapter_proto::Block>,
         usage: magnus_adapter_proto::Usage,
     },
+    /// A draft written by a scoped step: the model call saw only these
+    /// threads and the person's own words, and the draft's body is what it
+    /// wrote. `participants` are the threads' addresses, entitled to what
+    /// the draft holds: a send of it to them passes under content
+    /// provenance (#178).
+    DraftScoped {
+        run: String,
+        person: String,
+        draft: String,
+        threads: Vec<String>,
+        #[serde(default)]
+        participants: Vec<String>,
+        usage: magnus_adapter_proto::Usage,
+    },
     /// A backup of the log and the vault was written (K10).
     BackupMade {
         file: String,
@@ -1243,6 +1257,7 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("disagreement_outcome", &["outcome"]),
     ("card_declined", &["reason"]),
     ("schedule_ended", &["reason"]),
+    ("draft_scoped", &["participants"]),
     ("grant_set", &["title"]),
     ("commitment_recorded", &["what", "to", "quote"]),
     ("commitment_changed", &["what", "to", "note"]),
@@ -1296,6 +1311,7 @@ impl Ev {
             | MemoryPass { run, .. }
             | SpokenWritten { run, .. }
             | KnowledgeExtraction { run, .. }
+            | DraftScoped { run, .. }
             | Output { run, .. } => Some(run),
             Item { run, .. } | ScheduleEnded { run, .. } => run.as_deref(),
             _ => None,
