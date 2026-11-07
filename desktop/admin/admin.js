@@ -918,15 +918,41 @@ function drawUsers(view) {
   box.innerHTML = rows.length ? `<div class="ad-scroll"><table class="t small"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last sign-in</th><th class="n">Sessions</th><th></th></tr></thead><tbody>${rows.map(u => `<tr class="click" data-href="#/users/${esc(u.id)}" tabindex="0">
       <td>${esc(u.name)}</td><td>${esc(u.email || "")}</td><td>${u.role === "admin" ? "Admin" : "Member"}</td>
       <td>${pill(u.status)}</td><td>${esc(when(u.last_sign_in))}</td><td class="n">${esc(u.sessions)}</td>
-      <td>${u.status === "invited" ? `<button class="link small" data-resend="${esc(u.id)}">Resend</button> <button class="link small" data-cancel="${esc(u.id)}">Cancel</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`
+      <td>${u.status === "invited" ? `<button class="link small" data-resend="${esc(u.id)}">Resend</button> <button class="link small" data-otp="${esc(u.id)}">One-time password</button> <button class="link small" data-cancel="${esc(u.id)}">Cancel</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`
     : UI.empty(all.length ? "Nobody matches." : "Nobody is in the organisation yet.", all.length ? null : "Invite the first person.");
   rowLinks(box);
   for (const b of $$("[data-resend]", box)) b.onclick = () => act("POST", `/users/${b.dataset.resend}/invite`, null, () => UI.toast("The invitation was sent again."));
+  for (const b of $$("[data-otp]", box)) b.onclick = () => oneTimePassword(all.find(x => x.id === b.dataset.otp));
   for (const b of $$("[data-cancel]", box)) b.onclick = async () => {
     const u = all.find(x => x.id === b.dataset.cancel);
     if (await UI.confirm({ title: "Cancel this invitation?", body: `${u?.email || "Their"} account goes, and the link in the email stops working.`, verb: "Cancel invitation", danger: true }))
       act("DELETE", `/users/${b.dataset.cancel}/invite`, null, () => { UI.toast("The invitation is cancelled."); loadUsers(view); });
   };
+}
+
+// For when the invitation email cannot reach them: a password to sign in
+// with once, shown here only, which the admin passes on; the provider then
+// asks them to choose their own.
+async function oneTimePassword(u) {
+  if (!u) return;
+  if (!(await UI.confirm({ title: "Give a one-time password?", body: `${u.email || u.name} signs in with it once on ${org()}'s sign-in page, then chooses their own password. It is shown only now: pass it on yourself.`, verb: "Make password" }))) return;
+  let v;
+  try { v = await api("POST", `/users/${u.id}/invite/password`); }
+  catch (e) { return UI.toast(e.message); }
+  const d = document.createElement("dialog");
+  d.className = "ad-sheet";
+  d.setAttribute("aria-labelledby", "otp-title");
+  d.innerHTML = `<h2 id="otp-title">One-time password</h2>
+    <p class="small muted">Pass these on to ${esc(u.name)}. The password works once; they then choose their own.</p>
+    <label>Sign in at <input readonly value="${esc(v.sign_in)}"></label>
+    <label>Username <input readonly value="${esc(v.username)}"></label>
+    <label>One-time password <input readonly id="otp-value" value="${esc(v.password)}"></label>
+    <div class="row ad-sheet-actions"><button type="button" id="otp-copy">Copy password</button><button type="button" class="primary" id="otp-done">Done</button></div>`;
+  document.body.append(d);
+  d.addEventListener("close", () => d.remove());
+  $("#otp-copy", d).onclick = () => navigator.clipboard?.writeText(v.password).then(() => UI.toast("Copied."), () => $("#otp-value", d).select());
+  $("#otp-done", d).onclick = () => d.close();
+  d.showModal();
 }
 
 function invite(view) {
@@ -950,7 +976,7 @@ function invite(view) {
     try {
       const v = await api("POST", "/users", Object.fromEntries(new FormData(e.target)));
       d.close();
-      UI.toast(v.email_sent ? "Invitation sent." : `The account is made, but the email could not be sent (${v.email_error}). Use Resend once email works.`);
+      UI.toast(v.email_sent ? "Invitation sent." : `The account is made, but the email could not be sent (${v.email_error}). Use Resend once email works, or One-time password to pass it on yourself.`);
       loadUsers(view);
     } catch (err) { const el = $("#invite-error", d); el.textContent = err.message; el.hidden = false; }
   };

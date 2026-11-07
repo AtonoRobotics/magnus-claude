@@ -57,6 +57,7 @@ pub fn person(u: &Value, admins: &[String]) -> Value {
         "id": id,
         "name": if name.is_empty() { u["username"].clone() } else { json!(name) },
         "email": u["email"],
+        "username": u["username"],
         "role": if admins.iter().any(|a| a == id) { "admin" } else { "member" },
         "status": status,
         "created": u["createdTimestamp"].as_i64().and_then(chrono::DateTime::from_timestamp_millis),
@@ -179,6 +180,14 @@ impl Directory {
     /// passkeys). It lasts three days.
     pub async fn send_invite(&self, idp: &Idp, key: &Key, id: &str) -> Result<()> {
         self.call(idp, key, reqwest::Method::PUT, &format!("/users/{}/execute-actions-email?lifespan=259200", seg(id)), Some(&json!(["UPDATE_PASSWORD"]))).await?;
+        Ok(())
+    }
+
+    /// Give an invited person a password to sign in with once, for when the
+    /// provider cannot email them: it is temporary, so the provider still
+    /// asks them to choose their own, and they stay invited until they do.
+    pub async fn set_temporary_password(&self, idp: &Idp, key: &Key, id: &str, password: &str) -> Result<()> {
+        self.call(idp, key, reqwest::Method::PUT, &format!("/users/{}/reset-password", seg(id)), Some(&json!({ "type": "password", "value": password, "temporary": true }))).await?;
         Ok(())
     }
 

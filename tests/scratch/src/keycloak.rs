@@ -351,12 +351,22 @@ impl Keycloak {
         self.browse(url, username, true).await
     }
 
+    /// The same with a password given to them (a one-time one): they sign
+    /// in with it and, asked to choose their own, keep it.
+    pub async fn browser_with(&self, url: &str, username: &str, password: &str) -> Result<String, String> {
+        self.browse_as(url, username, password, false).await
+    }
+
     async fn browse(&self, url: &str, username: &str, deny: bool) -> Result<String, String> {
+        self.browse_as(url, username, &password_of(username), deny).await
+    }
+
+    async fn browse_as(&self, url: &str, username: &str, password: &str, deny: bool) -> Result<String, String> {
         // A browser that hangs fails the test in two minutes, named, never
         // holds the run.
         let run = tokio::process::Command::new("node")
             .arg(workspace_root().join("tests/scratch/sign-in-browser.mjs"))
-            .args([url, &username.to_lowercase(), &password_of(username)])
+            .args([url, &username.to_lowercase(), password])
             .args(deny.then_some("deny"))
             .env("MAGNUS_CHROMIUM", crate::chromium())
             .kill_on_drop(true)
