@@ -703,7 +703,7 @@ async fn accept_invite(State(k): K, Extension(t): Extension<Transport>, ConnectI
     if password.chars().count() < k.cfg.sign_in.min_password_length {
         return err(StatusCode::BAD_REQUEST, format!("a password needs at least {} characters", k.cfg.sign_in.min_password_length));
     }
-    match crate::accounts::accept(&k.cfg.appliance.state_dir, &k.cfg.sign_in, token, password) {
+    match k.accounts.accept(&k.cfg.sign_in, token, password) {
         Ok(Some(person)) if k.cfg.person(&person).is_some() => Json(json!({ "person": person })).into_response(),
         Ok(_) => err(StatusCode::UNAUTHORIZED, "The invitation is wrong or expired."),
         Err(e) => internal(e),

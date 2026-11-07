@@ -258,7 +258,8 @@ fn invite(args: &[String]) -> Result<()> {
     let person = arg(args, "--person").context("--person is required")?;
     anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
     anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only local passwords are invited");
-    println!("{}", crate::accounts::invite(&cfg.appliance.state_dir, &person, arg(args, "--email").as_deref())?);
+    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+    println!("{}", accounts.invite(&person, arg(args, "--email").as_deref())?);
     eprintln!("invited {person}: pass them the token above within 7 days");
     Ok(())
 }
