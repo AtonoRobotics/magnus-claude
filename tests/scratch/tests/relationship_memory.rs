@@ -349,6 +349,47 @@ async fn a_developer_reading_another_persons_run_sees_no_note_or_disagreement_wo
     }
 }
 
+const SAMNOTE: &str = "File under Q for quarterly (userdoc-9a1c).";
+
+/// A task that files a user document in its person's mapped directory and
+/// reads it back.
+fn user_doc_model() -> model::Script {
+    script(|c| async move {
+        if system(&c).contains(PASS) {
+            return Reply::Text(String::new());
+        }
+        match c.turn() {
+            0 => contract_unchecked("file a note", "filed"),
+            1 => tool("bundle_write", json!({ "path": "/users/sam-40example.com/n.md", "frontmatter": { "type": "Note", "scope": "user", "owner_user": "sam@example.com" }, "body": SAMNOTE })),
+            2 => tool("bundle_read", json!({ "path": "/users/sam-40example.com/n.md" })),
+            _ => fail("done"),
+        }
+    })
+}
+
+fn at_spec() -> Spec {
+    let mut s = Spec::default();
+    s.people.push(Person { id: "sam@example.com".into(), name: "Sam".into(), token: format!("tok-sam-{}", canary("x").rsplit('-').next().unwrap()), groups: vec!["staff".into()], roles: vec![] });
+    s
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_whose_id_has_at_and_dot_keeps_user_documents() {
+    let m = FakeModel::start(user_doc_model()).await;
+    let app = Appliance::start(at_spec(), &m).await;
+    let sam = app.api("sam@example.com");
+    // Relationship memory round-trips through the mapped directory.
+    let (st, v) = sam.post("/v1/relationship", json!({ "action": "add", "text": NOTE })).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert_eq!(notes(&sam).await["notes"], json!([NOTE]));
+    // So does an ordinary user document, written and read through the tools.
+    let text = "File a note for later.";
+    let task = sam.submit(text).await;
+    sam.wait_settled(&task).await;
+    let results: Vec<_> = m.requests().into_iter().filter(|c| said(c) == text && c.turn() == 3).flat_map(|c| c.last_results()).collect();
+    assert!(results.iter().any(|r| !r.is_error && r.text.contains(SAMNOTE)), "{results:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_that_read_outside_content_writes_no_note() {
     let m = FakeModel::start(model()).await;
