@@ -46,13 +46,16 @@ async fn a_client_the_provider_does_not_know_yet_is_waited_for_before_the_person
 }
 
 /// The person waits for the sign-in page ten seconds at most, whatever the
-/// provider does: here it says it does not know the client for seven
+/// provider does: here it says it does not know the client for nine
 /// seconds, then answers nothing. A request started near the end used to
-/// get ten seconds of its own (review of #209).
+/// get ten seconds of its own (review of #209), so against nine seconds of
+/// answers that broken shape takes about nineteen, against ten for the one
+/// global deadline; past ten the old loop's own deadline would fire first
+/// and the two would be indistinguishable (#303).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_sign_in_waits_for_a_new_client_ten_seconds_at_most() {
     let cal = FakeOAuthApp::start(3600).await;
-    cal.state.lock().unwrap().new_clients_unknown_then_silent = Some(std::time::Duration::from_secs(7));
+    cal.state.lock().unwrap().new_clients_unknown_then_silent = Some(std::time::Duration::from_secs(9));
     let m = FakeModel::start(steps(vec![])).await;
     let app = Appliance::start(Spec::default(), &m).await;
     let alice = app.api("alice");
@@ -64,10 +67,12 @@ async fn a_sign_in_waits_for_a_new_client_ten_seconds_at_most() {
     let waited = started.elapsed();
     assert!(st.is_success() && v["authorize_url"].is_string(), "{v}");
     // Twelve seconds broke twice under overlapping full suites (runs
-    // 42261795000 and 42262894435: 12.6 s, 14.0 s). The product still waits
-    // ten seconds at most; the #209 regression this guards would take about
-    // twenty, so eighteen keeps catching it.
-    assert!(waited < std::time::Duration::from_secs(18), "the person waited {waited:?} for the sign-in page");
+    // 42261795000 and 42262894435: 12.6 s, 14.0 s), and eighteen would let
+    // the #209 shape pass against a seven-second fixture (review of #283:
+    // seven plus its own ten is seventeen). At nine the broken shape takes
+    // about nineteen, so sixteen keeps two seconds over the slowest loaded
+    // pass and three under the regression.
+    assert!(waited < std::time::Duration::from_secs(16), "the person waited {waited:?} for the sign-in page");
 }
 
 /// Magnus registers at an app's authorization server once: every later
