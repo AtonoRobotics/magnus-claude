@@ -484,7 +484,10 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
             }
             return match k.accounts.sign_in_counted(&person, password, &counter) {
                 Ok(Ok(_)) => issue(&k, t, &person, app, device.as_deref()).await,
-                Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong."),
+                // Unreachable: the password-only check never asks for the
+                // authenticator code (the machine code is already the second
+                // factor here). Answered as wrong, like everything else.
+                Ok(Err(crate::accounts::SignInError::Rejected | crate::accounts::SignInError::NeedsCode)) => err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong."),
                 Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
                 Err(e) => internal(e),
             };
@@ -545,12 +548,19 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         let _ = k.accounts.sign_in(&person, password);
         return err(StatusCode::UNAUTHORIZED, "The name or password is wrong.");
     }
-    match k.accounts.sign_in_counted(&person, password, &counter) {
+    match k.accounts.sign_in_counted_with_code(&person, password, code, &counter) {
         Ok(Ok(_)) => issue(&k, t, &person, app, device.as_deref()).await,
+        Ok(Err(crate::accounts::SignInError::NeedsCode)) => code_needed(),
         Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
         Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
         Err(e) => internal(e),
     }
+}
+
+/// Ask for the 6-digit code from the person's authenticator app: the same
+/// screen whether the identity provider or the local store asked (#429).
+fn code_needed() -> Response {
+    (StatusCode::UNAUTHORIZED, Json(json!({ "code_needed": true, "error": "Enter the 6-digit code from your authenticator app." }))).into_response()
 }
 
 /// Start a sign-in through the identity provider: the person approves the
@@ -636,9 +646,7 @@ async fn provider_answered(k: &Arc<Kernel>, t: Transport, label: String, polled:
             issue(k, t, &person, app, device.as_deref()).await
         }
         Polled::Failed(m) => err(StatusCode::GONE, m),
-        Polled::NeedsCode => {
-            (StatusCode::UNAUTHORIZED, Json(json!({ "code_needed": true, "error": "Enter the 6-digit code from your authenticator app." }))).into_response()
-        }
+        Polled::NeedsCode => code_needed(),
         Polled::Refused(m) => err(StatusCode::UNAUTHORIZED, m),
         Polled::UseBrowser(m) => (StatusCode::UNAUTHORIZED, Json(json!({ "browser": true, "error": m }))).into_response(),
     }

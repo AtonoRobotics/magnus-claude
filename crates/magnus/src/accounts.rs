@@ -39,6 +39,10 @@ pub enum SignInError {
     Rejected,
     /// Too many failures; try again after this time.
     Locked(DateTime<Utc>),
+    /// The password was right and the person uses an authenticator app:
+    /// ask for the code and try again. Uncounted: needing the code says
+    /// nothing was wrong, as with the identity provider's `NeedsCode`.
+    NeedsCode,
 }
 
 pub struct Accounts {
@@ -86,6 +90,25 @@ pub fn new_machine_code(state_dir: &Path) -> Result<String> {
     Ok(code)
 }
 
+/// Enroll a person's authenticator app: a fresh 160-bit secret is stored
+/// beside the passwords, and the `otpauth://` URI to enroll is returned.
+/// Re-enrolling replaces the secret. Used by the CLI on the appliance
+/// itself; the console enrolls through the Users screen (#429).
+pub fn enroll_totp(state_dir: &Path, person: &str) -> Result<String> {
+    let d = dir(state_dir);
+    std::fs::create_dir_all(&d)?;
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700))?;
+    let path = d.join("totp.json");
+    let mut all: BTreeMap<String, String> = read_json(&path)?;
+    let mut raw = [0u8; 20];
+    rand::rngs::OsRng.fill_bytes(&mut raw);
+    let secret = crate::totp::base32_encode(&raw);
+    all.insert(person.to_string(), secret.clone());
+    write_private(&path, &serde_json::to_vec_pretty(&all)?)?;
+    let label = percent_encoding::utf8_percent_encode(person, percent_encoding::NON_ALPHANUMERIC);
+    Ok(format!("otpauth://totp/Magnus:{label}?secret={}&issuer=Magnus&digits=6&period=30", secret.trim_end_matches('=')))
+}
+
 /// Set a person's password. Used by the CLI on the appliance itself.
 pub fn set_password(state_dir: &Path, cfg: &SignIn, person: &str, password: &str) -> Result<()> {
     anyhow::ensure!(
@@ -122,6 +145,12 @@ impl Accounts {
     /// Whether the person has a password set (read fresh: the CLI may have set it).
     pub fn has_password(&self, person: &str) -> bool {
         read_json::<BTreeMap<String, String>>(&self.dir.join("passwords.json")).map(|m| m.contains_key(person)).unwrap_or(false)
+    }
+
+    /// Whether the person enrolled an authenticator app (read fresh: the
+    /// CLI may have enrolled it).
+    pub fn has_totp(&self, person: &str) -> bool {
+        read_json::<BTreeMap<String, String>>(&self.dir.join("totp.json")).map(|m| m.contains_key(person)).unwrap_or(false)
     }
 
     /// Until when a person may not try another password, after too many
@@ -222,6 +251,17 @@ impl Accounts {
             return Ok(Err(SignInError::Locked(until)));
         }
         let all: BTreeMap<String, String> = read_json(&self.dir.join("passwords.json"))?;
+        if !Self::password_ok(&all, person, password) {
+            if all.contains_key(person) {
+                self.failed(counter);
+            }
+            return Ok(Err(SignInError::Rejected));
+        }
+        self.succeeded(counter);
+        Ok(Ok(()))
+    }
+
+    fn password_ok(all: &BTreeMap<String, String>, person: &str, password: &str) -> bool {
         // Verify against a throwaway hash when the person is unknown, so
         // timing does not tell which names exist.
         static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -230,15 +270,46 @@ impl Accounts {
             Argon2::default().hash_password(salt.as_str().as_bytes(), &salt).map(|h| h.to_string()).unwrap_or_default()
         });
         let phc = all.get(person).unwrap_or(dummy);
-        let ok = PasswordHash::new(phc).map(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok()).unwrap_or(false) && all.contains_key(person);
-        if !ok {
+        PasswordHash::new(phc).map(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok()).unwrap_or(false) && all.contains_key(person)
+    }
+
+    /// Check a password and, where the person enrolled one, the code from
+    /// their authenticator app. A missing code answers `NeedsCode`
+    /// (uncounted); a wrong code rejects and counts, like a wrong password.
+    pub fn sign_in_counted_with_code(&self, person: &str, password: &str, code: Option<&str>, counter: &str) -> Result<std::result::Result<(), SignInError>> {
+        self.sign_in_counted_with_code_at(person, password, code, counter, Utc::now())
+    }
+
+    /// `sign_in_counted_with_code` at `at`, for tests.
+    pub fn sign_in_counted_with_code_at(&self, person: &str, password: &str, code: Option<&str>, counter: &str, at: DateTime<Utc>) -> Result<std::result::Result<(), SignInError>> {
+        if let Some(until) = self.locked(counter) {
+            return Ok(Err(SignInError::Locked(until)));
+        }
+        let all: BTreeMap<String, String> = read_json(&self.dir.join("passwords.json"))?;
+        if !Self::password_ok(&all, person, password) {
             if all.contains_key(person) {
                 self.failed(counter);
             }
             return Ok(Err(SignInError::Rejected));
         }
-        self.succeeded(counter);
-        Ok(Ok(()))
+        // The password was right, so the person is known: a wrong code
+        // counts on their counter, as a wrong password does.
+        let secrets: BTreeMap<String, String> = read_json(&self.dir.join("totp.json"))?;
+        let Some(secret) = secrets.get(person) else {
+            self.succeeded(counter);
+            return Ok(Ok(()));
+        };
+        match code.map(str::trim).filter(|c| !c.is_empty()) {
+            None => Ok(Err(SignInError::NeedsCode)),
+            Some(c) if crate::totp::verify(secret, c, at) => {
+                self.succeeded(counter);
+                Ok(Ok(()))
+            }
+            Some(_) => {
+                self.failed(counter);
+                Ok(Err(SignInError::Rejected))
+            }
+        }
     }
 
     /// Open a session for a person whose identity is already established.
@@ -350,6 +421,48 @@ mod tests {
         let old = r#"{"h":{"id":"sess_old","person":"ada","created":"2030-01-01T00:00:00Z","expires":"2030-02-01T00:00:00Z","client":"app"}}"#;
         let map: BTreeMap<String, Session> = serde_json::from_str(old).unwrap();
         assert!(map["h"].device.is_none(), "a session from before device certificates did not load");
+    }
+
+    /// Enrolling a second factor asks for the code afterwards: the right
+    /// password alone answers `NeedsCode`, the password with the current
+    /// code signs in, and a wrong code is rejected and counted, like a
+    /// wrong password (#429).
+    #[test]
+    fn a_second_factor_asks_for_the_code_and_counts_a_wrong_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SignIn { session_days: 1, max_failures: 3, lockout_minutes: 15, min_password_length: 10, oidc: None };
+        set_password(dir.path(), &cfg, "ada", "a-long-password").unwrap();
+        let accounts = Accounts::open(dir.path(), cfg).unwrap();
+        assert!(!accounts.has_totp("ada"));
+        let uri = enroll_totp(dir.path(), "ada").unwrap();
+        assert!(uri.starts_with("otpauth://totp/"), "not an enrollment URI: {uri}");
+        assert!(accounts.has_totp("ada"), "enrollment did not stick");
+        let at = chrono::Utc::now();
+        let secret = uri.split("secret=").nth(1).and_then(|s| s.split('&').next()).context("the enrollment URI carries no secret").unwrap();
+        let secret = crate::totp::base32_decode(secret).unwrap();
+        let code = crate::totp::generate(&secret, (at.timestamp().div_euclid(30)) as u64, 6);
+        let counter = Accounts::network_counter("ada");
+        assert!(matches!(accounts.sign_in_counted_with_code_at("ada", "a-long-password", None, &counter, at), Ok(Err(SignInError::NeedsCode))), "the password alone signed in past the second factor");
+        assert!(accounts.locked(&counter).is_none(), "needing the code counted as a failure");
+        assert!(matches!(accounts.sign_in_counted_with_code_at("ada", "a-long-password", Some("000000"), &counter, at), Ok(Err(SignInError::Rejected))), "a wrong code did not reject");
+        assert!(matches!(accounts.sign_in_counted_with_code_at("ada", "a-long-password", Some(&code), &counter, at), Ok(Ok(()))), "the current code did not sign in");
+        for _ in 0..3 {
+            let _ = accounts.sign_in_counted_with_code_at("ada", "a-long-password", Some("000000"), &counter, at);
+        }
+        assert!(accounts.locked(&counter).is_some(), "wrong codes did not lock the counter");
+    }
+
+    /// Without an enrolled second factor, the code path behaves exactly as
+    /// the password path: the feature is off until enrolled (#429).
+    #[test]
+    fn no_second_factor_behaves_as_passwords_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = open(dir.path());
+        set_password(dir.path(), &SignIn { session_days: 1, max_failures: 5, lockout_minutes: 15, min_password_length: 10, oidc: None }, "ada", "a-long-password").unwrap();
+        let counter = Accounts::network_counter("ada");
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "a-long-password", None, &counter), Ok(Ok(()))), "a password without a second factor stopped signing in");
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "wrong-password", None, &counter), Ok(Err(SignInError::Rejected))), "a wrong password stopped rejecting");
+        assert!(matches!(accounts.sign_in_counted_with_code("nobody", "whatever-password", None, &counter), Ok(Err(SignInError::Rejected))), "an unknown name stopped rejecting");
     }
 
     /// Each counter is its scope then the whole person id, so no person's

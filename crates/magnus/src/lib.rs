@@ -57,6 +57,7 @@ pub mod state;
 pub mod suggestions;
 pub mod tls;
 pub mod tools;
+pub mod totp;
 pub mod trash;
 pub mod update;
 pub mod vault;
