@@ -773,7 +773,7 @@ impl Kernel {
                         continue;
                     }
                     // The spec's second source (#210): mailed before.
-                    if self.mailed_before(f, &run.person, r).await? {
+                    if self.mailed_before(a, f, run, person, r).await? {
                         continue;
                     }
                     // The spec's third source (#211): the organisation's
@@ -1269,28 +1269,69 @@ impl Kernel {
     /// manifest's sent search, through their own sign-in. Whatever stops
     /// the read counts as not mailed: the send asks rather than passing on
     /// an unchecked claim.
-    async fn mailed_before(&self, f: &Facts, person: &str, address: &str) -> Result<bool> {
+    async fn mailed_before(&self, a: &Action, f: &Facts, run: &Run, person: &Person, address: &str) -> Result<bool> {
         let (Some(c), Some(s)) = (f.connector.as_ref(), f.connector.as_ref().and_then(|c| c.sent.as_ref())) else { return Ok(false) };
-        if self.read(|s| s.turned_off.contains(person)) {
+        if self.read(|s| s.turned_off.contains(&person.id)) {
             return Ok(false);
         }
         let secret = match &c.credential {
-            Some(_) => match self.connector_secret(c, person).await {
+            Some(_) => match self.connector_secret(c, &person.id).await {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!("sent mail for {person}: {e:#}");
+                    tracing::warn!("sent mail for {}: {e:#}", person.id);
                     return Ok(false);
                 }
             },
             None => None,
         };
         let bearer = secret.as_ref().map(|s| s.expose());
-        let args = json!({ s.input.as_str(): s.query.replace("{address}", address) });
-        let out = self.connector_call(c, person, &f.app, bearer, &s.read, &args).await;
+        // The sent search is authorized like any read (#371): its own
+        // access check, pin validation and policy decision, audited as a
+        // Decision of its own, as for destination previews (#184).
+        // Whatever stops the read counts as not mailed.
+        let read_name = format!("{}__{}", f.app, s.read);
+        let Some(rf) = facts(self, &read_name) else {
+            tracing::warn!("sent mail for {}: {read_name} is not a known classified tool", person.id);
+            return Ok(false);
+        };
+        if !has_rights(person, &rf) {
+            tracing::warn!("sent mail for {}: no access to {}", person.id, f.app);
+            return Ok(false);
+        }
+        if let Err(why) = self.check_pin(c, &rf, &person.id).await {
+            tracing::warn!("sent mail for {}: {why}", person.id);
+            return Ok(false);
+        }
+        let (pinned, changed) = self.read(|s| (s.pins.contains_key(&rf.name), s.changed.contains_key(&rf.name)));
+        if changed || !pinned {
+            tracing::warn!("sent mail for {}: {read_name} is not pinned", person.id);
+            return Ok(false);
+        }
+        let query = s.query.replace("{address}", address);
+        let search = Action { run: a.run.clone(), call_id: format!("sent:{}", a.call_id), step_id: a.step_id.clone(), tool: read_name.clone(), input: json!({ s.input.as_str(): query }), issuer: Issuer::Model };
+        let policies = self.read(|s| s.policies.clone());
+        let rfacts = ToolFacts { name: &rf.name, app: &rf.app, risk: rf.risk, audience: rf.audience };
+        match policy::decide(&policies, person, Some(&run.task), &rfacts, run.untrusted, run.private) {
+            Ok(Outcome::Allow { rule }) => self.decision(&search, "allow", "mailed_before", "permitted", Some(rule)).await?,
+            Ok(Outcome::Deny { reason, rule }) => {
+                self.decision(&search, "deny", "mailed_before", &reason, rule).await?;
+                return Ok(false);
+            }
+            Ok(Outcome::Ask { rule }) => {
+                self.decision(&search, "deny", "mailed_before", &format!("policy asks before the sent search ({rule})"), Some(rule)).await?;
+                return Ok(false);
+            }
+            Err(e) => {
+                tracing::warn!("sent mail for {}: the search cannot be judged: {e:#}", person.id);
+                return Ok(false);
+            }
+        }
+        let args = json!({ s.input.as_str(): query });
+        let out = self.connector_call(c, &person.id, &f.app, bearer, &s.read, &args).await;
         let read = match out {
             Ok(o) if !o.is_error => o.structured.or_else(|| serde_json::from_str(&o.text).ok()).unwrap_or(Value::Null),
             _ => {
-                tracing::warn!("sent mail for {person}: the search would not answer");
+                tracing::warn!("sent mail for {}: the search would not answer", person.id);
                 return Ok(false);
             }
         };

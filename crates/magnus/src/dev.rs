@@ -428,7 +428,7 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
             }
             Ev::Decision { call_id, tool, outcome, stage, reason, rule, .. } => {
                 let ix = *action_ix.entry(call_id.clone()).or_insert_with(|| {
-                    actions.push(json!({ "call_id": call_id, "tool": tool, "issuer": if call_id.starts_with("check:") { "code (a check the model wrote)" } else if call_id.starts_with("verify:") { "the verifier" } else if call_id.starts_with("preview:") { "the gate (destination preview)" } else { "model" }, "decisions": [], "result": null }));
+                    actions.push(json!({ "call_id": call_id, "tool": tool, "issuer": if call_id.starts_with("check:") { "code (a check the model wrote)" } else if call_id.starts_with("verify:") { "the verifier" } else if call_id.starts_with("preview:") { "the gate (destination preview)" } else if call_id.starts_with("sent:") { "the gate (sent search)" } else { "model" }, "decisions": [], "result": null }));
                     actions.len() - 1
                 });
                 actions[ix]["decisions"].as_array_mut().unwrap().push(json!({ "seq": e.seq, "stage": stage, "outcome": outcome, "reason": reason, "rule": rule }));
