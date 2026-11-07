@@ -746,6 +746,7 @@ impl Kernel {
             }
             // The proactive loop's own wakes: cadence, overnight, coming-up
             // schedules, due commitments and stale approvals (#237).
+            self.settle_background().await;
             self.review_due(now).await;
             // Scheduled polls of watched reads (#406).
             self.poll_due(now).await;
@@ -773,6 +774,15 @@ impl Kernel {
     /// Stop a run on an inbox item (`item`, when it is new) in one write:
     /// nobody sees the item while the run still shows as running.
     pub async fn suspend_on(&self, run: &str, reason: &str, id: String, item: Option<Ev>) -> Result<()> {
+        // Background work never waits on its person: it ends, and the next
+        // wake tries again. The log keeps why, for the run inspector; the
+        // person sees nothing (owner, 2026-11-07).
+        if self.is_background(run) && reason != "kill_switch" {
+            let ended = Ev::Failed { run: run.into(), reason: format!("background work ended rather than wait on its person ({reason})"), by: "kernel".into() };
+            self.emit("kernel", ended).await?;
+            self.on_stop(run, true).await;
+            return Ok(());
+        }
         let stop = Ev::Suspended { run: run.into(), reason: reason.into(), item: Some(id) };
         self.emit_all(item.into_iter().chain([stop]).map(|e| ("kernel", e)).collect()).await?;
         self.on_stop(run, false).await;
@@ -784,6 +794,44 @@ impl Kernel {
         let (task, person) = self.read(|s| s.runs.get(run).map(|r| (r.task.clone(), r.person.clone()))).unwrap_or_default();
         let (id, ev) = notice_event(Some(task), Some(run.into()), person, summary, serde_json::json!({ "reason": reason, "evidence": details }));
         self.suspend_on(run, reason, id, Some(ev)).await
+    }
+
+    /// Background work left waiting on its person, from before it stopped
+    /// asking (owner, 2026-11-07): each such run ends, and every card it
+    /// put up that is not one of its outputs is put away. A run so held
+    /// also held every later review for its person.
+    pub async fn settle_background(&self) {
+        let (runs, items) = self.read(|s| {
+            let bg = |task: &Option<String>| task.as_ref().and_then(|t| s.tasks.get(t)).is_some_and(|t| t.background());
+            let runs: Vec<String> = s
+                .runs
+                .values()
+                .filter(|r| r.status == crate::state::Status::Suspended && !["timer", "update", "kill_switch"].contains(&r.reason.as_deref().unwrap_or_default()))
+                .filter(|r| s.tasks.get(&r.task).is_some_and(|t| t.background()))
+                .map(|r| r.id.clone())
+                .collect();
+            let items: Vec<String> = s
+                .items
+                .values()
+                .filter(|i| i.resolution.is_none() && bg(&i.task) && !crate::state::BACKGROUND_OUTPUTS.contains(&i.kind.as_str()))
+                .map(|i| i.id.clone())
+                .collect();
+            (runs, items)
+        });
+        if runs.is_empty() && items.is_empty() {
+            return;
+        }
+        let mut evs: Vec<(&str, Ev)> = items.into_iter().map(|id| ("kernel", Ev::ItemResolved { id, decision: "dismiss".into(), scope: None, text: Some("background work: not the person's to answer".into()) })).collect();
+        evs.extend(runs.iter().map(|r| ("kernel", Ev::Failed { run: r.clone(), reason: "background work ended rather than wait on its person".into(), by: "kernel".into() })));
+        self.tell(evs).await;
+        for r in &runs {
+            self.on_stop(r, true).await;
+        }
+    }
+
+    /// Whether a run is Magnus's own background work (`Task::background`).
+    pub fn is_background(&self, run: &str) -> bool {
+        self.read(|s| s.runs.get(run).and_then(|r| s.tasks.get(&r.task)).is_some_and(|t| t.background()))
     }
 
     /// A notice in the person's inbox (something ended or stopped, with the

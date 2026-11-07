@@ -1548,6 +1548,12 @@ impl Kernel {
         let why = json!({ "reason": "kill_switch", "evidence": { "why": "the owner engaged the kill switch, and has released it; Continue goes on from where it stopped" } });
         let mut evs = vec![(actor.as_str(), Ev::KillSwitch { engaged })];
         for r in &stopped {
+            // Background work is not the person's to continue: it ends,
+            // and the next wake starts fresh (owner, 2026-11-07).
+            if k.is_background(&r.id) {
+                evs.push(("kernel", Ev::Failed { run: r.id.clone(), reason: "background work stopped by the kill switch".into(), by: "kernel".into() }));
+                continue;
+            }
             let title = k.title_of(r).await;
             evs.push(("kernel", k.notice_of(r, format!("Stopped by the kill switch: {title}"), why.clone())));
         }
@@ -1555,7 +1561,10 @@ impl Kernel {
             return Err((StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("{e:#}") })));
         }
         k.vault.unseal();
-        return Ok(json!({ "engaged": false, "told": stopped.len() }));
+        for r in stopped.iter().filter(|r| k.is_background(&r.id)) {
+            k.on_stop(&r.id, true).await;
+        }
+        return Ok(json!({ "engaged": false, "told": stopped.iter().filter(|r| !k.is_background(&r.id)).count() }));
     }
     // One control (B11). The vault is sealed first, and each OAuth sign-in
     // taken out of it and revoked at its provider, whatever happens to the

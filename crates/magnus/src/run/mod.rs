@@ -684,8 +684,12 @@ impl Kernel {
                 let reason = input["reason"].as_str().unwrap_or("no reason given").to_string();
                 self.result(rid, call_id, "Recorded.", false).await?;
                 // A failure is never silent (K24): the person's inbox says so, with the evidence, in the same write.
-                let notice = self.notice_of(&run, format!("Failed: {}", self.title_of(&run).await), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run) } }));
-                self.emit_all(vec![("model", Ev::Failed { run: rid.into(), reason, by: "model".into() }), ("kernel", notice)]).await?;
+                // Background work's failure is told to the run inspector, not the person (owner, 2026-11-07).
+                let mut evs = vec![("model", Ev::Failed { run: rid.into(), reason: reason.clone(), by: "model".into() })];
+                if !self.is_background(rid) {
+                    evs.push(("kernel", self.notice_of(&run, format!("Failed: {}", self.title_of(&run).await), json!({ "reason": "failed", "evidence": { "reason": reason, "last_results": self.last_results(&run) } }))));
+                }
+                self.emit_all(evs).await?;
                 self.on_stop(rid, true).await;
                 self.after_end(rid);
                 return Ok(Flow::Stop);
@@ -952,8 +956,12 @@ impl Kernel {
         // A review's work is the observations it queued, already in the
         // log; there is nothing to check it against, and no person to
         // review its criteria, so it completes without a contract (#237).
-        // A poll's read likewise stands alone (#406).
-        if run.contract.is_none() && self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.review || t.poll)) {
+        // A poll's read likewise stands alone (#406). That holds whatever
+        // contract it wrote while it changed nothing in the world: a
+        // review that found nothing put a card in front of the person
+        // asking them to check its own judgement (2026-11-07). One that
+        // acted under a grant started work, and is checked as any task.
+        if (run.contract.is_none() || !run.work_started) && self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.review || t.poll)) {
             let summary = input["summary"].as_str().unwrap_or_default().to_string();
             self.result(rid, call_id, "Reviewed and completed.", false).await?;
             self.emit("kernel", Ev::Completed { run: rid.into(), summary, view: Some(view), spoken }).await?;
@@ -1086,6 +1094,18 @@ impl Kernel {
             judgeable = self.reviewer_on_completion(run, goal, judgeable, &summary).await?;
         }
         unchecked.extend(judgeable);
+        // Background work is not put in front of its person for review
+        // (owner, 2026-11-07): it completes, and the criteria no one could
+        // check stay in the log for the run inspector.
+        if !unchecked.is_empty() && self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.background())) {
+            let ids: Vec<&str> = unchecked.iter().filter_map(|c| c["id"].as_str()).collect();
+            self.result(rid, call_id, "Completed. As background work, its unchecked criteria go to no one.", false).await?;
+            let summary = format!("{summary} (unchecked criteria: {})", ids.join(", "));
+            self.emit("kernel", Ev::Completed { run: rid.into(), summary, view: Some(view), spoken }).await?;
+            self.on_stop(rid, true).await;
+            self.after_end(rid);
+            return Ok(Flow::Stop);
+        }
         if !unchecked.is_empty() {
             // No executable check, and the verifier off or unsure: the person reviews (K37).
             let (item, ev) = self.item_event(

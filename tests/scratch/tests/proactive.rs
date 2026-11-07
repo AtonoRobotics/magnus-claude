@@ -473,6 +473,165 @@ async fn proactive_off_runs_no_reviews() {
     .await;
 }
 
+/// A review that writes a contract and decides nothing changes nothing in
+/// the world, so it completes without asking the person to check its own
+/// judgement (2026-11-07: a review that found nothing put "Check them
+/// yourself: choose an appropriate response" in front of the owner).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_that_decides_nothing_needs_no_review_whatever_its_contract() {
+    let calls = Arc::new(Mutex::new(vec![(
+        "task_contract".to_string(),
+        json!({
+            "goal": "Review the supplied state",
+            "assumptions": [],
+            "irreversible_actions": [],
+            "criteria": [{ "id": "c1", "description": "Choose an appropriate response to the supplied state" }]
+        }),
+    )]));
+    let m = FakeModel::start(model(calls)).await;
+    let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
+    let bob = app.api("bob");
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+
+    // The triggered review records its contract, decides nothing, and
+    // completes without waiting on the person.
+    let me = bob.clone();
+    eventually("the coming-up review completed", Duration::from_secs(60), || {
+        let me = me.clone();
+        async move {
+            let (_, v) = me.get("/v1/tasks").await;
+            v["tasks"].as_array().cloned().unwrap_or_default().into_iter().find(|t| {
+                t["review"] == true && t["status"] == "completed" && t["text"].as_str().is_some_and(|x| x.contains("coming up"))
+            })
+        }
+    })
+    .await;
+    let me = bob.clone();
+    never("a review run asked the person to review it", Duration::from_secs(3), || {
+        let me = me.clone();
+        async move { me.inbox().await.iter().any(|i| i["kind"] == "review") }
+    })
+    .await;
+}
+
+/// Background work asks no one (owner, 2026-11-07): a review whose action
+/// would need the person's approval gets a refusal it can act on, and no
+/// approval, review or notice reaches the person.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_that_would_need_approval_is_refused_and_asks_no_one() {
+    let mail = mcp::mail().start().await;
+    let calls = Arc::new(Mutex::new(vec![
+        ("task_contract".to_string(), json!({ "goal": "Tell Bob the backups are late", "assumptions": [], "irreversible_actions": ["mail__send"], "criteria": [{ "id": "c1", "description": "Bob was told" }] })),
+        ("mail__send".to_string(), json!({ "to": "bob@corp.example", "subject": "Backups", "body": "The backups are late." })),
+    ]));
+    let m = FakeModel::start(model(calls)).await;
+    let app = Appliance::start(Spec::default().proactive(json!({ "on": true })).app("mail", &mail, "public", "private", &[("send", "irreversible")]), &m).await;
+    let bob = app.api("bob");
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+
+    let me = bob.clone();
+    eventually("the coming-up review completed", Duration::from_secs(60), || {
+        let me = me.clone();
+        async move {
+            let (_, v) = me.get("/v1/tasks").await;
+            v["tasks"].as_array().cloned().unwrap_or_default().into_iter().find(|t| {
+                t["review"] == true && t["status"] == "completed" && t["text"].as_str().is_some_and(|x| x.contains("coming up"))
+            })
+        }
+    })
+    .await;
+    assert_eq!(mail.effects("send"), 0, "background work sent without approval");
+    assert!(
+        m.requests().iter().any(|r| r.last_results().iter().any(|x| x.is_error && x.text.contains("background work"))),
+        "the review was not told why it was refused"
+    );
+    let me = bob.clone();
+    never("background work put a card in front of the person", Duration::from_secs(3), || {
+        let me = me.clone();
+        async move { me.inbox().await.iter().any(|i| ["approval", "review", "notice", "question"].contains(&i["kind"].as_str().unwrap_or_default())) }
+    })
+    .await;
+}
+
+/// Background work that stops on its budget ends quietly, and the next
+/// review still starts: a stopped review used to wait on the person with a
+/// notice, and held every later review for them (owner, 2026-11-07).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_stopped_by_its_budget_ends_quietly_and_reviews_go_on() {
+    // The review for the first schedule coming up spends its whole budget
+    // on a tool it was not given; every other review finishes at once.
+    let burner: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let m = FakeModel::start(script(move |c| {
+        let burner = burner.clone();
+        async move {
+            if !c.body["system"].to_string().contains(REVIEW) {
+                return tool("task_fail", json!({ "reason": "not under test" }));
+            }
+            let first = c.messages().first().cloned().unwrap_or_default().to_string();
+            let Some(why) = first.split("Review the person's state (").nth(1).and_then(|r| r.split(')').next()).filter(|r| r.ends_with("coming up")) else {
+                return done("Reviewed quietly.");
+            };
+            let mut b = burner.lock().unwrap();
+            if b.get_or_insert_with(|| why.to_string()) == why {
+                return tool("no_such_tool", json!({}));
+            }
+            done("Reviewed; nothing further.")
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
+    let bob = app.api("bob");
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+    let coming_up = |status: &'static str| {
+        let me = bob.clone();
+        move || {
+            let me = me.clone();
+            async move {
+                let (_, v) = me.get("/v1/tasks").await;
+                v["tasks"].as_array().cloned().unwrap_or_default().into_iter().find(|t| {
+                    t["review"] == true && t["status"] == status && t["text"].as_str().is_some_and(|x| x.contains("coming up"))
+                })
+            }
+        }
+    };
+    eventually("the first review ended on its budget", Duration::from_secs(90), coming_up("failed")).await;
+
+    // A second schedule coming up wakes another review: nothing holds it.
+    let (st, v) = bob.post("/v1/schedules", json!({ "text": "Check the mail server.", "every_minutes": 5 })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    eventually("a later review completed", Duration::from_secs(60), coming_up("completed")).await;
+    let me = bob.clone();
+    never("background work put a notice in front of the person", Duration::from_secs(3), || {
+        let me = me.clone();
+        async move { me.inbox().await.iter().any(|i| i["kind"] == "notice" || i["kind"] == "review") }
+    })
+    .await;
+}
+
+/// Background cleanup puts away only a review's plumbing: an interruption
+/// is one of its outputs, so it stays until the person reads it (#446
+/// review: the sweep dismissed interruptions within half a second).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_interruption_stays_open_after_the_sweep() {
+    let calls = Arc::new(Mutex::new(vec![(
+        "interrupt".to_string(),
+        json!({ "what": "The deploy failed", "why": "The site is down" }),
+    )]));
+    let m = FakeModel::start(model(calls)).await;
+    let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
+    let bob = app.api("bob");
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+
+    let item = wait_open(&bob, "interrupt").await;
+    let id = item["id"].clone();
+    let me = bob.clone();
+    never("the sweep put away the review's interruption", Duration::from_secs(3), || {
+        let (me, id) = (me.clone(), id.clone());
+        async move { me.inbox().await.iter().any(|i| i["id"] == id && i["status"] != "open") }
+    })
+    .await;
+}
+
 /// A review proposes a task the person approves into a real task (#393):
 /// the proposal lands in the inbox (not the thread), grounded in the
 /// cited evidence, and accepting starts the task with the approved budget

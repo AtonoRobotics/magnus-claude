@@ -618,7 +618,9 @@ async function refresh() {
   const get = (path, k) => api("GET", path).then(v => v[k]).catch(() => null);
   const [tasks, schedules, threads, projects, health] = await Promise.all([get("/v1/tasks", "tasks"), get("/v1/schedules", "schedules"), get("/v1/chat", "threads"), get("/v1/projects", "projects"), api("GET", "/v1/health").catch(() => null), pollInbox()]);
   if (!App.me) return;
-  if (tasks) App.tasks = tasks;
+  // Magnus's own background reviews are plumbing, not the person's tasks
+  // (owner, 2026-11-07): developers see them in the run inspector.
+  if (tasks) App.tasks = tasks.filter(t => !t.review);
   if (schedules) App.schedules = schedules;
   if (threads) App.threads = threads;
   if (projects) App.projects = projects;
