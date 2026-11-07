@@ -349,11 +349,13 @@ impl crate::kernel::Kernel {
 
     /// A watched tool answered for the person: diff its items against
     /// the last two answers, waking a review for new ones (#369). The
-    /// first sighting seeds silently; the window advances only when
-    /// the wake starts a review, so a dropped wake retries on the next
-    /// read instead of losing the items. Two answers, not all history
-    /// (#409): no cap to evict from, so an unchanged answer diffs
-    /// empty however large it is, and memory stays two answers deep.
+    /// first sighting seeds silently; every read after advances the
+    /// window, news or not, so the window tracks reads, not wakes
+    /// (#414). A dropped wake advances nothing, so it retries on the
+    /// next read instead of losing the items. Two answers, not all
+    /// history (#409): no cap to evict from, so an unchanged answer
+    /// diffs empty however large it is, and memory stays two answers
+    /// deep.
     pub(crate) async fn note_watched(self: &Arc<Self>, person: &str, app: &str, remote: &str, data: &Value) {
         let watches: Vec<crate::config::Watch> =
             self.cfg.connectors.iter().find(|c| c.name == app).map(|c| c.watch.clone()).unwrap_or_default();
@@ -370,6 +372,11 @@ impl crate::kernel::Kernel {
             };
             let fresh: Vec<&String> = ids.iter().filter(|id| !window.iter().any(|w| w.contains(*id))).collect();
             if fresh.is_empty() {
+                // No news, but the read still counts: the window is the
+                // last two reads, whatever they held (#414).
+                let _ = self
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
+                    .await;
                 continue;
             }
             let n = fresh.len();
