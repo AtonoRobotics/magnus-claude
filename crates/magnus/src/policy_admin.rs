@@ -19,16 +19,25 @@ use std::str::FromStr;
 pub type Refusal = (StatusCode, String);
 
 /// What a policy may name: people in groups, tools in apps with their risk
-/// and audience, the two actions, and the run's taint as context.
+/// and audience, the two actions, and the run's taint as context; and tasks
+/// and schedules in their person, the five control actions, and whether the
+/// controller is the owner or an admin (#266).
 pub const SCHEMA: &str = r#"
 entity Group;
 entity Person in [Group];
 entity App;
 entity Tool in [App] = { "risk": String, "audience": String };
+entity Task in [Person];
+entity Schedule in [Person];
 action "execute", "request_approval" appliesTo {
   principal: [Person],
   resource: [Tool],
   context: { "untrusted": Bool, "private": Bool }
+};
+action "cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule" appliesTo {
+  principal: [Person],
+  resource: [Task, Schedule],
+  context: { "is_owner": Bool, "is_admin": Bool }
 };
 "#;
 
@@ -187,11 +196,23 @@ mod tests {
         assert!(check(crate::policy::DEFAULT_ORG).is_empty(), "{:?}", check(crate::policy::DEFAULT_ORG));
     }
 
+    /// A control narrowing names control actions and task resources, so the
+    /// organisation can write it (#266).
+    #[test]
+    fn a_control_narrowing_fits_the_schema() {
+        let narrowing = r#"forbid(principal, action == Action::"cancel_task", resource) when { context.is_admin && !(resource in principal) };"#;
+        assert!(check(narrowing).is_empty(), "{:?}", check(narrowing));
+    }
+
     #[test]
     fn a_problem_names_its_line_and_column() {
-        let p = check("permit(principal, action, resource);\nforbid(principal, action, resource) when { resource.colour == \"red\" };");
+        let p = check("permit(principal, action, resource);\nforbid(principal, action == Action::\"execute\", resource) when { resource.colour == \"red\" };");
         assert_eq!(p.len(), 1, "{p:?}");
         assert_eq!(p[0]["line"], 2, "{p:?}");
+        let p = check("forbid(principal, action, resource) when { resource.colour == \"red\" };");
+        assert_eq!(p.len(), 3, "{p:?}");
+        assert!(p.iter().any(|e| e["message"].as_str().unwrap_or("").contains("`Tool`")), "{p:?}");
+        assert!(p.iter().any(|e| e["message"].as_str().unwrap_or("").contains("`Task`")), "{p:?}");
         let p = check("permit(principal, action, resource)\n  when { context.untrusted && ;");
         assert!(!p.is_empty() && p[0]["line"] == 2, "{p:?}");
         assert!(check("permit(principal, action == Action::\"execute\", resource) when { context.private == false };").is_empty());

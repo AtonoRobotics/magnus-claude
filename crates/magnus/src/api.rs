@@ -1220,6 +1220,7 @@ fn controlled(r: Result<Value, crate::controls::Refused>) -> Response {
     match r {
         Ok(v) => Json(v).into_response(),
         Err(e @ Refused::NotFound(_)) => err(StatusCode::NOT_FOUND, e.to_string()),
+        Err(Refused::Denied(m)) => err(StatusCode::FORBIDDEN, m),
         Err(Refused::Conflict(m)) => err(StatusCode::CONFLICT, m),
         Err(Refused::Invalid(m)) => err(StatusCode::BAD_REQUEST, m),
         Err(Refused::Failed(m)) => err(StatusCode::INTERNAL_SERVER_ERROR, m),

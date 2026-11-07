@@ -13,7 +13,8 @@ use crate::config::Person;
 use crate::tools::{Audience, Risk};
 use anyhow::{anyhow, Result};
 use cedar_policy::{
-    Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicySet, Request, RestrictedExpression,
+    ActionConstraint, Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicySet, Request,
+    RestrictedExpression,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
@@ -32,6 +33,151 @@ pub struct ToolFacts<'a> {
     pub app: &'a str,
     pub risk: Risk,
     pub audience: Audience,
+}
+
+/// The organization policy in force until the owner writes one: the agent
+/// reads, makes reversible writes and uses its sandbox on its own, and asks
+/// for everything else; and anyone controls their own tasks and schedules,
+/// the owner and admins anyone's.
+pub const DEFAULT_CONTROL: &str = r#"
+permit(principal, action == Action::"cancel_task", resource)
+  when { resource in principal || context.is_owner || context.is_admin };
+permit(principal, action == Action::"pause_schedule", resource)
+  when { resource in principal || context.is_owner || context.is_admin };
+permit(principal, action == Action::"resume_schedule", resource)
+  when { resource in principal || context.is_owner || context.is_admin };
+permit(principal, action == Action::"edit_schedule", resource)
+  when { resource in principal || context.is_owner || context.is_admin };
+permit(principal, action == Action::"cancel_schedule", resource)
+  when { resource in principal || context.is_owner || context.is_admin };
+"#;
+
+/// The actions that control a task or a schedule rather than call a tool.
+/// Each layer's rules are partitioned by the actions they name before an
+/// evaluation (`partition_layer`), so a tool rule's `resource.risk` check
+/// never runs against a task entity and a control rule's `context.is_owner`
+/// check never runs against a tool request. A rule that names no action (an
+/// unqualified `action`) is kept in both partitions: keeping it can only add
+/// an error, which fails closed and loudly, while dropping it could miss a
+/// forbid, which fails open and silently.
+pub const CONTROL_ACTIONS: &[&str] =
+    &["cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule"];
+
+/// The actions that call a tool rather than control a task or a schedule.
+const TOOL_ACTIONS: &[&str] = &["execute", "request_approval"];
+
+/// True when a rule naming `uids` may bear on a control request (`control`)
+/// or a tool request. A rule is dropped from a partition only when every
+/// action it names is known to belong to the other side; a mixed rule, or
+/// one naming an unknown action, stays in both.
+fn rule_touches(uids: &[cedar_policy::EntityUid], control: bool) -> bool {
+    if uids.is_empty() {
+        return true;
+    }
+    let other = if control { TOOL_ACTIONS } else { CONTROL_ACTIONS };
+    !uids.iter().all(|uid| {
+        uid.type_name().to_string() == "Action" && other.contains(&uid.id().unescaped())
+    })
+}
+
+/// Split a layer's rules into the ones that bear on `control` requests
+/// (task and schedule operations) or, when false, the tool boundary. The
+/// subset is re-rendered and policy ids renumbered, so diagnostics on a
+/// mixed layer name the rule's position within its partition.
+fn partition_layer(text: &str, control: bool) -> Result<String> {
+    if !control && !CONTROL_ACTIONS.iter().any(|a| text.contains(a)) {
+        return Ok(text.to_string());
+    }
+    let set = PolicySet::from_str(text).map_err(|e| anyhow!("{e}"))?;
+    let mut out = String::new();
+    for policy in set.policies() {
+        let touches = match policy.action_constraint() {
+            ActionConstraint::Any => true,
+            ActionConstraint::Eq(uid) => rule_touches(std::slice::from_ref(&uid), control),
+            ActionConstraint::In(uids) => rule_touches(&uids, control),
+        };
+        if touches {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&policy.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// One control operation: `op` on the `kind` ("Task", "Schedule") `id`
+/// owned by `owner`.
+pub struct ControlFacts<'a> {
+    pub op: &'a str,
+    pub kind: &'a str,
+    pub id: &'a str,
+    pub owner: &'a str,
+}
+
+fn control_entities(person: &Person, t: &ControlFacts) -> Result<Entities> {
+    let mut groups = HashSet::new();
+    let mut list = vec![];
+    for g in &person.groups {
+        let g = uid("Group", g)?;
+        groups.insert(g.clone());
+        list.push(Entity::new_no_attrs(g, HashSet::new()));
+    }
+    let who = uid("Person", &person.id)?;
+    list.push(Entity::new_no_attrs(who.clone(), groups));
+    if t.owner != person.id {
+        list.push(Entity::new_no_attrs(uid("Person", t.owner)?, HashSet::new()));
+    }
+    let owner = uid("Person", t.owner)?;
+    list.push(Entity::new_no_attrs(uid(t.kind, t.id)?, [owner].into_iter().collect()));
+    Entities::from_entities(list, None).map_err(|e| anyhow!("{e}"))
+}
+
+/// Why a control was refused: the policy forbids it, or the policy
+/// itself failed to evaluate. Callers tell the two apart: a broken policy
+/// falls back to today's fixed rule, while a forbid binds even those the
+/// fixed rule would let through.
+pub enum ControlDeny {
+    Forbidden(String),
+    Broken(String),
+}
+
+/// Whether `person` may `t` under the layered policy: the organization
+/// layer permits and no lower layer forbids (#266). The allowing rule, or
+/// why not.
+pub fn control_allowed(policies: &BTreeMap<String, String>, person: &Person, t: &ControlFacts) -> Result<String, ControlDeny> {
+    let failed = |e: String| ControlDeny::Broken(format!("policy failed to evaluate {} for {}: {e}", t.op, person.id));
+    let ents = control_entities(person, t).map_err(|e| failed(format!("{e:#}")))?;
+    let layers = layers_for(policies, person, None);
+    let ctx = Context::from_pairs([
+        ("is_owner".to_string(), RestrictedExpression::new_bool(person.is_owner())),
+        ("is_admin".to_string(), RestrictedExpression::new_bool(person.has_role("admin"))),
+    ])
+    .map_err(|e| failed(e.to_string()))?;
+    let req = Request::new(uid("Person", &person.id).map_err(|e| failed(format!("{e:#}")))?, uid("Action", t.op).map_err(|e| failed(format!("{e:#}")))?, uid(t.kind, t.id).map_err(|e| failed(format!("{e:#}")))?, ctx, None)
+        .map_err(|e| failed(e.to_string()))?;
+    let org = format!("{}\n{DEFAULT_CONTROL}", partition_layer(&layers[0].1, true).map_err(|e| failed(format!("{e:#}")))?);
+    let (mut ok, rule) = eval(&org, "org", &req, &ents).map_err(|e| failed(format!("{e:#}")))?;
+    let mut reason = rule.first().cloned();
+    for (name, text) in &layers[1..] {
+        let narrowed = format!(
+            "{}\npermit(principal, action, resource);",
+            partition_layer(text, true).map_err(|e| failed(format!("{e:#}")))?
+        );
+        let (allows, rules) = eval(&narrowed, name, &req, &ents).map_err(|e| failed(format!("{e:#}")))?;
+        if !allows {
+            ok = false;
+            reason = rules.first().cloned().or_else(|| Some(name.clone()));
+        }
+    }
+    if ok {
+        Ok(reason.unwrap_or_default())
+    } else {
+        Err(ControlDeny::Forbidden(match reason {
+            Some(r) => format!("policy forbids {} for {} (rule {r})", t.op, person.id),
+            None => format!("no policy permits {} for {}", t.op, person.id),
+        }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -127,7 +273,7 @@ pub fn decide(
     for action in ["execute", "request_approval"] {
         let req = Request::new(uid("Person", &person.id)?, uid("Action", action)?, uid("Tool", tool.name)?, ctx.clone(), None)
             .map_err(|e| anyhow!("{e}"))?;
-        let (org_ok, org_rules) = eval(&layers[0].1, "org", &req, &ents)?;
+        let (org_ok, org_rules) = eval(&partition_layer(&layers[0].1, false)?, "org", &req, &ents)?;
         let mut ok = org_ok;
         let mut rule = org_rules.first().cloned();
         if !org_ok && !org_rules.is_empty() {
@@ -136,7 +282,8 @@ pub fn decide(
         for (name, text) in &layers[1..] {
             // With a permit-everything rule added, the layer denies only if one
             // of its own forbids matched.
-            let narrowed = format!("{text}\npermit(principal, action, resource);");
+            let narrowed =
+                format!("{}\npermit(principal, action, resource);", partition_layer(text, false)?);
             let (allows, rules) = eval(&narrowed, name, &req, &ents)?;
             if !allows {
                 ok = false;
@@ -201,6 +348,36 @@ mod tests {
 
     fn person(id: &str) -> Person {
         serde_json::from_value(serde_json::json!({ "id": id, "groups": ["staff"] })).unwrap()
+    }
+
+    /// Task and schedule control follows the layered policy, with today's
+    /// rule as the default: one's own, the owner's and admins' anything;
+    /// and the organisation's policy can narrow it (#266).
+    #[test]
+    fn controls_follow_the_layered_policy_with_todays_rule_as_default() {
+        use std::collections::BTreeMap;
+        let person = |id: &str, roles: &[&str]| serde_json::from_value::<Person>(serde_json::json!({ "id": id, "groups": ["staff"], "roles": roles })).unwrap();
+        let (carol, bob, alice, dave) = (person("carol", &[]), person("bob", &[]), person("alice", &["owner"]), person("dave", &["admin"]));
+        let cancel = |id: &'static str, owner: &'static str| ControlFacts { op: "cancel_task", kind: "Task", id, owner };
+        let policies = BTreeMap::new();
+        let c = cancel("t1", "carol");
+        assert!(control_allowed(&policies, &carol, &c).is_ok(), "own task");
+        assert!(control_allowed(&policies, &alice, &c).is_ok(), "owner");
+        assert!(control_allowed(&policies, &dave, &c).is_ok(), "admin");
+        assert!(control_allowed(&policies, &bob, &c).is_err(), "another person's task");
+        let narrow = format!("{DEFAULT_ORG}\nforbid(principal, action == Action::\"cancel_task\", resource) when {{ context.is_admin && !(resource in principal) }};");
+        let mut narrowed = BTreeMap::new();
+        narrowed.insert("org".to_string(), narrow);
+        assert!(control_allowed(&narrowed, &dave, &c).is_err(), "admin cancel of another's allowed");
+        let own = cancel("t2", "dave");
+        assert!(control_allowed(&narrowed, &dave, &own).is_ok(), "admin cancel of own denied");
+        assert!(control_allowed(&narrowed, &alice, &c).is_ok(), "owner cancel denied");
+        let pause = ControlFacts { op: "pause_schedule", kind: "Schedule", id: "s1", owner: "carol" };
+        assert!(control_allowed(&policies, &carol, &pause).is_ok(), "own schedule");
+        assert!(control_allowed(&policies, &bob, &pause).is_err(), "another person's schedule");
+        let mut broken = BTreeMap::new();
+        broken.insert("org".to_string(), "permit(principal, action, resource) when {".to_string());
+        assert!(control_allowed(&broken, &carol, &c).is_err(), "broken policy allowed");
     }
 
     /// A grant covers its person's actions in its apps, never moving money
