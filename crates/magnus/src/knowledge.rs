@@ -469,7 +469,11 @@ impl Kernel {
             state: None,
         };
         let (adapter, model) = (run.model().0.to_string(), run.model().1.to_string());
-        let out = self.adapters.complete(&adapter, &model, &system, vec![msg], vec![], run.config.max_tokens, |_| {}).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let Some(allowance) = self.aux_max_tokens(&run.id, "knowledge extraction", &adapter, &model, &system, vec![msg.clone()], vec![], run.config.max_tokens).await
+        else {
+            return Ok(None);
+        };
+        let out = self.adapters.complete(&adapter, &model, &system, vec![msg], vec![], allowance, |_| {}).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let reply: String = out.blocks.iter().filter_map(|b| if let magnus_adapter_proto::Block::Text { text } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("").trim().to_string();
         self.emit("kernel:knowledge", Ev::KnowledgeExtraction { run: run.id.clone(), model: format!("{adapter}/{model}"), reply: reply.clone(), usage: out.usage }).await?;
         let value = match kind {

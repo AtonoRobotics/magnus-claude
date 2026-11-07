@@ -139,6 +139,38 @@ pub fn budget_used(run: &Run) -> String {
     format!("budget used: {} of {} actions, ${:.2} of ${:.2}", run.actions, b.max_actions, run.usd, b.max_usd)
 }
 
+/// The prompt's tokens from the kernel's bytes: the fallback when the
+/// adapter cannot measure what it would send. The live path asks the
+/// adapter, which drops what it cannot send.
+pub(crate) fn estimated_input_tokens(system: &str, messages: &[magnus_adapter_proto::Message], tools: &[magnus_adapter_proto::ToolSpec]) -> u64 {
+    let chars = system.len() + serde_json::to_string(messages).map(|s| s.len()).unwrap_or(0) + serde_json::to_string(tools).map(|s| s.len()).unwrap_or(0);
+    magnus_adapter_proto::chars_to_tokens(chars)
+}
+
+/// The output tokens the dollars left allow: the full allowance when the
+/// quoted worst case fits, fewer when only fewer fit, none when the
+/// prompt alone does not fit. The quote scales linearly in output tokens
+/// (the adapter contract), so what is left over the prompt prices the
+/// headroom.
+pub(crate) fn clamp_output_for_budget(remaining_usd: f64, input_usd: f64, output_usd_full: f64, max_tokens: u32) -> Option<u32> {
+    if input_usd > remaining_usd {
+        return None;
+    }
+    if output_usd_full <= 0.0 {
+        return Some(max_tokens);
+    }
+    let unit = output_usd_full / max_tokens.max(1) as f64;
+    if unit <= 0.0 {
+        return Some(max_tokens);
+    }
+    let affordable = ((remaining_usd - input_usd) / unit).floor().clamp(0.0, max_tokens as f64) as u32;
+    if affordable < 1 {
+        None
+    } else {
+        Some(affordable)
+    }
+}
+
 pub fn idempotency_key(run: &str, step_id: &str, tool: &str) -> String {
     use sha2::Digest;
     hex::encode(&sha2::Sha256::digest(format!("{run}\n{step_id}\n{tool}").as_bytes())[..16])
@@ -206,6 +238,51 @@ enum Gate {
 }
 
 impl Kernel {
+    /// An auxiliary model call's output allowance: the full allowance when
+    /// its worst case fits what the run has left, None when it does not —
+    /// the caller skips the call. Auxiliary calls are optional extras
+    /// (verdicts, memory, extractions, spoken scripts), never the run's
+    /// work, so they run whole or not at all: a truncated judgment is
+    /// worse than none, and the run is never suspended for one (#319). An
+    /// estimate the adapter cannot give falls back to the kernel's bytes;
+    /// a quote it cannot give skips: the call would fail anyway.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn aux_max_tokens(
+        &self,
+        run_id: &str,
+        purpose: &str,
+        adapter: &str,
+        model: &str,
+        system: &str,
+        messages: Vec<magnus_adapter_proto::Message>,
+        tools: Vec<magnus_adapter_proto::ToolSpec>,
+        max_tokens: u32,
+    ) -> Option<u32> {
+        let Some(run) = self.read(|s| s.runs.get(run_id).cloned()) else { return None };
+        let left = run.config.budget.max_usd - run.usd;
+        let input_tokens = match self.adapters.estimate_prompt(adapter, model, system, messages.clone(), tools.clone()).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("{purpose} prompt estimate for {run_id}: {e:#}; pricing the kernel's bytes");
+                estimated_input_tokens(system, &messages, &tools)
+            }
+        };
+        let (input_usd, output_usd) = match self.adapters.quote(adapter, model, input_tokens, max_tokens).await {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!("{purpose} quote for {run_id}: {e:#}; skipping");
+                return None;
+            }
+        };
+        match clamp_output_for_budget(left, input_usd, output_usd, max_tokens) {
+            Some(n) if n == max_tokens => Some(n),
+            _ => {
+                tracing::info!("{purpose} for {run_id} skipped: its worst case does not fit what is left");
+                None
+            }
+        }
+    }
+
     async fn record(&self, a: &Action, key: Option<String>, status: &str, text: String, is_error: bool, label: Label, data: Option<Value>) -> Result<Verdict> {
         let sources = facts(self, &a.tool).map(|f| vec![f.app]).unwrap_or_default();
         self.record_from(a, key, status, text, is_error, label, sources, data).await
@@ -1316,8 +1393,25 @@ pub fn media_type_for(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::may_use;
+    use super::{clamp_output_for_budget, may_use};
     use crate::config::{Connector, Person};
+
+    /// $10 a million output tokens, the 16000-token allowance: the full
+    /// allowance when it fits, fewer when only fewer fit, none when the
+    /// prompt alone does not (#273).
+    #[test]
+    fn the_dollars_left_bound_the_call_output() {
+        // $1 left, $0.01 in, $0.16 out: the full 16000.
+        assert_eq!(clamp_output_for_budget(1.0, 0.01, 0.16, 16000), Some(16000));
+        // $0.050001 left, $0.01 in: 4000 fit.
+        assert_eq!(clamp_output_for_budget(0.050001, 0.01, 0.16, 16000), Some(4000));
+        // $0.010009 left: nothing writable fits.
+        assert_eq!(clamp_output_for_budget(0.010009, 0.01, 0.16, 16000), None);
+        // The prompt alone past what is left: no call.
+        assert_eq!(clamp_output_for_budget(0.001, 0.01, 0.16, 16000), None);
+        // Free output (or unpriced): the full allowance while the prompt fits.
+        assert_eq!(clamp_output_for_budget(0.05, 0.01, 0.0, 16000), Some(16000));
+    }
 
     fn app(allow: &[&str], block: &[&str]) -> Connector {
         serde_json::from_value(serde_json::json!({ "name": "gmail", "url": "https://x.test/mcp", "audience": "public", "label": "private", "access_groups": allow, "blocked_groups": block })).unwrap()
