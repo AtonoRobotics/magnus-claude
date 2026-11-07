@@ -359,9 +359,11 @@ impl crate::kernel::Kernel {
     /// and no wake mark lands. The read's own diff wakes when there is
     /// news. The clock restarts when the run starts, not when it
     /// answers; a failed start leaves it due, retrying next sweep.
+    /// Headroom for one retry past the read (#419): a transient error
+    /// must not suspend the poll onto the person's inbox.
     async fn start_poll(self: &Arc<Self>, person: &str, app: &str, watch: &crate::config::Watch) {
         let budget =
-            crate::config::Budget { max_model_calls: 3, max_actions: 1, max_usd: self.cfg.proactive.wake_max_usd };
+            crate::config::Budget { max_model_calls: 5, max_actions: 3, max_usd: self.cfg.proactive.wake_max_usd };
         let text = format!("Poll {app}: call {app}__{} once with no arguments, then end the task. Do nothing else.", watch.tool);
         match self.create_run("poll", person, text, vec![], crate::kernel::NewRun { budget: Some(budget), ..Default::default() }).await
         {
