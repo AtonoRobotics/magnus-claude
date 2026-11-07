@@ -18,8 +18,8 @@ const sentences = Number(env("MAGNUS_SENTENCES")), seconds = Number(env("MAGNUS_
 const d = await open(wd, app, process.env.MAGNUS_SHOTS, "read-aloud");
 
 const read = () => { try { return readFileSync(log, "utf8").split("\n").filter(Boolean); } catch { return []; } };
-const listen = () => d.xpath("//div[@data-kind='answer']//div[@role='toolbar']//button[normalize-space()='Read aloud']");
-const busy = async () => (await d.attr(listen(), "disabled")) !== null;
+const listen = () => d.xpath("//div[@data-kind='answer']//div[@role='group']//button[@aria-label='Read aloud']");
+const busy = () => d.run("return !!document.querySelector('[data-msg-act=hush]')");
 
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
@@ -44,7 +44,7 @@ await d.step("read to the end, a sentence at a time", async () => {
 await d.step("Stop ends it and nothing more is made", async () => {
   await d.click(listen());
   await d.until("the first sentence", () => read().length > sentences || null);
-  await d.click(d.xpath("//div[@data-kind='answer']//div[@role='toolbar']//button[normalize-space()='Stop']"));
+  await d.click(d.xpath("//div[@data-kind='answer']//div[@role='group']//button[@aria-label='Stop reading']"));
   await d.until("reading to stop", async () => !(await busy()) || null, seconds * 1000);
   const made = read().length;
   await new Promise(r => setTimeout(r, sentences * seconds * 1000));

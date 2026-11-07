@@ -78,52 +78,77 @@ const Compose = (() => {
   // A delivered file shown in full, drawn from the same components: Markdown
   // as headings, paragraphs, lists and tables; CSV as a table; other text as
   // text. `limit` is the appliance's ({chars, rows}); the rest is in the file.
-  const inline = s => s
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g, (_, t, u) => t === u ? u : `${t} (${u})`)
-    .replace(/<(https?:[^>\s]+)>/g, "$1")
-    .replace(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a, b) => a ?? b)
-    .replace(/`([^`]+)`/g, "$1");
-
   function table(columns, rows, limit) {
     const t = { type: "table", columns: columns.map(c => c || " "), rows: rows.slice(0, limit.rows).map(r => columns.map((_, k) => r[k] ?? "")) };
     if (rows.length > limit.rows) t.caption = `The first ${limit.rows} of ${rows.length} rows; the rest are in the file.`;
     return t;
   }
 
-  function fromMarkdown(md, limit) {
-    const out = [], lines = md.replace(/\r\n?/g, "\n").split("\n");
-    let para = [], list = null;
-    const endPara = () => { if (para.length) out.push({ type: "text", text: inline(para.join("\n")) }); para = []; };
-    const endList = () => { if (list) out.push(list); list = null; };
-    const cells = l => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => inline(c.trim()));
-    const rule = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i];
-      let m;
-      if (/^\s*```/.test(l)) {
-        endPara(); endList();
-        const body = [];
-        while (++i < lines.length && !/^\s*```/.test(lines[i])) body.push(lines[i]);
-        if (body.join("").trim()) out.push({ type: "text", text: body.join("\n") });
-      } else if (!l.trim()) { endPara(); endList(); }
-      else if ((m = l.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/))) { endPara(); endList(); out.push({ type: "heading", text: inline(m[2]) || " ", level: m[1].length }); }
-      else if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(l)) { endPara(); endList(); }
-      else if (l.includes("|") && rule.test(lines[i + 1] || "")) {
-        endPara(); endList();
-        const columns = cells(l), rows = [];
-        for (i += 1; i + 1 < lines.length && lines[i + 1].includes("|") && lines[i + 1].trim(); i++) rows.push(cells(lines[i + 1]));
-        out.push(table(columns, rows, limit));
-      } else if ((m = l.match(/^\s*([-*+]|\d+[.)])\s+(.*)$/))) {
-        endPara();
-        const ordered = /\d/.test(m[1]);
-        if (list && list.ordered !== ordered) endList();
-        (list ||= { type: "list", items: [], ordered }).items.push(inline(m[2]));
-      } else if (list && /^\s{2,}\S/.test(l)) list.items[list.items.length - 1] += " " + inline(l.trim());
-      else { endList(); para.push((l.match(/^\s*>\s?(.*)$/) || [, l])[1].trim()); }
+  // A conservative Markdown renderer shared by conversation and file previews.
+  // Only our generated tags enter the DOM; source HTML is always escaped.
+  function safeUrl(value) {
+    try { const u = new URL(value, location.origin); return ["http:", "https:"].includes(u.protocol) ? u.href : null; } catch { return null; }
+  }
+  function markdownInline(text, depth = 0) {
+    if (depth > 8) return esc(text);
+    const pattern = /(`+)([\s\S]*?)\1|(!?)\[([^\]\n]*)\]\(([^\s]*?)(?:\s+"[^"\n]*")?\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*|_([^_\n]+)_|<(https?:\/\/[^>\s]+)>/g;
+    let out = "", at = 0;
+    for (const m of text.matchAll(pattern)) {
+      out += esc(text.slice(at, m.index)); at = m.index + m[0].length;
+      if (m[1]) out += `<code>${esc(m[2].replace(/\n/g, " "))}</code>`;
+      else if (m[4] !== undefined || m[10]) {
+        const label = m[4] ?? m[10], raw = m[5] ?? m[10], url = safeUrl(raw);
+        const localImage = m[3] && url && new URL(url).origin === location.origin && new URL(url).pathname.startsWith("/v1/files/");
+        if (localImage) out += `<img data-prose-image="${esc(new URL(url).pathname)}" alt="${esc(label)}" loading="lazy">`;
+        else out += url ? `<a href="${esc(url)}" data-prose-link rel="noopener noreferrer">${markdownInline(label, depth + 1)}</a>` : esc(label);
+      } else if (m[6] || m[7]) out += `<strong>${markdownInline(m[6] || m[7], depth + 1)}</strong>`;
+      else out += `<em>${markdownInline(m[8] || m[9], depth + 1)}</em>`;
     }
-    endPara(); endList();
-    return out;
+    return out + esc(text.slice(at));
+  }
+  function markdown(source) {
+    const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n"), out = [];
+    const cells = line => line.trim().replace(/^\|/, "").replace(/\|$/, "").split(/(?<!\\)\|/).map(c => markdownInline(c.trim().replace(/\\\|/g, "|")));
+    const tableRule = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+    const block = line => /^\s*$|^\s{0,3}(?:#{1,6}\s|>|[-*+]\s|\d+[.)]\s|`{3,}|~{3,})/.test(line);
+    for (let i = 0; i < lines.length;) {
+      const line = lines[i]; let m;
+      if (!line.trim()) { i++; continue; }
+      if ((m = line.match(/^\s{0,3}(`{3,}|~{3,})([^\s]*)\s*$/))) {
+        const fence = m[1], lang = m[2], body = [];
+        for (i++; i < lines.length && !new RegExp(`^\\s{0,3}${fence[0]}{${fence.length},}\\s*$`).test(lines[i]); i++) body.push(lines[i]);
+        if (i < lines.length) i++;
+        out.push(`<div class="code-block"><div class="code-head"><span>${esc(lang)}</span><button type="button" data-code-copy aria-label="Copy code" data-tooltip="Copy code">Copy code</button></div><pre><code>${esc(body.join("\n"))}</code></pre></div>`);
+      } else if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/))) { out.push(`<h${m[1].length}>${markdownInline(m[2])}</h${m[1].length}>`); i++; }
+      else if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) { out.push("<hr>"); i++; }
+      else if (line.includes("|") && tableRule.test(lines[i + 1] || "")) {
+        const head = cells(line), rows = []; i += 2;
+        while (i < lines.length && lines[i].trim() && lines[i].includes("|")) { rows.push(cells(lines[i])); i++; }
+        out.push(`<div class="markdown-table" tabindex="0" role="region" aria-label="Table"><table><thead><tr>${head.map(c => `<th scope="col">${c}</th>`).join("")}</tr></thead><tbody>${rows.map(row => `<tr>${head.map((_, n) => `<td>${row[n] || ""}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+      } else if (/^\s{0,3}>/.test(line)) {
+        const quote = []; while (i < lines.length && /^\s{0,3}>/.test(lines[i])) quote.push(lines[i++].replace(/^\s{0,3}>\s?/, ""));
+        // Quotes need no recursive block parser to remain readable and safe.
+        out.push(`<blockquote>${quote.map(x => markdownInline(x)).join("<br>")}</blockquote>`);
+      } else if ((m = line.match(/^\s*([-*+]|\d+[.)])\s+(.*)$/))) {
+        const ordered = /\d/.test(m[1]), tag = ordered ? "ol" : "ul", items = [], start = ordered ? ` start="${parseInt(m[1], 10)}"` : "";
+        while (i < lines.length) {
+          const item = lines[i].match(/^\s*([-*+]|\d+[.)])\s+(.*)$/);
+          if (!item || /\d/.test(item[1]) !== ordered) break;
+          i++; const parts = [item[2]];
+          while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !/^\s*([-*+]|\d+[.)])\s/.test(lines[i])) parts.push(lines[i++].trim());
+          items.push(`<li>${markdownInline(parts.join("\n"))}</li>`);
+        }
+        out.push(`<${tag}${start}>${items.join("")}</${tag}>`);
+      } else {
+        const parts = [line]; i++;
+        while (i < lines.length && !block(lines[i]) && !(lines[i].includes("|") && tableRule.test(lines[i + 1] || ""))) parts.push(lines[i++]);
+        out.push(`<p>${markdownInline(parts.join("\n"))}</p>`);
+      }
+    }
+    return `<div class="markdown">${out.join("\n")}</div>`;
+  }
+  function fromMarkdown(md, limit) {
+    return [{ type: "markdown", text: md.slice(0, limit.chars) }];
   }
 
   function fromCsv(text, limit) {
@@ -160,6 +185,7 @@ const Compose = (() => {
   function part(c, files, limit) {
     switch (c.type) {
       case "heading": return c.level > 2 ? `<h4>${esc(c.text)}</h4>` : `<h2>${esc(c.text)}</h2>`;
+      case "markdown": return markdown(c.text);
       case "text": return `<p${c.muted ? ` class="cap"` : ""}>${esc(c.text)}</p>`;
       case "list": return frame(c, c.ordered ? `<ol>${c.items.map(i => `<li>${esc(i)}</li>`).join("")}</ol>` : `<ul>${c.items.map(i => `<li>${esc(i)}</li>`).join("")}</ul>`);
       case "table": {
@@ -185,6 +211,26 @@ const Compose = (() => {
   const VARS = ["fg", "fg2", "muted", "line", "hair", "surface", "raised", "shadow", "accent", "accent-text"];
   const DEFAULT_LIGHT = { fg: "#1C1C1E", fg2: "#3F3F44", muted: "#5E5E63", line: "#E7E6E2", hair: "#EFEEEA", surface: "#FFFFFF", raised: "#F6F6F3", shadow: "0 1px 2px rgba(0,0,0,0.04), 0 6px 20px rgba(0,0,0,0.04)", accent: "#3557D9", "accent-text": "#3557D9" };
   const vars = t => VARS.map(k => `--${k}:${(t || DEFAULT_LIGHT)[k] ?? DEFAULT_LIGHT[k]};`).join("");
+  const markdownStyles = `.markdown { font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; min-width: 0; }
+.markdown p { margin: 8px 0; white-space: pre-wrap; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 { color: var(--fg); margin: 16px 0 8px; }
+.markdown h1 { font-size: 24px; } .markdown h2 { font-size: 20px; } .markdown h3 { font-size: 17px; }
+.markdown a { color: var(--accent-text); text-decoration: underline; }
+.markdown ul, .markdown ol { padding-left: 24px; }
+.markdown blockquote { border-left: 2px solid var(--muted); margin: 12px 0; padding: 4px 16px; }
+.markdown code { font-family: var(--mono, monospace); font-size: 13px; }
+.markdown :not(pre) > code { background: var(--raised); border-radius: 4px; padding: 2px 4px; }
+.markdown .code-block { background: var(--raised); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin: 12px 0; }
+.markdown .code-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 12px; color: var(--muted); }
+.markdown .code-head button { min-height: 36px; padding: 4px 12px; background: var(--surface); border: 1px solid var(--muted); color: var(--fg); border-radius: 8px; cursor: pointer; }
+.markdown pre { overflow: auto; white-space: pre; margin: 0; padding: 12px 16px; max-width: 100%; }
+.markdown .markdown-table { overflow: auto; max-width: 100%; margin: 12px 0; }
+.markdown table { border-collapse: collapse; width: 100%; }
+.markdown th, .markdown td { padding: 8px 12px; border: 1px solid var(--line); text-align: left; min-width: 100px; }
+.markdown img { max-width: 100%; height: auto; object-fit: contain; }
+.markdown :focus-visible { outline: 2px solid var(--focus, var(--accent-text)); outline-offset: 2px; }
+@media (any-pointer: coarse) { .markdown .code-head button { min-height: 44px; min-width: 44px; } }
+`;
   const CSS = `
     :root { --bar: var(--accent); --s0: var(--accent); --s1:#c2410c; --s2:#0f766e; --s3:#7c3aed; --s4:#a16207; --s5:#be123c; }
     html,body { margin:0; background: transparent; color:var(--fg); font: 14px/1.45 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; font-feature-settings: "tnum" 1, "cv11" 1; }
@@ -252,8 +298,8 @@ const Compose = (() => {
     const body = (view || []).map(c => part(c, files || {}, limit || { chars: 160000, rows: 200 })).join("\n");
     return `<!doctype html><html style="color-scheme: ${mode === "dark" ? "dark" : "light"}"><head><meta charset="utf-8">
       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data: ${location.origin}">
-      <style>:root{${vars(tokens)}}${fontCss || ""}${CSS}</style></head><body>${body}</body></html>`;
+      <style>:root{${vars(tokens)}}${fontCss || ""}${CSS}${markdownStyles}</style></head><body>${body}</body></html>`;
   }
 
-  return { documentFor, TEXT };
+  return { documentFor, TEXT, markdown, safeUrl, markdownStyles };
 })();
