@@ -193,7 +193,7 @@ impl Kernel {
                     run: run_id.into(),
                     step,
                     attempt,
-                    context: ContextRef { through_seq: run.last_seq, instructions: super::sent_version(&run.config.instructions, &system), tools_hash: tools_hash.clone(), relationship, personal },
+                    context: ContextRef { through_seq: run.last_seq, instructions: super::sent_version(&run.config.instructions, &system), tools_hash: tools_hash.clone(), relationship, personal, character: Some(super::character_version()) },
                 },
             )
             .await?;

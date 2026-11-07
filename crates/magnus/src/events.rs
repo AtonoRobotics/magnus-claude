@@ -115,6 +115,11 @@ pub struct ContextRef {
     /// others is theirs (#258, #301).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub personal: bool,
+    /// The character the reply spoke as, so alpha feedback traces to it
+    /// (#269). None on calls logged before it: they spoke with it too,
+    /// but only inside the hashed instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
 }
 
 impl ContextRef {
@@ -1121,6 +1126,9 @@ pub enum Ev {
         #[serde(default)]
         script: String,
         usage: magnus_adapter_proto::Usage,
+        /// The character the script was rewritten as (#269).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        character: Option<String>,
     },
     /// The person had a memory forgotten; it is never read back again.
     MemoryForgotten {

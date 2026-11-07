@@ -63,13 +63,11 @@ fn input(p: &CompleteParams) -> Vec<Value> {
 /// measuring, so the estimate can never drift from what goes out.
 pub fn request_body(p: &CompleteParams) -> Value {
     let s = &p.settings;
-    let instructions = match s["instructions_prefix"].as_str() {
-        Some(pre) => format!("{pre}\n\n{}", p.system),
-        None => p.system.clone(),
-    };
+    // No prefix: what the provider is sent is what the kernel logged, with
+    // no appliance-config text outside the version (#269).
     let mut body = json!({
         "model": p.model,
-        "instructions": instructions,
+        "instructions": p.system,
         "input": input(p),
         "stream": true,
         "store": s["store"].as_bool().unwrap_or(false),
@@ -219,4 +217,18 @@ pub async fn complete(http: &reqwest::Client, p: CompleteParams, sink: &mut Sink
         sink.send(&Event::State { state: json!({ "items": reasoning_items }) }).await?;
     }
     finish(sink, s, &p.model, usage, served, &stop).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No prefix is prepended to the instructions: what the provider is
+    /// sent is what the kernel logged, with no appliance-config text
+    /// outside the version (#269).
+    #[test]
+    fn no_prefix_is_prepended_to_instructions() {
+        let p = CompleteParams { model: "m".into(), settings: json!({ "instructions_prefix": "SHOULD NOT APPEAR" }), credential: None, system: "SYS".into(), messages: vec![], tools: vec![], max_tokens: 1 };
+        assert_eq!(request_body(&p)["instructions"], json!("SYS"));
+    }
 }
