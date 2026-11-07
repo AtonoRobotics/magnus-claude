@@ -282,6 +282,44 @@ async fn a_schedule_that_keeps_failing_pauses_until_its_person_resumes_it() {
     assert_eq!(alice.post(&format!("/v1/schedules/{id}/resume"), json!({})).await.0.as_u16(), 404);
 }
 
+/// An ended schedule is history: deleting it starts nothing and stops
+/// nothing. A schedule ends as its last run starts, so that run can still
+/// be going, and it goes on (#452).
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_ended_schedule_leaves_its_last_run_going() {
+    // The run's first model call takes a while, once: long enough to delete
+    // the schedule while it is going. Then the run ends itself, so its end
+    // is its own, not the delete's.
+    let slow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let m = FakeModel::start(script(move |c| {
+        let slow = slow.clone();
+        async move {
+            if c.body.to_string().contains("Fetch it once.") && slow.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+            tool("task_fail", json!({ "reason": "the source was empty" }))
+        }
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    every_minute(&mut app, 3).await;
+    let alice = app.api("alice");
+    let once = add(&alice, json!({ "text": "Fetch it once.", "every_minutes": 1, "max_runs": 1 })).await;
+    let run = eventually("its one run is going", MINUTE, || async {
+        tasks_with(&alice, "Fetch it once.").await.into_iter().find(|t| t["status"] == "running").map(|t| t["task_id"].as_str().unwrap().to_string())
+    })
+    .await;
+    eventually("the schedule ends as its last run starts", MINUTE, || async { schedule(&alice, &once).await.filter(|s| !s["ended"].is_null()) }).await;
+
+    let (st, v) = alice.send(reqwest::Method::DELETE, &format!("/v1/schedules/{once}"), None).await;
+    assert!(st.is_success(), "{st} {v}");
+    assert_eq!(v["runs_stopped"], 0, "deleting an ended schedule stopped its run: {v}");
+    assert!(schedule(&alice, &once).await.is_none(), "the ended schedule is still listed");
+    let t = alice.wait_settled(&run).await;
+    assert_eq!(t["status"], "failed", "its last run was stopped, not left to end itself: {t}");
+    assert!(t["summary"].as_str().unwrap_or_default().contains("the source was empty"), "{t}");
+}
+
 /// A schedule a run proposes gets that run's budget, kept as it was, and
 /// its runs start with that run's taint.
 #[tokio::test(flavor = "multi_thread")]

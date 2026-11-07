@@ -2,7 +2,7 @@
 // (tests/scratch/tests/live_cards.rs sets it up): the waiting memo's card
 // has Cancel, which cancels it; the confirmed schedule's card shows its next
 // run, and Pause, Resume and Cancel act on it directly; an ended schedule's
-// card says it ended, with why and no acts; the plan's result, which came
+// card says it ended, with why, and its one act is Delete (#452); the plan's result, which came
 // after the person's newer message, quotes what they asked.
 //
 // MAGNUS_URL, MAGNUS_PERSON, MAGNUS_PASSWORD  where and who
@@ -69,12 +69,13 @@ await step("the schedule's card shows its next run, and pauses and resumes from 
   await card.getByRole("button", { name: "Resume" }).click();
   await card.locator(".chip", { hasText: "Scheduled" }).waitFor({ timeout: T });
 });
-await step("an ended schedule's card says it ended, with why and no acts", async () => {
+await step("an ended schedule's card says it ended, with why, and offers only Delete", async () => {
   const card = page.locator(`#thread [data-schedule="${ended}"]`);
   await card.locator(".chip", { hasText: "Ended" }).waitFor({ timeout: T });
   await card.getByText(/reached its end/).waitFor({ timeout: T });
   if (await card.getByText("Cancelled").count()) throw new Error("an ended schedule's card says Cancelled");
-  if (await card.getByRole("button").count()) throw new Error("an ended schedule's card offers acts");
+  const acts = await card.getByRole("button").allInnerTexts();
+  if (acts.length !== 1 || acts[0].trim() !== "Delete") throw new Error(`an ended schedule's card offers ${JSON.stringify(acts)}, not Delete alone`);
 });
 
 await step("Cancel on the memo's card cancels it", async () => {
