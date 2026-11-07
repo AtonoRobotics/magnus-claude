@@ -79,6 +79,20 @@ async fn form_at(b: &reqwest::Client, url: &str, path: &str, sid: Option<&str>) 
     }
     let r = req.send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
+    let raw = r
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("__Host-magnus_local="))
+        .expect("the form set no login cookie")
+        .to_string();
+    // Browsers enforce the `__Host-` contract; a narrower path or a
+    // missing flag silently drops the cookie there (#456).
+    let attrs: Vec<String> = raw.split(';').map(|p| p.trim().to_string()).collect();
+    for attr in ["Path=/", "Secure", "HttpOnly", "SameSite=Strict"] {
+        assert!(attrs.iter().any(|p| p == attr), "the login cookie lost {attr}: {raw}");
+    }
     let cookie = cookie_of(&r, "__Host-magnus_local").expect("the form set no login cookie");
     let body = r.text().await.unwrap();
     let token = body.split("name=login_token value=\"").nth(1).and_then(|s| s.split('"').next()).expect("the form carries no login token").to_string();

@@ -216,11 +216,12 @@ fn urlencode(s: &str) -> String {
 const LOCAL_LOGIN_COOKIE: &str = "__Host-magnus_local";
 
 /// Mint a login binding: the token and the cookie that carries it back.
-/// None when too many logins are waiting.
+/// None when too many logins are waiting. The path is `/`: browsers
+/// reject `__Host-` cookies with any narrower path (#456).
 fn mint_login(c: &Console) -> Option<(String, String)> {
     let token = crate::connectors::random();
     c.store.add_login_token(token.clone()).ok()?;
-    Some((token.clone(), format!("{LOCAL_LOGIN_COOKIE}={token}; Path=/auth; Secure; HttpOnly; SameSite=Strict")))
+    Some((token.clone(), format!("{LOCAL_LOGIN_COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Strict")))
 }
 
 fn escape(s: &str) -> String {
@@ -325,7 +326,7 @@ pub async fn local_login_post(State(c): State<Arc<Console>>, axum::extract::Conn
             c.store.sessions.lock().unwrap().insert(sid.clone(), s);
             let mut r = Redirect::to(&then).into_response();
             r.headers_mut().append(header::SET_COOKIE, session_cookie(&sid).parse().unwrap());
-            r.headers_mut().append(header::SET_COOKIE, format!("{LOCAL_LOGIN_COOKIE}=; Path=/auth; Secure; HttpOnly; SameSite=Strict; Max-Age=0").parse().unwrap());
+            r.headers_mut().append(header::SET_COOKIE, format!("{LOCAL_LOGIN_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0").parse().unwrap());
             r
         }
         Some("needs_code") => retry(&person, true, "Enter the 6-digit code from your authenticator app."),
