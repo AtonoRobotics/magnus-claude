@@ -69,6 +69,27 @@ fn version_of(name: &str, text: &str) -> String {
     format!("{name}@{}", &hex::encode(sha2::Sha256::digest(text.as_bytes()))[..12])
 }
 
+/// The harness section of a run's system context (#270): what wakes it,
+/// what it keeps, what bounds it, and only the capabilities offered —
+/// `search`, `sandbox` and `browser` as this appliance offers them.
+fn harness_text(who: &str, search: bool, sandbox: bool, browser: bool) -> String {
+    let mut s = format!(
+        "\n\n# Your harness\n\nYou run on this appliance for {who}. You wake when they message you, submit a task, or when one of their schedules comes due; once, when they first start using Magnus, you open the conversation yourself.\n\nYou keep: what you remember across conversations (memory_search), their relationship notes, their open disagreements with you, your suggestion ledger, their open commitments, and your playbook lessons.\n\nYou are bound by the organisation's Cedar policies; some actions wait for the person's approval; and when the kill switch is on, nothing new starts until the owner releases it.\n"
+    );
+    if search {
+        s.push_str("\nYou can search the web with web_search, and fetch any page with web_fetch.\n");
+    } else {
+        s.push_str("\nYou cannot search the web; you can still fetch a page when given its address.\n");
+    }
+    if sandbox {
+        s.push_str("\nYour executable checks may run as sandbox commands such as your tests or a demo: each runs in a fresh VM from the sandbox image with a copy of /workspace. Its tools must be the image's: a check that names a program or module the image lacks, or changes PATH or PYTHONPATH, is refused when you record it.\n");
+    }
+    if browser {
+        s.push_str("\nYou can drive a web browser with the browser tools.\n");
+    }
+    s
+}
+
 /// What a run is told about its scope: a schedule's run keeps to what
 /// the person confirmed; a one-off task from an accepted card was
 /// approved for its scope, not scheduled (#271).
@@ -246,9 +267,10 @@ impl Kernel {
             }
         }
         let system = if chat.is_some_and(|c| c.turn) { CHAT_INSTRUCTIONS } else { INSTRUCTIONS };
+        let harness = self.harness_context(run);
         let (person, relationship) = self.person_context(run).await?;
         let personal = !person.is_empty();
-        Ok((format!("{system}{person}"), msgs, relationship, personal))
+        Ok((format!("{system}{harness}{person}"), msgs, relationship, personal))
     }
 
     /// A task from chat keeps the conversation it came from with its
@@ -269,6 +291,15 @@ impl Kernel {
     /// Whether the run is a chat turn.
     pub fn is_chat_turn(&self, run: &Run) -> bool {
         self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.is_chat_turn()))
+    }
+
+    /// What a run's system context says about its own harness (#270): what
+    /// wakes it, what it keeps, what bounds it, and only the capabilities
+    /// this appliance actually offers it — generated from what is
+    /// offered, so its opinions about itself rest on facts, not guesses.
+    fn harness_context(&self, run: &Run) -> String {
+        let who = self.person(&run.person).map(|p| if p.name.is_empty() { p.id.clone() } else { p.name.clone() }).unwrap_or_else(|| run.person.clone());
+        harness_text(&who, self.web.can_search(), self.sandboxes.available(), self.browser.available())
     }
 
     /// Tools offered to the run's next model call: run records, built-ins,
@@ -1079,7 +1110,25 @@ fn strip_descriptions(v: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::scope_line;
+    use super::{harness_text, scope_line};
+
+    /// The harness section names only what is offered (#270): no web
+    /// search, no sandbox, no browser without them.
+    #[test]
+    fn harness_names_only_what_is_offered() {
+        let bare = harness_text("bob", false, false, false);
+        assert!(bare.contains("for bob"), "{bare}");
+        assert!(bare.contains("You cannot search the web"), "{bare}");
+        assert!(!bare.contains("You can search the web"), "{bare}");
+        assert!(!bare.contains("fresh VM"), "{bare}");
+        assert!(!bare.contains("browser tools"), "{bare}");
+        assert!(bare.contains("kill switch"), "{bare}");
+        let full = harness_text("bob", true, true, true);
+        assert!(full.contains("You can search the web with web_search"), "{full}");
+        assert!(full.contains("fresh VM"), "{full}");
+        assert!(full.contains("browser tools"), "{full}");
+        assert!(!full.contains("You cannot search the web"), "{full}");
+    }
 
     /// A schedule's run is told the person confirmed its schedule; a
     /// one-off task is told it was approved, without the word (#271).
