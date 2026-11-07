@@ -9,8 +9,9 @@ through to the live address, all-dead errors, both asserting they
 settle in under 5s. `crates/magnus/tests/tools.rs`: the private-name
 test navigates to `localhost` instead of the machine's name. The
 release-checks Browser sidecar step now runs `node --test
-"browser/**/*.test.js"` (a bare directory argument runs the package's
-main instead of its tests).
+browser/destinations.test.js`, naming the file: a bare directory
+argument runs the package's main, and the runner's older node does
+not expand `**` patterns.
 The 90s navigation-budget bump is reverted: `sidecar.js` and
 `browser.rs` are master-identical again.
 
