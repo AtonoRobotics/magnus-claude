@@ -53,16 +53,64 @@ fn code(uri: &str) -> String {
     magnus::totp::generate(&raw, (chrono::Utc::now().timestamp().div_euclid(30)) as u64, 6)
 }
 
-/// The console session cookie of a response, if it set one.
-fn sid_of(r: &reqwest::Response) -> Option<String> {
+/// One cookie of a response, by name, if it set a non-empty one.
+fn cookie_of(r: &reqwest::Response, name: &str) -> Option<String> {
     r.headers()
         .get_all(reqwest::header::SET_COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .filter_map(|v| v.split(';').next()?.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
-        .find(|(k, _)| k == "__Host-magnus_admin")
+        .find(|(k, _)| k == name)
         .map(|(_, v)| v)
         .filter(|v| !v.is_empty())
+}
+
+/// The console session cookie of a response, if it set one.
+fn sid_of(r: &reqwest::Response) -> Option<String> {
+    cookie_of(r, "__Host-magnus_admin")
+}
+
+/// A local form's CSRF binding: its cookie and its hidden field. A
+/// cross-origin attacker reads neither (#456).
+async fn form_at(b: &reqwest::Client, url: &str, path: &str, sid: Option<&str>) -> (String, String, String) {
+    let mut req = b.get(format!("{url}{path}"));
+    if let Some(sid) = sid {
+        req = with_cookie(req, sid);
+    }
+    let r = req.send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let raw = r
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("__Host-magnus_local="))
+        .expect("the form set no login cookie")
+        .to_string();
+    // Browsers enforce the `__Host-` contract; a narrower path or a
+    // missing flag silently drops the cookie there (#456).
+    let attrs: Vec<String> = raw.split(';').map(|p| p.trim().to_string()).collect();
+    for attr in ["Path=/", "Secure", "HttpOnly", "SameSite=Strict"] {
+        assert!(attrs.iter().any(|p| p == attr), "the login cookie lost {attr}: {raw}");
+    }
+    let cookie = cookie_of(&r, "__Host-magnus_local").expect("the form set no login cookie");
+    let body = r.text().await.unwrap();
+    let token = body.split("name=login_token value=\"").nth(1).and_then(|s| s.split('"').next()).expect("the form carries no login token").to_string();
+    assert!(!token.is_empty(), "the login token is empty");
+    (cookie, token, body)
+}
+
+/// Submit a local form the way the browser does: fetch it for its login
+/// cookie and token, then post with both.
+async fn submit(b: &reqwest::Client, url: &str, path: &str, sid: Option<&str>, fields: Vec<(String, String)>) -> reqwest::Response {
+    let (cookie, token, _) = form_at(b, url, path, sid).await;
+    let mut req = b.post(format!("{url}{path}")).header("cookie", format!("__Host-magnus_local={cookie}"));
+    if let Some(sid) = sid {
+        req = with_cookie(req, sid);
+    }
+    let mut fields = fields;
+    fields.push(("login_token".to_string(), token));
+    req.form(&fields).send().await.unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -80,39 +128,43 @@ async fn an_admin_signs_in_locally_and_a_member_and_a_wrong_password_do_not() {
     let c = launch(p).await;
     let api = |path: &str| format!("{url}/api/v1{path}");
     let b = browser(&c, false);
-    // Browsers send Origin on form posts; the test does as they do (#456).
-    let post = |path: String| b.post(path).header("origin", url.clone());
+    // No hand-crafted security headers anywhere here: the test behaves
+    // like the browser, which under the console's no-referrer policy sends
+    // `Origin: null` (#456).
+    let login = |who: &str, pw: &str, extra: Vec<(String, String)>| {
+        let mut fields = vec![("person".to_string(), who.to_string()), ("password".to_string(), pw.to_string()), ("then".to_string(), "/".to_string())];
+        fields.extend(extra);
+        submit(&b, &url, "/auth/local", None, fields)
+    };
 
-    // The form is there, naming the local way in.
-    let r = b.get(format!("{url}/auth/local")).send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
-    let body = r.text().await.unwrap();
+    // The form is there, bound to its page by cookie and token.
+    let (_, _, body) = form_at(&b, &url, "/auth/local", None).await;
     assert!(body.contains("<form") && body.contains("name=password"), "no local sign-in form: {body}");
+
+    // A post without the binding, however right its credentials, refuses:
+    // that is all a cross-origin attacker can send (#456).
+    let r = b.post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("then", "/")]).send().await.unwrap();
+    assert!(sid_of(&r).is_none(), "an unbound post signed in");
+    let r = b
+        .post(format!("{url}/auth/local"))
+        .header("cookie", "__Host-magnus_local=forged")
+        .form(&[("person", "alice"), ("password", "alice-long-password"), ("login_token", "forged"), ("then", "/")])
+        .send()
+        .await
+        .unwrap();
+    assert!(sid_of(&r).is_none(), "a forged binding signed in");
 
     // A wrong password, an unknown name and a member refuse alike, with no session.
     for (who, pw) in [("alice", "wrong-password"), ("nobody", "whatever-password"), ("carol", "carol-long-password")] {
-        let r = post(format!("{url}/auth/local")).form(&[("person", who), ("password", pw), ("then", "/")]).send().await.unwrap();
+        let r = login(who, pw, vec![]).await;
         assert_eq!(r.status(), StatusCode::OK, "{who} was not refused");
         assert!(sid_of(&r).is_none(), "{who} was given a console session");
         let body = r.text().await.unwrap();
         assert!(body.contains("wrong"), "{who} got no alike refusal: {body}");
     }
 
-    // A cross-origin post with the right password, and one with no origin
-    // to judge, both refuse: the form answers only its own pages (#456).
-    let r = b
-        .post(format!("{url}/auth/local"))
-        .header("origin", "https://evil.test")
-        .form(&[("person", "alice"), ("password", "alice-long-password"), ("then", "/")])
-        .send()
-        .await
-        .unwrap();
-    assert!(sid_of(&r).is_none(), "a cross-origin post signed in");
-    let r = b.post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("then", "/")]).send().await.unwrap();
-    assert!(sid_of(&r).is_none(), "a post with no origin signed in");
-
     // The admin signs in with the password; she is stepped up from it.
-    let r = post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("then", "/")]).send().await.unwrap();
+    let r = login("alice", "alice-long-password", vec![]).await;
     assert_eq!(r.status(), StatusCode::SEE_OTHER, "the password did not sign in");
     let sid = sid_of(&r).expect("no session cookie on local sign-in");
     let me: Value = with_cookie(b.get(api("/session")), &sid).send().await.unwrap().json().await.unwrap();
@@ -120,9 +172,9 @@ async fn an_admin_signs_in_locally_and_a_member_and_a_wrong_password_do_not() {
     let csrf = me["csrf"].as_str().unwrap().to_string();
 
     // A change without the session's token is refused; with it, done.
-    let r = with_cookie(post(api("/session/step-up")), &sid).send().await.unwrap();
+    let r = with_cookie(b.post(api("/session/step-up")), &sid).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::FORBIDDEN, "a change without the CSRF token was taken");
-    let r = with_cookie(post(api("/session/step-up")), &sid).header("x-csrf-token", &csrf).send().await.unwrap();
+    let r = with_cookie(b.post(api("/session/step-up")), &sid).header("x-csrf-token", &csrf).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NO_CONTENT, "a fresh step-up did not count");
 
     // Step-up for a local session goes to the local form, which confirms
@@ -131,7 +183,7 @@ async fn an_admin_signs_in_locally_and_a_member_and_a_wrong_password_do_not() {
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
     let to = r.headers().get(reqwest::header::LOCATION).unwrap().to_str().unwrap().to_string();
     assert!(to.contains("/auth/local/step-up"), "local step-up did not route locally: {to}");
-    let r = with_cookie(post(format!("{url}/auth/local/step-up")), &sid).form(&[("password", "alice-long-password"), ("then", "/auth/done")]).send().await.unwrap();
+    let r = submit(&b, &url, "/auth/local/step-up", Some(&sid), vec![("password".to_string(), "alice-long-password".to_string()), ("then".to_string(), "/auth/done".to_string())]).await;
     assert_eq!(r.status(), StatusCode::SEE_OTHER, "the password did not confirm the step-up");
 
     // Disabling ends the session at the next check, within seconds.
@@ -145,11 +197,11 @@ async fn an_admin_signs_in_locally_and_a_member_and_a_wrong_password_do_not() {
     // shows the code screen, and with the code she is in again.
     // (Enrolled last so no code is ever used twice in this test.)
     let uri = enroll(&app, "alice");
-    let r = post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("then", "/")]).send().await.unwrap();
+    let r = login("alice", "alice-long-password", vec![]).await;
     assert_eq!(r.status(), StatusCode::OK);
     assert!(sid_of(&r).is_none(), "the password alone opened a session past the code");
     assert!(r.text().await.unwrap().contains("6-digit code"), "no code screen");
-    let r = post(format!("{url}/auth/local")).form(&[("person", "alice"), ("password", "alice-long-password"), ("code", &code(&uri)), ("then", "/")]).send().await.unwrap();
+    let r = login("alice", "alice-long-password", vec![("code".to_string(), code(&uri))]).await;
     assert_eq!(r.status(), StatusCode::SEE_OTHER, "the code did not sign in");
     let sid = sid_of(&r).expect("no session cookie past the code");
 
