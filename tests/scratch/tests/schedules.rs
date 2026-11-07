@@ -11,6 +11,7 @@
 //! - one that keeps failing pauses itself until its person resumes it, and
 //!   the app can resume it and stop it;
 //! - one cancelled or paused while the sweep starts it gets no run;
+//! - a pause landing after a release snapshot is not undone by it;
 //! - one held on its waiting run can be paused by its person, and stays
 //!   paused when the hold ends;
 //! - a proposed schedule keeps the budget and taint of the run that
@@ -443,4 +444,44 @@ async fn a_person_can_pause_a_schedule_held_on_them_and_it_stays_paused() {
     // Resumed, it fires again as usual.
     assert_eq!(alice.post(&format!("/v1/schedules/{id}/resume"), json!({})).await.0.as_u16(), 204);
     eventually("a second run after the resume", MINUTE * 2, || async { (tasks_with(&alice, "Watch the gate.").await.len() == 2).then_some(()) }).await;
+}
+
+/// A pause landing after the sweep snapshots a release is not undone:
+/// the release rechecks that the hold ended and the pause is still the
+/// hold's before resuming it (#318). The gate holds the release so the
+/// pause lands there by construction, not by timing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pause_after_the_release_snapshot_is_not_released() {
+    let m = FakeModel::start(script(|c| async move {
+        match c.turn() {
+            0 => simple_contract(),
+            1 => tool("ask_principal", json!({ "question": "Raise the alarm too?" })),
+            _ => done("Watched the door."),
+        }
+    }))
+    .await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    every_minute(&mut app, 0).await;
+    let alice = app.api("alice");
+    let id = add(&alice, json!({ "text": "Watch the door.", "every_minutes": 1 })).await;
+
+    let first = eventually("the schedule's first run", MINUTE, || async { tasks_with(&alice, "Watch the door.").await.first().map(|t| t["task_id"].as_str().unwrap().to_string()) }).await;
+    alice.wait_item(&first, "question").await;
+    eventually("the schedule held on its waiting run", PATIENCE, || async { schedule(&alice, &id).await.filter(|s| s["paused_on"] == first.as_str()) }).await;
+
+    // The hold ends; the sweep snapshots the release and waits at the gate.
+    std::fs::write(app.state_dir.join("release-gate"), "").unwrap();
+    assert!(alice.post(&format!("/v1/tasks/{first}/cancel"), json!({})).await.0.is_success());
+    eventually("the sweep holds the release at the gate", PATIENCE, || async {
+        std::fs::read_to_string(app.state_dir.join("release-gated")).ok().filter(|s| s == &id).map(|_| ())
+    })
+    .await;
+
+    // Pausing in the window converts the hold; lifting the gate must not
+    // resume the person's pause.
+    assert_eq!(alice.post(&format!("/v1/schedules/{id}/pause"), json!({})).await.0.as_u16(), 204);
+    std::fs::remove_file(app.state_dir.join("release-gate")).unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let s = schedule(&alice, &id).await.unwrap();
+    assert!(!s["paused"].is_null(), "the stale release undid the pause: {s}");
 }
