@@ -248,6 +248,38 @@ impl crate::kernel::Kernel {
                         return Some((approval_reason(&i.id), None));
                     }
                 }
+                // The backstop (#386): a task that ended while a review
+                // was active had its fast wake dropped. The newest such
+                // task with no wake mark, ended over thirty seconds ago
+                // so the fast wake had its chance, gets its review from
+                // this sweep. The mark lands from the reason when the
+                // review starts, exactly as for the fast wake.
+                if let Some((id, verb, outcome, label)) = s
+                    .tasks
+                    .values()
+                    .filter(|t| t.person == person && !t.review && !t.chat.as_ref().is_some_and(|c| c.turn))
+                    .filter_map(|t| {
+                        let r = s.runs.get(&t.run_id)?;
+                        let verb = match r.status {
+                            crate::state::Status::Completed => "done",
+                            crate::state::Status::Failed => "failed",
+                            _ => return None,
+                        };
+                        let ended = r.ended_at?;
+                        if now.signed_duration_since(ended).num_seconds() < 30 {
+                            return None;
+                        }
+                        if s.wake_marks.contains_key(&format!("{person}:task {}", t.task_id)) {
+                            return None;
+                        }
+                        let label = Label { untrusted: r.untrusted, private: r.private };
+                        Some((ended, t.task_id.clone(), verb, r.summary.clone().unwrap_or_default(), label))
+                    })
+                    .max_by_key(|(ended, _, _, _, _)| *ended)
+                    .map(|(_, id, verb, outcome, label)| (id, verb, outcome, label))
+                {
+                    return Some((format!("task {id} {verb}"), Some(Ended { task: id, outcome, label })));
+                }
                 None
             });
             if let Some((reason, ended)) = event {
