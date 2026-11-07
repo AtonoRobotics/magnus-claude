@@ -123,10 +123,10 @@ assign=()
 for o in $owners; do assign+=(--assign-admin "$o"); done
 hosts=()
 for n in "${names[@]}"; do hosts+=(--admin-hostname "$n:$port"); done
-# Keycloak's private admin origin, from the appliance's own identity
-# (#290): the client script's defaults name the retired deployment's
-# files, so pass all three explicitly and say which setting is missing
-# when the identity is not configured (#312).
+# Keycloak's private admin origin, from the appliance's own identity:
+# the client script takes all three as required arguments (#428), so pass
+# them explicitly and say which setting is missing when the identity is
+# not configured (#312).
 read -r kc_url kc_ca < <(python3 -I - "$config" <<'EOF'
 import sys, tomllib
 try:
@@ -137,8 +137,8 @@ except KeyError:
 EOF
 )
 kc_admin="$here/identity/admin.json"
-[ -n "$kc_url" ] && [ -f "$kc_ca" ] || { echo "no Keycloak admin origin: [sign_in.oidc] status_admin_url/status_admin_ca are missing or the CA is not at $kc_ca (release/identity-on-appliance.sh configures them)" >&2; exit 1; }
-[ -f "$kc_admin" ] || { echo "no Keycloak admin file at $kc_admin (release/identity-on-appliance.sh makes it)" >&2; exit 1; }
+[ -n "$kc_url" ] && [ -f "$kc_ca" ] || { echo "no Keycloak admin origin: [sign_in.oidc] status_admin_url/status_admin_ca are missing or the CA is not at $kc_ca (until #429 replaces Keycloak, the live identity is configured by hand)" >&2; exit 1; }
+[ -f "$kc_admin" ] || { echo "no Keycloak admin file at $kc_admin (until #429 replaces Keycloak, the live identity is configured by hand)" >&2; exit 1; }
 sudo -n python3 -I config/keycloak-client.py --admin-url "$kc_url" --admin-file "$kc_admin" --ca "$kc_ca" --admin-console "$jwks" "${hosts[@]}" "${assign[@]}"
 
 # The console as a user service beside the appliance, on the installed

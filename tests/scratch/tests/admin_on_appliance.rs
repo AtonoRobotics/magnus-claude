@@ -139,3 +139,25 @@ async fn the_setup_names_keycloaks_admin_origin_from_the_config_or_says_what_is_
     assert!(!out.status.success(), "the setup reached Keycloak with no identity configured");
     assert!(stderr.contains("status_admin_ca"), "it did not say which setting is missing: {stderr}");
 }
+
+/// `config/keycloak-client.py` takes its admin origin, admin file and CA
+/// as required arguments (#428): the retired deployment's defaults are
+/// gone, so a bare run fails naming them instead of dying on a CA file
+/// that exists nowhere.
+#[test]
+fn the_client_script_requires_its_admin_origin_file_and_ca() {
+    let out = std::process::Command::new("python3")
+        .arg("-I")
+        .arg(workspace_root().join("config/keycloak-client.py"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a bare run did not fail as argparse"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for a in ["--admin-url", "--admin-file", "--ca"] {
+        assert!(stderr.contains(a), "it did not name {a}: {stderr}");
+    }
+}
