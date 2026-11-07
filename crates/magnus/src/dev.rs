@@ -294,6 +294,7 @@ fn redact_event_body(body: &mut Value, call_tool: &HashMap<String, String>) {
         "item" => {
             if body["details"]["disagreement"].is_string() {
                 body["summary"] = json!(crate::tools::REDACTED_CALL);
+                body["details"]["outcome"] = json!(crate::tools::REDACTED_CALL);
             }
         }
         _ => {}

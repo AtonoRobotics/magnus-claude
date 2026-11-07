@@ -248,6 +248,7 @@ async fn erasing_a_person_removes_their_relationship_memory() {
 const TASKNOTE: &str = "File vendors every Friday (tasknote-4b1c).";
 const DISPOS: &str = "I advised waiting for the written quote (disagree-pos-8d2f).";
 const DISDEC: &str = "They decided to sign the order now (disagree-dec-5e6a).";
+const DISOUT: &str = "The order fell through (disagree-out-3c9e).";
 
 /// Chat records a note and a disagreement when told to; a clean task records
 /// a note of its own. Apart from the memory pass, which is answered empty.
@@ -271,7 +272,7 @@ fn leak_model() -> model::Script {
             0 if s.contains("launch went") => {
                 let at = sys.find("disagreement_").expect("no open disagreement");
                 let id: String = sys[at..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-                tool("disagreement", json!({ "action": "outcome", "id": id, "outcome": "worked" }))
+                tool("disagreement", json!({ "action": "outcome", "id": id, "outcome": DISOUT }))
             }
             _ => Reply::Text("Understood.".into()),
         }
@@ -352,7 +353,7 @@ async fn a_developer_reading_another_persons_run_sees_no_note_or_disagreement_wo
             let (st, v) = dana.get(&path).await;
             assert_eq!(st.as_u16(), 200, "{v}");
             let read = v.to_string();
-            for canary in [NOTE, DISPOS, DISDEC] {
+            for canary in [NOTE, DISPOS, DISDEC, DISOUT] {
                 assert!(!read.contains(canary), "a developer read carol's words at {path}: {read}");
             }
             assert!(read.contains("disagreement") && read.contains("redacted: this call is the person's alone"), "calls gone, not redacted, at {path}: {read}");
