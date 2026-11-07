@@ -258,6 +258,47 @@ async fn second_interrupt_same_day_queues_when_budget_spent() {
     );
 }
 
+/// A failed task wakes a review that names the task and why it failed:
+/// the triggering task's ID and outcome arrive with the wake, not
+/// through the unfinished-work section, which excludes ended tasks (#383).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_task_wakes_a_review_that_names_it() {
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = prompts.clone();
+    let m = FakeModel::start(script(move |c| {
+        let prompts = seen.clone();
+        async move {
+            if !c.body["system"].to_string().contains(REVIEW) {
+                return tool("task_fail", json!({ "reason": "the backup drive is full" }));
+            }
+            prompts.lock().unwrap().push(c.text());
+            done("Reviewed quietly.")
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
+    let bob = app.api("bob");
+    // Drain the boot review first: a wake during an active review is
+    // dropped with no retry (#386), so the failing task waits its turn.
+    eventually("bob's boot review drained", Duration::from_secs(60), || {
+        let me = bob.clone();
+        async move {
+            let (_, v) = me.get("/v1/tasks").await;
+            let reviews: Vec<_> = v["tasks"].as_array().cloned().unwrap_or_default().into_iter().filter(|t| t["review"] == true).collect();
+            (!reviews.is_empty() && reviews.iter().all(|t| t["status"] == "completed" || t["status"] == "failed")).then_some(())
+        }
+    })
+    .await;
+    let id = bob.submit("Back up the photos.").await;
+    let t = bob.wait_settled(&id).await;
+    assert_eq!(t["status"], "failed", "{t}");
+    eventually("a review naming the failed task", Duration::from_secs(60), || {
+        let (prompts, id) = (prompts.clone(), id.clone());
+        async move { prompts.lock().unwrap().iter().any(|p| p.contains(&id) && p.contains("backup drive is full")).then_some(()) }
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn proactive_off_runs_no_reviews() {
     let calls = Arc::new(Mutex::new(vec![(

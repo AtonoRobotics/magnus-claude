@@ -2228,7 +2228,7 @@ impl State {
                     let tz = self.preferences.get(person).map(crate::proactive::tz_of).unwrap_or(chrono_tz::Tz::UTC);
                     self.reviews_overnight.insert(person.clone(), crate::proactive::day_key(e.at, tz));
                 }
-                for (prefix, suffix) in [("schedule ", " coming up"), ("commitment ", " due"), ("approval ", " waiting")] {
+                for (prefix, suffix) in [("schedule ", " coming up"), ("commitment ", " due"), ("approval ", " waiting"), ("task ", " done"), ("task ", " failed")] {
                     if let Some(id) = reason.strip_prefix(prefix).and_then(|r| r.strip_suffix(suffix)) {
                         let tz = self.preferences.get(person).map(crate::proactive::tz_of).unwrap_or(chrono_tz::Tz::UTC);
                         self.wake_marks.insert(format!("{person}:{prefix}{id}"), crate::proactive::day_key(e.at, tz));
