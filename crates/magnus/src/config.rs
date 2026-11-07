@@ -926,6 +926,11 @@ impl Config {
         let mut cfg: Config = toml::from_str(&text)?;
         cfg.path = path.canonicalize()?;
         anyhow::ensure!(cfg.backup.keep_days >= 1, "[backup] keep_days must be at least 1: with 0 every backup is deleted as soon as it is made");
+        if let Some(b) = &cfg.browser {
+            for site in &b.allow {
+                anyhow::ensure!(browser_allow_ok(site), "[browser] allow: {site:?} is not a name, address or range: want `name`, `name:port`, `1.2.3.4`, `[::1]:8080` or `10.0.0.0/8`");
+            }
+        }
         for c in &cfg.connectors {
             anyhow::ensure!(
                 !c.name.contains("__") && c.name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),
@@ -997,6 +1002,65 @@ impl Person {
     }
 }
 
+/// Whether this `[browser] allow` entry parses as the sidecar reads it
+/// (`browser/destinations.js`, `parseAllow`): a name or address with or
+/// without `:port`, or a range. A port is 1-5 digits, as there. Checked at
+/// load so a bad entry fails here naming itself, instead of stopping the
+/// sidecar with only "the browser sidecar did not start" (#242).
+fn browser_allow_ok(entry: &str) -> bool {
+    let lower = entry.trim().to_lowercase();
+    let s = lower.strip_suffix('.').unwrap_or(&lower);
+    if s.contains('/') || s.parse::<std::net::Ipv6Addr>().is_ok() {
+        return range_ok(s);
+    }
+    // `[host]` or `[host]:port`.
+    if let Some(rest) = s.strip_prefix('[') {
+        let Some((host, after)) = rest.split_once(']') else { return false };
+        if host.is_empty() {
+            return false;
+        }
+        let port = if after.is_empty() { None } else { after.strip_prefix(':') };
+        if !after.is_empty() && port.is_none() {
+            return false;
+        }
+        return port.is_none_or(port_ok) && ip_or_name_ok(host);
+    }
+    // `host` or `host:port`, with no colon in the host.
+    let (host, port) = match s.rsplit_once(':') { Some((h, p)) => (h, Some(p)), None => (s, None) };
+    if host.is_empty() || host.contains([':', '[', ']']) {
+        return false;
+    }
+    port.is_none_or(port_ok) && ip_or_name_ok(host)
+}
+
+fn port_ok(p: &str) -> bool {
+    (1..=5).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// An address must parse; anything else is a name, which the sidecar
+/// resolves when it is used.
+fn ip_or_name_ok(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>().is_ok() || !host.is_empty()
+}
+
+/// Whether this parses as the sidecar's `range`: an address, or an address
+/// with a prefix length it has that many bits for.
+fn range_ok(s: &str) -> bool {
+    let (ip, len) = match s.split_once('/') { Some((ip, len)) => (ip, Some(len)), None => (s, None) };
+    // As the sidecar's `bytes`: brackets and a zone come off first.
+    let ip = ip.trim_start_matches('[').trim_end_matches(']');
+    let ip = ip.split('%').next().unwrap_or("");
+    let bits = match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(_)) => 32,
+        Ok(std::net::IpAddr::V6(_)) => 128,
+        Err(_) => return false,
+    };
+    match len {
+        None => true,
+        Some(l) => l.parse::<u32>().is_ok_and(|n| n <= bits),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,6 +1084,29 @@ mod tests {
         assert_eq!(load(&brokered).unwrap().connectors[0].idempotency, "none");
         // A remote app may say it honors the header.
         assert!(load("url = \"https://a.example/mcp\"\nidempotency = \"header\"\n").is_ok());
+    }
+
+    fn load_browser(allow: &str) -> anyhow::Result<Config> {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("magnus.toml");
+        let text = format!("[appliance]\nstate_dir = \"/s\"\nlisten = \"127.0.0.1:0\"\n[database]\nurl = \"postgres://x\"\n[model]\nname = \"m\"\nadapter = \"a\"\nmax_tokens = 1\n[browser]\ncommand = [\"node\", \"sidecar.js\"]\nchromium = \"/c\"\nallow = [{allow}]");
+        std::fs::write(&p, text).unwrap();
+        Config::load(&p)
+    }
+
+    /// A bad `[browser] allow` entry fails at load naming itself and what
+    /// was expected, instead of stopping the sidecar with only "the browser
+    /// sidecar did not start". What parses mirrors the sidecar's
+    /// `parseAllow` (`browser/destinations.js`).
+    #[test]
+    fn a_bad_browser_allow_entry_fails_at_load_naming_itself() {
+        for good in ["\"printer\"", "\"printer.lan\"", "\"printer.lan:631\"", "\"intranet.\"", "\"EXAMPLE.com:443\"", "\"10.1.2.3\"", "\"10.1.2.3:8080\"", "\"[::1]:8080\"", "\"::1\"", "\"10.1.0.0/16\"", "\"fc00::/7\"", "\"10.1.0.0/8\""] {
+            assert!(load_browser(good).is_ok(), "{good}");
+        }
+        for bad in ["\"\"", "\"10.0.0.0/33\"", "\"10.0.0.0/8/8\"", "\"10.0.0.0/-1\"", "\"[::1\"", "\"[::1]x\"", "\"printer.lan:\"", "\"printer.lan:123456\"", "\"a:b:c\"", "\":8080\""] {
+            let e = load_browser(bad).unwrap_err();
+            assert!(format!("{e:#}").contains("[browser] allow") && format!("{e:#}").contains(bad.trim_matches('"')), "{bad}: {e:#}");
+        }
     }
 
     /// A tool's reach is `self` on a write, or nothing: a read reaches no
