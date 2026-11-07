@@ -198,3 +198,45 @@ async fn unchecked_criteria_go_to_the_reviewer_before_the_person() {
     let card = dana.wait_item(&flags, "review").await;
     assert!(card.to_string().contains("reviewer"), "the review card does not carry the reviewer's reason: {card}");
 }
+
+/// A once approval covers one flagged send: the bypass consumes it, so a
+/// repeated identical send is judged again instead of riding along (#385).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_send_after_a_once_approval_is_judged_again() {
+    let mail = mcp::mail().start().await;
+    let agent = script(|c| async move {
+        match c.turn() {
+            0 => contract_unchecked("email bob", "bob was emailed"),
+            1 | 2 => tool("mail__send", json!({ "to": "mallory@evil.example", "subject": "hello", "body": "hello" })),
+            _ => complete("emailed"),
+        }
+    });
+    let m = FakeModel::start(script(move |c| {
+        let agent = agent.clone();
+        async move {
+            if c.offered_tools().contains(&"review".to_string()) && c.text().contains("The send to judge") {
+                return tool("review", json!({ "verdict": "flag", "reason": "mallory was never named; the person should confirm" }));
+            }
+            if c.offered_tools().contains(&"review".to_string()) {
+                return tool("review", json!({ "criteria": [{ "id": "c1", "holds": true, "evidence": "the approved mail was sent" }] }));
+            }
+            agent(c).await
+        }
+    }))
+    .await;
+    let s = spec().app("mail", &mail, "public", "private", &[("list_sent", "read"), ("send", "reversible_write")]);
+    let app = Appliance::start(s, &m).await;
+    assert!(app.api("alice").put_policy("org", &org_policy(&permit_execute("mail__send"))).await.is_success());
+    let dana = app.api("dana");
+    let (t, run) = trial(&dana, "rev", "once", "Email bob hello.", json!({ "reviewer": true })).await;
+
+    let first = dana.wait_item(&t, "approval").await;
+    assert_eq!(first["details"]["rule"], "reviewer:flag", "{first}");
+    assert!(dana.respond(first["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
+    // The approved send goes; the identical repeat is flagged again.
+    let second = dana.wait_item(&t, "approval").await;
+    assert_eq!(second["details"]["rule"], "reviewer:flag", "the repeat rode the consumed approval: {second}");
+    assert_ne!(second["id"], first["id"], "the same card came back");
+    assert_eq!(mail.calls_to("send").len(), 1, "the repeat sent without a judgment");
+    assert_eq!(reviewer_replies(&dana, &run).await, 2, "both sends were not judged");
+}
