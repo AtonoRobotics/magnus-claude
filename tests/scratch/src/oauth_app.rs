@@ -72,6 +72,9 @@ pub struct AppState {
     pub registrations: usize,
     /// Its sign-in answers 429, as a provider does under load.
     pub sign_in_throttled: bool,
+    /// Its first registrations answer 429, as a provider does under load
+    /// (GitLab.com did, #315), then it registers.
+    pub throttle_registrations: usize,
     n: usize,
 }
 
@@ -188,6 +191,10 @@ async fn metadata(State((base, st)): S) -> Json<Value> {
 
 async fn register(State((_, st)): S, Json(b): Json<Value>) -> Response {
     let mut s = st.lock().unwrap();
+    if s.throttle_registrations > 0 {
+        s.throttle_registrations -= 1;
+        return oauth_error(429, "temporarily_unavailable");
+    }
     s.n += 1;
     s.registrations += 1;
     let id = format!("client-{}", s.n);
