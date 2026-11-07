@@ -266,6 +266,26 @@ impl Kernel {
         Ok(es)
     }
 
+    /// Debug builds only, for the sweep race test: while
+    /// `<state_dir>/sweep-gate` exists, a schedule firing waits here, at
+    /// the recheck before its run is created, after writing its schedule
+    /// id to `<state_dir>/sweep-gated` so the test knows it arrived.
+    /// Removing the gate lets it go on. Release builds, the only ones
+    /// shipped, have none of this.
+    #[cfg(debug_assertions)]
+    async fn sweep_gate(&self, schedule: &str) {
+        let dir = &self.cfg.appliance.state_dir;
+        if !dir.join("sweep-gate").exists() {
+            return;
+        }
+        let _ = std::fs::write(dir.join("sweep-gated"), schedule);
+        let start = std::time::Instant::now();
+        while dir.join("sweep-gate").exists() && start.elapsed() < std::time::Duration::from_secs(120) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let _ = std::fs::remove_file(dir.join("sweep-gated"));
+    }
+
     /// Debug builds only, for the crash tests: the process ends at once,
     /// as a crash would, right after a write that put an event of the kind
     /// named in `<state_dir>/crash-after` in the log, and before anything
@@ -636,6 +656,17 @@ impl Kernel {
                 // for them; a recall that fails is a firing that failed.
                 let started = match self.words_of(&sc.person, sc.seq).await {
                     Ok(w) => {
+                        #[cfg(debug_assertions)]
+                        self.sweep_gate(&sc.id).await;
+                        // Cancelled or paused while its words were recalled:
+                        // no run starts for a schedule that is gone or paused
+                        // now (behavior spec: cancelling stops future runs and
+                        // any run in flight; pausing stops future runs). No
+                        // await stands between this recheck and the creation
+                        // below.
+                        if !self.read(|s| s.schedules.get(&sc.id).is_some_and(|x| x.paused.is_none())) {
+                            continue;
+                        }
                         let o = NewRun {
                             // A schedule's own limits, within the appliance's today.
                             budget: sc.budget.as_ref().map(|b| b.within(&self.cfg.budget)),
