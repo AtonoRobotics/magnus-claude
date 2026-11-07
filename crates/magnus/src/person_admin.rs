@@ -69,7 +69,7 @@ impl Kernel {
             if sc.paused_on.is_some() {
                 return Err((StatusCode::CONFLICT, "its run is waiting on its person: when they answer it, the schedule goes on".into()));
             }
-            self.emit(actor, Ev::ScheduleResumed { id: id.into() }).await.map_err(failed)?;
+            self.emit(actor, Ev::ScheduleResumed { id: id.into(), source: Some("console".into()), turn: None }).await.map_err(failed)?;
         } else {
             if sc.ended.is_some() {
                 return Err((StatusCode::CONFLICT, "the schedule has ended".into()));
@@ -77,7 +77,7 @@ impl Kernel {
             if sc.paused.is_some() {
                 return Err((StatusCode::CONFLICT, "the schedule is already suspended".into()));
             }
-            self.emit(actor, Ev::SchedulePaused { id: id.into(), reason: format!("Suspended by {by}, an admin"), task: None, admin: true }).await.map_err(failed)?;
+            self.emit(actor, Ev::SchedulePaused { id: id.into(), reason: format!("Suspended by {by}, an admin"), task: None, admin: true, source: Some("console".into()), turn: None }).await.map_err(failed)?;
         }
         Ok(json!({ "id": id, "paused": !on }))
     }
@@ -162,13 +162,13 @@ impl Kernel {
         // Runs still going stop first, so nothing writes for them after.
         let going: Vec<String> = self.read(|s| s.runs.values().filter(|r| r.person == person && !r.status.terminal()).map(|r| r.id.clone()).collect());
         for run in &going {
-            if self.emit(actor, Ev::Cancelled { run: run.clone() }).await.is_ok() {
+            if self.emit(actor, Ev::Cancelled { run: run.clone(), source: Some("console".into()), turn: None }).await.is_ok() {
                 self.on_stop(run, true).await;
             }
         }
         let schedules: Vec<String> = self.read(|s| s.schedules.values().filter(|x| x.person == person).map(|x| x.id.clone()).collect());
         for id in &schedules {
-            self.emit(actor, Ev::ScheduleRemoved { id: id.clone() }).await.map_err(failed)?;
+            self.emit(actor, Ev::ScheduleRemoved { id: id.clone(), source: Some("console".into()), turn: None }).await.map_err(failed)?;
         }
         // Their brokered connectors' microVMs.
         self.brokered.stop(None, Some(person)).await;

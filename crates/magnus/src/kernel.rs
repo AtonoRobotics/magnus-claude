@@ -395,7 +395,7 @@ impl Kernel {
         for sc in schedules {
             let title = self.schedule_title_for_notice(&sc).await;
             let notice = self.notice_to(None, None, person.to_string(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": told } }));
-            self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: told.to_string(), task: None, admin: false }), ("kernel", notice)]).await;
+            self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: told.to_string(), task: None, admin: false, source: None, turn: None }), ("kernel", notice)]).await;
         }
         ended
     }
@@ -635,7 +635,7 @@ impl Kernel {
             for (sc, task, why) in hold {
                 let title = self.schedule_title_for_notice(&sc).await;
                 let notice = self.notice_to(Some(task.clone()), None, sc.person.clone(), format!("A schedule paused until you answer its run: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why, "task": task } }));
-                self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: Some(task), admin: false }), ("kernel", notice)]).await;
+                self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: Some(task), admin: false, source: None, turn: None }), ("kernel", notice)]).await;
             }
             for id in release {
                 #[cfg(debug_assertions)]
@@ -647,7 +647,7 @@ impl Kernel {
                 let ended = self.read(|s| s.held_by_person(&id).is_none());
                 let held_pause = self.read(|s| s.schedules.get(&id).is_some_and(|x| x.paused_on.is_some()));
                 if ended && held_pause {
-                    let _ = self.emit("kernel", Ev::ScheduleResumed { id }).await;
+                    let _ = self.emit("kernel", Ev::ScheduleResumed { id, source: None, turn: None }).await;
                 }
             }
             let due_schedules: Vec<crate::state::Schedule> =
@@ -667,7 +667,7 @@ impl Kernel {
                 if n > 0 && self.read(|s| s.failures_in_a_row(&sc.id)) >= n {
                     let why = format!("its last {n} runs failed");
                     let notice = self.notice_to(None, None, sc.person.clone(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why } }));
-                    self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: None, admin: false }), ("kernel", notice)]).await;
+                    self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: None, admin: false, source: None, turn: None }), ("kernel", notice)]).await;
                     continue;
                 }
                 // A scheduled task acts for the person who set it up (K54),
