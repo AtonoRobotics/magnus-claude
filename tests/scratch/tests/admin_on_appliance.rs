@@ -112,3 +112,30 @@ async fn the_setup_writes_an_admin_console_that_answers_its_hostname_on_the_netw
     by_ip.get(format!("https://{ip}:{port}/")).send().await.expect("the address no longer gets the CA's certificate");
     let _ = child.start_kill();
 }
+
+/// Past `--config-only`, the setup names Keycloak's admin origin, admin
+/// file and CA explicitly from the appliance's config: with no appliance
+/// identity configured it stops and says which setting is missing (#312),
+/// instead of reaching the retired deployment's default CA and dying in
+/// `ssl.create_default_context`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_setup_names_keycloaks_admin_origin_from_the_config_or_says_what_is_missing() {
+    let m = FakeModel::start(steps(vec![])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let config = app.dir.path().join("magnus.toml");
+    let ip = lan_ip();
+    let port = free_port(ip);
+    run(&config, &format!("{ip}/24"), port);
+    let out = std::process::Command::new(workspace_root().join("release/admin-on-appliance.sh"))
+        .arg(&config)
+        .arg(bin("magnus-admin").parent().unwrap())
+        .env("MAGNUS_ADMIN_LAN", format!("{ip}/24"))
+        .env("MAGNUS_ADMIN_TAILSCALE", "none")
+        .env("MAGNUS_ADMIN_TSNAME", "strix.example-tailnet.ts.net")
+        .env("MAGNUS_ADMIN_PORT", port.to_string())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "the setup reached Keycloak with no identity configured");
+    assert!(stderr.contains("status_admin_ca"), "it did not say which setting is missing: {stderr}");
+}
