@@ -203,7 +203,7 @@ impl crate::kernel::Kernel {
             // One sweep starts at most one review per person: an event
             // first (it is marked, so the cadence cannot starve it, and it
             // is the more urgent), else the periodic one (#381).
-            let event: Option<(String, Option<(String, String)>)> = self.read(|s| {
+            let event: Option<(String, Option<Ended>)> = self.read(|s| {
                 for sc in s
                     .schedules
                     .values()
