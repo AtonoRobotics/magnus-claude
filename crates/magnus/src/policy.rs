@@ -57,9 +57,11 @@ permit(principal, action == Action::"cancel_schedule", resource)
 /// evaluation (`partition_layer`), so a tool rule's `resource.risk` check
 /// never runs against a task entity and a control rule's `context.is_owner`
 /// check never runs against a tool request. A rule that names no action (an
-/// unqualified `action`) is kept in both partitions: keeping it can only add
-/// an error, which fails closed and loudly, while dropping it could miss a
-/// forbid, which fails open and silently.
+/// unqualified `action`) bears on tool calls only: before control was
+/// governed every unqualified rule could only mean tools, and the group's
+/// sales policy still drafts one, so that meaning is kept. Name the control
+/// actions to constrain control; the console refuses an unqualified forbid
+/// that would silently miss it.
 pub const CONTROL_ACTIONS: &[&str] =
     &["cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule"];
 
@@ -80,6 +82,19 @@ fn rule_touches(uids: &[cedar_policy::EntityUid], control: bool) -> bool {
     })
 }
 
+/// Which evaluations a rule bears on: tool calls, task and schedule
+/// control, or both for a mixed or unknown action list.
+pub(crate) fn policy_sides(policy: &cedar_policy::Policy) -> (bool, bool) {
+    match policy.action_constraint() {
+        ActionConstraint::Any => (true, false),
+        ActionConstraint::Eq(uid) => {
+            let uids = std::slice::from_ref(&uid);
+            (rule_touches(uids, false), rule_touches(uids, true))
+        }
+        ActionConstraint::In(uids) => (rule_touches(&uids, false), rule_touches(&uids, true)),
+    }
+}
+
 /// Split a layer's rules into the ones that bear on `control` requests
 /// (task and schedule operations) or, when false, the tool boundary. The
 /// subset is re-rendered and policy ids renumbered, so diagnostics on a
@@ -91,12 +106,8 @@ fn partition_layer(text: &str, control: bool) -> Result<String> {
     let set = PolicySet::from_str(text).map_err(|e| anyhow!("{e}"))?;
     let mut out = String::new();
     for policy in set.policies() {
-        let touches = match policy.action_constraint() {
-            ActionConstraint::Any => true,
-            ActionConstraint::Eq(uid) => rule_touches(std::slice::from_ref(&uid), control),
-            ActionConstraint::In(uids) => rule_touches(&uids, control),
-        };
-        if touches {
+        let (tools, controls) = policy_sides(&policy);
+        if (controls && control) || (tools && !control) {
             if !out.is_empty() {
                 out.push('\n');
             }
@@ -105,6 +116,13 @@ fn partition_layer(text: &str, control: bool) -> Result<String> {
     }
     Ok(out)
 }
+
+/// The permit-everything rule a control evaluation adds to a lower layer,
+/// so the layer denies only if one of its own forbids matched: the tool
+/// boundary's unqualified blanket bears on tool calls only, so control
+/// names its actions.
+const CONTROL_PERMIT_ALL: &str =
+    "permit(principal, action in [Action::\"cancel_task\", Action::\"pause_schedule\", Action::\"resume_schedule\", Action::\"edit_schedule\", Action::\"cancel_schedule\"], resource);";
 
 /// One control operation: `op` on the `kind` ("Task", "Schedule") `id`
 /// owned by `owner`.
@@ -161,7 +179,7 @@ pub fn control_allowed(policies: &BTreeMap<String, String>, person: &Person, t: 
     let mut reason = rule.first().cloned();
     for (name, text) in &layers[1..] {
         let narrowed = format!(
-            "{}\npermit(principal, action, resource);",
+            "{}\n{CONTROL_PERMIT_ALL}",
             partition_layer(text, true).map_err(|e| failed(format!("{e:#}")))?
         );
         let (allows, rules) = eval(&narrowed, name, &req, &ents).map_err(|e| failed(format!("{e:#}")))?;
