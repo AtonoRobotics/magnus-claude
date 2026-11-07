@@ -419,7 +419,8 @@ impl crate::kernel::Kernel {
     /// next read instead of losing the items. Two answers, not all
     /// history (#409): no cap to evict from, so an unchanged answer
     /// diffs empty however large it is, and memory stays two answers
-    /// deep.
+    /// deep. Every answer also restarts the poll clock (#413): a fresh
+    /// read postpones the next poll, whoever made it.
     pub(crate) async fn note_watched(self: &Arc<Self>, person: &str, app: &str, remote: &str, data: &Value) {
         let watches: Vec<crate::config::Watch> =
             self.cfg.connectors.iter().find(|c| c.name == app).map(|c| c.watch.clone()).unwrap_or_default();
@@ -427,6 +428,11 @@ impl crate::kernel::Kernel {
             let mut ids = watched_ids(data, &w.items, &w.id);
             ids.sort();
             ids.dedup();
+            // A fresh read postpones the next poll (#413). The start mark
+            // stays the bound for polls whose reads never answer.
+            let _ = self
+                .emit(&format!("person:{person}"), crate::events::Ev::WatchPolled { person: person.into(), app: app.into(), tool: remote.into() })
+                .await;
             let window = self.read(|s| s.watched_seen.get(&(person.to_string(), app.to_string(), remote.to_string())).cloned());
             let Some(window) = window else {
                 let _ = self
