@@ -268,6 +268,11 @@ fn leak_model() -> model::Script {
         match c.turn() {
             0 if s.contains("stop joking") => tool("relationship_note", json!({ "action": "add", "text": NOTE })),
             1 if s.contains("stop joking") => tool("disagreement", json!({ "action": "record", "position": DISPOS, "decision": DISDEC })),
+            0 if s.contains("launch went") => {
+                let at = sys.find("disagreement_").expect("no open disagreement");
+                let id: String = sys[at..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                tool("disagreement", json!({ "action": "outcome", "id": id, "outcome": "worked" }))
+            }
             _ => Reply::Text("Understood.".into()),
         }
     })
@@ -337,16 +342,25 @@ async fn a_developer_reading_another_persons_run_sees_no_note_or_disagreement_wo
     let (carol, dana) = (app.api("carol"), app.api("dana"));
     let (_, turn) = chat(&carol, None, "Please stop joking around with me.").await;
     let run = carol.task(&turn).await["run_id"].as_str().unwrap().to_string();
+    // Its outcome, told to her at once (#260): the report carries the same
+    // words, and stays hers alone too.
+    let (_, turn) = chat(&carol, None, "The launch went badly.").await;
+    let run2 = carol.task(&turn).await["run_id"].as_str().unwrap().to_string();
 
-    for path in [format!("/v1/dev/runs/{run}"), format!("/v1/dev/runs/{run}/log")] {
-        let (st, v) = dana.get(&path).await;
-        assert_eq!(st.as_u16(), 200, "{v}");
-        let read = v.to_string();
-        for canary in [NOTE, DISPOS, DISDEC] {
-            assert!(!read.contains(canary), "a developer read carol's words at {path}: {read}");
+    for run in [&run, &run2] {
+        for path in [format!("/v1/dev/runs/{run}"), format!("/v1/dev/runs/{run}/log")] {
+            let (st, v) = dana.get(&path).await;
+            assert_eq!(st.as_u16(), 200, "{v}");
+            let read = v.to_string();
+            for canary in [NOTE, DISPOS, DISDEC] {
+                assert!(!read.contains(canary), "a developer read carol's words at {path}: {read}");
+            }
+            assert!(read.contains("disagreement") && read.contains("redacted: this call is the person's alone"), "calls gone, not redacted, at {path}: {read}");
         }
-        assert!(read.contains("relationship_note") && read.contains("disagreement") && read.contains("redacted: this call is the person's alone"), "calls gone, not redacted, at {path}: {read}");
     }
+    let (st, v) = dana.get(&format!("/v1/dev/runs/{run}")).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert!(v.to_string().contains("relationship_note"), "the note call is gone: {v}");
 }
 
 const SAMNOTE: &str = "File under Q for quarterly (userdoc-9a1c).";
