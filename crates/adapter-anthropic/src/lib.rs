@@ -46,6 +46,14 @@ async fn handle(http: reqwest::Client, req: Request, mut sink: Sink) -> anyhow::
         }
         Request::Catalog { settings, credential } => catalog(&http, &settings, credential, &mut sink).await,
         Request::Complete(p) => complete(&http, p, &mut sink).await,
+        Request::Quote { settings, model, input_tokens, output_tokens } => {
+            let (pi, po, _, _) = prices(&model, &settings);
+            sink.send(&Event::Quote {
+                input_usd: input_tokens as f64 * pi / 1_000_000.0,
+                output_usd: output_tokens as f64 * po / 1_000_000.0,
+            })
+            .await
+        }
         Request::AuthRevoke { .. } => {
             let detail = "an API key is revoked in the Anthropic console (https://console.anthropic.com/settings/keys)".into();
             sink.send(&Event::AuthRevoked { at_provider: false, detail }).await

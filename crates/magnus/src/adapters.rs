@@ -265,6 +265,22 @@ impl Adapters {
         }
     }
 
+    /// Price a call that has not happened, from the adapter's own prices:
+    /// the prompt's dollars and the full output's dollars, with no cache
+    /// benefit assumed. Local to the adapter: no provider round trip.
+    pub async fn quote(&self, id: &str, model: &str, input_tokens: u64, output_tokens: u32) -> Result<(f64, f64)> {
+        let r = self.get(id).await?;
+        let (settings, _) = Self::split_settings(&r.cfg);
+        let mut call = proto::Call::open(&r.socket, Request::Quote { settings, model: model.into(), input_tokens, output_tokens: output_tokens as u64 }).await?;
+        loop {
+            match call.next().await?.ok_or_else(|| anyhow!("adapter closed the connection"))? {
+                Event::Quote { input_usd, output_usd } => return Ok((input_usd, output_usd)),
+                Event::Error { class, message, .. } => return Err(anyhow!("adapter {id} would not quote {model}: {class:?}: {message}")),
+                ev => return Err(anyhow!("adapter {id} answered a quote with {ev:?}")),
+            }
+        }
+    }
+
     /// The adapter's model list. A credential it refreshed on the way goes
     /// to the vault, never to the caller.
     pub async fn catalog(&self, id: &str) -> Result<Event> {
