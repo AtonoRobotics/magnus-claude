@@ -236,9 +236,11 @@ impl Kernel {
     }
 
     /// Cancel a schedule: no more runs, and a run of it still going stops.
+    /// An ended schedule is only deleted: it starts no more runs anyway,
+    /// and its last run, which can still be going, goes on (#452).
     pub async fn cancel_schedule(&self, who: &Person, id: &str, turn: Option<&str>) -> Result<Value, Refused> {
-        self.schedule_owned(who, id, "cancel_schedule")?;
-        let going: Vec<(String, String)> = self.read(|s| s.tasks.values().filter(|t| t.schedule.as_deref() == Some(id)).filter_map(|t| s.runs.get(&t.run_id)).filter(|r| !r.status.terminal()).map(|r| (r.task.clone(), r.id.clone())).collect());
+        let sc = self.schedule_owned(who, id, "cancel_schedule")?;
+        let going: Vec<(String, String)> = if sc.ended.is_some() { vec![] } else { self.read(|s| s.tasks.values().filter(|t| t.schedule.as_deref() == Some(id)).filter_map(|t| s.runs.get(&t.run_id)).filter(|r| !r.status.terminal()).map(|r| (r.task.clone(), r.id.clone())).collect()) };
         let (source, turn_ev) = sources(turn);
         self.emit(&format!("person:{}", who.id), Ev::ScheduleRemoved { id: id.into(), source, turn: turn_ev }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
         let mut runs = vec![];
