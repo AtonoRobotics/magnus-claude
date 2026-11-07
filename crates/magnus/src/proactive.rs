@@ -433,7 +433,7 @@ impl crate::kernel::Kernel {
                 // No news, but the read still counts: the window is the
                 // last two reads, whatever they held (#414).
                 let _ = self
-                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids, full: true })
                     .await;
                 continue;
             }
