@@ -1510,9 +1510,13 @@ impl State {
             Ev::PersonErased { person } => {
                 let runs: HashSet<String> = self.runs.values().filter(|r| &r.person == person).map(|r| r.id.clone()).collect();
                 let tasks: HashSet<String> = self.tasks.values().filter(|t| &t.person == person).map(|t| t.task_id.clone()).collect();
+                let their_items: HashSet<String> = self.items.values().filter(|i| &i.person == person).map(|i| i.id.clone()).collect();
                 self.tasks.retain(|_, t| &t.person != person);
                 self.runs.retain(|_, r| &r.person != person);
                 self.items.retain(|_, i| &i.person != person && i.run.as_ref().is_none_or(|r| !runs.contains(r)));
+                // Their items' opened and resolved marks go with the items (#412).
+                self.items_opened.retain(|id, _| !their_items.contains(id));
+                self.items_resolved_at.retain(|id, _| !their_items.contains(id));
                 self.schedules.retain(|_, x| &x.person != person);
                 // Their grants: none covers whoever is next known by their name.
                 self.grants.retain(|_, g| &g.person != person);
@@ -1551,6 +1555,10 @@ impl State {
                 self.last_sign_in.remove(person);
                 self.app_connections.retain(|(p, _), _| p != person);
                 self.openers.retain(|(p, _)| p != person);
+                // Their watched baselines and home mark: whoever is next
+                // known by their name starts fresh (#412).
+                self.watched_seen.retain(|(p, _, _), _| p != person);
+                self.home_last_open.remove(person);
                 // Their poll clocks: whoever is next known by their
                 // name starts polling fresh (#406).
                 self.watch_last_polled.retain(|(p, _, _), _| p != person);
@@ -2662,5 +2670,23 @@ mod tests {
         assert_eq!(window.len(), 2, "replay kept {window:?}");
         assert_eq!(window[0], std::collections::HashSet::from(["a".to_string()]));
         assert_eq!(window[1], std::collections::HashSet::from(["b".to_string()]));
+    }
+
+    /// Erasure drops watched baselines, home marks and opened marks
+    /// (#412): whoever is next known by the name starts fresh.
+    #[test]
+    fn erasure_drops_baselines_and_home_and_opened_marks() {
+        let mut s = State::default();
+        s.apply(&ev(1, "person:bob", json!({ "kind": "watched_seen", "person": "bob", "app": "mail", "tool": "list_inbox", "ids": ["a"], "full": true })));
+        s.apply(&ev(2, "person:bob", json!({ "kind": "home_opened", "person": "bob" })));
+        s.apply(&ev(3, "person:bob", json!({ "kind": "item", "id": "i1", "item_kind": "approval", "task": null, "run": null, "person": "bob" })));
+        s.apply(&ev(4, "person:bob", json!({ "kind": "item_opened", "id": "i1" })));
+        s.apply(&ev(5, "person:bob", json!({ "kind": "item_resolved", "id": "i1", "decision": "approved" })));
+        assert!(!s.watched_seen.is_empty() && !s.home_last_open.is_empty() && !s.items_opened.is_empty() && !s.items_resolved_at.is_empty(), "the setup left nothing to erase");
+        s.apply(&ev(6, "kernel", json!({ "kind": "person_erased", "person": "bob" })));
+        assert!(s.watched_seen.is_empty(), "the erased baseline stayed: {:?}", s.watched_seen.keys().collect::<Vec<_>>());
+        assert!(!s.home_last_open.contains_key("bob"), "the erased home mark stayed");
+        assert!(!s.items_opened.contains_key("i1"), "the erased opened mark stayed");
+        assert!(!s.items_resolved_at.contains_key("i1"), "the erased resolved mark stayed");
     }
 }
