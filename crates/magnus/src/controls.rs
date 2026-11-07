@@ -64,7 +64,7 @@ fn control_check(client: &Kernel, who: &Person, op: &str, kind: &str, id: &str, 
 
 /// One task's row for lists and get: status, result, what it did.
 fn task_row(t: &Task, r: &Run) -> Value {
-    json!({ "id": t.task_id, "person": t.person, "status": crate::api::status_str(r.status), "created_at": t.created_at, "schedule": t.schedule, "summary": r.summary })
+    json!({ "id": t.task_id, "person": t.person, "status": crate::api::status_str(r.status), "created_at": t.created_at, "schedule": t.schedule, "summary": r.summary, "review": t.review })
 }
 
 /// One schedule's row for lists and get, with its latest run.

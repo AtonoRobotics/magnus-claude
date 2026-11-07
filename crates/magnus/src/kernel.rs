@@ -566,7 +566,7 @@ impl Kernel {
             escalate_to,
             lost: self.cfg.modules.lost.clone(),
             verifier_model: self.cfg.verifier.model.clone(),
-            instructions: if o.chat.as_ref().is_some_and(|c| c.turn) { crate::run::chat_instructions_version() } else { crate::run::instructions_version() },
+            instructions: if actor == "review" { crate::run::review_instructions_version() } else if o.chat.as_ref().is_some_and(|c| c.turn) { crate::run::chat_instructions_version() } else { crate::run::instructions_version() },
             harness: HARNESS_VERSION.into(),
             playbook: self.read(|s| s.playbook_version),
         };
@@ -744,6 +744,9 @@ impl Kernel {
                     self.wake(&run);
                 }
             }
+            // The proactive loop's own wakes: cadence, overnight, coming-up
+            // schedules, due commitments and stale approvals (#237).
+            self.review_due(now).await;
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }

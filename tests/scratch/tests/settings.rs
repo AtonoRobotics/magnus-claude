@@ -116,13 +116,27 @@ async fn preferences_are_each_persons_own() {
     let (_m, app) = start().await;
     let carol = app.api("carol");
     let (_, p) = carol.get("/v1/preferences").await;
-    assert_eq!(p, json!({ "notify_blocking": true, "notify_batched": false, "notify_agent_changes": true, "feedback_consent": false }));
+    assert_eq!(p, json!({ "notify_blocking": true, "notify_batched": false, "notify_agent_changes": true, "feedback_consent": false, "timezone": "UTC", "working_hours": { "start": "09:00", "end": "17:00" }, "quiet_hours": { "start": "22:00", "end": "07:00" }, "review_every_minutes": 60, "interruptions_per_day": 3 }));
     let (st, p) = carol.send(reqwest::Method::PUT, "/v1/preferences", Some(json!({ "notify_batched": true, "feedback_consent": true }))).await;
     assert!(st.is_success(), "{p}");
     assert_eq!((p["notify_batched"].clone(), p["feedback_consent"].clone(), p["notify_blocking"].clone()), (json!(true), json!(true), json!(true)));
     assert_eq!(app.api("bob").get("/v1/preferences").await.1["feedback_consent"], false, "carol's choice reached bob");
     assert_eq!(carol.send(reqwest::Method::PUT, "/v1/preferences", Some(json!({ "theme": true }))).await.0, 400);
     assert_eq!(carol.send(reqwest::Method::PUT, "/v1/preferences", Some(json!({ "notify_batched": "yes" }))).await.0, 400);
+}
+
+/// The proactive loop's settings are changeable per person, and only in
+/// shapes the loop can use (#237).
+#[tokio::test(flavor = "multi_thread")]
+async fn proactive_settings_are_typed() {
+    let (_m, app) = start().await;
+    let carol = app.api("carol");
+    let (st, p) = carol.send(reqwest::Method::PUT, "/v1/preferences", Some(json!({ "timezone": "America/Los_Angeles", "working_hours": { "start": "08:00", "end": "16:00" }, "interruptions_per_day": 1 }))).await;
+    assert!(st.is_success(), "{p}");
+    assert_eq!((p["timezone"].clone(), p["working_hours"].clone(), p["interruptions_per_day"].clone()), (json!("America/Los_Angeles"), json!({ "start": "08:00", "end": "16:00" }), json!(1)));
+    for bad in [json!({ "timezone": "Mars/Olympus" }), json!({ "working_hours": { "start": "xx", "end": "17:00" } }), json!({ "interruptions_per_day": 0 })] {
+        assert_eq!(carol.send(reqwest::Method::PUT, "/v1/preferences", Some(bad.clone())).await.0.as_u16(), 400, "{bad}");
+    }
 }
 
 /// A request to delete a person's data goes to the owner's inbox with the

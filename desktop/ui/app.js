@@ -162,7 +162,7 @@ const chip = st => { const [c, l] = STATUS[st] || ["", st]; return `<span class=
 // it in a panel, and the sidebar. Everything it shows is read together
 // (refresh), so a task, a schedule or a decision is one object wherever it
 // appears, and acting on it anywhere redraws every place it is shown.
-const needsMe = () => App.inbox.filter(i => i.status === "open" && i.can_respond);
+const needsMe = () => App.inbox.filter(i => i.status === "open" && i.can_respond && !(i.details && i.details.notify_at && Date.parse(i.details.notify_at) > Date.now()));
 
 // The workspace's icons, drawn as in the Magnus Workspace design: 24px
 // outlines in the current color.
@@ -1389,7 +1389,7 @@ route(/^#\/chat\/([^/]+)$/, async (main, thread) => {
 // ---------- Inbox ----------
 
 const KIND = {
-  approval: "Approval", question: "Question", review: "Review", notice: "Stopped", message: "Note from the agent",
+  approval: "Approval", question: "Question", review: "Review", notice: "Stopped", message: "Note from the agent", observation: "Observation", interrupt: "Interruption",
   policy_proposal: "Policy proposal", schedule_proposal: "Recurring task proposal", tool_change: "Changed tool", tool_review: "New app's tools",
   contract_change: "Contract change", deletion_request: "Deletion request", shared: "Shared with you", endorsement: "Company fact?",
 };
@@ -1539,6 +1539,10 @@ function card(i, composed) {
       break;
     case "message":
       body = `${taintNote(d.taint)}${buttons(i, [["dismiss", "Dismiss"]])}`;
+      break;
+    case "observation":
+    case "interrupt":
+      body = `${d.why ? `<p>${esc(d.why)}</p>` : ""}${d.evidence ? `<div class="evidence"><div class="small muted">Evidence</div>${fieldValue(d.evidence)}</div>` : ""}${d.notify_at && Date.parse(d.notify_at) > Date.now() ? `<p class="small faint">Pings ${esc(when(d.notify_at))}.</p>` : ""}${taintNote(d.taint)}${buttons(i, [["dismiss", "Dismiss"]])}`;
       break;
     case "tool_change":
       body = `<div class="what"><div class="field"><span>Tool</span><span class="mono">${esc(d.tool)}</span></div><div class="field"><span>New description</span>${fieldValue(d.description)}</div><div class="field"><span>Inputs</span>${fieldValue(d.input_schema)}</div></div>
