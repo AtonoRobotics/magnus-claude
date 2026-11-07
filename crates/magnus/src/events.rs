@@ -1019,13 +1019,17 @@ pub enum Ev {
     },
     /// A watched read answered: these item ids were seen for the
     /// person's app tool, becoming the newest of its two-answer
-    /// window (#369, #409).
+    /// window (#369, #409). `full` tells whole answers from history:
+    /// events before #411 hold fresh-only ids after the seed, and
+    /// replay unions those onto the newest entry instead (#415).
     WatchedSeen {
         person: String,
         app: String,
         tool: String,
         #[serde(default)]
         ids: Vec<String>,
+        #[serde(default)]
+        full: bool,
     },
     /// A scheduled poll of a watched read started (#406): the poll
     /// clock for the person's app tool restarts here.

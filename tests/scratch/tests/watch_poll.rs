@@ -4,6 +4,7 @@
 //! Polls are quiet: their tasks never reach the person's list.
 
 use magnus_invariants::*;
+use magnus_scratch::{control, reconfigure};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -98,4 +99,59 @@ async fn a_watch_with_an_interval_polls_without_reads() {
         .filter(|t| t["poll"] == true)
         .collect();
     assert!(polls.is_empty(), "poll tasks reached the person's list");
+}
+
+/// A watch the person cannot use starts no poll (#418): one app
+/// whose secret is missing (never connected) and one turned off by
+/// an admin stay quiet, while the connected watch polls.
+#[tokio::test(flavor = "multi_thread")]
+async fn watches_the_person_cannot_use_are_not_polled() {
+    let mail = mcp::mail().start().await;
+    let cal = mcp::mail().start().await;
+    let cal2 = mcp::mail().start().await;
+    let polled = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_polls = polled.clone();
+    let m = FakeModel::start(script(move |c| {
+        let seen_polls = seen_polls.clone();
+        async move {
+            if c.body["system"].to_string().contains(REVIEW) {
+                return done("Reviewed quietly.");
+            }
+            let text = c.text();
+            if text.contains("Poll ") {
+                let which = ["mail", "cal2", "cal"].into_iter().find(|a| text.contains(&format!("Poll {a}:"))).unwrap_or("?");
+                seen_polls.lock().unwrap().push(which.to_string());
+                // A poll whose app is unusable has no tool to call;
+                // end without reading, as its model would.
+                return tool("task_fail", json!({ "reason": "no such tool" }));
+            }
+            return tool("task_fail", json!({ "reason": "no tasks in this test" }));
+        }
+    }))
+    .await;
+    // Boot with the loop off, so nothing polls before cal2 is off.
+    let mut app = Appliance::start(
+        Spec::default()
+            .app("mail", &mail, "public", "private", &[("list_inbox", "read")])
+            .watch_poll("mail", "list_inbox", "/messages", "subject", 1)
+            .app("cal", &cal, "public", "private", &[("list_inbox", "read")])
+            .watch_poll("cal", "list_inbox", "/messages", "subject", 1)
+            .without_secret("cal")
+            .app("cal2", &cal2, "public", "private", &[("list_inbox", "read")])
+            .watch_poll("cal2", "list_inbox", "/messages", "subject", 1),
+        &m,
+    )
+    .await;
+    let (st, v) = control(&app, "PATCH", "/v1/admin/connectors/cal2", json!({ "actor": "admin:root", "enabled": false })).await;
+    assert_eq!(st, 200, "{v}");
+    reconfigure(&mut app, |cfg| {
+        cfg["proactive"].as_table_mut().unwrap().insert("on".into(), toml::Value::Boolean(true));
+    })
+    .await;
+    // Past the first due sweep: mail polls, the others never do.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let polls = polled.lock().unwrap();
+    assert!(polls.iter().any(|t| t == "mail"), "the connected watch never polled: {polls:?}");
+    assert!(!polls.iter().any(|t| t == "cal"), "the unconnected watch polled: {polls:?}");
+    assert!(!polls.iter().any(|t| t == "cal2"), "the turned-off watch polled: {polls:?}");
 }

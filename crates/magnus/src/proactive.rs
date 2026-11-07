@@ -318,7 +318,11 @@ impl crate::kernel::Kernel {
     /// from the sweep beside the review wakes. Each due watch starts
     /// one minimal polling run; its answer diffs through the same hook
     /// as any read, so items nobody reads still wake. Polls run even
-    /// while a review is active: a cheap read waits for nothing.
+    /// while a review is active: a cheap read waits for nothing. Only
+    /// watches the person can currently use are polled: the effective
+    /// connector list (a turned-off app is skipped), and only when
+    /// they are connected and their sign-in has not lapsed (#418). A
+    /// run that cannot read is never started.
     pub async fn poll_due(self: &Arc<Self>, now: DateTime<Utc>) {
         if !self.cfg.proactive.on {
             return;
@@ -329,9 +333,9 @@ impl crate::kernel::Kernel {
                 continue;
             }
             let watches: Vec<(String, crate::config::Watch)> = self
-                .cfg
-                .connectors
+                .connectors()
                 .iter()
+                .filter(|c| self.connected(c, &person) && !self.lapsed(c, &person))
                 .flat_map(|c| c.watch.iter().map(|w| (c.name.clone(), w.clone())))
                 .filter(|(_, w)| w.poll_minutes.is_some())
                 .collect();
@@ -424,7 +428,7 @@ impl crate::kernel::Kernel {
             let window = self.read(|s| s.watched_seen.get(&(person.to_string(), app.to_string(), remote.to_string())).cloned());
             let Some(window) = window else {
                 let _ = self
-                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids, full: true })
                     .await;
                 continue;
             };
@@ -433,14 +437,14 @@ impl crate::kernel::Kernel {
                 // No news, but the read still counts: the window is the
                 // last two reads, whatever they held (#414).
                 let _ = self
-                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids, full: true })
                     .await;
                 continue;
             }
             let n = fresh.len();
             if self.review_wake_items(person, app, n).await {
                 let _ = self
-                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids, full: true })
                     .await;
             }
         }
