@@ -106,6 +106,9 @@ pub struct Run {
     /// Who approved the contract in force, when it was a change.
     pub contract_approved_by: Option<String>,
     pub verified: BTreeMap<String, (bool, Value, String)>,
+    /// How often the reviewer module judged for this run (a send, or the
+    /// completion criteria): the dev registry's acted count.
+    pub reviewed: u32,
     pub untrusted: bool,
     pub private: bool,
     /// Apps whose private content this run has read.
@@ -1884,6 +1887,7 @@ impl State {
                         contract_taint: (false, false),
                         contract_approved_by: None,
                         verified: BTreeMap::new(),
+                        reviewed: 0,
                         // Uploaded files are the person's private data, and
                         // content from elsewhere: data, not instructions.
                         untrusted: uploads || pb.untrusted,
@@ -1948,7 +1952,7 @@ impl State {
                     r.replies.push(Reply { step: *step, seq: e.seq, blocks: blocks.clone(), state: state.clone() });
                 }
             }
-            Ev::VerifierReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } | Ev::SpokenWritten { run, usage, .. } | Ev::KnowledgeExtraction { run, usage, .. } | Ev::DraftScoped { run, usage, .. } => {
+            Ev::VerifierReply { run, usage, .. } | Ev::ReviewerReply { run, usage, .. } | Ev::MemoryPass { run, usage, .. } | Ev::SpokenWritten { run, usage, .. } | Ev::KnowledgeExtraction { run, usage, .. } | Ev::DraftScoped { run, usage, .. } => {
                 self.charge_grant(run, e.at, usage.cost_usd);
                 if let Ev::DraftScoped { draft, person, threads, participants, .. } = &e.ev {
                     self.draft_sources.insert(draft.clone(), DraftSources { person: person.clone(), threads: threads.clone(), participants: participants.clone() });
@@ -1956,6 +1960,9 @@ impl State {
                 if let Some(r) = self.runs.get_mut(run) {
                     if let Ev::SpokenWritten { script, .. } = &e.ev {
                         r.spoken = Some(script.clone());
+                    }
+                    if matches!(&e.ev, Ev::ReviewerReply { .. }) {
+                        r.reviewed += 1;
                     }
                     r.model_calls += 1;
                     r.usd += usage.cost_usd;

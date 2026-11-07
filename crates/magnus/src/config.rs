@@ -20,6 +20,8 @@ pub struct Config {
     #[serde(default)]
     pub verifier: Verifier,
     #[serde(default)]
+    pub reviewer: Reviewer,
+    #[serde(default)]
     pub backup: Backup,
     #[serde(default)]
     pub trash: Trash,
@@ -590,10 +592,18 @@ pub struct Verifier {
     pub model: Option<String>,
 }
 
+/// The send reviewer: off unless enabled, like the verifier. It judges
+/// with the run's own model: a send it reads is already fully in context.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct Reviewer {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// Removable modules (each compensates for a model weakness and is kept
 /// only while its ablation shows it helps): the default for every model,
-/// then per model (`adapter/model`). The verifier's default is
-/// `[verifier] enabled`.
+/// then per model (`adapter/model`). The verifier's and the reviewer's
+/// defaults are `[verifier] enabled` and `[reviewer] enabled`.
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct Modules {
     #[serde(default)]
@@ -620,6 +630,8 @@ pub struct ModelModules {
     pub escalation: Option<bool>,
     #[serde(default)]
     pub memory_pass: Option<bool>,
+    #[serde(default)]
+    pub reviewer: Option<bool>,
     /// The stronger model a lost run escalates to, `adapter/model`.
     #[serde(default)]
     pub escalate_to: Option<String>,
@@ -637,6 +649,7 @@ impl Config {
                 "verifier" => m.verifier,
                 "lost_reset" => m.lost_reset,
                 "memory_pass" => m.memory_pass,
+                "reviewer" => m.reviewer,
                 _ => m.escalation,
             });
             (name.to_string(), p.unwrap_or(default))
@@ -646,6 +659,7 @@ impl Config {
             pick("lost_reset", self.modules.lost_reset.unwrap_or(true)),
             pick("escalation", self.modules.escalation.unwrap_or(true)),
             pick("memory_pass", self.modules.memory_pass.unwrap_or(true)),
+            pick("reviewer", self.reviewer.enabled),
         ]
         .into_iter()
         .collect();

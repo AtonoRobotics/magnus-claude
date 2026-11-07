@@ -111,6 +111,7 @@ async fn modules(AxState(k): K, h: HeaderMap) -> Response {
             *n.entry("lost_reset").or_default() += r.cuts.len();
             *n.entry("escalation").or_default() += r.escalated.is_some() as usize;
             *n.entry("verifier").or_default() += r.verified.values().filter(|v| v.2 == "verifier").count();
+            *n.entry("reviewer").or_default() += r.reviewed as usize;
         }
         n.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<HashMap<String, usize>>()
     });
@@ -157,6 +158,11 @@ pub const MODULES: &[Module] = &[
         name: "memory_pass",
         compensates: "models that rarely choose to write down what they learn about the person",
         ablation_suite: "tests/scratch/tests/memory.rs: a_fact_stated_in_one_chat_is_recalled_in_a_new_one",
+    },
+    Module {
+        name: "reviewer",
+        compensates: "models that send without checking where it goes, and report work no check covers",
+        ablation_suite: "tests/scratch/tests/modules.rs: the_reviewer_blocks_a_send_to_the_wrong_recipient",
     },
 ];
 

@@ -3,7 +3,9 @@
 //! is compared on and off as an experiment.
 //! - lost-reset: a run going in circles is cut back with a note;
 //! - escalation: lost again, it moves to the stronger model;
-//! - verifier: judges the criteria no code checks, by reading the world.
+//! - verifier: judges the criteria no code checks, by reading the world;
+//! - reviewer: judges every send before it leaves, and the criteria no code
+//!   checks, blocking or flagging what should not go.
 
 use magnus_invariants::appliance::Person;
 use magnus_invariants::model::{Reply, Script};
@@ -182,4 +184,54 @@ async fn the_verifier_catches_work_its_own_report_overstates() {
     let (off, _) = trial(&dana, "ver", "send", "Email bob hello.", json!({ "verifier": false })).await;
     let t = dana.wait_settled(&off).await;
     assert_eq!(t["waiting_on"], "review", "{t}");
+}
+
+/// The reviewer's ablation: on, a send to the wrong recipient never leaves;
+/// off, the same send goes. The registry names this suite for the module.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_reviewer_blocks_a_send_to_the_wrong_recipient() {
+    let mail = mcp::mail().start().await;
+    let m = FakeModel::start(script(|c| async move {
+        // The reviewer blocks mail to mallory, and holds the completion.
+        if c.offered_tools().contains(&"review".to_string()) {
+            if !c.text().contains("The send to judge") {
+                return tool("review", json!({ "criteria": [{ "id": "c1", "holds": true, "evidence": "the report matches the run" }] }));
+            }
+            let bad = c.text().contains("mallory@evil.example");
+            return tool("review", json!({ "verdict": if bad { "block" } else { "pass" }, "reason": if bad { "mallory is not the intended recipient" } else { "to the named recipient" } }));
+        }
+        // The agent mails mallory, of all people.
+        match c.turn() {
+            0 => contract_unchecked("email mallory", "mallory was emailed"),
+            1 => tool("mail__send", json!({ "to": "mallory@evil.example", "subject": "hello", "body": "hello" })),
+            _ if c.text().contains("Denied (reviewer)") => complete("blocked; nothing sent"),
+            _ => complete("sent"),
+        }
+    }))
+    .await;
+    let s = spec().app("mail", &mail, "public", "private", &[("list_sent", "read"), ("send", "reversible_write")]);
+    let app = Appliance::start(s, &m).await;
+    assert!(app.api("alice").put_policy("org", &org_policy(&permit_execute("mail__send"))).await.is_success());
+    let dana = app.api("dana");
+
+    // On: the send is blocked, and the run finishes without sending.
+    let (on, on_run) = trial(&dana, "rev", "send", "Email mallory hello.", json!({ "reviewer": true })).await;
+    let t = dana.wait_settled(&on).await;
+    assert_eq!(t["status"], "completed", "{t}");
+    assert_eq!(mail.effects("send"), 0, "the blocked send left");
+    let k = kinds(&dana, &on_run).await;
+    assert!(k.iter().any(|k| k == "reviewer_reply"), "{k:?}");
+
+    // Off: the same send goes.
+    let (off, _) = trial(&dana, "rev", "send", "Email mallory hello.", json!({})).await;
+    let t = dana.wait_settled(&off).await;
+    assert!(t["status"] == "completed" || t["waiting_on"] == "review", "{t}");
+    assert_eq!(mail.effects("send"), 1, "the unreviewed send did not go");
+
+    // The registry lists the module, its ablation suite, and its acts.
+    let (_, reg) = dana.get("/v1/dev/modules").await;
+    let rev = reg["modules"].as_array().unwrap().iter().find(|m| m["name"] == "reviewer").unwrap().clone();
+    assert!(rev["compensates"].as_str().is_some_and(|c| !c.is_empty()) && rev["ablation_suite"].as_str().unwrap().contains("modules.rs"));
+    assert!(rev["models"].as_object().unwrap().values().all(|m| m["on"] == json!(false)), "the reviewer is on by default: {reg}");
+    assert!(rev["acted"].as_u64().unwrap() >= 2, "{reg}");
 }

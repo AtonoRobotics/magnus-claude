@@ -119,6 +119,10 @@ pub fn facts(k: &Kernel, tool: &str) -> Option<Facts> {
 /// lookups (or a conversation's).
 pub const WEB_LOOKUPS: &str = "kernel:web_lookups";
 
+/// The rule on an approval card the send reviewer asked for: it flagged
+/// the send, and the person decides (#179).
+pub const REVIEWER_FLAG: &str = "reviewer:flag";
+
 /// The draft writes a scoped step rewrites: a reply, forward or new draft
 /// is written from its thread and the person's words alone (#178).
 const DRAFT_WRITES: &[&str] = &["create_draft", "reply_draft", "forward_draft", "update_draft"];
@@ -161,6 +165,19 @@ fn is_chat_tool(f: &Facts) -> bool {
     // Sharing is the one bundle write that belongs to conversation, as the
     // controls do (#299): the person's say after seeing the text.
     f.connector.is_none() && (f.app == "chat" || f.name == "bundle_share")
+}
+
+/// A send the reviewer judges: the model's own action, changing the world
+/// outside Magnus. Its own memory, a chat message, and a local write are
+/// not sends.
+fn is_reviewed_send(a: &Action, f: &Facts) -> bool {
+    if a.issuer != Issuer::Model || is_chat_tool(f) || f.reaches_self || !f.risk.changes_state() {
+        return false;
+    }
+    if f.connector.is_none() && f.app == "memory" {
+        return false;
+    }
+    f.connector.is_some() || f.app == "web" || f.app == "browser"
 }
 
 /// Whether a sent search found mail: what `found` points at is not empty.
@@ -464,6 +481,15 @@ impl Kernel {
             Ok(Some(why)) => Some(why),
             Err(v) => return Ok(v),
         };
+
+        // 4b. Review: an enabled reviewer judges each send the kernel does
+        // not ask about. One the kernel asks about is reviewed by the
+        // person instead, who outranks it (#179).
+        if ask.is_none() && run.config.module("reviewer") && is_reviewed_send(a, &f) {
+            if let Gate::Stop(v) = self.reviewer_stage(a, &run, &f, shown.as_ref()).await? {
+                return Ok(v);
+            }
+        }
 
         // 5. Approval.
         if let Some((why, rule)) = ask {
@@ -823,16 +849,10 @@ impl Kernel {
         Ok(Ok(ask))
     }
 
-    async fn approval_stage(&self, a: &Action, run: &Run, f: &Facts, why: &str, rule: Option<String>, shown: Option<&Shown>) -> Result<Gate> {
-        if a.issuer.reads_only() {
-            return Ok(Gate::Stop(self.deny(a, "approval", "a contract check or the verifier cannot wait for approval", false, rule).await?));
-        }
-        let hash = shown.map_or_else(|| input_hash(&a.tool, &a.input), |s| s.hash(&a.tool, &a.input));
+    /// The approval covering this exact action, if one holds and its
+    /// approver may still give it.
+    fn covering_approval(&self, run: &Run, a: &Action, f: &Facts, hash: &str, kernel_ask: bool, lookup: bool) -> Option<crate::state::Approval> {
         let now = chrono::Utc::now();
-        // A taint ask (Rule of Two, audience) is satisfied only by an approval
-        // of this exact action; broader scopes cover policy asks only.
-        let kernel_ask = rule.as_deref().is_some_and(|r| r.starts_with("kernel:"));
-        let lookup = rule.as_deref() == Some(WEB_LOOKUPS);
         let found = self.read(|s| {
             // The person allowed this task's web lookups, or, in chat, this
             // conversation's: any web read, not only the one first asked about.
@@ -857,7 +877,7 @@ impl Kernel {
                         && ap.reason.as_deref() != Some("unknown_outcome")
                         && (!kernel_ask || ap.scope == "once")
                         && match ap.scope.as_str() {
-                            "once" => !ap.used && ap.task == run.task && ap.input_hash.as_deref() == Some(hash.as_str()),
+                            "once" => !ap.used && ap.task == run.task && ap.input_hash.as_deref() == Some(hash),
                             "task" => ap.task == run.task,
                             "window" => ap.until.is_some_and(|u| u > now),
                             "standing" => true,
@@ -873,7 +893,19 @@ impl Kernel {
             !matches!(ap.scope.as_str(), "standing" | "window")
                 || ap.by.strip_prefix("person:").and_then(|id| self.person(id)).is_some_and(|p| p.is_owner() || p.has_role(&format!("approver:{}", f.risk.as_str())))
         };
-        let found = found.into_iter().find(|ap| still_may(ap));
+        found.into_iter().find(|ap| still_may(ap))
+    }
+
+    async fn approval_stage(&self, a: &Action, run: &Run, f: &Facts, why: &str, rule: Option<String>, shown: Option<&Shown>) -> Result<Gate> {
+        if a.issuer.reads_only() {
+            return Ok(Gate::Stop(self.deny(a, "approval", "a contract check or the verifier cannot wait for approval", false, rule).await?));
+        }
+        let hash = shown.map_or_else(|| input_hash(&a.tool, &a.input), |s| s.hash(&a.tool, &a.input));
+        // A taint ask (Rule of Two, audience) is satisfied only by an approval
+        // of this exact action; broader scopes cover policy asks only.
+        let kernel_ask = rule.as_deref().is_some_and(|r| r.starts_with("kernel:"));
+        let lookup = rule.as_deref() == Some(WEB_LOOKUPS);
+        let found = self.covering_approval(run, a, f, &hash, kernel_ask, lookup);
         // A confirmed schedule was approved once for all its runs (owner,
         // 2026-11-02: "The schedule should be approved once and run until
         // completion or it's stopped"): its confirmation covers the policy's
@@ -952,6 +984,66 @@ impl Kernel {
         };
         self.suspend_on(&a.run, "approval", id, item).await?;
         Ok(Gate::Stop(Verdict::Suspended))
+    }
+
+    /// The reviewer's judgment on a send: a pass or nothing said lets it
+    /// through; a block denies it with its reason on the task; a flag asks
+    /// the person on an approval card the same shape as any ask (#179).
+    async fn reviewer_stage(&self, a: &Action, run: &Run, f: &Facts, shown: Option<&Shown>) -> Result<Gate> {
+        let hash = shown.map_or_else(|| input_hash(&a.tool, &a.input), |s| s.hash(&a.tool, &a.input));
+        // The person already cleared a flag on this exact action: judging it
+        // again would ask twice for the same send.
+        if self.covering_approval(run, a, f, &hash, false, false).is_some() {
+            return Ok(Gate::Pass);
+        }
+        match self.review_send(run, &a.tool, &a.input, shown).await? {
+            crate::run::reviewer::SendVerdict::Pass | crate::run::reviewer::SendVerdict::Unavailable => Ok(Gate::Pass),
+            crate::run::reviewer::SendVerdict::Block(reason) => {
+                let (_, ev) = crate::kernel::notice_event(
+                    Some(run.task.clone()),
+                    Some(a.run.clone()),
+                    run.person.clone(),
+                    format!("The reviewer blocked {}: {reason}", a.tool),
+                    json!({ "call_id": a.call_id, "tool": a.tool, "reason": reason }),
+                );
+                self.emit("kernel", ev).await?;
+                Ok(Gate::Stop(self.deny(a, "reviewer", &format!("the reviewer blocked this send: {reason}"), false, None).await?))
+            }
+            crate::run::reviewer::SendVerdict::Flag(reason) => {
+                let why = format!("the reviewer flagged this send: {reason}");
+                self.decision(a, "ask", "reviewer", &why, Some(REVIEWER_FLAG.into())).await?;
+                let open = self.read(|s| {
+                    s.items
+                        .values()
+                        .find(|i| i.run.as_deref() == Some(&a.run) && i.kind == "approval" && i.resolution.is_none() && i.details["call_id"] == a.call_id.as_str())
+                        .map(|i| i.id.clone())
+                });
+                let (id, item) = match open {
+                    Some(id) => (id, None),
+                    None => {
+                        let id = new_id("item");
+                        let ev = Ev::Item {
+                            id: id.clone(),
+                            item_kind: "approval".into(),
+                            task: Some(run.task.clone()),
+                            run: Some(a.run.clone()),
+                            person: run.person.clone(),
+                            summary: format!("The reviewer flagged {} — approve?", a.tool),
+                            details: json!({
+                                "call_id": a.call_id, "tool": a.tool, "input": a.input, "input_hash": hash,
+                                "risk": f.risk.as_str(), "app": f.app, "audience": f.audience.as_str(),
+                                "why": why, "rule": REVIEWER_FLAG,
+                                "taint": { "untrusted": run.untrusted, "private": run.private },
+                                "destinations": shown.map(Shown::details),
+                            }),
+                        };
+                        (id, Some(ev))
+                    }
+                };
+                self.suspend_on(&a.run, "approval", id, item).await?;
+                Ok(Gate::Stop(Verdict::Suspended))
+            }
+        }
     }
 
     /// Resolve an intent that has no result (B7): resend when the app honors

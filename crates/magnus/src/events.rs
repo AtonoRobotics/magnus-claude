@@ -220,6 +220,17 @@ pub enum Ev {
         blocks: Vec<magnus_adapter_proto::Block>,
         usage: magnus_adapter_proto::Usage,
     },
+    /// One model call of the reviewer module: judging a send before it
+    /// leaves (`send`), or the completion criteria no code check covers
+    /// (`completion`).
+    ReviewerReply {
+        run: String,
+        purpose: String,
+        model: String,
+        #[serde(default)]
+        blocks: Vec<magnus_adapter_proto::Block>,
+        usage: magnus_adapter_proto::Usage,
+    },
     /// A draft written by a scoped step: the model call saw only these
     /// threads and the person's own words, and the draft's body is what it
     /// wrote. `participants` are the threads' addresses, entitled to what
@@ -1298,6 +1309,7 @@ impl Ev {
             | ContextReset { run, .. }
             | Escalated { run, .. }
             | VerifierReply { run, .. }
+            | ReviewerReply { run, .. }
             | Suspended { run, .. }
             | Resumed { run }
             | Completed { run, .. }
