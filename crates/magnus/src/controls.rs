@@ -41,7 +41,7 @@ fn may_control(who: &Person, owner: &str) -> bool {
 /// run did it, or the app's button did.
 fn sources(turn: Option<&str>) -> (Option<String>, Option<String>) {
     match turn {
-        Some(run) => (Some("conversation".into()), Some(run.into())),
+        Some(turn) => (Some("conversation".into()), Some(turn.into())),
         None => (Some("button".into()), None),
     }
 }
@@ -324,8 +324,9 @@ impl Kernel {
 
     /// One of the control tools Magnus calls in a conversation, for the
     /// person the conversation is with: what the tool says back, and whether
-    /// it is an error.
-    pub async fn chat_control(&self, person: &str, tool: &str, input: &Value, run: &str) -> (String, bool, Option<Value>) {
+    /// it is an error. `turn` is the asking chat turn, recorded on the
+    /// control's event (#267, #358).
+    pub async fn chat_control(&self, person: &str, tool: &str, input: &Value, turn: &str) -> (String, bool, Option<Value>) {
         let Some(who) = self.person(person) else { return ("no such person".into(), true, None) };
         let id = input["id"].as_str().unwrap_or_default();
         let r: Result<Value, Refused> = match tool {
@@ -342,11 +343,11 @@ impl Kernel {
                 Ok(row) => self.as_policy_allows(&who, vec![row]).await.map(|mut rows| json!({ "schedule": rows.pop().unwrap_or(Value::Null) })),
                 Err(e) => Err(e),
             },
-            "cancel_task" => self.cancel_task(&who, id, Some(run)).await,
-            "pause_schedule" => self.pause_schedule(&who, id, Some(run)).await.map(|_| json!({ "paused": id })),
-            "resume_schedule" => self.resume_schedule(&who, id, Some(run)).await.map(|_| json!({ "resumed": id })),
-            "edit_schedule" => self.edit_schedule(&who, id, input, Some(run)).await,
-            "cancel_schedule" => self.cancel_schedule(&who, id, Some(run)).await,
+            "cancel_task" => self.cancel_task(&who, id, Some(turn)).await,
+            "pause_schedule" => self.pause_schedule(&who, id, Some(turn)).await.map(|_| json!({ "paused": id })),
+            "resume_schedule" => self.resume_schedule(&who, id, Some(turn)).await.map(|_| json!({ "resumed": id })),
+            "edit_schedule" => self.edit_schedule(&who, id, input, Some(turn)).await,
+            "cancel_schedule" => self.cancel_schedule(&who, id, Some(turn)).await,
             _ => Err(Refused::Invalid(format!("{tool} is not a control"))),
         };
         match r {
