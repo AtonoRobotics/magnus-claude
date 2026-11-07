@@ -1890,7 +1890,7 @@ async fn schedules(State(k): K, h: HeaderMap) -> Response {
                 json!({
                     "id": x.id, "person": x.person, "text": words.text(x.seq), "title": words.title(x.seq).unwrap_or_else(|| words.text(x.seq).to_string()),
                     "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due(), "last_fired": x.last_fired,
-                    "until": x.until, "max_runs": x.max_runs, "started": x.started, "paused": x.paused, "paused_on": x.paused_on,
+                    "until": x.until, "max_runs": x.max_runs, "started": x.started, "paused": x.paused, "paused_on": x.paused_on, "ended": x.ended,
                     // Each run's limit: its own, or the appliance's when it has none.
                     "budget": x.budget.clone().unwrap_or_else(|| k.cfg.budget.clone()),
                     "skipped": x.skipped.as_ref().map(|(at, task, why)| json!({ "at": at, "task": task, "why": why })),

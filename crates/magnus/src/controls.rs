@@ -131,6 +131,9 @@ impl Kernel {
     /// suspension is not paused over.
     pub async fn pause_schedule(&self, who: &Person, id: &str) -> Result<(), Refused> {
         let sc = self.schedule_owned(who, id)?;
+        if sc.ended.is_some() {
+            return Err(Refused::Conflict("the schedule has ended".into()));
+        }
         if sc.paused_by_admin {
             return Err(Refused::Conflict("it is suspended by an admin: only an admin lifts it".into()));
         }
@@ -146,6 +149,9 @@ impl Kernel {
     /// lifted only by an admin (or the owner), here or in the console.
     pub async fn resume_schedule(&self, who: &Person, id: &str) -> Result<(), Refused> {
         let sc = self.schedule_owned(who, id)?;
+        if sc.ended.is_some() {
+            return Err(Refused::Conflict("the schedule has ended".into()));
+        }
         if sc.paused.is_none() {
             return Err(Refused::Conflict("the schedule is not paused".into()));
         }

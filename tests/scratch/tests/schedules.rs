@@ -196,7 +196,8 @@ async fn a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run() {
     let n = notice(&alice, "A schedule ended itself", &own).await;
     assert_eq!(n["details"]["evidence"]["why"], "the bell has rung", "{n}");
     assert_eq!(written_with(&app, &n).await, ("schedule_ended".into(), true), "the end and its notice are two writes");
-    assert!(schedule(&alice, &own).await.is_none(), "it ended itself but is still set");
+    let ended = schedule(&alice, &own).await.expect("it ended itself and is gone");
+    assert_eq!(ended["ended"], "the bell has rung", "it ended itself with no reason: {ended}");
     let rung = tasks_with(&alice, "Ring the bell.").await;
     assert_eq!(rung.len(), 1);
     assert_eq!(alice.wait_settled(rung[0]["task_id"].as_str().unwrap()).await["status"], "completed");
@@ -219,7 +220,8 @@ async fn a_schedule_ends_after_its_runs_at_its_time_or_by_its_own_run() {
     assert_eq!(written_with(&app, &n).await, ("schedule_ended".into(), true), "the end and its notice are two writes");
     assert_eq!(tasks_with(&alice, "Water the plants.").await.len(), 1, "it ran past its end");
 
-    eventually("the second schedule ends after two runs", MINUTE * 2, || async { schedule(&alice, &twice).await.is_none().then_some(()) }).await;
+    let twice_ended = eventually("the second schedule ends after two runs", MINUTE * 2, || async { schedule(&alice, &twice).await.filter(|s| !s["ended"].is_null()) }).await;
+    assert!(twice_ended["ended"].as_str().unwrap().contains("2 times"), "no reason: {twice_ended}");
     let n = notice(&alice, "A schedule ended", &twice).await;
     assert!(n["details"]["evidence"]["why"].as_str().unwrap().contains("ran 2 times"), "{n}");
     assert_eq!(written_with(&app, &n).await, ("schedule_ended".into(), true), "the end and its notice are two writes");

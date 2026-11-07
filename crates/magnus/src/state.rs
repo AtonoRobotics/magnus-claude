@@ -486,6 +486,8 @@ pub struct Schedule {
     pub paused_by_admin: bool,
     /// From when failures count toward pausing it again.
     pub resumed: Option<DateTime<Utc>>,
+    /// Why it is over, once it is: an ended schedule stays, marked.
+    pub ended: Option<String>,
 }
 
 /// A person's standing authority over a category of their own work
@@ -620,6 +622,9 @@ pub enum Answer {
 impl Schedule {
     /// Whether it may start no more runs: past its end, or out of runs.
     pub fn finished(&self, now: DateTime<Utc>) -> Option<String> {
+        if self.ended.is_some() {
+            return None;
+        }
         if let Some(m) = self.max_runs.filter(|m| self.started >= *m) {
             return Some(format!("it ran {m} time{}, as set", if m == 1 { "" } else { "s" }));
         }
@@ -1549,6 +1554,7 @@ impl State {
                         paused_on: None,
                         paused_by_admin: false,
                         resumed: None,
+                        ended: None,
                     },
                 );
                 if let Some(c) = card {
@@ -1693,8 +1699,19 @@ impl State {
                     k.version = e.seq;
                 }
             }
-            Ev::ScheduleRemoved { id } | Ev::ScheduleEnded { id, .. } => {
+            Ev::ScheduleRemoved { id } => {
                 self.schedules.remove(id);
+            }
+            Ev::ScheduleEnded { id, reason, .. } => {
+                // It stays, marked with why: its card says it ended, with
+                // its latest run. Only a cancelled one is gone (#264). The
+                // end is terminal: no pause outlives it.
+                if let Some(s) = self.schedules.get_mut(id) {
+                    s.ended = Some(reason.clone());
+                    s.paused = None;
+                    s.paused_on = None;
+                    s.paused_by_admin = false;
+                }
             }
             Ev::ScheduleSkipped { id, task, reason } => {
                 if let Some(s) = self.schedules.get_mut(id) {
@@ -1715,6 +1732,9 @@ impl State {
                     s.daily_at = daily_at.clone();
                     s.until = *until;
                     s.max_runs = *max_runs;
+                    // A new end puts an ended one back: edits only move the
+                    // end forward, so it runs again (#264).
+                    s.ended = None;
                 }
             }
             Ev::ScheduleResumed { id } => {
@@ -2422,5 +2442,26 @@ mod tests {
         assert!(!s.branches.contains_key("b-bob"), "bob's branch kept his words");
         assert!(!s.attachments.contains_key("t-bob"), "bob's task kept what it had attached");
         assert!(s.branches.contains_key("b-alice") && s.attachments.contains_key("t-alice"), "alice's went with bob's");
+    }
+
+    /// An ended schedule stays in state, marked with why, its pause
+    /// cleared: only a cancelled one is gone. It is not finished twice,
+    /// and an edit puts it back (#264).
+    #[test]
+    fn an_ended_schedule_stays_marked_with_why_until_cancelled() {
+        let mut s = State::default();
+        s.apply(&ev(1, "person:alice", json!({ "kind": "schedule_set", "id": "s1", "person": "alice", "text": "Say hi.", "every_minutes": 60, "max_runs": 1 })));
+        s.apply(&ev(2, "person:alice", json!({ "kind": "schedule_paused", "id": "s1", "reason": "Paused by you" })));
+        s.apply(&ev(3, "kernel", json!({ "kind": "schedule_ended", "id": "s1", "reason": "it ran 1 time, as set" })));
+        let sc = s.schedules.get("s1").expect("an ended schedule was removed");
+        assert_eq!(sc.ended.as_deref(), Some("it ran 1 time, as set"), "the end kept no reason");
+        assert!(sc.paused.is_none(), "the end kept the pause");
+        assert!(sc.finished(chrono::Utc::now()).is_none(), "an ended schedule finishes again");
+        // An edit puts it back: a new end, no mark.
+        s.apply(&ev(4, "person:alice", json!({ "kind": "schedule_changed", "id": "s1", "every_minutes": 60, "daily_at": null, "until": null, "max_runs": 2 })));
+        assert!(s.schedules["s1"].ended.is_none(), "the edit kept the end mark");
+        // Cancelling removes it, as before.
+        s.apply(&ev(5, "person:alice", json!({ "kind": "schedule_removed", "id": "s1" })));
+        assert!(!s.schedules.contains_key("s1"), "a cancelled schedule stayed");
     }
 }

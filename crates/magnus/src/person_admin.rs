@@ -49,7 +49,7 @@ impl Kernel {
                         "every_minutes": x.every_minutes, "daily_at": x.daily_at, "next": x.next_due(), "last_fired": x.last_fired,
                         "until": x.until, "max_runs": x.max_runs, "runs": runs, "failures": x.failures.len(),
                         "skipped": x.skipped.as_ref().map(|(at, _, why)| json!({ "at": at, "why": why })),
-                        "paused": x.paused, "paused_on": x.paused_on,
+                        "paused": x.paused, "paused_on": x.paused_on, "ended": x.ended,
                     })
                 })
                 .collect();
@@ -71,6 +71,9 @@ impl Kernel {
             }
             self.emit(actor, Ev::ScheduleResumed { id: id.into() }).await.map_err(failed)?;
         } else {
+            if sc.ended.is_some() {
+                return Err((StatusCode::CONFLICT, "the schedule has ended".into()));
+            }
             if sc.paused.is_some() {
                 return Err((StatusCode::CONFLICT, "the schedule is already suspended".into()));
             }
