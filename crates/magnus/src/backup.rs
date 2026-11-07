@@ -79,7 +79,77 @@ pub fn check(v: &Value) -> Result<(usize, i64)> {
     anyhow::ensure!(v["through_seq"].as_i64() == Some(last), "the backup ends at {last}, not at {}", v["through_seq"]);
     let vk = B64.decode(v["vault"]["key"].as_str().unwrap_or_default())?;
     crate::vault::check(&vk, v["vault"]["secrets"].as_str().unwrap_or("{}"))?;
+    // Each database the appliance depends on reads back whole (#296).
+    for d in v["databases"].as_array().into_iter().flatten() {
+        let name = d["name"].as_str().unwrap_or_default();
+        let dump = B64.decode(d["dump"].as_str().unwrap_or_default()).with_context(|| format!("the dump of {name}"))?;
+        pg_tool("pg_restore", &["--list"], &[], &dump).with_context(|| format!("the dump of {name} does not read back"))?;
+    }
     Ok((events.len(), last))
+}
+
+/// A database the backup holds: its name, its URL without the password (for
+/// the tools' command line, which others on the machine can read), and the
+/// password (given to them in the environment).
+fn database(url: &str) -> Result<(String, String, String)> {
+    let mut u = url::Url::parse(url).context("[backup] databases holds a URL that does not parse")?;
+    let name = u.path().trim_start_matches('/').to_string();
+    anyhow::ensure!(!name.is_empty() && u.scheme().starts_with("postgres"), "[backup] databases: {} names no Postgres database", u.host_str().unwrap_or_default());
+    let password = url::form_urlencoded::parse(format!("p={}", u.password().unwrap_or_default()).as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default();
+    u.set_password(None).map_err(|_| anyhow::anyhow!("[backup] databases: {name} has no password to take out"))?;
+    Ok((name, u.to_string(), password))
+}
+
+/// Run `pg_dump` or `pg_restore`, with `input` on its stdin; its stdout.
+fn pg_tool(tool: &str, args: &[&str], env: &[(&str, &str)], input: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Write;
+    let mut child = std::process::Command::new(tool)
+        .args(args)
+        .envs(env.iter().copied())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("run {tool}"))?;
+    let mut stdin = child.stdin.take().context("stdin")?;
+    let input = input.to_vec();
+    let feed = std::thread::spawn(move || stdin.write_all(&input));
+    let out = child.wait_with_output()?;
+    let _ = feed.join();
+    anyhow::ensure!(out.status.success(), "{tool}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    Ok(out.stdout)
+}
+
+/// Each configured database, dumped (custom format, no owners or grants:
+/// a restore makes them the restoring role's).
+fn dump_databases(cfg: &Config) -> Result<Vec<Value>> {
+    cfg.backup
+        .databases
+        .iter()
+        .map(|url| {
+            let (name, dsn, password) = database(url)?;
+            let dump = pg_tool("pg_dump", &["--format=custom", "--no-owner", "--no-privileges", "--dbname", &dsn], &[("PGPASSWORD", &password)], &[])
+                .with_context(|| format!("back up the database {name}"))?;
+            Ok(json!({ "name": name, "dump": B64.encode(dump) }))
+        })
+        .collect()
+}
+
+/// Put each database the backup holds back, into the one `[backup]
+/// databases` names with that name; all are found before any is written.
+fn restore_databases(cfg: &Config, v: &Value) -> Result<usize> {
+    let mut plan = Vec::new();
+    for d in v["databases"].as_array().into_iter().flatten() {
+        let name = d["name"].as_str().unwrap_or_default();
+        let target = cfg.backup.databases.iter().map(|u| database(u)).collect::<Result<Vec<_>>>()?.into_iter().find(|(n, ..)| n == name);
+        let Some((_, dsn, password)) = target else { bail!("the backup holds the database {name}, which [backup] databases does not name") };
+        plan.push((name.to_string(), dsn, password, B64.decode(d["dump"].as_str().unwrap_or_default())?));
+    }
+    for (name, dsn, password, dump) in &plan {
+        pg_tool("pg_restore", &["--clean", "--if-exists", "--no-owner", "--no-privileges", "--single-transaction", "--dbname", dsn], &[("PGPASSWORD", password)], dump)
+            .with_context(|| format!("restore the database {name}"))?;
+    }
+    Ok(plan.len())
 }
 
 impl Kernel {
@@ -99,10 +169,13 @@ impl Kernel {
             r["salt"] = Value::Null;
         }
         let (vault_key, secrets) = self.vault.raw()?;
+        let cfg = self.cfg.clone();
+        let databases = tokio::task::spawn_blocking(move || dump_databases(&cfg)).await??;
         let made = chrono::Utc::now();
         let doc = json!({
             "format": FORMAT, "made_at": made, "through_seq": through, "scrubbed_through": scrubbed, "events": rows,
             "vault": { "key": B64.encode(vault_key), "secrets": secrets },
+            "databases": databases,
         });
         let plain = serde_json::to_vec(&doc)?;
         let cipher = key(&self.cfg, true)?;
@@ -116,7 +189,10 @@ impl Kernel {
         // The restore test, on the file as written.
         let checked = std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| open(&cipher, &b)).and_then(|v| check(&v));
         let (ok, detail) = match &checked {
-            Ok((n, last)) => (true, format!("restored in memory: {n} events through {last}, every secret decrypts")),
+            Ok((n, last)) => {
+                let dbs = doc["databases"].as_array().map(|d| d.len()).unwrap_or(0);
+                (true, format!("restored in memory: {n} events through {last}, every secret decrypts, {dbs} databases read back"))
+            }
             Err(e) => (false, format!("{e:#}")),
         };
         self.emit("kernel", Ev::BackupChecked { file: file.clone(), ok, detail: detail.clone() }).await?;
@@ -437,6 +513,11 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
         crate::vault::write_private(&vault_dir.join("secrets.json"), v["vault"]["secrets"].as_str().unwrap_or("{}").as_bytes())?;
         Ok(())
     };
+    // The databases the appliance depends on, while the log's transaction is
+    // still open: one that cannot be put back leaves the log empty, so the
+    // restore can be run again (#296).
+    let (c, w) = (cfg.clone(), v.clone());
+    tokio::task::spawn_blocking(move || restore_databases(&c, &w)).await??;
     let old_key = std::fs::read(vault_dir.join("key")).ok();
     let undo = || {
         let _ = std::fs::remove_file(vault_dir.join("secrets.json"));

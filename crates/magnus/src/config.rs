@@ -412,6 +412,11 @@ pub struct Backup {
     /// backup within it.
     #[serde(default = "keep_days")]
     pub keep_days: u32,
+    /// The other Postgres databases the appliance depends on (its identity
+    /// provider's, #296), as connection URLs: each backup holds a dump of
+    /// each, and `magnus restore` puts them back.
+    #[serde(default)]
+    pub databases: Vec<String>,
 }
 
 /// Daily: with a month kept, a month of daily restore points.
@@ -424,7 +429,7 @@ fn keep_days() -> u32 {
 
 impl Default for Backup {
     fn default() -> Self {
-        Backup { dir: None, key_file: None, every_hours: every_hours(), keep_days: keep_days() }
+        Backup { dir: None, key_file: None, every_hours: every_hours(), keep_days: keep_days(), databases: Vec::new() }
     }
 }
 
