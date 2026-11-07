@@ -161,8 +161,11 @@ pub fn check(text: &str) -> Vec<Value> {
         }
     }
     let mut out = vec![];
+    let mut tool_bad = HashSet::new();
     for e in Validator::new(tool_schema().clone()).validate(&set, ValidationMode::Strict).validation_errors() {
-        if tools.contains(e.policy_id().to_string().as_str()) {
+        let id = e.policy_id().to_string();
+        tool_bad.insert(id.clone());
+        if tools.contains(id.as_str()) {
             out.push(problem(text, e, e.to_string()));
         }
     }
@@ -184,13 +187,17 @@ pub fn check(text: &str) -> Vec<Value> {
     }
     for (id, is_forbid) in unqualified {
         if is_forbid {
-            // One message naming every side the forbid would fit if it
-            // named actions: it constrains tool calls only as written.
+            // One message naming every other side the forbid would fit
+            // if it named actions. Control keeps its existing signal
+            // (fits the control half); the loop guides only when the
+            // rule fails as tools but fits as loop — a Tool-scoped
+            // rule already works as tools, so loop guidance there
+            // would refuse legitimate policies (#368).
             let mut sides = vec![];
             if !control_bad.contains(&id) {
                 sides.push("name the task and schedule actions to constrain control");
             }
-            if !loop_bad.contains(&id) {
+            if !loop_bad.contains(&id) && tool_bad.contains(&id) {
                 sides.push("name suggest, interrupt or act to constrain the loop");
             }
             if !sides.is_empty() {
