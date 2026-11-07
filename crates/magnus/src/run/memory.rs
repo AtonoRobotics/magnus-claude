@@ -31,10 +31,11 @@ impl Kernel {
         // carries the ended task's ID and outcome: the review's context
         // excludes ended tasks, so without it the review cannot see what
         // failed (#383).
-        if let Some((person, task, ended)) = self.read(|s| {
+        if let Some((person, task, ended, label)) = self.read(|s| {
             s.runs.get(run.as_str()).map(|r| {
                 let ended = s.tasks.get(&r.task).map(|t| (t.review, t.chat.as_ref().is_some_and(|c| c.turn), r.status, r.summary.clone()));
-                (r.person.clone(), r.task.clone(), ended)
+                let label = crate::tools::Label { untrusted: r.untrusted, private: r.private };
+                (r.person.clone(), r.task.clone(), ended, label)
             })
         }) {
             // A failure's reason and a completion's summary both land in
@@ -46,8 +47,9 @@ impl Kernel {
             };
             if let Some((reason, outcome)) = wake {
                 let k = self.clone();
+                let ended = crate::proactive::Ended { task, outcome, label };
                 tokio::spawn(async move {
-                    k.review_wake(&person, reason, Some((task, outcome))).await;
+                    k.review_wake(&person, reason, Some(ended)).await;
                 });
             }
         }
