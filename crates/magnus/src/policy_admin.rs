@@ -11,16 +11,40 @@ use crate::events::Ev;
 use crate::kernel::Kernel;
 use crate::tools::{Audience, Risk};
 use axum::http::StatusCode;
-use cedar_policy::{PolicySet, Schema, ValidationMode, Validator};
+use cedar_policy::{ActionConstraint, Effect, PolicySet, Schema, ValidationMode, Validator};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 
 pub type Refusal = (StatusCode, String);
 
 /// What a policy may name: people in groups, tools in apps with their risk
-/// and audience, the two actions, and the run's taint as context.
+/// and audience, the two actions, and the run's taint as context; and tasks
+/// and schedules in their person, the five control actions, and whether the
+/// controller is the owner or an admin (#266).
 pub const SCHEMA: &str = r#"
+entity Group;
+entity Person in [Group];
+entity App;
+entity Tool in [App] = { "risk": String, "audience": String };
+entity Task in [Person];
+entity Schedule in [Person];
+action "execute", "request_approval" appliesTo {
+  principal: [Person],
+  resource: [Tool],
+  context: { "untrusted": Bool, "private": Bool }
+};
+action "cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule" appliesTo {
+  principal: [Person],
+  resource: [Task, Schedule],
+  context: { "is_owner": Bool, "is_admin": Bool }
+};
+"#;
+
+/// The schema's tool half: people in groups, tools in apps, the two
+/// actions. Validation runs each side's rules against its half (`check`),
+/// so an unqualified tool rule is judged as tools, not against tasks.
+const TOOL_SCHEMA: &str = r#"
 entity Group;
 entity Person in [Group];
 entity App;
@@ -32,9 +56,28 @@ action "execute", "request_approval" appliesTo {
 };
 "#;
 
-fn schema() -> &'static Schema {
+/// The schema's control half: tasks and schedules in their person, the
+/// five control actions.
+const CONTROL_SCHEMA: &str = r#"
+entity Group;
+entity Person in [Group];
+entity Task in [Person];
+entity Schedule in [Person];
+action "cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule" appliesTo {
+  principal: [Person],
+  resource: [Task, Schedule],
+  context: { "is_owner": Bool, "is_admin": Bool }
+};
+"#;
+
+fn tool_schema() -> &'static Schema {
     static S: std::sync::OnceLock<Schema> = std::sync::OnceLock::new();
-    S.get_or_init(|| Schema::from_cedarschema_str(SCHEMA).expect("Magnus's policy schema parses (a unit test checks)").0)
+    S.get_or_init(|| Schema::from_cedarschema_str(TOOL_SCHEMA).expect("the tool half parses").0)
+}
+
+fn control_schema() -> &'static Schema {
+    static S: std::sync::OnceLock<Schema> = std::sync::OnceLock::new();
+    S.get_or_init(|| Schema::from_cedarschema_str(CONTROL_SCHEMA).expect("the control half parses").0)
 }
 
 /// Where an offset falls in the text: its line and column, from 1.
@@ -52,13 +95,52 @@ fn problem(text: &str, d: &dyn miette::Diagnostic, message: String) -> Value {
 }
 
 /// Parse a policy set and check it against the schema: each error with its
-/// place. Empty: it may be applied.
+/// place. Empty: it may be applied. Each rule is judged against its own
+/// side's half — the text is validated whole against each half and the
+/// other side's errors dropped by policy id, so places stay true — and an
+/// unqualified forbid that would also fit control is refused with guidance
+/// instead of silently constraining tool calls only (#266).
 pub fn check(text: &str) -> Vec<Value> {
     let set = match PolicySet::from_str(text) {
         Ok(s) => s,
         Err(e) => return e.iter().map(|x| problem(text, x, x.to_string())).collect(),
     };
-    Validator::new(schema().clone()).validate(&set, ValidationMode::Strict).validation_errors().map(|e| problem(text, e, e.to_string())).collect()
+    let mut tools = HashSet::new();
+    let mut controls = HashSet::new();
+    let mut unqualified = vec![];
+    for p in set.policies() {
+        let id = p.id().to_string();
+        let (t, c) = crate::policy::policy_sides(&p);
+        if t {
+            tools.insert(id.clone());
+        }
+        if c {
+            controls.insert(id.clone());
+        }
+        if matches!(p.action_constraint(), ActionConstraint::Any) {
+            unqualified.push((id, p.effect() == Effect::Forbid));
+        }
+    }
+    let mut out = vec![];
+    for e in Validator::new(tool_schema().clone()).validate(&set, ValidationMode::Strict).validation_errors() {
+        if tools.contains(e.policy_id().to_string().as_str()) {
+            out.push(problem(text, e, e.to_string()));
+        }
+    }
+    let mut control_bad = HashSet::new();
+    for e in Validator::new(control_schema().clone()).validate(&set, ValidationMode::Strict).validation_errors() {
+        let id = e.policy_id().to_string();
+        control_bad.insert(id.clone());
+        if controls.contains(id.as_str()) {
+            out.push(problem(text, e, e.to_string()));
+        }
+    }
+    for (id, is_forbid) in unqualified {
+        if is_forbid && !control_bad.contains(&id) {
+            out.push(json!({ "message": format!("for policy `{id}`, a forbid that names no action constrains tool calls only; name the task and schedule actions to constrain control"), "line": 1, "column": 1, "offset": Value::Null, "length": Value::Null }));
+        }
+    }
+    out
 }
 
 /// A layer an admin may write: the organisation's, a group's, or a known
@@ -183,15 +265,43 @@ mod tests {
 
     #[test]
     fn the_schema_parses_and_the_default_policy_fits_it() {
-        let _ = schema();
+        let _ = (tool_schema(), control_schema());
+        Schema::from_cedarschema_str(SCHEMA).expect("the served schema parses");
         assert!(check(crate::policy::DEFAULT_ORG).is_empty(), "{:?}", check(crate::policy::DEFAULT_ORG));
+    }
+
+    /// A control narrowing names control actions and task resources, so the
+    /// organisation can write it (#266).
+    #[test]
+    fn a_control_narrowing_fits_the_schema() {
+        let narrowing = r#"forbid(principal, action == Action::"cancel_task", resource) when { context.is_admin && !(resource in principal) };"#;
+        assert!(check(narrowing).is_empty(), "{:?}", check(narrowing));
+    }
+
+    /// An unqualified tool rule validates as a tool rule, so the group's
+    /// sales policy still drafts clean; a forbid that names no action but
+    /// could constrain control is refused with guidance instead of
+    /// silently constraining tool calls only (#266).
+    #[test]
+    fn an_unqualified_rule_validates_as_a_tool_rule() {
+        let sales = "forbid(principal, action, resource) when { resource.risk == \"financial\" };";
+        assert!(check(sales).is_empty(), "{:?}", check(sales));
+        let blanket = "forbid(principal, action, resource);";
+        let p = check(blanket);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0]["message"].as_str().unwrap_or("").contains("names no action"), "{p:?}");
+        let preamble = "permit(principal, action, resource);";
+        assert!(check(preamble).is_empty(), "{:?}", check(preamble));
     }
 
     #[test]
     fn a_problem_names_its_line_and_column() {
-        let p = check("permit(principal, action, resource);\nforbid(principal, action, resource) when { resource.colour == \"red\" };");
+        let p = check("permit(principal, action, resource);\nforbid(principal, action == Action::\"execute\", resource) when { resource.colour == \"red\" };");
         assert_eq!(p.len(), 1, "{p:?}");
         assert_eq!(p[0]["line"], 2, "{p:?}");
+        let p = check("forbid(principal, action, resource) when { resource.colour == \"red\" };");
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0]["message"].as_str().unwrap_or("").contains("`Tool`"), "{p:?}");
         let p = check("permit(principal, action, resource)\n  when { context.untrusted && ;");
         assert!(!p.is_empty() && p[0]["line"] == 2, "{p:?}");
         assert!(check("permit(principal, action == Action::\"execute\", resource) when { context.private == false };").is_empty());

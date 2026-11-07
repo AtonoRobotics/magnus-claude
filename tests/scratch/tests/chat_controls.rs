@@ -4,6 +4,8 @@
 //! the app's buttons. A person controls their own and nobody else's; the
 //! owner controls anyone's. A cancelled task says what it had already done.
 
+use magnus::policy::DEFAULT_ORG;
+use magnus_invariants::appliance::Person;
 use magnus_invariants::model::Script;
 use magnus_invariants::*;
 use serde_json::{json, Value};
@@ -359,3 +361,44 @@ async fn get_task_reports_what_the_run_did_so_far() {
     let got: Value = serde_json::from_str(&got).unwrap();
     assert_eq!(got["task"]["already_done"], json!(["memory write"]), "{got}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_org_policy_can_stop_admins_cancelling_others_tasks() {
+    let person = |id: &str, roles: &[&str]| Person {
+        id: id.into(),
+        name: id.into(),
+        token: format!("tok-{id}"),
+        groups: vec!["staff".into()],
+        roles: roles.iter().map(|r| r.to_string()).collect(),
+    };
+    let spec = Spec {
+        people: vec![person("alice", &["owner"]), person("dave", &["admin"]), person("carol", &[])],
+        ..Spec::default()
+    };
+    let calls = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start(model(calls.clone())).await;
+    let app = Appliance::start(spec, &m).await;
+    let (alice, dave, carol) = (app.api("alice"), app.api("dave"), app.api("carol"));
+
+    // By default an admin cancels anyone's waiting task.
+    let first = carol.submit("Draft the quarterly numbers.").await;
+    carol.wait_item(&first, "question").await;
+    let done = ask(&dave, &calls, "Cancel Carol's first task.", "cancel_task", json!({ "id": first })).await;
+    assert!(done.contains("cancelled"), "{done}");
+
+    // The organisation narrows it: admins may not cancel others' tasks.
+    let narrow = format!("{DEFAULT_ORG}\nforbid(principal, action == Action::\"cancel_task\", resource) when {{ context.is_admin && !(resource in principal) }};");
+    assert!(alice.put_policy("org", &narrow).await.is_success());
+    let second = carol.submit("Draft the annual numbers.").await;
+    carol.wait_item(&second, "question").await;
+    let refused = ask(&dave, &calls, "Cancel Carol's second task.", "cancel_task", json!({ "id": second })).await;
+    assert!(refused.contains("policy forbids"), "{refused}");
+    assert_ne!(carol.task(&second).await["status"], json!("cancelled"), "the task was cancelled past the policy");
+
+    // Their own tasks still cancel.
+    let own = dave.submit("Draft my numbers.").await;
+    dave.wait_item(&own, "question").await;
+    let done = ask(&dave, &calls, "Cancel my own task.", "cancel_task", json!({ "id": own })).await;
+    assert!(done.contains("cancelled"), "{done}");
+}
+
