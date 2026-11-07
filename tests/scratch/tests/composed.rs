@@ -158,6 +158,23 @@ async fn read_aloud_uses_a_script_written_for_listening() {
     assert_eq!(again["entries"].as_array().unwrap().iter().find(|e| e["kind"] == "answer").unwrap()["spoken"], SCRIPT);
 }
 
+/// Read aloud at the run's model-call cap reads the answer itself: no
+/// script is written past the cap (#330).
+#[tokio::test(flavor = "multi_thread")]
+async fn read_aloud_at_the_call_cap_reads_the_answer_itself() {
+    let mut m = FakeModel::start(model()).await;
+    m.url = magnus_scratch::provider(&m).await;
+    let app = Appliance::start(Spec::default().max_model_calls(1), &m).await;
+    let alice = app.api("alice");
+    let (thread, a) = ask(&alice, "Who are you?", None).await;
+    let path = format!("/v1/chat/{thread}/entries/{}/spoken", a["id"].as_str().unwrap());
+    let (st, v) = alice.post(&path, json!({})).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    let calls: Vec<Conversation> = m.requests().into_iter().filter(|c| c.body["system"].to_string().contains(LISTENING)).collect();
+    assert!(calls.is_empty(), "a script was written past the call cap: {v}");
+    assert_eq!(v["script"], a["text"], "read aloud did not fall back to the answer: {v}");
+}
+
 /// The answer's text streams before anything is shown: someone who opens the
 /// chat while the model is still writing gets the text so far at once, and
 /// the chart only when the answer is done.
