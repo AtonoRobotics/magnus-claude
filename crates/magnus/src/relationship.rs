@@ -160,6 +160,19 @@ impl Kernel {
         Ok((notes_of(c["body"].as_str().unwrap_or_default()), d.version()))
     }
 
+    /// The person's notes as they stood at `at`: the version in force
+    /// then (0: none yet), read from the log, so a run's later calls
+    /// carry what its first call did (#259). A removal in force then
+    /// means none.
+    pub async fn relationship_at(&self, person: &str, at: chrono::DateTime<chrono::Utc>) -> anyhow::Result<(Vec<String>, u32)> {
+        let Some((seq, kind, body)) = self.log.bundle_at(&path(person), at).await? else { return Ok((vec![], 0)) };
+        if kind != "bundle_written" {
+            return Ok((vec![], 0));
+        }
+        let c = self.log.contents(&[seq]).await?.remove(&seq).unwrap_or_default();
+        Ok((notes_of(c["body"].as_str().unwrap_or_default()), body["version"].as_u64().unwrap_or(0) as u32))
+    }
+
     /// Change the person's notes: by Magnus in `run`, or by the person
     /// themselves (no run). Each change is a new version of the document,
     /// checked as every bundle write is (K8); one change at a time, so two
@@ -212,11 +225,12 @@ impl Kernel {
 
     /// What a run's system context carries for its person beyond the
     /// instructions (`section`), and the notes' version, which each model
-    /// call logs. A run's recent messages are those that ended before it
-    /// started, outside its own conversation, so its context is the same
-    /// at every call.
+    /// call logs. The notes are those in force when it started, as its
+    /// recent messages are those that ended before it started, outside
+    /// its own conversation, so its context is the same at every call.
     pub(crate) async fn person_context(&self, run: &Run) -> anyhow::Result<(String, Option<u32>)> {
-        let (notes, version) = self.relationship(&run.person).await?;
+        // Their notes, as they stood when it started (#259).
+        let (notes, version) = self.relationship_at(&run.person, run.created_at).await?;
         let thread = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.as_ref().map(|c| c.thread.clone())));
         let recent = self.recent_to(&run.person, thread.as_deref(), run.created_at).await?;
         // Their reactions and open disagreements, as they stood when it started (#233).

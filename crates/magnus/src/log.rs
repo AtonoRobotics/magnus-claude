@@ -630,6 +630,14 @@ impl Log {
         Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
     }
 
+    /// One bundle path's latest write or removal strictly before `at`:
+    /// its event, kind and body. None when it never changed before then.
+    pub async fn bundle_at(&self, path: &str, at: DateTime<Utc>) -> Result<Option<(i64, String, Value)>> {
+        let sql = "SELECT seq, kind, body FROM public.events WHERE kind IN ('bundle_written', 'bundle_removed') AND body->>'path' = $1 AND at < $2 ORDER BY seq DESC LIMIT 1";
+        let rows = self.client().await?.query(sql, &[&path, &at]).await.context("read a bundle path as of a time")?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).next())
+    }
+
     /// Delete the content of these events.
     pub async fn delete_content(&self, seqs: &[i64]) -> Result<u64> {
         if !self.store {

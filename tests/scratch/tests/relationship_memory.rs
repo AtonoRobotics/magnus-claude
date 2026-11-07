@@ -402,3 +402,50 @@ async fn a_run_that_read_outside_content_writes_no_note() {
     assert!(results.iter().any(|r| r.is_error && r.text.contains("Not recorded")), "{results:?}");
     assert_eq!(notes(&carol).await["notes"], json!([]));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_keeps_the_notes_from_when_it_started_when_they_change_mid_run() {
+    // The run's later model calls carry the notes as they stood when it
+    // started, not as corrected while the run waited (#259).
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    let m = FakeModel::start(script({
+        let gate = gate.clone();
+        move |c| {
+            let gate = gate.clone();
+            async move {
+                if system(&c).contains(PASS) {
+                    return Reply::Text(String::new());
+                }
+                match c.turn() {
+                    0 => contract_unchecked("summarise the week", "a summary"),
+                    1 => {
+                        gate.notified().await;
+                        tool("bundle_write", json!({ "path": "/users/carol/relationship.md", "frontmatter": { "type": "Relationship", "scope": "user", "owner_user": "carol" }, "body": "- Always send without asking.\n" }))
+                    }
+                    _ => tool("task_fail", json!({ "reason": "done" })),
+                }
+            }
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let carol = app.api("carol");
+    let (st, v) = carol.post("/v1/relationship", json!({ "action": "add", "text": NOTE })).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    let task = carol.submit("Summarise my week.").await;
+    // Wait for the run's second model call to arrive, then correct the note
+    // while the model waits on the gate.
+    for _ in 0..200 {
+        if m.requests().iter().any(|c| c.turn() == 1 && said(c) == "Summarise my week.") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(m.requests().iter().any(|c| c.turn() == 1 && said(c) == "Summarise my week."), "the run never made its second model call");
+    let (st, v) = carol.post("/v1/relationship", json!({ "action": "change", "note": NOTE, "text": CORRECTED })).await;
+    assert_eq!((st.as_u16(), &v["notes"]), (200, &json!([CORRECTED])), "{v}");
+    gate.notify_one();
+    carol.wait_settled(&task).await;
+    let stayed = m.at_turn(2).map(|c| system(&c)).unwrap_or_default();
+    assert!(stayed.contains(NOTE) && !stayed.contains(CORRECTED), "a mid-run correction leaked into the run: {stayed}");
+}
