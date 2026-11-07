@@ -400,7 +400,7 @@ impl Provider {
     pub async fn in_directory(&self, address: &str) -> Result<bool> {
         let found: Result<bool> = async {
             let d = self.discovery().await?;
-            let (admin, token) = self.status_admin(&d).await?;
+            let (admin, token) = self.status_admin(d).await?;
             let mut u = url::Url::parse(&format!("{admin}/users"))?;
             u.query_pairs_mut().append_pair("email", address).append_pair("exact", "true");
             let users: Vec<Value> = self.admin_http.get(u).bearer_auth(&token).send().await?.error_for_status()?.json().await?;
