@@ -619,6 +619,26 @@ impl Kernel {
         Ok(id)
     }
 
+    async fn observe_or_interrupt(self: &Arc<Self>, run: &Run, call_id: &str, name: &str, input: &Value) -> Result<()> {
+        let rid = run.id.as_str();
+        let (what, why, evidence) = (input["what"].as_str().unwrap_or_default().trim(), input["why"].as_str().unwrap_or_default().trim(), input["evidence"].as_str().unwrap_or_default().trim());
+        if name == "observe" {
+            if what.is_empty() || why.is_empty() || evidence.is_empty() {
+                self.result(rid, call_id, "observe needs what, why and evidence. A retry with the same values will not help.", true).await?;
+            } else {
+                let at = self.notify_due(&run.person);
+                let item = self.item(run, "observation", what.to_string(), json!({ "why": why, "evidence": evidence, "call_id": call_id, "notify_at": at.to_rfc3339() })).await?;
+                self.result(rid, call_id, format!("Queued as observation {item} for the person's next session."), false).await?;
+            }
+        } else if what.is_empty() || why.is_empty() {
+            self.result(rid, call_id, "interrupt needs what and why. A retry with the same values will not help.", true).await?;
+        } else {
+            let said = self.interrupt_for(run, what, why, call_id).await?;
+            self.result(rid, call_id, said, false).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn record_call(self: &Arc<Self>, run: &Run, call_id: &str, step_id: &str, name: &str, input: &Value) -> Result<Flow> {
         let rid = run.id.as_str();
         if name == "show" {
@@ -761,24 +781,10 @@ impl Kernel {
                 self.item(run, "message", m, json!({ "from": "agent", "call_id": call_id })).await?;
                 self.result(rid, call_id, "Sent.", false).await?;
             }
-            "observe" => {
-                let (what, why, evidence) = (input["what"].as_str().unwrap_or_default().trim(), input["why"].as_str().unwrap_or_default().trim(), input["evidence"].as_str().unwrap_or_default().trim());
-                if what.is_empty() || why.is_empty() || evidence.is_empty() {
-                    self.result(rid, call_id, "observe needs what, why and evidence. A retry with the same values will not help.", true).await?;
-                } else {
-                    let at = self.notify_due(&run.person);
-                    let item = self.item(run, "observation", what.to_string(), json!({ "why": why, "evidence": evidence, "call_id": call_id, "notify_at": at.to_rfc3339() })).await?;
-                    self.result(rid, call_id, format!("Queued as observation {item} for the person's next session."), false).await?;
-                }
-            }
-            "interrupt" => {
-                let (what, why) = (input["what"].as_str().unwrap_or_default().trim(), input["why"].as_str().unwrap_or_default().trim());
-                if what.is_empty() || why.is_empty() {
-                    self.result(rid, call_id, "interrupt needs what and why. A retry with the same values will not help.", true).await?;
-                } else {
-                    let said = self.interrupt_for(run, what, why, call_id).await?;
-                    self.result(rid, call_id, said, false).await?;
-                }
+            // Boxed like complete_review: record_call's future sits on the
+            // stack below Cedar policy evaluation (#370).
+            "observe" | "interrupt" => {
+                Box::pin(self.observe_or_interrupt(run, call_id, name, input)).await?;
             }
             _ => self.result(rid, call_id, format!("{name} is not a run record."), true).await?,
         }
@@ -919,6 +925,15 @@ impl Kernel {
     }
 
     /// The model reports completion; the world decides (A4, K25, K26, K37).
+    async fn complete_review(self: &Arc<Self>, run: &Run, rid: &str, call_id: &str, input: &Value, view: Value, spoken: Option<String>) -> Result<Flow> {
+        let summary = input["summary"].as_str().unwrap_or_default().to_string();
+        self.result(rid, call_id, "Reviewed and completed.", false).await?;
+        self.emit("kernel", Ev::Completed { run: rid.into(), summary, view: Some(view), spoken }).await?;
+        self.on_stop(rid, true).await;
+        self.after_end(rid);
+        Ok(Flow::Stop)
+    }
+
     async fn complete(self: &Arc<Self>, run: &Run, call_id: &str, step_id: &str, input: &Value) -> Result<Flow> {
         let rid = run.id.as_str();
         // The deliverable's shape is checked, never its content: a missing or
@@ -937,13 +952,11 @@ impl Kernel {
         // A review's work is the observations it queued, already in the
         // log; there is nothing to check it against, and no person to
         // review its criteria, so it completes without a contract (#237).
+        // Boxed: complete()'s future sits on the stack below Cedar policy
+        // evaluation, which refuses to run with under 100KB left; growing
+        // it starves the verifier's reads (#370).
         if run.contract.is_none() && self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.review)) {
-            let summary = input["summary"].as_str().unwrap_or_default().to_string();
-            self.result(rid, call_id, "Reviewed and completed.", false).await?;
-            self.emit("kernel", Ev::Completed { run: rid.into(), summary, view: Some(view), spoken }).await?;
-            self.on_stop(rid, true).await;
-            self.after_end(rid);
-            return Ok(Flow::Stop);
+            return Box::pin(self.complete_review(run, rid, call_id, input, view, spoken)).await;
         }
         let Some(contract) = run.contract.clone() else {
             self.result(rid, call_id, "There is no task contract, so completion cannot be checked. Record one with task_contract, then retry.", true).await?;
