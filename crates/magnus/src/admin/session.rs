@@ -5,12 +5,13 @@
 use super::auth::{self, Pending, Session, COOKIE, ROLE};
 use super::Console;
 use anyhow::{anyhow, bail, Context, Result};
-use axum::extract::{Query, Request, State};
+use axum::extract::{Form, Query, Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use chrono::{Duration, Utc};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -192,10 +193,151 @@ pub async fn login(State(c): State<Arc<Console>>, h: HeaderMap, Query(q): Query<
 }
 
 /// A fresh password check, for the actions that need one in the last five
-/// minutes; it comes back to `then`.
+/// minutes; it comes back to `then`. Local sessions confirm against the
+/// local store, provider sessions on the provider's page.
 pub async fn step_up(State(c): State<Arc<Console>>, h: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
-    let Some((sid, _)) = current(&c, &h) else { return Redirect::to("/auth/login").into_response() };
-    begin(&c, &h, Some(sid), local_path(q.get("then"))).await
+    let Some((sid, s)) = current(&c, &h) else { return Redirect::to("/auth/login").into_response() };
+    let then = local_path(q.get("then"));
+    if s.local {
+        return Redirect::to(&format!("/auth/local/step-up?then={}", urlencode(&then))).into_response();
+    }
+    begin(&c, &h, Some(sid), then).await
+}
+
+fn urlencode(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>()
+}
+
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// The local sign-in form: username and password, and the authenticator
+/// code where the account uses one. `error` says what went wrong, if
+/// anything did yet.
+fn local_form(action: &str, then: &str, person: &str, name: Option<&str>, code_needed: bool, error: Option<&str>) -> Response {
+    let who = match name {
+        // A step-up names its admin and asks only for the secrets.
+        Some(n) => format!("<p class=muted>Signed in as <strong>{}</strong>. Confirm it&rsquo;s you.</p>", escape(n)),
+        None => format!("<label>Username<input name=person value=\"{}\" autocomplete=username required></label>", escape(person)),
+    };
+    let code = if code_needed {
+        "<label>6-digit code<input name=code inputmode=numeric autocomplete=one-time-code required></label>"
+    } else {
+        "<label>6-digit code, if your account uses one<input name=code inputmode=numeric autocomplete=one-time-code></label>"
+    };
+    let error = error.map(|e| format!("<p class=error>{}</p>", escape(e))).unwrap_or_default();
+    let body = format!(
+        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width, initial-scale=1\"><title>Sign in to the console</title><link rel=stylesheet href=/assets/app.css><link rel=stylesheet href=/assets/admin.css><script src=/assets/theme.js></script><main class=\"ad-main\"><section class=\"card ad-sign-in\"><h1>Sign in to the console</h1>{error}<form method=post action=\"{action}\"><input type=hidden name=then value=\"{}\">{who}<label>Password<input type=password name=password autocomplete=current-password required></label>{code}<div class=row><button class=\"button primary\" type=submit>Sign in</button></div></form></section></main>",
+        escape(then)
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
+}
+
+/// Sign in against the local store instead of the provider (`/auth/login`
+/// stays the provider's way until the cutover removes it).
+pub async fn local_login(Query(q): Query<HashMap<String, String>>) -> Response {
+    let empty = String::new();
+    local_form("/auth/local", &local_path(q.get("then")), q.get("person").unwrap_or(&empty), None, false, None)
+}
+
+#[derive(Deserialize)]
+pub struct LocalLogin {
+    pub person: String,
+    pub password: String,
+    pub code: Option<String>,
+    pub then: Option<String>,
+}
+
+fn session_cookie(sid: &str) -> String {
+    format!("{COOKIE}={sid}; Path=/; Secure; HttpOnly; SameSite=Strict")
+}
+
+pub async fn local_login_post(State(c): State<Arc<Console>>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>, Form(f): Form<LocalLogin>) -> Response {
+    let person = f.person.trim().to_lowercase();
+    let then = local_path(f.then.as_ref());
+    let v = match c.kernel.call(Method::POST, "/v1/admin/console-sign-in", Some(&json!({ "person": person, "password": f.password, "code": f.code }))).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("admin console: local sign-in check: {e:#}");
+            return local_form("/auth/local", &then, &person, None, false, Some("Sign-in is unavailable. Try again in a moment."));
+        }
+    };
+    match v["result"].as_str() {
+        Some("ok") => {
+            let name = v["name"].as_str().unwrap_or(&person).to_string();
+            if let Err(e) = c.audit((&person, &name), "sign_in", None, peer, None, None).await {
+                tracing::error!("admin console: {e:#}");
+                return local_form("/auth/local", &then, &person, None, false, Some("The console could not record this sign-in, so it did not let it through. Try again in a moment."));
+            }
+            let now = Utc::now();
+            let sid = crate::connectors::random();
+            // A password just typed counts as stepped up, as with a fresh
+            // provider sign-in.
+            let s = Session { sub: person, name, csrf: crate::connectors::random(), refresh_token: String::new(), local: true, started: now, seen: now, refreshed: now, stepped_up: Some(now) };
+            c.store.sessions.lock().unwrap().insert(sid.clone(), s);
+            ([(header::SET_COOKIE, session_cookie(&sid))], Redirect::to(&then)).into_response()
+        }
+        Some("needs_code") => local_form("/auth/local", &then, &person, None, true, Some("Enter the 6-digit code from your authenticator app.")),
+        Some("locked") => {
+            tracing::warn!("admin console: local sign-in locked for {person}");
+            local_form("/auth/local", &then, &person, None, false, Some("Too many wrong passwords. Try again in a few minutes."))
+        }
+        _ => {
+            tracing::warn!("admin console: local sign-in refused for {person}");
+            local_form("/auth/local", &then, &person, None, false, Some("The name, password or code is wrong."))
+        }
+    }
+}
+
+/// Confirm a local session with its admin's password (and code): the form.
+pub async fn local_step_up(State(c): State<Arc<Console>>, h: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    let Some((_, s)) = current(&c, &h) else { return Redirect::to("/auth/login").into_response() };
+    if !s.local {
+        return Redirect::to(&format!("/auth/step-up?then={}", urlencode(&local_path(q.get("then"))))).into_response();
+    }
+    local_form("/auth/local/step-up", &local_path(q.get("then")), &s.sub, Some(&s.name), false, None)
+}
+
+#[derive(Deserialize)]
+pub struct LocalStepUp {
+    pub password: String,
+    pub code: Option<String>,
+    pub then: Option<String>,
+}
+
+/// Confirm a local session: the password just typed stamps the step-up.
+pub async fn local_step_up_post(State(c): State<Arc<Console>>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>, h: HeaderMap, Form(f): Form<LocalStepUp>) -> Response {
+    let Some((sid, s)) = current(&c, &h) else { return Redirect::to("/auth/login").into_response() };
+    if !s.local {
+        return Redirect::to(&format!("/auth/step-up?then={}", urlencode(&local_path(f.then.as_ref())))).into_response();
+    }
+    let then = local_path(f.then.as_ref());
+    let form = |code_needed: bool, error: &str| local_form("/auth/local/step-up", &then, &s.sub, Some(&s.name), code_needed, Some(error));
+    let v = match c.kernel.call(Method::POST, "/v1/admin/console-sign-in", Some(&json!({ "person": s.sub, "password": f.password, "code": f.code }))).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("admin console: local step-up check: {e:#}");
+            return form(false, "Confirmation is unavailable. Try again in a moment.");
+        }
+    };
+    match v["result"].as_str() {
+        Some("ok") => {
+            if let Err(e) = c.audit((&s.sub, &s.name), "step_up", None, peer, None, None).await {
+                tracing::error!("admin console: {e:#}");
+                return form(false, "The console could not record this confirmation, so it did not let it through. Try again in a moment.");
+            }
+            let mut sessions = c.store.sessions.lock().unwrap();
+            if let Some(s) = sessions.get_mut(&sid) {
+                s.stepped_up = Some(Utc::now());
+                s.refreshed = Utc::now();
+            }
+            Redirect::to(&then).into_response()
+        }
+        Some("needs_code") => form(true, "Enter the 6-digit code from your authenticator app."),
+        Some("locked") => form(false, "Too many wrong passwords. Try again in a few minutes."),
+        _ => form(false, "The password or code is wrong."),
+    }
 }
 
 async fn begin(c: &Console, h: &HeaderMap, step_up: Option<String>, then: String) -> Response {
@@ -278,7 +420,7 @@ pub async fn callback(State(c): State<Arc<Console>>, axum::extract::ConnectInfo(
         }
         None => {
             let sid = crate::connectors::random();
-            let s = Session { sub, name, csrf: crate::connectors::random(), refresh_token: refresh, started: now, seen: now, refreshed: now, stepped_up: fresh.then_some(now) };
+            let s = Session { sub, name, csrf: crate::connectors::random(), refresh_token: refresh, local: false, started: now, seen: now, refreshed: now, stepped_up: fresh.then_some(now) };
             c.store.sessions.lock().unwrap().insert(sid.clone(), s);
             let session = format!("{COOKIE}={sid}; Path=/; Secure; HttpOnly; SameSite=Strict");
             let mut r = Redirect::to(&p.then).into_response();
@@ -328,7 +470,25 @@ fn refused(status: StatusCode, error: &str, message: &str) -> Response {
 pub async fn guard(State(c): State<Arc<Console>>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>, mut req: Request, next: Next) -> Response {
     let Some((sid, mut s)) = current(&c, req.headers()) else { return refused(StatusCode::UNAUTHORIZED, "sign_in_required", "Sign in to the admin console.") };
     let now = Utc::now();
-    if now - s.refreshed > Duration::seconds(c.refresh_seconds) {
+    if s.local && now - s.refreshed > Duration::seconds(c.refresh_seconds) {
+        // Still here, active and an admin, at the kernel.
+        let still = match c.kernel.call(Method::GET, &format!("/v1/admin/console-standing/{}", urlencode(&s.sub)), None).await {
+            Ok(v) => v["ok"] == true,
+            Err(e) => {
+                tracing::warn!("admin console: {}'s session ends: {e:#}", s.sub);
+                false
+            }
+        };
+        if !still {
+            c.store.sessions.lock().unwrap().remove(&sid);
+            if let Err(e) = c.audit((&s.sub, &s.name), "session_ended", None, peer, None, None).await {
+                tracing::error!("admin console: {e:#}");
+            }
+            return refused(StatusCode::UNAUTHORIZED, "sign_in_required", "Your console session ended: your account no longer signs in as an admin.");
+        }
+        s.refreshed = now;
+    }
+    if !s.local && now - s.refreshed > Duration::seconds(c.refresh_seconds) {
         // Still an admin, still turned on, at the provider.
         let still = match c.idp.token(&c.key, &[("grant_type", "refresh_token"), ("refresh_token", &s.refresh_token)]).await {
             Ok(b) => match c.idp.admin_of(&b, None).await {
@@ -404,7 +564,9 @@ pub async fn logout(State(c): State<Arc<Console>>, axum::Extension(a): axum::Ext
         return refused(StatusCode::SERVICE_UNAVAILABLE, "audit", &format!("{e:#}"));
     }
     c.store.sessions.lock().unwrap().remove(&a.sid);
-    c.idp.logout(&c.key, &a.session.refresh_token).await;
+    if !a.session.local {
+        c.idp.logout(&c.key, &a.session.refresh_token).await;
+    }
     ([(header::SET_COOKIE, format!("{COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0"))], StatusCode::NO_CONTENT).into_response()
 }
 

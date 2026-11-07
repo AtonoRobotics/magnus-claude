@@ -386,6 +386,13 @@ impl Accounts {
         format!("local:{person}")
     }
 
+    /// The counter for console sign-in attempts: its own, so guessing at
+    /// the console cannot lock the person's apps, and guessing at the apps
+    /// cannot lock the console (#429).
+    pub fn console_counter(person: &str) -> String {
+        format!("console:{person}")
+    }
+
     /// End every session of a person (the provider turned them off).
     /// End every session of `person`; the ids of those ended.
     pub fn end_all(&self, person: &str) -> Result<Vec<String>> {

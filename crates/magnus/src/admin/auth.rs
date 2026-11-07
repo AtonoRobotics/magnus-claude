@@ -125,6 +125,10 @@ pub struct Session {
     pub name: String,
     pub csrf: String,
     pub refresh_token: String,
+    /// Signed in against the local store (`/auth/local`) rather than the
+    /// provider: the guard rechecks standing with the kernel, and sign-out
+    /// skips the provider (#429).
+    pub local: bool,
     pub started: DateTime<Utc>,
     pub seen: DateTime<Utc>,
     pub refreshed: DateTime<Utc>,
