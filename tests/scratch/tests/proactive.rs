@@ -472,3 +472,39 @@ async fn proactive_off_runs_no_reviews() {
     )
     .await;
 }
+
+/// A review that writes a contract and decides nothing changes nothing in
+/// the world, so it completes without asking the person to check its own
+/// judgement (2026-11-07: a review that found nothing put "Check them
+/// yourself: choose an appropriate response" in front of the owner).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_that_decides_nothing_needs_no_review_whatever_its_contract() {
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body["system"].to_string().contains(REVIEW) {
+            return tool("task_fail", json!({ "reason": "not under test" }));
+        }
+        match c.turn() {
+            0 => contract_unchecked("Review the supplied state", "Choose an appropriate response to the supplied state"),
+            _ => done("No observation or interruption warranted."),
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
+    let bob = app.api("bob");
+    let me = bob.clone();
+    let task = eventually("a completed review", Duration::from_secs(60), || {
+        let me = me.clone();
+        async move {
+            let (_, v) = me.get("/v1/tasks").await;
+            v["tasks"].as_array().cloned().unwrap_or_default().into_iter().find(|t| t["review"] == true && t["status"] == "completed")
+        }
+    })
+    .await;
+    assert_eq!(task["person"], "bob");
+    let me = bob.clone();
+    never("a review run asked the person to review it", Duration::from_secs(3), || {
+        let me = me.clone();
+        async move { me.inbox().await.iter().any(|i| i["kind"] == "review") }
+    })
+    .await;
+}

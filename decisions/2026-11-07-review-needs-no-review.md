@@ -1,0 +1,4 @@
+# A review that changed nothing needs no review (2026-11-07)
+
+- A proactive review or a poll that started no work (`work_started` false: it only read and wrote run records such as `observe`, `interrupt` and `propose_schedule`) completes on `task_complete` as one without a contract, whatever contract it wrote. Reason: the owner got a review card from a background review that found nothing, asking him to check "Choose an appropriate response based on the supplied unfinished work"; the person asked for nothing, nothing changed in the world, and the criterion is the review's own judgement, which no one can check. The behavior spec says a review that decides nothing produces no output.
+- A review that acted under a grant started work, so its criteria are checked as any task's, a person's review included (K37). Invariant 7's own test is a person's task and is unchanged.

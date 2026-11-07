@@ -948,8 +948,12 @@ impl Kernel {
         // A review's work is the observations it queued, already in the
         // log; there is nothing to check it against, and no person to
         // review its criteria, so it completes without a contract (#237).
-        // A poll's read likewise stands alone (#406).
-        if run.contract.is_none() && self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.review || t.poll)) {
+        // A poll's read likewise stands alone (#406). That holds whatever
+        // contract it wrote while it changed nothing in the world: a
+        // review that found nothing put a card in front of the person
+        // asking them to check its own judgement (2026-11-07). One that
+        // acted under a grant started work, and is checked as any task.
+        if (run.contract.is_none() || !run.work_started) && self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.review || t.poll)) {
             let summary = input["summary"].as_str().unwrap_or_default().to_string();
             self.result(rid, call_id, "Reviewed and completed.", false).await?;
             self.emit("kernel", Ev::Completed { run: rid.into(), summary, view: Some(view), spoken }).await?;
