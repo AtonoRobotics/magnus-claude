@@ -279,7 +279,8 @@ async fn a_failed_task_wakes_a_review_that_names_it() {
     let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
     let bob = app.api("bob");
     // Drain the boot review first: a wake during an active review is
-    // dropped with no retry (#386), so the failing task waits its turn.
+    // dropped for the backstop to pick up (#386), so the failing task
+    // waits its turn to exercise the fast wake.
     eventually("bob's boot review drained", Duration::from_secs(60), || {
         let me = bob.clone();
         async move {
@@ -296,6 +297,61 @@ async fn a_failed_task_wakes_a_review_that_names_it() {
         let (prompts, id) = (prompts.clone(), id.clone());
         async move { prompts.lock().unwrap().iter().any(|p| p.contains(&id) && p.contains("backup drive is full")).then_some(()) }
     })
+    .await;
+}
+
+/// A task that ends while a review is active is picked up by a later
+/// sweep: the fast wake is dropped (#386's race), but the sweep's
+/// backstop finds the newest ended task with no wake mark and reviews
+/// it by name. The boot review is stalled so the failure is guaranteed
+/// to land while it is active.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_ending_during_an_active_review_is_picked_up_by_the_backstop() {
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = prompts.clone();
+    let m = FakeModel::start(script(move |c| {
+        let prompts = seen.clone();
+        async move {
+            if !c.body["system"].to_string().contains(REVIEW) {
+                return tool("task_fail", json!({ "reason": "the backup drive is full" }));
+            }
+            prompts.lock().unwrap().push(c.text());
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            done("Reviewed quietly.")
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
+    let bob = app.api("bob");
+    // The boot review must be active when the task fails: wait for it
+    // to be running, then fail immediately.
+    eventually("bob's boot review running", Duration::from_secs(60), || {
+        let me = bob.clone();
+        async move {
+            let (_, v) = me.get("/v1/tasks").await;
+            v["tasks"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .any(|t| t["review"] == true && t["status"] == "running")
+                .then_some(())
+        }
+    })
+    .await;
+    let id = bob.submit("Back up the photos.").await;
+    let t = bob.wait_settled(&id).await;
+    assert_eq!(t["status"], "failed", "{t}");
+    eventually(
+        "the backstop review naming the failed task",
+        Duration::from_secs(90),
+        || {
+            let (prompts, id) = (prompts.clone(), id.clone());
+            async move {
+                prompts.lock().unwrap().iter().any(|p| p.contains(&id) && p.contains("backup drive is full")).then_some(())
+            }
+        },
+    )
     .await;
 }
 

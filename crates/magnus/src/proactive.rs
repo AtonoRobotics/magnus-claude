@@ -200,8 +200,8 @@ impl crate::kernel::Kernel {
             } else if !in_window(m, st.working) && overnight.as_deref() != Some(today.as_str()) {
                 self.start_review(&person, "overnight".into(), None).await;
             }
-            for reason in self.read(|s| {
-                let mut out = vec![];
+            for (reason, ended) in self.read(|s| {
+                let mut out: Vec<(String, Option<(String, String)>)> = vec![];
                 for sc in s
                     .schedules
                     .values()
@@ -214,7 +214,7 @@ impl crate::kernel::Kernel {
                         .get(&format!("{person}:schedule {}", sc.id))
                         .is_some_and(|d| d == &today)
                     {
-                        out.push(schedule_reason(&sc.id));
+                        out.push((schedule_reason(&sc.id), None));
                     }
                 }
                 for c in s
@@ -231,7 +231,7 @@ impl crate::kernel::Kernel {
                             .get(&format!("{person}:commitment {}", c.id))
                             .is_some_and(|d| d == &today)
                     {
-                        out.push(commitment_reason(&c.id));
+                        out.push((commitment_reason(&c.id), None));
                     }
                 }
                 for i in s.items.values().filter(|i| {
@@ -243,12 +243,43 @@ impl crate::kernel::Kernel {
                             .get(&format!("{person}:approval {}", i.id))
                             .is_some_and(|d| d == &today)
                     {
-                        out.push(approval_reason(&i.id));
+                        out.push((approval_reason(&i.id), None));
                     }
+                }
+                // The backstop (#386): a task that ended while a review
+                // was active had its fast wake dropped. The newest such
+                // task with no wake mark, ended over thirty seconds ago
+                // so the fast wake had its chance, gets its review from
+                // this sweep. The mark lands from the reason when the
+                // review starts, exactly as for the fast wake.
+                if let Some((id, verb, outcome)) = s
+                    .tasks
+                    .values()
+                    .filter(|t| t.person == person && !t.review && !t.chat.as_ref().is_some_and(|c| c.turn))
+                    .filter_map(|t| {
+                        let r = s.runs.get(&t.run_id)?;
+                        let verb = match r.status {
+                            crate::state::Status::Completed => "done",
+                            crate::state::Status::Failed => "failed",
+                            _ => return None,
+                        };
+                        let ended = r.ended_at?;
+                        if now.signed_duration_since(ended).num_seconds() < 30 {
+                            return None;
+                        }
+                        if s.wake_marks.contains_key(&format!("{person}:task {}", t.task_id)) {
+                            return None;
+                        }
+                        Some((ended, t.task_id.clone(), verb, r.summary.clone().unwrap_or_default()))
+                    })
+                    .max_by_key(|(ended, _, _, _)| *ended)
+                    .map(|(_, id, verb, outcome)| (id, verb, outcome))
+                {
+                    out.push((format!("task {id} {verb}"), Some((id, outcome))));
                 }
                 out
             }) {
-                self.start_review(&person, reason, None).await;
+                self.start_review(&person, reason, ended).await;
                 break;
             }
         }
