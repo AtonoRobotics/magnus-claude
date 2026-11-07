@@ -293,6 +293,38 @@ pub async fn resend(State(c): State<Arc<Console>>, Extension(a): Extension<Admin
     }
 }
 
+/// When the email cannot reach them: a password to sign in with once,
+/// shown to the admin here only, and the provider's page to use it on. The
+/// provider then asks them to choose their own. Only for an invitation, and
+/// for an admin's with a fresh password, as inviting one needs.
+pub async fn one_time_password(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Path(id): Path<String>) -> Response {
+    let p = match invited(&c, &id).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if p["role"] == "admin" {
+        if let Err(r) = a.step_up() {
+            return r;
+        }
+    }
+    let password = one_time();
+    let r = recorded(&c, &a, "user_invite_password_set", &id, None, None, async {
+        c.directory.set_temporary_password(&c.idp, &c.key, &id, &password).await?;
+        Ok(Value::Null)
+    })
+    .await;
+    match r {
+        Ok(_) => Json(json!({ "password": password, "sign_in": format!("{}/account", c.idp.issuer.trim_end_matches('/')), "username": p["username"] })).into_response(),
+        Err(r) => r,
+    }
+}
+
+/// Twenty letters and digits from the system's randomness.
+fn one_time() -> String {
+    use rand::Rng;
+    rand::rngs::OsRng.sample_iter(&rand::distributions::Alphanumeric).take(20).map(char::from).collect()
+}
+
 /// Withdraw an invitation nobody has taken up: the account goes. An account
 /// in use is removed only by Delete.
 pub async fn cancel(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Path(id): Path<String>) -> Response {

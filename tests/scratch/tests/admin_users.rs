@@ -168,6 +168,49 @@ async fn an_admin_invites_someone_who_chooses_their_password_from_the_providers_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn without_email_an_admin_gives_an_invited_person_a_one_time_password() {
+    // The realm has no mail server (#352): the invitation cannot be
+    // emailed, and the admin passes on a one-time password instead.
+    let s = Setup::start(60, &[]).await;
+    let alice = s.alice(false).await;
+    let (st, v) = s.send(reqwest::Method::POST, "/users", &alice, Some(json!({ "email": "dee@acme.test", "name": "Dee Ray", "role": "member" }))).await;
+    assert_eq!((st, &v["email_sent"]), (StatusCode::CREATED, &json!(false)), "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+
+    let (st, v) = s.send(reqwest::Method::POST, &format!("/users/{id}/invite/password"), &alice, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let password = v["password"].as_str().unwrap().to_string();
+    assert!(password.len() >= 20 && password.chars().all(|c| c.is_ascii_alphanumeric()), "{v}");
+    assert_eq!(v["sign_in"].as_str(), Some(format!("{}/account", s.kc.issuer).as_str()), "{v}");
+    assert_eq!(v["username"], "dee@acme.test", "{v}");
+    // Still an invitation: the provider makes them choose their own first.
+    assert!(!s.kc.password_works("dee@acme.test", &password).await, "the one-time password signs in without choosing one's own");
+    assert_eq!(s.user(&alice, "dee@acme.test").await.unwrap()["status"], "invited");
+    assert!(s.audited(&alice).await.iter().any(|a| a == "user_invite_password_set"), "not in the audit log");
+
+    // Dee signs in with it at the provider and chooses their password.
+    let landed = s.kc.browser_with(v["sign_in"].as_str().unwrap(), "dee@acme.test", &password).await;
+    assert!(landed.is_ok(), "{landed:?}");
+    assert!(s.kc.password_works("dee@acme.test", &password).await, "the chosen password does not sign in ({landed:?})");
+    assert_eq!(s.user(&alice, "dee@acme.test").await.unwrap()["status"], "active");
+    // An account in use gets no password from here.
+    let (st, v) = s.send(reqwest::Method::POST, &format!("/users/{id}/invite/password"), &alice, None).await;
+    assert_eq!((st, v["error"].as_str()), (StatusCode::CONFLICT, Some("not_invited")), "{v}");
+
+    // An admin's invitation needs a fresh password, as inviting them does.
+    let fresh = s.alice(true).await;
+    let (st, v) = s.send(reqwest::Method::POST, "/users", &fresh, Some(json!({ "email": "eve@acme.test", "name": "Eve Ito", "role": "admin" }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let eve = v["id"].as_str().unwrap().to_string();
+    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+    let (st, v) = s.send(reqwest::Method::POST, &format!("/users/{eve}/invite/password"), &fresh, None).await;
+    assert_eq!((st, v["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("step_up_required")), "{v}");
+    let fresh = s.alice(true).await;
+    let (st, v) = s.send(reqwest::Method::POST, &format!("/users/{eve}/invite/password"), &fresh, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_last_admin_stays_and_a_person_turned_off_loses_every_session_and_schedule() {
     let s = Setup::start(60, &["Bob"]).await;
 

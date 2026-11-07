@@ -217,6 +217,7 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/api/v1/users/{id}/sessions", axum::routing::delete(users::end_sessions))
         .route("/api/v1/users/{id}/sessions/{sid}", axum::routing::delete(users::end_session))
         .route("/api/v1/users/{id}/invite", axum::routing::post(users::resend).delete(users::cancel))
+        .route("/api/v1/users/{id}/invite/password", axum::routing::post(users::one_time_password))
         .route("/api/v1/connectors", get(connectors::list).post(connectors::add))
         .route("/api/v1/connectors/{id}", axum::routing::patch(connectors::update).delete(connectors::remove))
         .route("/api/v1/connectors/{id}/credential", axum::routing::put(connectors::set_credential).delete(connectors::revoke_credential))

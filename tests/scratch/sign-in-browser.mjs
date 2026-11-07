@@ -33,6 +33,9 @@ const browser = await chromium.launch({ executablePath, headless: true });
 try {
   const page = await (await browser.newContext()).newPage();
   await page.goto(url);
+  // The provider's account page is a script that sends the browser on to
+  // its sign-in form: wait for a form to fill before looking for one.
+  await page.waitForSelector("#username, #password-new, a[href*='login-actions/action-token'], input[name=accept], button[name=accept]", { timeout: 15000 }).catch(() => {});
   // A link from the provider's email (an invitation) opens on "Perform the
   // following action: Update password", then on choosing a password: there
   // is no sign-in form to fill.
