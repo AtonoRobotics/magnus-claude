@@ -66,6 +66,16 @@ pub struct Invite {
     pub expires: DateTime<Utc>,
 }
 
+/// What a person may administer: admins enter the console, members do not.
+/// Nobody recorded is a member. This is the console axis, not the kernel's
+/// owner/developer roles (#429).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Admin,
+    Member,
+}
+
 /// Days an invitation stays usable.
 const INVITE_DAYS: i64 = 7;
 
@@ -79,11 +89,13 @@ pub struct Accounts {
     /// Last accepted authenticator step per person: a code signs in once,
     /// and concurrent uses of it admit exactly one (#441).
     totp_steps: Mutex<BTreeMap<String, i64>>,
-    /// Serializes invitation changes: concurrent accepts of one token admit
-    /// exactly one, and concurrent invites never resurrect a consumed one
-    /// (#450). In-process only, like every lock here; the CLI is the rare
-    /// second writer, as with the passwords file.
-    invites: Mutex<()>,
+    /// Serializes local-people changes (invites, roles, statuses):
+    /// concurrent accepts of one token admit exactly one, concurrent
+    /// invites never resurrect a consumed one, and two switches never
+    /// strand the organisation with no admin (#450, #429). In-process
+    /// only, like every lock here; the CLI is the rare second writer, as
+    /// with the passwords file.
+    people: Mutex<()>,
 }
 
 fn token_hash(token: &str) -> String {
@@ -177,7 +189,7 @@ impl Accounts {
         let mut sessions: BTreeMap<String, Session> = read_json(&d.join("sessions.json"))?;
         sessions.retain(|_, s| s.expires > now);
         let totp_steps: BTreeMap<String, i64> = read_json(&d.join("totp-steps.json"))?;
-        Ok(Accounts { dir: d, cfg, sessions: Mutex::new(sessions), failures: Mutex::new(BTreeMap::new()), totp_steps: Mutex::new(totp_steps), invites: Mutex::new(()) })
+        Ok(Accounts { dir: d, cfg, sessions: Mutex::new(sessions), failures: Mutex::new(BTreeMap::new()), totp_steps: Mutex::new(totp_steps), people: Mutex::new(()) })
     }
 
     fn save(&self, sessions: &BTreeMap<String, Session>) -> Result<()> {
@@ -203,7 +215,12 @@ impl Accounts {
 
     /// Turn a person on or off. Disabling ends their live sessions at once
     /// and returns the ids of those ended, for the caller to record.
+    /// Refuses to disable the organisation's last enabled admin.
     pub fn set_status(&self, person: &str, status: Status) -> Result<Vec<String>> {
+        let _g = self.people.lock().unwrap();
+        if status == Status::Disabled && self.sole_enabled_admin(person)? {
+            anyhow::bail!("This is the organisation's last admin: make someone else an admin first.");
+        }
         let path = self.dir.join("status.json");
         let mut all: BTreeMap<String, Status> = read_json(&path)?;
         all.insert(person.to_string(), status);
@@ -214,6 +231,35 @@ impl Accounts {
         Ok(vec![])
     }
 
+    /// What the person may administer: member unless recorded an admin
+    /// (read fresh: the CLI may have changed it).
+    pub fn role(&self, person: &str) -> Role {
+        read_json::<BTreeMap<String, Role>>(&self.dir.join("roles.json")).map(|m| m.get(person).copied().unwrap_or(Role::Member)).unwrap_or(Role::Member)
+    }
+
+    /// Whether `person` is an enabled admin with no other: demoting or
+    /// disabling them would strand the organisation. Unrecorded people are
+    /// members, so an unmanaged switch never guards.
+    fn sole_enabled_admin(&self, person: &str) -> Result<bool> {
+        let roles: BTreeMap<String, Role> = read_json(&self.dir.join("roles.json"))?;
+        let statuses: BTreeMap<String, Status> = read_json(&self.dir.join("status.json"))?;
+        let enabled = |p: &str| roles.get(p) == Some(&Role::Admin) && statuses.get(p).copied().unwrap_or(Status::Active) == Status::Active;
+        Ok(enabled(person) && !roles.keys().any(|p| p != person && enabled(p)))
+    }
+
+    /// Set a person's role. Refuses to demote the organisation's last
+    /// enabled admin.
+    pub fn set_role(&self, person: &str, role: Role) -> Result<()> {
+        let _g = self.people.lock().unwrap();
+        if role == Role::Member && self.sole_enabled_admin(person)? {
+            anyhow::bail!("This is the organisation's last admin: make someone else an admin first.");
+        }
+        let path = self.dir.join("roles.json");
+        let mut all: BTreeMap<String, Role> = read_json(&path)?;
+        all.insert(person.to_string(), role);
+        write_private(&path, &serde_json::to_vec_pretty(&all)?)
+    }
+
     /// Invite a person: a single-use token, good for 7 days, is stored by
     /// its hash and returned to pass on; the person must already be in the
     /// config (the local user store lifts that in a later #429 slice).
@@ -221,7 +267,7 @@ impl Accounts {
     /// anyone else keeps their status, so an invite never revokes working
     /// access.
     pub fn invite(&self, person: &str, email: Option<&str>) -> Result<String> {
-        let _g = self.invites.lock().unwrap();
+        let _g = self.people.lock().unwrap();
         let d = &self.dir;
         std::fs::create_dir_all(d)?;
         std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
@@ -257,7 +303,7 @@ impl Accounts {
         // The password is judged before the token is touched, so a short one
         // does not burn the invitation.
         anyhow::ensure!(password.chars().count() >= cfg.min_password_length, "a password needs at least {} characters", cfg.min_password_length);
-        let _g = self.invites.lock().unwrap();
+        let _g = self.people.lock().unwrap();
         let d = &self.dir;
         let path = d.join("invites.json");
         let mut all: BTreeMap<String, Invite> = read_json(&path)?;
@@ -771,6 +817,60 @@ mod tests {
             });
             assert_eq!(*admitted.lock().unwrap(), 1, "round {round}: racing accepts did not admit exactly one");
         }
+    }
+
+    /// Local roles default to member, set explicitly, and read back (#429).
+    #[test]
+    fn roles_default_member_and_set_explicitly() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SignIn { session_days: 1, max_failures: 5, lockout_minutes: 15, min_password_length: 10, oidc: None };
+        let accounts = Accounts::open(dir.path(), cfg).unwrap();
+        assert_eq!(accounts.role("ada"), Role::Member, "an unrecorded person is not a member");
+        accounts.set_role("ada", Role::Admin).unwrap();
+        assert_eq!(accounts.role("ada"), Role::Admin, "setting admin did not stick");
+        accounts.set_role("bea", Role::Member).unwrap();
+        assert_eq!(accounts.role("bea"), Role::Member, "setting member did not stick");
+    }
+
+    /// The last enabled admin keeps the role and the sign-in: demoting or
+    /// disabling them refuses, a disabled admin record does not count, and a
+    /// second admin unlocks both (#429).
+    #[test]
+    fn last_admin_keeps_role_and_signin() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SignIn { session_days: 1, max_failures: 5, lockout_minutes: 15, min_password_length: 10, oidc: None };
+        set_password(dir.path(), &cfg, "ada", "a-long-password").unwrap();
+        set_password(dir.path(), &cfg, "bea", "bea-long-password").unwrap();
+        let accounts = Accounts::open(dir.path(), cfg).unwrap();
+        accounts.set_role("ada", Role::Admin).unwrap();
+        let e = accounts.set_role("ada", Role::Member).unwrap_err();
+        assert!(format!("{e:#}").contains("last admin"), "demoting the last admin refused wrongly: {e:#}");
+        assert_eq!(accounts.role("ada"), Role::Admin, "the refused demotion landed");
+        let e = accounts.set_status("ada", Status::Disabled).unwrap_err();
+        assert!(format!("{e:#}").contains("last admin"), "disabling the last admin refused wrongly: {e:#}");
+        assert_eq!(accounts.status("ada"), Status::Active, "the refused disabling landed");
+        // A disabled admin on record does not free the switch: nobody
+        // enabled would be left to administer.
+        accounts.set_role("bea", Role::Admin).unwrap();
+        accounts.set_status("bea", Status::Disabled).unwrap();
+        assert!(accounts.set_role("ada", Role::Member).is_err(), "a disabled admin record freed the last enabled admin's role");
+        accounts.set_status("bea", Status::Active).unwrap();
+        accounts.set_role("ada", Role::Member).unwrap();
+        accounts.set_status("ada", Status::Disabled).unwrap();
+        assert_eq!(accounts.role("ada"), Role::Member, "a second admin did not unlock the demotion");
+        assert_eq!(accounts.status("ada"), Status::Disabled, "a second admin did not unlock the disabling");
+    }
+
+    /// With no admin records the switch is unmanaged: disabling works, so
+    /// the guard never locks an appliance that never assigned roles (#429).
+    #[test]
+    fn no_admin_records_leaves_the_switch_unguarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SignIn { session_days: 1, max_failures: 5, lockout_minutes: 15, min_password_length: 10, oidc: None };
+        set_password(dir.path(), &cfg, "ada", "a-long-password").unwrap();
+        let accounts = Accounts::open(dir.path(), cfg).unwrap();
+        accounts.set_status("ada", Status::Disabled).unwrap();
+        assert_eq!(accounts.status("ada"), Status::Disabled, "disabling with no admin records refused");
     }
 
     /// Without an enrolled second factor, the code path behaves exactly as
