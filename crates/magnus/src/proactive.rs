@@ -507,13 +507,37 @@ impl crate::kernel::Kernel {
     /// working hours or over budget it waits for the next session; in
     /// quiet hours it posts now and pings when quiet ends (#237). What
     /// the `interrupt` record says back.
+    /// Whether the loop may `op` (`suggest`, `interrupt`, `act`) for
+    /// this run: person-directed runs are not the loop, so only review
+    /// and schedule-originated runs are governed and anything else is
+    /// allowed; a governed run needs the policy's leave (#368). Some
+    /// reason denies, following the boundary's fail-closed rule.
+    pub(crate) fn loop_deny(&self, run: &crate::state::Run, op: &str, tool: Option<&crate::policy::ToolFacts>) -> Option<String> {
+        let (task, policies) = self.read(|s| (s.tasks.get(&run.task).cloned(), s.policies.clone()));
+        let task = match task {
+            Some(t) => t,
+            None => return Some("policy cannot evaluate the loop action: the run has no task".into()),
+        };
+        if !task.review && task.schedule.is_none() {
+            return None;
+        }
+        let person = match self.person(&run.person) {
+            Some(p) => p,
+            None => return Some("policy cannot evaluate the loop action: the run has no person".into()),
+        };
+        match crate::policy::loop_allowed(&policies, &person, op, tool, run.untrusted, run.private) {
+            Ok(_) => None,
+            Err(crate::policy::LoopDeny::Forbidden(r)) | Err(crate::policy::LoopDeny::Broken(r)) => Some(r),
+        }
+    }
+
     pub async fn interrupt_for(
         &self,
         run: &crate::state::Run,
         what: &str,
         why: &str,
         call_id: &str,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, bool)> {
         let prefs = self.read(|s| {
             s.preferences
                 .get(&run.person)
@@ -522,13 +546,24 @@ impl crate::kernel::Kernel {
         });
         let st = settings(&self.cfg.proactive, &prefs);
         let now = Utc::now();
+        if let Some(denied) = self.loop_deny(run, "interrupt", None) {
+            // Denied like a spent budget: the news waits as an
+            // observation when suggestions are allowed, else nothing is
+            // queued (#368).
+            if self.loop_deny(run, "suggest", None).is_none() {
+                let at = quiet_ends_at(now, st.tz, st.quiet).unwrap_or(now);
+                let item = self.item(run, "observation", what.to_string(), serde_json::json!({ "why": why, "evidence": "queued: interruptions not permitted", "call_id": call_id, "notify_at": at.to_rfc3339() })).await?;
+                return Ok((format!("Interruptions are not permitted ({denied}): queued as observation {item} for the next session."), false));
+            }
+            return Ok((format!("Interruptions and observations are not permitted ({denied}): nothing was queued."), true));
+        }
         if !in_window(minutes_at(now, st.tz), st.working) {
             let at = window_next_start(now, st.tz, st.working).unwrap_or(now);
             let item = self.item(run, "observation", what.to_string(), serde_json::json!({ "why": why, "evidence": "queued: outside working hours", "call_id": call_id, "notify_at": at.to_rfc3339() })).await?;
-            return Ok(format!(
+            return Ok((format!(
                 "Outside working hours: queued as observation {item}; it pings at {}.",
                 at.with_timezone(&st.tz).format("%H:%M")
-            ));
+            ), false));
         }
         let today = day_key(now, st.tz);
         let n = self.read(|s| {
@@ -541,9 +576,9 @@ impl crate::kernel::Kernel {
         if n >= st.per_day {
             let at = quiet_ends_at(now, st.tz, st.quiet).unwrap_or(now);
             let item = self.item(run, "observation", what.to_string(), serde_json::json!({ "why": why, "evidence": "queued: interruption budget spent", "call_id": call_id, "notify_at": at.to_rfc3339() })).await?;
-            return Ok(format!(
+            return Ok((format!(
                 "Interruption budget spent ({n} today): queued as observation {item} for the next session."
-            ));
+            ), false));
         }
         let at = quiet_ends_at(now, st.tz, st.quiet).unwrap_or(now);
         let item = self
@@ -555,12 +590,12 @@ impl crate::kernel::Kernel {
             )
             .await?;
         if at > now {
-            Ok(format!(
+            Ok((format!(
                 "Posted as interruption {item}; it pings when quiet ends at {}.",
                 at.with_timezone(&st.tz).format("%H:%M")
-            ))
+            ), false))
         } else {
-            Ok(format!("Delivered as interruption {item}."))
+            Ok((format!("Delivered as interruption {item}."), false))
         }
     }
 }
