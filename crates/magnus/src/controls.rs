@@ -7,6 +7,7 @@
 use crate::config::Person;
 use crate::events::Ev;
 use crate::kernel::Kernel;
+use crate::state::{Run, Schedule, State as Projection, Task};
 use crate::tools::Label;
 use serde_json::{json, Value};
 
@@ -33,6 +34,32 @@ fn may_control(who: &Person, owner: &str) -> bool {
     who.id == owner || who.is_owner() || who.has_role("admin")
 }
 
+/// One task's row for lists and get: status, result, what it did.
+fn task_row(t: &Task, r: &Run) -> Value {
+    json!({ "id": t.task_id, "person": t.person, "status": crate::api::status_str(r.status), "created_at": t.created_at, "schedule": t.schedule, "summary": r.summary })
+}
+
+/// One schedule's row for lists and get, with its latest run.
+fn schedule_row(s: &Projection, x: &Schedule) -> Value {
+    let latest = s.tasks.values().filter(|t| t.schedule.as_deref() == Some(&x.id)).max_by_key(|t| t.created_at).and_then(|t| s.runs.get(&t.run_id).map(|r| json!({ "task": t.task_id, "status": crate::api::status_str(r.status), "at": t.created_at, "summary": r.summary })));
+    json!({
+        "id": x.id, "person": x.person, "every_minutes": x.every_minutes, "daily_at": x.daily_at, "until": x.until, "max_runs": x.max_runs,
+        "runs": x.started, "paused": x.paused, "next": x.next_due(), "latest": latest,
+    })
+}
+
+/// One task's row by id, however old, for `who` to control. None when
+/// there is no such task or it is not theirs (#265).
+fn controlled_task(s: &Projection, who: &Person, id: &str) -> Option<Value> {
+    let t = s.tasks.get(id).filter(|t| may_control(who, &t.person))?;
+    s.runs.get(&t.run_id).map(|r| task_row(t, r))
+}
+
+/// One schedule's row by id for `who` to control (#265).
+fn controlled_schedule(s: &Projection, who: &Person, id: &str) -> Option<Value> {
+    s.schedules.get(id).filter(|x| may_control(who, &x.person)).map(|x| schedule_row(s, x))
+}
+
 impl Kernel {
     /// The tasks `who` controls (their own; everyone's for the owner and
     /// admins), newest first.
@@ -41,8 +68,7 @@ impl Kernel {
             s.tasks
                 .values()
                 .filter(|t| may_control(who, &t.person) && t.chat.as_ref().is_none_or(|c| !c.turn))
-                .filter_map(|t| s.runs.get(&t.run_id).map(|r| (t, r)))
-                .map(|(t, r)| json!({ "id": t.task_id, "person": t.person, "status": crate::api::status_str(r.status), "created_at": t.created_at, "schedule": t.schedule, "summary": r.summary }))
+                .filter_map(|t| s.runs.get(&t.run_id).map(|r| task_row(t, r)))
                 .collect()
         });
         v.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
@@ -52,19 +78,18 @@ impl Kernel {
 
     /// The schedules `who` controls.
     pub fn schedules_for(&self, who: &Person) -> Vec<Value> {
-        self.read(|s| {
-            s.schedules
-                .values()
-                .filter(|x| may_control(who, &x.person))
-                .map(|x| {
-                    let latest = s.tasks.values().filter(|t| t.schedule.as_deref() == Some(&x.id)).max_by_key(|t| t.created_at).and_then(|t| s.runs.get(&t.run_id).map(|r| json!({ "task": t.task_id, "status": crate::api::status_str(r.status), "at": t.created_at, "summary": r.summary })));
-                    json!({
-                        "id": x.id, "person": x.person, "every_minutes": x.every_minutes, "daily_at": x.daily_at, "until": x.until, "max_runs": x.max_runs,
-                        "runs": x.started, "paused": x.paused, "next": x.next_due(), "latest": latest,
-                    })
-                })
-                .collect()
-        })
+        self.read(|s| s.schedules.values().filter(|x| may_control(who, &x.person)).map(|x| schedule_row(s, x)).collect())
+    }
+
+    /// One task by id, however old: the list's row, under the same
+    /// who-may-control rule; no such task when it is not theirs (#265).
+    pub fn get_task(&self, who: &Person, id: &str) -> Result<Value, Refused> {
+        self.read(|s| controlled_task(s, who, id)).ok_or(Refused::NotFound("task"))
+    }
+
+    /// One schedule by id under the same rule (#265).
+    pub fn get_schedule(&self, who: &Person, id: &str) -> Result<Value, Refused> {
+        self.read(|s| controlled_schedule(s, who, id)).ok_or(Refused::NotFound("schedule"))
     }
 
     /// Cancel a task: its run stops, the cancellation is in the log, and
@@ -227,13 +252,14 @@ impl Kernel {
         Ok(rows)
     }
 
-    /// What a list of tasks or schedules carries (invariant 4): a summary is
-    /// the words of the run that wrote it, so the list is labelled as each
-    /// run whose summary it returned, and names the apps those runs read
-    /// private data from. A row with no summary says nothing a run wrote.
+    /// What a list or get of tasks or schedules carries (invariant 4): a
+    /// summary is the words of the run that wrote it, so the answer is
+    /// labelled as each run whose summary it returned, and names the apps
+    /// those runs read private data from. A row with no summary says
+    /// nothing a run wrote.
     pub fn listed_taint(&self, listed: &Value) -> (Label, Vec<String>) {
-        let tasks = listed["tasks"].as_array().into_iter().flatten().filter(|r| r["summary"].is_string()).filter_map(|r| r["id"].as_str());
-        let latest = listed["schedules"].as_array().into_iter().flatten().map(|x| &x["latest"]).filter(|r| r["summary"].is_string()).filter_map(|r| r["task"].as_str());
+        let tasks = listed["tasks"].as_array().into_iter().flatten().chain(std::iter::once(&listed["task"])).filter(|r| r["summary"].is_string()).filter_map(|r| r["id"].as_str());
+        let latest = listed["schedules"].as_array().into_iter().flatten().map(|x| &x["latest"]).chain(std::iter::once(&listed["schedule"]["latest"])).filter(|r| r["summary"].is_string()).filter_map(|r| r["task"].as_str());
         let ids: Vec<&str> = tasks.chain(latest).collect();
         self.read(|s| {
             let mut label = Label::PRINCIPAL;
@@ -257,6 +283,14 @@ impl Kernel {
         let r: Result<Value, Refused> = match tool {
             "list_tasks" => self.as_policy_allows(&who, self.tasks_for(&who, 30)).await.map(|v| json!({ "tasks": v })),
             "list_schedules" => self.as_policy_allows(&who, self.schedules_for(&who)).await.map(|v| json!({ "schedules": v })),
+            "get_task" => match self.get_task(&who, id) {
+                Ok(row) => self.as_policy_allows(&who, vec![row]).await.map(|mut rows| json!({ "task": rows.pop().unwrap_or(Value::Null) })),
+                Err(e) => Err(e),
+            },
+            "get_schedule" => match self.get_schedule(&who, id) {
+                Ok(row) => self.as_policy_allows(&who, vec![row]).await.map(|mut rows| json!({ "schedule": rows.pop().unwrap_or(Value::Null) })),
+                Err(e) => Err(e),
+            },
             "cancel_task" => self.cancel_task(&who, id).await,
             "pause_schedule" => self.pause_schedule(&who, id).await.map(|_| json!({ "paused": id })),
             "resume_schedule" => self.resume_schedule(&who, id).await.map(|_| json!({ "resumed": id })),
@@ -272,7 +306,7 @@ impl Kernel {
 }
 
 /// The control tools, as the model calls them.
-pub const TOOLS: [&str; 7] = ["list_tasks", "list_schedules", "cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule"];
+pub const TOOLS: [&str; 9] = ["list_tasks", "list_schedules", "get_task", "get_schedule", "cancel_task", "pause_schedule", "resume_schedule", "edit_schedule", "cancel_schedule"];
 
 /// How a recorded intent reads in a cancel report.
 #[derive(Debug, PartialEq)]
@@ -296,11 +330,54 @@ fn report_class(result: Option<&crate::state::ResultRec>) -> ReportClass {
 
 #[cfg(test)]
 mod tests {
-    use super::{report_class, ReportClass};
+    use super::{controlled_schedule, controlled_task, report_class, ReportClass};
+    use crate::log::Event;
     use crate::state::ResultRec;
+    use crate::state::State as Projection;
+    use serde_json::{json, Value};
 
     fn rec(status: &str, is_error: bool) -> ResultRec {
         ResultRec { seq: 0, text: String::new(), is_error, status: status.into(), data: None }
+    }
+
+    /// One task or schedule by id: status, result or latest run, what it
+    /// did — the list's row, however old, for its person, the owner and
+    /// admins alone (#265).
+    #[test]
+    fn get_reaches_any_controlled_task_or_schedule() {
+        let mut s = Projection::default();
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        let t0 = chrono::Utc::now();
+        let mut seq = 0;
+        let mut ev = |at: chrono::DateTime<chrono::Utc>, actor: &str, e: Value| {
+            seq += 1;
+            s.apply(&Event { seq, at, actor: actor.into(), ev: serde_json::from_value(e).unwrap() });
+        };
+        for i in 0..31 {
+            let at = t0 + chrono::Duration::minutes(i);
+            ev(at, "kernel", json!({ "kind": "task_created", "task": format!("t{i:02}"), "run": format!("r{i:02}"), "person": "carol", "text": "Work.", "config": config }));
+            ev(at, "kernel", json!({ "kind": "completed", "run": format!("r{i:02}"), "summary": format!("did {i}") }));
+        }
+        ev(t0, "kernel", json!({ "kind": "task_created", "task": "tb", "run": "rb", "person": "bob", "text": "Work.", "config": config }));
+        ev(t0, "kernel", json!({ "kind": "schedule_set", "id": "s1", "person": "carol", "daily_at": "03:00" }));
+        ev(t0, "schedule:s1", json!({ "kind": "task_created", "task": "ts", "run": "rs", "person": "carol", "text": "Water.", "config": config }));
+        ev(t0, "kernel", json!({ "kind": "completed", "run": "rs", "summary": "watered" }));
+        let who = |id: &str, roles: &[&str]| serde_json::from_value::<crate::config::Person>(json!({ "id": id, "roles": roles })).unwrap();
+        let (carol, bob, alice) = (who("carol", &[]), who("bob", &[]), who("alice", &["owner"]));
+
+        // The oldest of 31, past the list's 30, with its result.
+        let oldest = controlled_task(&s, &carol, "t00").expect("the oldest task");
+        assert_eq!((&oldest["status"], &oldest["summary"]), (&json!("completed"), &json!("did 0")), "{oldest}");
+        assert!(controlled_task(&s, &carol, "t99").is_none(), "no such task");
+        assert!(controlled_task(&s, &carol, "tb").is_none(), "another person's task");
+        assert!(controlled_task(&s, &bob, "t00").is_none(), "another person's task");
+        assert_eq!(controlled_task(&s, &alice, "t00").as_ref().and_then(|r| r["summary"].as_str()), Some("did 0"), "the owner reads anyone's");
+
+        // The schedule with its latest run.
+        let got = controlled_schedule(&s, &carol, "s1").expect("the schedule");
+        assert_eq!((&got["daily_at"], &got["latest"]["task"], &got["latest"]["summary"]), (&json!("03:00"), &json!("ts"), &json!("watered")), "{got}");
+        assert!(controlled_schedule(&s, &carol, "s9").is_none(), "no such schedule");
+        assert!(controlled_schedule(&s, &bob, "s1").is_none(), "another person's schedule");
     }
 
     /// In flight and outcome-unknown read possibly done; done reads

@@ -55,6 +55,8 @@
   "end_schedule": "End the schedule that started this task, so no more of its runs start: for example when its work is done, its window has passed, or it has run as many times as it was meant to. Give the reason; the person is told. Only a task a schedule started can use it.",
   "list_tasks": "The person's tasks, newest first: id, status (running, waiting, completed, failed, cancelled), when it started, its schedule if a schedule started it, and its summary. Use it to find which task the person means.",
   "list_schedules": "The person's schedules: id, when it runs (every_minutes or daily_at), when it ends (until, max_runs), how many runs so far, whether and why it is paused, when it runs next, and its latest run with its result.",
+  "get_task": "One of the person's tasks by its id, however old: status, result and what it did. id: from list_tasks or this conversation.",
+  "get_schedule": "One of the person's schedules by its id: when it runs, when it ends, how many runs so far, whether and why it is paused, when it runs next, and its latest run with its result. id: from list_schedules or this conversation.",
   "cancel_task": "Cancel one of the person's tasks that has not ended: its run stops and the cancellation is recorded. The answer lists what it had already done, the changes that cannot be undone (an email sent) first: tell the person those plainly. id: from list_tasks or this conversation.",
   "pause_schedule": "Pause one of the person's schedules: no more runs start until it is resumed; a run already going goes on.",
   "resume_schedule": "Resume a paused schedule.",
