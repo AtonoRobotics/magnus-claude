@@ -1722,7 +1722,7 @@ impl State {
                     k.version = e.seq;
                 }
             }
-            Ev::ScheduleRemoved { id } => {
+            Ev::ScheduleRemoved { id, .. } => {
                 self.schedules.remove(id);
             }
             Ev::ScheduleEnded { id, reason, .. } => {
@@ -1742,14 +1742,14 @@ impl State {
                     s.skipped = Some((e.at, task.clone(), reason.clone()));
                 }
             }
-            Ev::SchedulePaused { id, reason, task, admin } => {
+            Ev::SchedulePaused { id, reason, task, admin, .. } => {
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.paused = Some(reason.clone());
                     s.paused_on = task.clone();
                     s.paused_by_admin = *admin;
                 }
             }
-            Ev::ScheduleChanged { id, every_minutes, daily_at, until, max_runs } => {
+            Ev::ScheduleChanged { id, every_minutes, daily_at, until, max_runs, .. } => {
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.every_minutes = *every_minutes;
                     s.daily_at = daily_at.clone();
@@ -1760,7 +1760,7 @@ impl State {
                     s.ended = None;
                 }
             }
-            Ev::ScheduleResumed { id } => {
+            Ev::ScheduleResumed { id, .. } => {
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.paused = None;
                     s.paused_by_admin = false;
@@ -2144,7 +2144,7 @@ impl State {
                     r.first_stop.get_or_insert(e.at);
                 }
             }
-            Ev::Cancelled { run } => {
+            Ev::Cancelled { run, .. } => {
                 if let Some(r) = self.runs.get_mut(run).filter(|r| !r.status.terminal()) {
                     r.status = Status::Cancelled;
                     r.reason = None;

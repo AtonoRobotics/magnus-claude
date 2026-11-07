@@ -451,3 +451,71 @@ async fn an_org_policy_tells_schedule_edits_from_cancels() {
     assert!(schedule(&carol, &bins).await["id"].is_string(), "the cancel went past the policy");
 }
 
+/// A cancelled run's log says how it was cancelled: by conversation, with
+/// the chat run, or by button (#267).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_runs_log_says_button_or_conversation() {
+    let person = |id: &str, roles: &[&str]| Person {
+        id: id.into(),
+        name: id.into(),
+        token: format!("tok-{id}"),
+        groups: vec!["staff".into()],
+        roles: roles.iter().map(|r| r.to_string()).collect(),
+    };
+    let spec = Spec {
+        people: vec![person("alice", &["owner"]), person("bob", &[]), person("dana", &["developer"])],
+        ..Spec::default()
+    };
+    let calls = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start(model(calls.clone())).await;
+    let mut app = Appliance::start(spec, &m).await;
+    let (bob, dana) = (app.api("bob"), app.api("dana"));
+    let cancelled = |log: &Value| {
+        log["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "cancelled")
+            .map(|e| e["body"].clone())
+            .unwrap_or(Value::Null)
+    };
+
+    // By conversation: the chat run is named.
+    let first = bob.submit("Draft the quarterly numbers.").await;
+    bob.wait_item(&first, "question").await;
+    calls.lock().unwrap().push(("Cancel it.".into(), "cancel_task".into(), json!({ "id": first })));
+    let (st, v) = bob.post("/v1/chat", json!({ "text": "Cancel it." })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let chat = bob.wait_settled(v["task_id"].as_str().unwrap()).await;
+    let run = bob.task(&first).await["run_id"].as_str().unwrap().to_string();
+    let (_, log) = dana.get(&format!("/v1/dev/runs/{run}/log")).await;
+    let ev = cancelled(&log);
+    assert_eq!((ev["source"].as_str(), ev["turn"].as_str()), (Some("conversation"), chat["run_id"].as_str()), "{ev}");
+
+    // By button: no turn.
+    let second = bob.submit("Draft the annual numbers.").await;
+    bob.wait_item(&second, "question").await;
+    let (st, v) = bob.post(&format!("/v1/tasks/{second}/cancel"), json!({})).await;
+    assert!(st.is_success(), "{v}");
+    let run = bob.task(&second).await["run_id"].as_str().unwrap().to_string();
+    let (_, log) = dana.get(&format!("/v1/dev/runs/{run}/log")).await;
+    let ev = cancelled(&log);
+    assert_eq!(ev["source"].as_str(), Some("button"), "{ev}");
+    assert!(ev["turn"].is_null(), "{ev}");
+
+    // Pauses say it too, in the log's own rows.
+    let one = schedule_set(&bob, "Water the plants.").await;
+    let two = schedule_set(&bob, "Take the bins out.").await;
+    calls.lock().unwrap().push(("Pause the plants.".into(), "pause_schedule".into(), json!({ "id": one })));
+    let (st, v) = bob.post("/v1/chat", json!({ "text": "Pause the plants." })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let chat = bob.wait_settled(v["task_id"].as_str().unwrap()).await;
+    assert_eq!(bob.post(&format!("/v1/schedules/{two}/pause"), json!({})).await.0.as_u16(), 204);
+    let db = app.db.admin().await;
+    let rows: Vec<Value> =
+        db.query("SELECT body FROM public.events WHERE kind = 'schedule_paused' ORDER BY seq", &[]).await.unwrap().iter().map(|r| r.get(0)).collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!((rows[0]["source"].as_str(), rows[0]["turn"].as_str()), (Some("conversation"), chat["run_id"].as_str()), "{}", rows[0]);
+    assert_eq!((rows[1]["source"].as_str(), rows[1]["turn"].is_null()), (Some("button"), true), "{}", rows[1]);
+}
+

@@ -37,6 +37,15 @@ fn may_control(who: &Person, owner: &str) -> bool {
     who.id == owner || who.is_owner() || who.has_role("admin")
 }
 
+/// What a control's event records about how it was done (#267): the chat
+/// run did it, or the app's button did.
+fn sources(turn: Option<&str>) -> (Option<String>, Option<String>) {
+    match turn {
+        Some(run) => (Some("conversation".into()), Some(run.into())),
+        None => (Some("button".into()), None),
+    }
+}
+
 /// Whether `who` may `op` the `kind` (`"Task"`, `"Schedule"`) `id` owned
 /// by `owner`: the layered policy decides (#266). A denial of a row they
 /// can see is honest; of one they cannot, it reads as not found, as
@@ -125,14 +134,15 @@ impl Kernel {
     /// Cancel a task: its run stops, the cancellation is in the log, and
     /// the answer says what it had already done, the changes that cannot be
     /// undone first.
-    pub async fn cancel_task(&self, who: &Person, id: &str) -> Result<Value, Refused> {
+    pub async fn cancel_task(&self, who: &Person, id: &str, turn: Option<&str>) -> Result<Value, Refused> {
         let found = self.read(|s| s.tasks.get(id).and_then(|t| s.runs.get(&t.run_id).map(|r| (t.person.clone(), r.clone()))));
         let Some((owner, run)) = found else { return Err(Refused::NotFound("task")) };
         control_check(self, who, "cancel_task", "Task", id, &owner, "task")?;
         if run.status.terminal() {
             return Err(Refused::Conflict(format!("the task has already ended ({})", crate::api::status_str(run.status))));
         }
-        self.emit(&format!("person:{}", who.id), Ev::Cancelled { run: run.id.clone() }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        let (source, turn_ev) = sources(turn);
+        self.emit(&format!("person:{}", who.id), Ev::Cancelled { run: run.id.clone(), source, turn: turn_ev }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
         // It may have ended on its own as the cancel was recorded: then the
         // cancel changed nothing, and the person is told how it ended.
         let now = self.read(|s| s.runs.get(&run.id).map(|r| r.status));
@@ -187,7 +197,7 @@ impl Kernel {
     /// already going goes on. Pausing one held on its waiting run keeps
     /// the person's pause: the hold's end does not resume it. An admin's
     /// suspension is not paused over.
-    pub async fn pause_schedule(&self, who: &Person, id: &str) -> Result<(), Refused> {
+    pub async fn pause_schedule(&self, who: &Person, id: &str, turn: Option<&str>) -> Result<(), Refused> {
         let sc = self.schedule_owned(who, id, "pause_schedule")?;
         if sc.ended.is_some() {
             return Err(Refused::Conflict("the schedule has ended".into()));
@@ -199,13 +209,14 @@ impl Kernel {
             return Err(Refused::Conflict("the schedule is already paused".into()));
         }
         let reason = if who.id == sc.person { "Paused by you".to_string() } else { format!("Paused by {}", who.name) };
-        self.emit(&format!("person:{}", who.id), Ev::SchedulePaused { id: id.into(), reason, task: None, admin: false }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        let (source, turn_ev) = sources(turn);
+        self.emit(&format!("person:{}", who.id), Ev::SchedulePaused { id: id.into(), reason, task: None, admin: false, source, turn: turn_ev }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
         Ok(())
     }
 
     /// Resume a schedule its person paused. An admin's suspension is
     /// lifted only by an admin (or the owner), here or in the console.
-    pub async fn resume_schedule(&self, who: &Person, id: &str) -> Result<(), Refused> {
+    pub async fn resume_schedule(&self, who: &Person, id: &str, turn: Option<&str>) -> Result<(), Refused> {
         let sc = self.schedule_owned(who, id, "resume_schedule")?;
         if sc.ended.is_some() {
             return Err(Refused::Conflict("the schedule has ended".into()));
@@ -219,19 +230,22 @@ impl Kernel {
         if sc.paused_on.is_some() {
             return Err(Refused::Conflict("its run is waiting on you: answer it, or resume or cancel that task, and the schedule goes on".into()));
         }
-        self.emit(&format!("person:{}", who.id), Ev::ScheduleResumed { id: id.into() }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        let (source, turn_ev) = sources(turn);
+        self.emit(&format!("person:{}", who.id), Ev::ScheduleResumed { id: id.into(), source, turn: turn_ev }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
         Ok(())
     }
 
     /// Cancel a schedule: no more runs, and a run of it still going stops.
-    pub async fn cancel_schedule(&self, who: &Person, id: &str) -> Result<Value, Refused> {
+    pub async fn cancel_schedule(&self, who: &Person, id: &str, turn: Option<&str>) -> Result<Value, Refused> {
         self.schedule_owned(who, id, "cancel_schedule")?;
         let going: Vec<(String, String)> = self.read(|s| s.tasks.values().filter(|t| t.schedule.as_deref() == Some(id)).filter_map(|t| s.runs.get(&t.run_id)).filter(|r| !r.status.terminal()).map(|r| (r.task.clone(), r.id.clone())).collect());
-        self.emit(&format!("person:{}", who.id), Ev::ScheduleRemoved { id: id.into() }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        let (source, turn_ev) = sources(turn);
+        self.emit(&format!("person:{}", who.id), Ev::ScheduleRemoved { id: id.into(), source, turn: turn_ev }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
         let mut runs = vec![];
         let mut stopped = 0;
         for (task, run) in &going {
-            if self.emit(&format!("person:{}", who.id), Ev::Cancelled { run: run.clone() }).await.is_ok() {
+            let (source, turn_ev) = sources(turn);
+            if self.emit(&format!("person:{}", who.id), Ev::Cancelled { run: run.clone(), source, turn: turn_ev }).await.is_ok() {
                 self.on_stop(run, true).await;
                 stopped += 1;
                 if let Some(now) = self.read(|s| s.runs.get(run).cloned()) {
@@ -245,7 +259,7 @@ impl Kernel {
 
     /// Change when a schedule runs and when it ends. What each run does
     /// stays: to change that, cancel it and set up another.
-    pub async fn edit_schedule(&self, who: &Person, id: &str, b: &Value) -> Result<Value, Refused> {
+    pub async fn edit_schedule(&self, who: &Person, id: &str, b: &Value, turn: Option<&str>) -> Result<Value, Refused> {
         let sc = self.schedule_owned(who, id, "edit_schedule")?;
         let timing = b.get("every_minutes").is_some_and(|v| !v.is_null()) || b.get("daily_at").is_some_and(|v| !v.is_null());
         let (every_minutes, daily_at) = if timing { crate::api::rule_for(b, self.cfg.schedules.min_every_minutes).map_err(Refused::Invalid)? } else { (sc.every_minutes, sc.daily_at.clone()) };
@@ -255,7 +269,8 @@ impl Kernel {
         if max_runs.is_some_and(|m| m <= sc.started) {
             return Err(Refused::Invalid(format!("it has already run {} times", sc.started)));
         }
-        self.emit(&format!("person:{}", who.id), Ev::ScheduleChanged { id: id.into(), every_minutes, daily_at: daily_at.clone(), until, max_runs }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
+        let (source, turn_ev) = sources(turn);
+        self.emit(&format!("person:{}", who.id), Ev::ScheduleChanged { id: id.into(), every_minutes, daily_at: daily_at.clone(), until, max_runs, source, turn: turn_ev }).await.map_err(|e| Refused::Failed(format!("{e:#}")))?;
         Ok(json!({ "id": id, "every_minutes": every_minutes, "daily_at": daily_at, "until": until, "max_runs": max_runs }))
     }
 
@@ -310,7 +325,7 @@ impl Kernel {
     /// One of the control tools Magnus calls in a conversation, for the
     /// person the conversation is with: what the tool says back, and whether
     /// it is an error.
-    pub async fn chat_control(&self, person: &str, tool: &str, input: &Value) -> (String, bool, Option<Value>) {
+    pub async fn chat_control(&self, person: &str, tool: &str, input: &Value, run: &str) -> (String, bool, Option<Value>) {
         let Some(who) = self.person(person) else { return ("no such person".into(), true, None) };
         let id = input["id"].as_str().unwrap_or_default();
         let r: Result<Value, Refused> = match tool {
@@ -327,11 +342,11 @@ impl Kernel {
                 Ok(row) => self.as_policy_allows(&who, vec![row]).await.map(|mut rows| json!({ "schedule": rows.pop().unwrap_or(Value::Null) })),
                 Err(e) => Err(e),
             },
-            "cancel_task" => self.cancel_task(&who, id).await,
-            "pause_schedule" => self.pause_schedule(&who, id).await.map(|_| json!({ "paused": id })),
-            "resume_schedule" => self.resume_schedule(&who, id).await.map(|_| json!({ "resumed": id })),
-            "edit_schedule" => self.edit_schedule(&who, id, input).await,
-            "cancel_schedule" => self.cancel_schedule(&who, id).await,
+            "cancel_task" => self.cancel_task(&who, id, Some(run)).await,
+            "pause_schedule" => self.pause_schedule(&who, id, Some(run)).await.map(|_| json!({ "paused": id })),
+            "resume_schedule" => self.resume_schedule(&who, id, Some(run)).await.map(|_| json!({ "resumed": id })),
+            "edit_schedule" => self.edit_schedule(&who, id, input, Some(run)).await,
+            "cancel_schedule" => self.cancel_schedule(&who, id, Some(run)).await,
             _ => Err(Refused::Invalid(format!("{tool} is not a control"))),
         };
         match r {
@@ -366,7 +381,7 @@ fn report_class(result: Option<&crate::state::ResultRec>) -> ReportClass {
 
 #[cfg(test)]
 mod tests {
-    use super::{controlled_schedule, controlled_task, report_class, ReportClass};
+    use super::{controlled_schedule, controlled_task, report_class, sources, ReportClass};
     use crate::log::Event;
     use crate::state::ResultRec;
     use crate::state::State as Projection;
@@ -380,6 +395,13 @@ mod tests {
     /// did — the list's row, however old, for its person, the owner and
     /// admins alone (#265).
     #[test]
+    /// A control's event names the chat run that did it, or the button.
+    #[test]
+    fn a_controls_event_names_conversation_or_button() {
+        assert_eq!(sources(Some("run_1")), (Some("conversation".into()), Some("run_1".into())));
+        assert_eq!(sources(None), (Some("button".into()), None));
+    }
+
     fn get_reaches_any_controlled_task_or_schedule() {
         let mut s = Projection::default();
         let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });

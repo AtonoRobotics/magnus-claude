@@ -158,7 +158,7 @@ async fn resend(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, 
             .collect()
     });
     for run in stop {
-        if let Err(e) = k.emit(&format!("person:{}", p.id), Ev::Cancelled { run: run.clone() }).await {
+        if let Err(e) = k.emit(&format!("person:{}", p.id), Ev::Cancelled { run: run.clone(), source: Some("button".into()), turn: None }).await {
             return internal(e);
         }
         k.on_stop(&run, true).await;

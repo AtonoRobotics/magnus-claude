@@ -110,6 +110,55 @@ fn reaction_line<'a>(sys: &'a str, said: &str) -> Option<&'a str> {
     sys.lines().find(|l| l.contains(&format!("{said}, on your message")))
 }
 
+/// Started tasks and cards take reactions: logged, shown on them, and
+/// in the next run's context (#267).
+#[tokio::test(flavor = "multi_thread")]
+async fn started_tasks_and_cards_take_reactions() {
+    use std::sync::{Arc, Mutex};
+    let cal = magnus_scratch::FakeOAuthApp::start(3600).await;
+    let name = Arc::new(Mutex::new(String::new()));
+    let n = name.clone();
+    let m = FakeModel::start(script(move |c| {
+        let n = n.clone();
+        async move {
+            let sys = system(&c);
+            if sys.contains(PASS) {
+                return Reply::Text(String::new());
+            }
+            if !sys.contains(CHAT) {
+                return Reply::Text("Sub done.".into());
+            }
+            if said(&c) != "Set things up." {
+                return Reply::Text("Done.".into());
+            }
+            match c.turn() {
+                0 => tool("create_task", json!({ "title": "Filing", "text": "File the notes." })),
+                1 => tool("offer_app", json!({ "name": n.lock().unwrap().clone(), "why": "To find a time your team is free" })),
+                _ => Reply::Text("All set.".into()),
+            }
+        }
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (alice, carol) = (app.api("alice"), app.api("carol"));
+    let (st, v) = alice.post("/v1/connectors", json!({ "url": cal.url, "audience": "public", "label": "private+untrusted" })).await;
+    assert!(st.is_success(), "{v}");
+    *name.lock().unwrap() = v["name"].as_str().unwrap().to_string();
+
+    let (thread, _) = chat(&carol, "Set things up.").await;
+    let (_, t) = carol.get(&format!("/v1/chat/{thread}")).await;
+    let entries = t["entries"].as_array().unwrap();
+    let tasks = entries.iter().find(|e| e["kind"] == "tasks").expect("no started-tasks entry")["id"].as_str().unwrap().to_string();
+    let card = entries.iter().find(|e| e["kind"] == "connector_card").expect("no connector card")["id"].as_str().unwrap().to_string();
+    assert_eq!(react(&carol, &thread, &tasks, json!("great")).await.0, 200);
+    assert_eq!(react(&carol, &thread, &card, json!("annoying")).await.0, 200);
+    assert_eq!(shown(&carol, &thread, &tasks).await, "great");
+    assert_eq!(shown(&carol, &thread, &card).await, "annoying");
+    chat(&carol, "What is on today?").await;
+    let sys = system_for(&m, "What is on today?");
+    assert!(reaction_line(&sys, "that was great").is_some() && reaction_line(&sys, "that was annoying").is_some(), "{sys}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reaction_is_logged_changed_and_taken_back_and_every_later_run_sees_it_also_after_a_restart() {
     let m = FakeModel::start(model()).await;

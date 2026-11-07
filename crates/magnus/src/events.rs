@@ -548,6 +548,13 @@ pub enum Ev {
         /// An admin's suspension: only an admin lifts it.
         #[serde(default)]
         admin: bool,
+        /// How it was done: "button" (the app), "conversation" (chat), or
+        /// "console" (the admin UI). None: automatic, or logged before #267.
+        #[serde(default)]
+        source: Option<String>,
+        /// The chat run that did it, when by conversation.
+        #[serde(default)]
+        turn: Option<String>,
     },
     /// When a schedule runs and when it ends, changed by its person (or the
     /// owner or an admin); what each run does stays.
@@ -557,9 +564,21 @@ pub enum Ev {
         daily_at: Option<String>,
         until: Option<chrono::DateTime<chrono::Utc>>,
         max_runs: Option<u32>,
+        /// How it was done: "button", "conversation" or "console" (#267).
+        #[serde(default)]
+        source: Option<String>,
+        /// The chat run that did it, when by conversation.
+        #[serde(default)]
+        turn: Option<String>,
     },
     ScheduleResumed {
         id: String,
+        /// How it was done: "button", "conversation" or "console" (#267).
+        #[serde(default)]
+        source: Option<String>,
+        /// The chat run that did it, when by conversation.
+        #[serde(default)]
+        turn: Option<String>,
     },
     /// The person declined a card proposed in chat (a schedule or a
     /// suggestion), with their reason (none in logs from before #253).
@@ -584,6 +603,12 @@ pub enum Ev {
     },
     ScheduleRemoved {
         id: String,
+        /// How it was done: "button", "conversation" or "console" (#267).
+        #[serde(default)]
+        source: Option<String>,
+        /// The chat run that did it, when by conversation.
+        #[serde(default)]
+        turn: Option<String>,
     },
     /// A person's standing authority over a category of their own work
     /// (behavior spec, Standing authority; #235): set when they chose
@@ -919,6 +944,13 @@ pub enum Ev {
     },
     Cancelled {
         run: String,
+        /// How it was done: "button", "conversation" or "console" (#267).
+        /// None: automatic, or logged before then.
+        #[serde(default)]
+        source: Option<String>,
+        /// The chat run that did it, when by conversation.
+        #[serde(default)]
+        turn: Option<String>,
     },
     Item {
         id: String,
@@ -1255,7 +1287,7 @@ impl Ev {
             | Resumed { run }
             | Completed { run, .. }
             | Failed { run, .. }
-            | Cancelled { run }
+            | Cancelled { run, .. }
             | ApprovalUsed { run, .. }
             | GrantUsed { run, .. }
             | Wait { run, .. }

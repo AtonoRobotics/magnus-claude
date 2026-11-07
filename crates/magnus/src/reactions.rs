@@ -21,6 +21,8 @@ use crate::api::{err, internal, who};
 use crate::events::Ev;
 use crate::kernel::{new_id, Kernel};
 use crate::state::State as Projection;
+use crate::state::Run;
+use std::collections::HashMap;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -34,8 +36,20 @@ use std::sync::Arc;
 pub const REACTIONS: &[(&str, &str)] = &[("great", "that was great"), ("annoying", "that was annoying")];
 
 /// The thread entries that are Magnus's messages: its answers (or what it
-/// said when it could not answer) and its tasks' results.
-const MAGNUS: &[&str] = &["answer", "turn", "result"];
+/// said when it could not answer), its tasks' results, the tasks a turn
+/// started, and the cards it proposed (#267). The person's own messages
+/// and openers are not its to be judged on.
+const MAGNUS: &[&str] = &[
+    "answer",
+    "turn",
+    "result",
+    "tasks",
+    "proposal_card",
+    "grant_card",
+    "suggestion_card",
+    "schedule_card",
+    "connector_card",
+];
 
 /// The thread's entries with the person's reaction on each of Magnus's
 /// messages that has one, for them to see.
@@ -59,6 +73,18 @@ pub fn marked(s: &Projection, person: &str, thread: &str, mut entries: Vec<Value
 /// into every later run of theirs.
 pub(crate) fn reactions_before(s: &Projection, person: &str, before: DateTime<Utc>) -> Vec<(DateTime<Utc>, String)> {
     let Some(mine) = s.reactions.get(person) else { return vec![] };
+    // A card's proposing run: cards live in run results, with no state
+    // link of their own, so index them once when a card carries one.
+    let mut card_runs: HashMap<&str, &Run> = HashMap::new();
+    if mine.keys().any(|(_, e)| e.starts_with("c:")) {
+        for r in s.runs.values() {
+            for res in r.results.values() {
+                if let Some(c) = res.data.as_ref().and_then(|d| d.get("card")).and_then(|c| c.as_str()) {
+                    card_runs.insert(c, r);
+                }
+            }
+        }
+    }
     let mut out: Vec<(DateTime<Utc>, String)> = mine
         .iter()
         .filter_map(|((thread, entry), history)| {
@@ -68,13 +94,28 @@ pub(crate) fn reactions_before(s: &Projection, person: &str, before: DateTime<Ut
             if s.trash.contains_key(thread) || s.removed_threads.contains(thread) || hidden(entry) {
                 return None;
             }
-            let task = entry.split_once(':').map(|(_, t)| t).filter(|t| !s.trash.contains_key(*t)).and_then(|t| s.tasks.get(t)).filter(|t| t.person == person)?;
+            // Started tasks read their turn's run, named in the entry; a
+            // card reads the run that proposed it (#267).
+            let (task, run) = match entry.split_once(':') {
+                Some(("t", id)) => {
+                    let run = s.runs.get(id)?;
+                    (s.tasks.get(&run.task).filter(|t| t.person == person && !s.trash.contains_key(&t.task_id))?, run)
+                }
+                Some(("c", id)) => {
+                    let run = card_runs.get(id).copied()?;
+                    (s.tasks.get(&run.task).filter(|t| t.person == person && !s.trash.contains_key(&t.task_id))?, run)
+                }
+                _ => {
+                    let task = entry.split_once(':').map(|(_, t)| t).filter(|t| !s.trash.contains_key(*t)).and_then(|t| s.tasks.get(t)).filter(|t| t.person == person)?;
+                    let run = s.runs.get(&task.run_id)?;
+                    (task, run)
+                }
+            };
             // A result goes with the answer that started its task (review of #252).
             let origin = task.chat.as_ref().and_then(|c| c.from_run.as_ref()).and_then(|f| s.runs.get(f)).map(|o| format!("a:{}", o.task));
             if origin.is_some_and(|o| hidden(&o)) {
                 return None;
             }
-            let run = s.runs.get(&task.run_id)?;
             let said = REACTIONS.iter().find(|(k, _)| k == reaction).map_or(reaction.as_str(), |(_, said)| said);
             let words = if run.untrusted || run.private {
                 "(its words are not shown: the run that wrote it read content from outside the conversation)".to_string()
@@ -275,6 +316,33 @@ mod tests {
         let sec = section(&[(at(2), "that was great, on your message \"x\"".into())], &[(at(3), "d1: you advised: Wait. They decided: Ship now.".into())]);
         assert!(sec.contains("# How this person reacted") && sec.contains("# Disagreements with this person still open") && sec.contains("d1: you advised"), "{sec}");
         assert_eq!(section(&[], &[]), "");
+    }
+
+    /// Reactions on started tasks and cards read their run: the tasks'
+    /// turn, the card's proposing run; a hidden card drops out (#267).
+    #[test]
+    fn reactions_on_tasks_and_cards_read_their_run() {
+        let mut s = Projection::default();
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 1, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        let t0 = Utc::now();
+        let ev = |s: &mut Projection, min: i64, e: Value| {
+            let seq = s.last_seq + 1;
+            s.apply(&Event { seq, at: t0 + chrono::Duration::minutes(min), actor: "kernel".into(), ev: serde_json::from_value(e).unwrap() });
+        };
+        ev(&mut s, 0, json!({ "kind": "task_created", "task": "t1", "run": "r1", "person": "carol", "text": "Hi.", "config": config, "chat": { "thread": "th", "turn": true } }));
+        ev(&mut s, 0, json!({ "kind": "completed", "run": "r1", "summary": "Looking into it." }));
+        ev(&mut s, 0, json!({ "kind": "task_created", "task": "t2", "run": "r2", "person": "carol", "text": "Sub.", "config": config, "chat": { "thread": "th", "turn": false, "from_run": "r1" } }));
+        ev(&mut s, 0, json!({ "kind": "tool_result", "run": "r1", "call_id": "c1", "status": "done", "is_error": false, "label": { "untrusted": false, "private": false }, "data": { "card": "k1" } }));
+        ev(&mut s, 1, json!({ "kind": "reacted", "person": "carol", "thread": "th", "entry": "t:r1", "reaction": "great" }));
+        ev(&mut s, 1, json!({ "kind": "reacted", "person": "carol", "thread": "th", "entry": "c:k1", "reaction": "annoying" }));
+        let at = |min: i64| t0 + chrono::Duration::minutes(min);
+        let got = reactions_before(&s, "carol", at(4));
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.iter().all(|(_, l)| l.contains("\"Looking into it.\"")), "{got:?}");
+        ev(&mut s, 2, json!({ "kind": "chat_hidden", "person": "carol", "thread": "th", "entries": ["c:k1"] }));
+        let got = reactions_before(&s, "carol", at(4));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].1.starts_with("that was great"), "{got:?}");
     }
 
     /// The person is told an outcome honestly whichever way it went,

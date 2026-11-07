@@ -1211,7 +1211,7 @@ async fn cancel(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
         Ok(p) => p,
         Err(r) => return r,
     };
-    controlled(k.cancel_task(&p, &id).await.map(|v| { let mut v = v; v["ok"] = json!(true); v }))
+    controlled(k.cancel_task(&p, &id, None).await.map(|v| { let mut v = v; v["ok"] = json!(true); v }))
 }
 
 /// A control's answer as the app gets it.
@@ -1958,7 +1958,7 @@ async fn resume_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
         Ok(p) => p,
         Err(r) => return r,
     };
-    match controlled(k.resume_schedule(&p, &id).await.map(|_| Value::Null)) {
+    match controlled(k.resume_schedule(&p, &id, None).await.map(|_| Value::Null)) {
         r if r.status() == StatusCode::OK => StatusCode::NO_CONTENT.into_response(),
         r => r,
     }
@@ -1970,7 +1970,7 @@ async fn pause_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Re
         Ok(p) => p,
         Err(r) => return r,
     };
-    match controlled(k.pause_schedule(&p, &id).await.map(|_| Value::Null)) {
+    match controlled(k.pause_schedule(&p, &id, None).await.map(|_| Value::Null)) {
         r if r.status() == StatusCode::OK => StatusCode::NO_CONTENT.into_response(),
         r => r,
     }
@@ -1982,7 +1982,7 @@ async fn edit_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b
         Ok(p) => p,
         Err(r) => return r,
     };
-    controlled(k.edit_schedule(&p, &id, &b).await)
+    controlled(k.edit_schedule(&p, &id, &b, None).await)
 }
 
 /// Cancel: no more runs, and one still going stops.
@@ -1993,7 +1993,7 @@ async fn remove_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
     };
     // The report goes back with the status: what each stopped run had
     // done, and how many actually stopped (#263).
-    controlled(k.cancel_schedule(&p, &id).await)
+    controlled(k.cancel_schedule(&p, &id, None).await)
 }
 
 pub(crate) fn rule_for(b: &Value, min: u32) -> Result<(Option<u32>, Option<String>), String> {
