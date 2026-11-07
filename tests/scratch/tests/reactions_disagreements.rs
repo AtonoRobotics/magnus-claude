@@ -65,6 +65,9 @@ fn model() -> model::Script {
             0 if s.contains("about Mondays") => Reply::Text(MONDAY.into()),
             0 if s.contains("ship it today") => tool("disagreement", json!({ "action": "record", "position": POSITION, "decision": DECISION })),
             0 if s.contains("launch went") => tool("disagreement", json!({ "action": "outcome", "id": open_id(&sys), "outcome": OUTCOME })),
+            0 if s.contains("friday send worked") => tool("disagreement", json!({ "action": "outcome", "id": open_id(&sys), "outcome": "worked" })),
+            0 if s.contains("friday send flopped") => tool("disagreement", json!({ "action": "outcome", "id": open_id(&sys), "outcome": "failed" })),
+            0 if s.contains("friday send pending") => tool("disagreement", json!({ "action": "outcome", "id": open_id(&sys), "outcome": "unclear" })),
             _ => Reply::Text("Understood.".into()),
         }
     })
@@ -240,4 +243,73 @@ async fn a_run_that_read_outside_content_records_no_disagreement() {
     let results: Vec<_> = m.requests().into_iter().filter(|c| said(c) == text && c.turn() == 2).flat_map(|c| c.last_results()).collect();
     assert!(results.iter().any(|r| r.is_error && r.text.contains("Not recorded")), "{results:?}");
     assert!(disagreements(&carol).await.is_empty());
+}
+
+/// A task that reads a page, then settles the open disagreement: first in
+/// its own words, then as a fixed value.
+fn tainted_outcome_model(page: &str) -> model::Script {
+    let page = page.to_string();
+    script(move |c| {
+        let page = page.clone();
+        async move {
+            let sys = system(&c);
+            if sys.contains(PASS) {
+                return Reply::Text(String::new());
+            }
+            if sys.contains(CHAT) {
+                return match c.turn() {
+                    0 => tool("disagreement", json!({ "action": "record", "position": POSITION, "decision": DECISION })),
+                    _ => Reply::Text("Understood.".into()),
+                };
+            }
+            match c.turn() {
+                0 => contract_unchecked("file vendor notes", "filed"),
+                1 => tool("web_fetch", json!({ "url": page })),
+                2 => tool("disagreement", json!({ "action": "outcome", "id": open_id(&sys), "outcome": "The vendor replied twice (dis-out-free)." })),
+                3 => tool("disagreement", json!({ "action": "outcome", "id": open_id(&sys), "outcome": "worked" })),
+                _ => tool("task_fail", json!({ "reason": "done" })),
+            }
+        }
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_outcome_is_recorded_from_a_run_that_read_outside_content_but_only_as_a_fixed_value() {
+    let web = FakeWeb::start(&[("/page", "Vendor news.")]).await;
+    let m = FakeModel::start(tainted_outcome_model(&web.url("/page"))).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let carol = app.api("carol");
+    chat(&carol, "I hear you, but I will ship it today anyway.").await;
+    assert_eq!(disagreements(&carol).await.len(), 1);
+
+    // The task reads outside content, so its outcome in its own words is
+    // refused, naming the fixed values; worked is recorded.
+    let text = "File what we know about vendor X.";
+    let task = carol.submit(text).await;
+    carol.wait_settled(&task).await;
+    let at = |turn| m.requests().into_iter().filter(|c| said(c) == text && c.turn() == turn).flat_map(|c| c.last_results()).collect::<Vec<_>>();
+    assert!(at(3).iter().any(|r| r.is_error && r.text.contains("worked") && r.text.contains("failed") && r.text.contains("unclear")), "{:?}", at(3));
+    assert!(at(4).iter().any(|r| !r.is_error && r.text.contains("Recorded the outcome")), "{:?}", at(4));
+    let settled = disagreements(&carol).await;
+    assert_eq!(&settled[0]["outcome"], &json!("worked"), "{settled:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn when_an_outcome_is_recorded_the_person_is_told_honestly_either_way() {
+    let m = FakeModel::start(model()).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let carol = app.api("carol");
+    for _ in 0..3 {
+        chat(&carol, "I hear you, but I will ship it today anyway.").await;
+    }
+    assert_eq!(disagreements(&carol).await.len(), 3);
+    chat(&carol, "The friday send worked.").await;
+    chat(&carol, "The friday send flopped.").await;
+    chat(&carol, "Is the friday send pending?").await;
+    let (st, v) = carol.get("/v1/inbox").await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    let notes: Vec<String> = v["items"].as_array().cloned().unwrap_or_default().into_iter().filter(|i| i["kind"] == "message").map(|i| i["summary"].as_str().unwrap_or_default().to_string()).collect();
+    assert!(notes.iter().any(|n| n.contains("you were right")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("didn't work out")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("still unclear")), "{notes:?}");
 }

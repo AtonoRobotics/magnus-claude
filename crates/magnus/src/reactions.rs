@@ -8,10 +8,14 @@
 //! A reaction is the person's own, given in the app on a message of
 //! Magnus's in their thread, and changed or taken back there; the log keeps
 //! which message, not its words. A disagreement is recorded by Magnus with
-//! `disagreement`, its outcome later, and only from a run that read nothing
-//! from outside the conversation, as for `relationship_note`: what it says
-//! is carried into every later run of the person. Both are the person's
-//! alone: no other person's run, the owner or an admin sees them.
+//! `disagreement`, its outcome later. The record comes only from a run that
+//! read nothing from outside the conversation, as for `relationship_note`:
+//! what it says is carried into every later run of the person. The outcome
+//! comes from any run, but a run that read outside content gives only a
+//! fixed value, so that content writes no free text into the person's log
+//! (#260). Either way the person is told at once, honestly whichever way it
+//! went. Both are the person's alone: no other person's run, the owner or
+//! an admin sees them.
 
 use crate::api::{err, internal, who};
 use crate::events::Ev;
@@ -115,18 +119,36 @@ pub fn section(reactions: &[(DateTime<Utc>, String)], open: &[(DateTime<Utc>, St
     s
 }
 
+/// A disagreement's outcome as a run that read outside content may record
+/// it: a fixed value, so that content writes no free text into the
+/// person's log (#260). A run that read nothing outside the conversation
+/// may say it in its own words.
+pub const OUTCOMES: &[&str] = &["worked", "failed", "unclear"];
+
+/// What the person is told when an outcome is recorded: honest whichever
+/// way it went, including when they were right, and never gloating (#260).
+pub fn outcome_report(position: &str, decision: &str, outcome: &str) -> String {
+    let stood = format!("You decided {decision} (I had advised {position}).");
+    match outcome {
+        "worked" => format!("{stood} It worked — you were right."),
+        "failed" => format!("{stood} It didn't work out."),
+        "unclear" => format!("{stood} It's still unclear how it turned out."),
+        free => format!("{stood} {free}"),
+    }
+}
+
 impl Kernel {
     /// `disagreement`, for the run's person.
     pub async fn disagreement_tool(&self, run: &str, input: &Value) -> anyhow::Result<(String, bool, Option<Value>)> {
         let Some(r) = self.read(|s| s.runs.get(run).cloned()) else { anyhow::bail!("no such run") };
-        if r.untrusted || r.private {
-            let why = "Not recorded: this run has read content from outside the conversation (untrusted or private), and a disagreement enters every later run of the person. Record it in a new conversation with them.";
-            return Ok((why.into(), true, None));
-        }
         let s = |k: &str| input[k].as_str().map(|t| t.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|t| !t.is_empty());
         let no = |why: String| Ok((format!("Not recorded: {why}"), true, None));
         match input["action"].as_str() {
             Some("record") => {
+                if r.untrusted || r.private {
+                    let why = "Not recorded: this run has read content from outside the conversation (untrusted or private), and a disagreement enters every later run of the person. Record it in a new conversation with them.";
+                    return Ok((why.into(), true, None));
+                }
                 let (Some(position), Some(decision)) = (s("position"), s("decision")) else {
                     return no("position (what you advised) and decision (what they decided instead) are needed".into());
                 };
@@ -138,16 +160,21 @@ impl Kernel {
                 let (Some(id), Some(outcome)) = (s("id"), s("outcome")) else {
                     return no("id (the disagreement's) and outcome (how it turned out) are needed".into());
                 };
+                if (r.untrusted || r.private) && !OUTCOMES.contains(&outcome.as_str()) {
+                    return no("this run has read content from outside the conversation: its outcome is worked, failed or unclear, so that content writes no free text into the person's log".into());
+                }
                 let (found, open) = self.read(|s| {
                     let mine = || s.disagreements.values().filter(|d| d.person == r.person);
-                    (mine().find(|d| d.id == id).map(|d| d.outcome.is_none()), mine().filter(|d| d.outcome.is_none()).map(|d| d.id.clone()).collect::<Vec<_>>())
+                    (mine().find(|d| d.id == id).map(|d| (d.outcome.is_none(), d.position.clone(), d.decision.clone())), mine().filter(|d| d.outcome.is_none()).map(|d| d.id.clone()).collect::<Vec<_>>())
                 });
                 match found {
                     None => no(format!("there is no disagreement {id}; the open ones are: {}", if open.is_empty() { "none".into() } else { open.join(", ") })),
-                    Some(false) => no(format!("{id} already has its outcome")),
-                    Some(true) => {
-                        self.emit("kernel", Ev::DisagreementOutcome { id: id.clone(), person: r.person.clone(), run: run.into(), outcome }).await?;
-                        Ok((format!("Recorded the outcome of {id}."), false, None))
+                    Some((false, _, _)) => no(format!("{id} already has its outcome")),
+                    Some((true, position, decision)) => {
+                        self.emit("kernel", Ev::DisagreementOutcome { id: id.clone(), person: r.person.clone(), run: run.into(), outcome: outcome.clone() }).await?;
+                        let told = outcome_report(&position, &decision, &outcome);
+                        self.emit("kernel", Ev::Item { id: new_id("item"), item_kind: "message".into(), task: Some(r.task.clone()), run: Some(run.into()), person: r.person.clone(), summary: told.clone(), details: json!({ "from": "agent", "disagreement": id, "outcome": outcome, "taint": { "untrusted": r.untrusted, "private": r.private } }) }).await?;
+                        Ok((format!("Recorded the outcome of {id} ({outcome}), and told the person: {told}"), false, None))
                     }
                 }
             }
@@ -248,5 +275,19 @@ mod tests {
         let sec = section(&[(at(2), "that was great, on your message \"x\"".into())], &[(at(3), "d1: you advised: Wait. They decided: Ship now.".into())]);
         assert!(sec.contains("# How this person reacted") && sec.contains("# Disagreements with this person still open") && sec.contains("d1: you advised"), "{sec}");
         assert_eq!(section(&[], &[]), "");
+    }
+
+    /// The person is told an outcome honestly whichever way it went,
+    /// including when they were right, and never gloated at (#260).
+    #[test]
+    fn an_outcome_report_is_honest_either_way() {
+        let told = outcome_report("Wait.", "Ship now.", "worked");
+        assert!(told.contains("Ship now.") && told.contains("Wait.") && told.contains("you were right"), "{told}");
+        let told = outcome_report("Wait.", "Ship now.", "failed");
+        assert!(told.contains("didn't work out") && !told.contains("told you"), "{told}");
+        let told = outcome_report("Wait.", "Ship now.", "unclear");
+        assert!(told.contains("still unclear"), "{told}");
+        let told = outcome_report("Wait.", "Ship now.", "It shipped fine.");
+        assert!(told.contains("It shipped fine."), "{told}");
     }
 }
