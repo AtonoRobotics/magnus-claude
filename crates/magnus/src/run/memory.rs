@@ -44,7 +44,11 @@ impl Kernel {
         let msg = Message { role: Role::User, content: vec![Block::Text { text: format!("{text}\n\nAlready remembered:\n{known}") }], state: None };
         let tools: Vec<_> = crate::tools::builtin_specs(false, false, false).into_iter().filter(|t| t.name == "memory_write").collect();
         let (adapter, model) = (run.model().0.to_string(), run.model().1.to_string());
-        let out = self.adapters.complete(&adapter, &model, MEMORY, vec![msg], tools, run.config.max_tokens, |_| {}).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let Some(allowance) = self.aux_max_tokens(&run.id, "memory pass", &adapter, &model, MEMORY, vec![msg.clone()], tools.clone(), run.config.max_tokens).await
+        else {
+            return Ok(());
+        };
+        let out = self.adapters.complete(&adapter, &model, MEMORY, vec![msg], tools, allowance, |_| {}).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let blocks = out.blocks.clone();
         let pass = self.emit("kernel:memory_pass", Ev::MemoryPass { run: run.id.clone(), model: format!("{adapter}/{model}"), blocks: out.blocks, usage: out.usage }).await?.seq;
         let mut n = 0;

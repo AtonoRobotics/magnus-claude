@@ -33,7 +33,8 @@ impl Kernel {
     }
 
     /// One verifier call, recorded with its cost. None when the budget is
-    /// spent or the provider failed: the verifier then says nothing.
+    /// spent, its worst case does not fit what is left, or the provider
+    /// failed: the verifier then says nothing.
     async fn verifier_call(&self, run: &Run, purpose: &str, system: &str, messages: Vec<Message>, tools: Vec<ToolSpec>) -> Result<Option<Vec<Block>>> {
         let calls = self.read(|s| s.runs.get(&run.id).map(|r| r.model_calls)).unwrap_or(0);
         // Nor once its grant's budget for the period is spent (#286).
@@ -41,7 +42,11 @@ impl Kernel {
             return Ok(None);
         }
         let (adapter, model) = Self::verifier_model(run);
-        let out = match self.adapters.complete(&adapter, &model, system, messages, tools, run.config.max_tokens, |_| {}).await {
+        let Some(allowance) = self.aux_max_tokens(&run.id, "verifier", &adapter, &model, system, messages.clone(), tools.clone(), run.config.max_tokens).await
+        else {
+            return Ok(None);
+        };
+        let out = match self.adapters.complete(&adapter, &model, system, messages, tools, allowance, |_| {}).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!("verifier on {}: {e:?}", run.id);

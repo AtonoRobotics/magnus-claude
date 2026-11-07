@@ -401,3 +401,28 @@ async fn a_schedule_card_is_a_suggestion_put_off_or_declined_with_a_reason() {
     assert!(sys.contains(LEDGER) && sys.contains("you proposed the schedule \"Every evening, the weather.\""), "{sys}");
     assert!(sys.contains("not now"), "{sys}");
 }
+
+/// Accepting an untimed suggestion starts a one-off task: its context says
+/// the person approved it for its scope, without calling it a schedule;
+/// a schedule's run keeps its own wording (#271).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_accepted_suggestion_starts_a_task_approved_for_its_scope_not_a_schedule() {
+    let m = FakeModel::start(model(|said, turn, c| match said {
+        _ => read_then_suggest(turn, c, json!({})),
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let (thread, _) = chat(&alice, "What could you take off my plate?").await;
+    let card = wait_entry(&alice, &thread, |e| e["kind"] == "suggestion_card").await;
+    let (st, v) = decide(&alice, card["card"].as_str().unwrap(), json!({ "decision": "accept" })).await;
+    assert_eq!(st, 200, "{v}");
+    let task = v["task"].as_str().expect("no task started").to_string();
+    alice.wait_settled(&task).await;
+    let theirs = |c: &Conversation| !system(c).contains(CHAT) && !system(c).contains(PASS);
+    let asked: Vec<Conversation> = m.requests().into_iter().filter(|c| theirs(c)).collect();
+    assert!(!asked.is_empty(), "the task never asked");
+    let first = serde_json::to_string(&asked[0].messages()).unwrap();
+    assert!(first.contains("approved this task for this scope"), "the task was not told it was approved: {first}");
+    assert!(!first.contains("confirmed this schedule"), "the one-off task was told it is a schedule: {first}");
+}

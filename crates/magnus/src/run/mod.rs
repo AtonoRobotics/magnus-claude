@@ -69,6 +69,17 @@ fn version_of(name: &str, text: &str) -> String {
     format!("{name}@{}", &hex::encode(sha2::Sha256::digest(text.as_bytes()))[..12])
 }
 
+/// What a run is told about its scope: a schedule's run keeps to what
+/// the person confirmed; a one-off task from an accepted card was
+/// approved for its scope, not scheduled (#271).
+fn scope_line(scheduled: bool, scope: &str) -> String {
+    if scheduled {
+        format!("The person confirmed this schedule for this scope; keep to it: {scope}")
+    } else {
+        format!("The person approved this task for this scope; keep to it: {scope}")
+    }
+}
+
 /// A conversation as the model reads it: who said what, in order.
 fn transcript(conversation: &[Value]) -> String {
     conversation
@@ -144,9 +155,11 @@ impl Kernel {
             first.push(Block::Text { text: index });
         }
         first.push(Block::Text { text: said });
-        // A schedule's run keeps to the scope the person confirmed for it.
+        // A schedule's run keeps to the scope the person confirmed for it;
+        // a one-off task from an accepted card was approved, not scheduled.
         if let Some(scope) = scope {
-            first.push(Block::Text { text: format!("The person confirmed this schedule for this scope; keep to it: {scope}") });
+            let scheduled = task.as_ref().is_some_and(|t| t.schedule.is_some());
+            first.push(Block::Text { text: scope_line(scheduled, &scope) });
         }
         // The project's instructions are the person's own words, for
         // everything in it; its files are data, read when needed (M2).
@@ -1061,5 +1074,20 @@ fn strip_descriptions(v: &Value) -> Value {
         ),
         Value::Array(a) => Value::Array(a.iter().map(strip_descriptions).collect()),
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scope_line;
+
+    /// A schedule's run is told the person confirmed its schedule; a
+    /// one-off task is told it was approved, without the word (#271).
+    #[test]
+    fn scope_wording_names_a_schedule_only_for_one() {
+        assert_eq!(scope_line(true, "Reads the web."), "The person confirmed this schedule for this scope; keep to it: Reads the web.");
+        let one_off = scope_line(false, "Reads the web.");
+        assert_eq!(one_off, "The person approved this task for this scope; keep to it: Reads the web.");
+        assert!(!one_off.contains("schedule"), "{one_off}");
     }
 }
