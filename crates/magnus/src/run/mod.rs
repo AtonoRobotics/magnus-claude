@@ -1110,7 +1110,7 @@ fn strip_descriptions(v: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{harness_text, scope_line};
+    use super::{harness_text, scope_line, CHAT_INSTRUCTIONS, INSTRUCTIONS};
 
     /// The harness section names only what is offered (#270): no web
     /// search, no sandbox, no browser without them.
@@ -1128,6 +1128,28 @@ mod tests {
         assert!(full.contains("fresh VM"), "{full}");
         assert!(full.contains("browser tools"), "{full}");
         assert!(!full.contains("You cannot search the web"), "{full}");
+    }
+
+    /// Both prompts state the spec's identity traits as identity, not
+    /// commands: calibrated confidence, proportionate effort, noticing
+    /// without acting unasked; tone and working style go to relationship
+    /// memory, whose tool description covers the spec's list (#268).
+    #[test]
+    fn identity_states_the_spec_traits() {
+        for prompt in [INSTRUCTIONS, CHAT_INSTRUCTIONS] {
+            assert!(!prompt.contains("You say how sure you are"), "{prompt:.120}");
+            assert!(prompt.contains("would decide differently"), "{prompt:.120}");
+            assert!(prompt.contains("A qualifier on a routine answer is a failure"), "{prompt:.120}");
+            assert!(prompt.contains("never turn a routine request into an open-ended investigation"), "{prompt:.120}");
+            assert!(prompt.contains("never treat usefulness as permission to act"), "{prompt:.120}");
+        }
+        assert!(CHAT_INSTRUCTIONS.contains("relationship_note"), "{CHAT_INSTRUCTIONS:.120}");
+        assert!(!CHAT_INSTRUCTIONS.contains("write it with `memory_write` at once, one short sentence per fact"), "tone still routes to memory");
+        let tools = include_str!("../../instructions/tools.json");
+        let note = tools.lines().find(|l| l.contains("\"relationship_note\"")).unwrap_or_default();
+        for phrase in ["how terse or detailed", "what they care about", "what a routine ask means"] {
+            assert!(note.contains(phrase), "{note}");
+        }
     }
 
     /// A schedule's run is told the person confirmed its schedule; a
