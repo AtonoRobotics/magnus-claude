@@ -134,3 +134,19 @@ async fn an_app_turned_off_still_has_its_sign_ins_ended_by_disconnect_and_the_ki
     .await;
     assert!(alice.post("/v1/kill-switch", json!({ "engaged": false })).await.0.is_success());
 }
+
+/// The app's authorization server answers the first registration with 429,
+/// as a provider does under load: the sign-in waits and registers anyway,
+/// once (#315).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_throttled_first_registration_is_retried_and_the_sign_in_succeeds() {
+    let cal = FakeOAuthApp::start(3600).await;
+    cal.state.lock().unwrap().throttle_registrations = 1;
+    let m = FakeModel::start(steps(vec![])).await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let alice = app.api("alice");
+    let name = add(&alice, &cal.url).await;
+    connect(&alice, &name).await;
+    assert_eq!(card(&alice, &name).await["state"], "connected");
+    assert_eq!(cal.state.lock().unwrap().registrations, 1, "the 429 registered, or the retry did not");
+}

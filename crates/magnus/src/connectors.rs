@@ -242,6 +242,17 @@ fn http() -> reqwest::Client {
     reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(30)).build().expect("http client")
 }
 
+/// How long a refused registration waits before trying again: what the
+/// server's `Retry-After` asks, capped (the seconds form; a date falls
+/// back to the backoff), else 1 s, 2 s, 4 s. The sign-in is interactive,
+/// so the waits stay short.
+fn registration_backoff(headers: &reqwest::header::HeaderMap, attempt: u32) -> Duration {
+    if let Some(s) = headers.get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()) {
+        return Duration::from_secs(s).min(Duration::from_secs(10));
+    }
+    Duration::from_secs(1 << attempt.min(2))
+}
+
 /// A provider may not know a client it registered a moment ago: GitLab.com
 /// answered the sign-in address built from one with 401 invalid_client, "The
 /// requested OAuth 2.0 Client does not exist" (master run 42105845733,
@@ -554,24 +565,33 @@ impl Kernel {
     }
 
     /// Register Magnus at an authorization server for a redirect address
-    /// (RFC 7591), and keep the client under `name` for later sign-ins.
+    /// (RFC 7591), and keep the client under `name` for later sign-ins. A
+    /// throttled or failing server (429, 5xx) is tried again, briefly: a
+    /// provider under load refused a sign-in that a wait would save (#315).
     async fn register_client(&self, name: &str, registration: &str, redirect_uri: &str) -> Result<(String, Option<String>)> {
-        let r = http()
-            .post(registration)
-            .json(&json!({
-                "client_name": "Magnus", "redirect_uris": [redirect_uri], "grant_types": ["authorization_code", "refresh_token"],
-                "response_types": ["code"], "token_endpoint_auth_method": "none"
-            }))
-            .send()
-            .await?;
-        if !r.status().is_success() {
-            bail!("the app's authorization server refused to register Magnus: HTTP {}", r.status());
+        let body = json!({
+            "client_name": "Magnus", "redirect_uris": [redirect_uri], "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"], "token_endpoint_auth_method": "none"
+        });
+        let mut last = String::new();
+        for attempt in 0..3 {
+            let r = http().post(registration).json(&body).send().await?;
+            if r.status().is_success() {
+                let v: Value = r.json().await?;
+                let id = v["client_id"].as_str().ok_or_else(|| anyhow!("registration returned no client id"))?.to_string();
+                let secret = v["client_secret"].as_str().map(String::from);
+                self.vault.put(name, &json!({ "client_id": id, "client_secret": secret }).to_string())?;
+                return Ok((id, secret));
+            }
+            last = format!("HTTP {}", r.status());
+            let retryable = r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS || r.status().is_server_error();
+            if !retryable || attempt == 2 {
+                break;
+            }
+            tracing::warn!("registration for {name} refused with {last}; trying again");
+            tokio::time::sleep(registration_backoff(r.headers(), attempt)).await;
         }
-        let v: Value = r.json().await?;
-        let id = v["client_id"].as_str().ok_or_else(|| anyhow!("registration returned no client id"))?.to_string();
-        let secret = v["client_secret"].as_str().map(String::from);
-        self.vault.put(name, &json!({ "client_id": id, "client_secret": secret }).to_string())?;
-        Ok((id, secret))
+        bail!("the app's authorization server refused to register Magnus: {last}");
     }
 
     /// Start signing in to an app: register if needed, and return the
@@ -1554,5 +1574,24 @@ mod naming {
         assert!(super::dead_token(&serde_json::json!({ "ok": false, "error": "invalid_refresh_token" })));
         assert!(!super::dead_token(&serde_json::json!({ "ok": false, "error": "ratelimited" })));
         assert!(!super::dead_token(&google));
+    }
+
+    /// A refused registration waits out the server's `Retry-After`, capped,
+    /// else a short backoff (#315).
+    #[test]
+    fn a_refused_registration_waits_out_retry_after_then_backs_off() {
+        use std::time::Duration;
+        let headers = |v: Option<&str>| {
+            let mut h = reqwest::header::HeaderMap::new();
+            if let Some(v) = v {
+                h.insert("retry-after", v.parse().unwrap());
+            }
+            h
+        };
+        assert_eq!(super::registration_backoff(&headers(Some("3")), 0), Duration::from_secs(3));
+        assert_eq!(super::registration_backoff(&headers(Some("120")), 0), Duration::from_secs(10));
+        assert_eq!(super::registration_backoff(&headers(None), 0), Duration::from_secs(1));
+        assert_eq!(super::registration_backoff(&headers(None), 1), Duration::from_secs(2));
+        assert_eq!(super::registration_backoff(&headers(Some("tomorrow")), 1), Duration::from_secs(2));
     }
 }
