@@ -240,14 +240,21 @@ fn entities(person: &Person, t: &ToolFacts) -> Result<Entities> {
 /// The evaluation of one policy set: whether it allows, and the rules that
 /// decided it.
 fn eval(cedar: &str, layer: &str, req: &Request, ents: &Entities) -> Result<(bool, Vec<String>)> {
-    let set = PolicySet::from_str(cedar).map_err(|e| anyhow!("policy layer {layer} does not parse: {e}"))?;
-    let resp = Authorizer::new().is_authorized(req, &set, ents);
-    let errors: Vec<String> = resp.diagnostics().errors().map(|e| e.to_string()).collect();
-    if !errors.is_empty() {
-        return Err(anyhow!("policy layer {layer} failed to evaluate: {}", errors.join("; ")));
-    }
-    let rules = resp.diagnostics().reason().map(|id| format!("{layer}:{id}")).collect();
-    Ok((resp.decision() == Decision::Allow, rules))
+    // Cedar refuses below 100KB of remaining stack as recursion-limit, and
+    // an evaluation itself takes hundreds of KB: growing here keeps every
+    // decision, for tool calls, controls and grants alike, independent of
+    // how deep its caller is (#375). The segment allocates only when the
+    // stack is short; a shallow call pays one check.
+    stacker::grow(2 * 1024 * 1024, || {
+        let set = PolicySet::from_str(cedar).map_err(|e| anyhow!("policy layer {layer} does not parse: {e}"))?;
+        let resp = Authorizer::new().is_authorized(req, &set, ents);
+        let errors: Vec<String> = resp.diagnostics().errors().map(|e| e.to_string()).collect();
+        if !errors.is_empty() {
+            return Err(anyhow!("policy layer {layer} failed to evaluate: {}", errors.join("; ")));
+        }
+        let rules = resp.diagnostics().reason().map(|id| format!("{layer}:{id}")).collect();
+        Ok((resp.decision() == Decision::Allow, rules))
+    })
 }
 
 /// The layers that apply to `person` in `task`, top first: org, groups,
@@ -367,6 +374,45 @@ mod tests {
     fn person(id: &str) -> Person {
         serde_json::from_value(serde_json::json!({ "id": id, "groups": ["staff"] })).unwrap()
     }
+
+    /// A decision deep in the stack still evaluates: Cedar refuses below
+    /// 100KB of remaining stack as recursion-limit, and an evaluation
+    /// itself takes hundreds of KB, so the eval grows the stack first.
+    /// Without that, this decision fails (#375).
+    ///
+    /// Calibrated for debug builds against Cedar 4.14: the burn stops with
+    /// remaining stack in [200KB, 260KB], above the overflow edge (~190KB)
+    /// and below the trip edge (~400KB for the default policy), so without
+    /// the grow this fails cleanly instead of aborting. The band is
+    /// asserted: a miss fails loudly rather than passing silently.
+    #[test]
+    fn a_decision_deep_in_the_stack_still_evaluates() {
+        fn deep(policies: &BTreeMap<String, String>, person: &Person, tool: &ToolFacts) -> Result<Outcome> {
+            match stacker::remaining_stack() {
+                // The platform cannot report it: nothing to burn.
+                None => decide(policies, person, None, tool, false, false),
+                Some(r) if r > 230 * 1024 => {
+                    let pad = [0u8; 4096];
+                    std::hint::black_box(&pad);
+                    deep(policies, person, tool)
+                }
+                Some(at) => {
+                    assert!((200 * 1024..=260 * 1024).contains(&at), "the burn missed its band: {at}");
+                    decide(policies, person, None, tool, false, false)
+                }
+            }
+        }
+        let policies = BTreeMap::new();
+        let tool = ToolFacts { name: "mail__list_sent", app: "mail", risk: Risk::Read, audience: Audience::Private };
+        match deep(&policies, &person("dana"), &tool) {
+            Ok(Outcome::Allow { .. }) => {}
+            other => panic!("a decision deep in the stack did not evaluate: {other:?}"),
+        }
+    }
+
+
+
+
 
     /// Task and schedule control follows the layered policy, with today's
     /// rule as the default: one's own, the owner's and admins' anything;
