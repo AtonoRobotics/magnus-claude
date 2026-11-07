@@ -54,6 +54,10 @@ pub struct Connector {
     /// (`Spec::destinations`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub destinations: BTreeMap<String, Value>,
+    /// How the gate asks whether the person mailed an address before
+    /// (`Spec::sent`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sent: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -115,6 +119,7 @@ impl Spec {
             idempotency: "header".into(),
             tools: tools.iter().map(|(t, r)| (t.to_string(), Tool { risk: r.to_string() })).collect(),
             destinations: BTreeMap::new(),
+            sent: None,
         });
         self
     }
@@ -131,6 +136,16 @@ impl Spec {
     pub fn destinations(mut self, app: &str, tool: &str, read: &str, id: &str, recipients: &[&str], content: &[&str]) -> Self {
         let c = self.connectors.iter_mut().find(|c| c.name == app).expect("app");
         c.destinations.insert(tool.into(), json!({ "read": read, "id": id, "recipients": recipients, "content": content }));
+        self
+    }
+
+    /// How the gate asks whether the person mailed an address before: the
+    /// `read` tool, called with `input` set to `query` naming the address,
+    /// counts as mailed when `found` (a JSON pointer into what it
+    /// returns) is not empty.
+    pub fn sent(mut self, app: &str, read: &str, input: &str, query: &str, found: &str) -> Self {
+        let c = self.connectors.iter_mut().find(|c| c.name == app).expect("app");
+        c.sent = Some(json!({ "read": read, "input": input, "query": query, "found": found }));
         self
     }
 

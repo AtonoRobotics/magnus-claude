@@ -124,6 +124,17 @@ fn is_chat_tool(f: &Facts) -> bool {
     f.connector.is_none() && (f.app == "chat" || f.name == "bundle_share")
 }
 
+/// Whether a sent search found mail: what `found` points at is not empty.
+fn found_at(read: &Value, found: &str) -> bool {
+    match read.pointer(found).unwrap_or(&Value::Null) {
+        Value::Null => false,
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+        Value::String(s) => !s.trim().is_empty(),
+        _ => true,
+    }
+}
+
 pub fn has_rights(person: &Person, f: &Facts) -> bool {
     f.connector.as_ref().is_none_or(|c| may_use(person, c))
 }
@@ -680,15 +691,27 @@ impl Kernel {
         let transmits = !is_chat_tool(f) && !own_memory && !f.reaches_self && (f.risk.changes_state() || f.app == "web" || f.app == "browser" || (f.connector.is_some() && f.audience > Audience::Private && !own_account_read));
         // These override a policy ask: the approval must then cover this exact
         // action, not a broader scope granted for policy reasons.
-        // A send whose every recipient the person wrote themselves goes where
-        // they asked, whatever the task read: injected text can choose
-        // neither who they named nor, read from the draft at the gate, who
-        // it goes to (#176; approvals spec, recipient provenance). That the
-        // content is what they wanted is theirs to judge (owner, 2026-11-04).
+        // A send whose every recipient the person wrote themselves, or has
+        // mailed before, goes where they asked, whatever the task read:
+        // injected text can choose neither who they named nor, read from
+        // the draft at the gate, who it goes to (#176, #210; approvals
+        // spec, recipient provenance). That the content is what they wanted
+        // is theirs to judge (owner, 2026-11-04).
         let theirs = match shown {
             Some(s) if transmits && untrusted && private => {
                 let named = self.named_by_person(run).await?;
-                s.recipients.values().flatten().all(|r| named.contains(r))
+                let mut all = true;
+                for r in s.recipients.values().flatten() {
+                    if named.contains(r) {
+                        continue;
+                    }
+                    // The spec's second source (#210): mailed before.
+                    if !self.mailed_before(f, &run.person, r).await? {
+                        all = false;
+                        break;
+                    }
+                }
+                all
             }
             _ => false,
         };
@@ -983,7 +1006,6 @@ impl Kernel {
         if self.read(|s| s.turned_off.contains(person)) {
             return Err(format!("{person}'s account is turned off at the organisation's sign-in. {nothing}"));
         }
-        let stops = self.brokered.generation(&c.name, person);
         let secret = match &c.credential {
             Some(_) => match self.connector_secret(c, person).await {
                 Ok(Some(s)) => Some(s),
@@ -994,12 +1016,7 @@ impl Kernel {
         };
         let bearer = secret.as_ref().map(|s| s.expose());
         let args = json!({ d.id.as_str(): id });
-        let out = if c.transport == crate::brokered::BROKERED {
-            let fence = || self.may_send(c, person, stops, &f.app);
-            self.brokered.call(c, person, bearer, &d.read, &args, &fence).await
-        } else {
-            self.mcp.call(&c.url, bearer, &d.read, &args, None).await
-        };
+        let out = self.connector_call(c, person, &f.app, bearer, &d.read, &args).await;
         let read = match out {
             Ok(o) if !o.is_error => o.structured.or_else(|| serde_json::from_str(&o.text).ok()).unwrap_or(Value::Null),
             Ok(o) => return Err(format!("{} could not read {id} to see who {} goes to: {}. {nothing}", f.app, a.tool, o.text)),
@@ -1012,6 +1029,58 @@ impl Kernel {
             return Err(format!("{id} names no recipients at {}, so {} would reach no one Magnus can show. {nothing}", f.app, a.tool));
         }
         Ok(Some(Shown { recipients, content: d.content.iter().map(field).collect(), bound: d.bound.iter().map(field).collect() }))
+    }
+
+    /// Call a read tool of a connector through the person's own sign-in, as
+    /// the gate reads a draft: over whatever transport it uses.
+    async fn connector_call(
+        &self,
+        c: &Connector,
+        person: &str,
+        app: &str,
+        bearer: Option<&str>,
+        read: &str,
+        args: &Value,
+    ) -> std::result::Result<crate::apps::CallOutput, crate::apps::CallError> {
+        let stops = self.brokered.generation(&c.name, person);
+        if c.transport == crate::brokered::BROKERED {
+            let fence = || self.may_send(c, person, stops, app);
+            self.brokered.call(c, person, bearer, read, args, &fence).await
+        } else {
+            self.mcp.call(&c.url, bearer, read, args, None).await
+        }
+    }
+
+    /// Whether the person has mailed `address` before (#210): the
+    /// manifest's sent search, through their own sign-in. Whatever stops
+    /// the read counts as not mailed: the send asks rather than passing on
+    /// an unchecked claim.
+    async fn mailed_before(&self, f: &Facts, person: &str, address: &str) -> Result<bool> {
+        let (Some(c), Some(s)) = (f.connector.as_ref(), f.connector.as_ref().and_then(|c| c.sent.as_ref())) else { return Ok(false) };
+        if self.read(|s| s.turned_off.contains(person)) {
+            return Ok(false);
+        }
+        let secret = match &c.credential {
+            Some(_) => match self.connector_secret(c, person).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("sent mail for {person}: {e:#}");
+                    return Ok(false);
+                }
+            },
+            None => None,
+        };
+        let bearer = secret.as_ref().map(|s| s.expose());
+        let args = json!({ s.input.as_str(): s.query.replace("{address}", address) });
+        let out = self.connector_call(c, person, &f.app, bearer, &s.read, &args).await;
+        let read = match out {
+            Ok(o) if !o.is_error => o.structured.or_else(|| serde_json::from_str(&o.text).ok()).unwrap_or(Value::Null),
+            _ => {
+                tracing::warn!("sent mail for {person}: the search would not answer");
+                return Ok(false);
+            }
+        };
+        Ok(found_at(&read, &s.found))
     }
 
     async fn call(self: &Arc<Self>, a: &Action, f: &Facts, bearer: Option<&str>, key: &str, stops: u64) -> std::result::Result<(String, bool, Option<Value>), CallFailure> {
