@@ -1668,12 +1668,20 @@ function feedRows(feed) {
 function needsView(composed) {
   const mine = App.inbox, open = mine.filter(i => i.status === "open");
   // Presented observations and interruptions are recorded opened, once
-  // each: the panel draws again on every refresh (#367).
+  // each: the panel draws again on every refresh (#367). An id counts
+  // as reported only after the request succeeds, so a transient
+  // failure is retried on the next refresh instead of losing first
+  // presentation for the session (#399); in-flight ids are held aside
+  // so overlapping refreshes do not report twice.
   App.reported ??= new Set();
-  const present = open.filter(i => (i.kind === "observation" || i.kind === "interrupt") && !App.reported.has(i.id));
+  App.reporting ??= new Set();
+  const present = open.filter(i => (i.kind === "observation" || i.kind === "interrupt") && !App.reported.has(i.id) && !App.reporting.has(i.id));
   if (present.length) {
-    for (const i of present) App.reported.add(i.id);
-    api("POST", "/v1/inbox/opened", { ids: present.map(i => i.id) }).catch(() => {});
+    for (const i of present) App.reporting.add(i.id);
+    api("POST", "/v1/inbox/opened", { ids: present.map(i => i.id) }).then(
+      () => { for (const i of present) { App.reporting.delete(i.id); App.reported.add(i.id); } },
+      () => { for (const i of present) App.reporting.delete(i.id); },
+    );
   }
   const now = open.filter(i => i.can_respond && i.blocking), later = open.filter(i => i.can_respond && !i.blocking), others = open.filter(i => !i.can_respond);
   const done = mine.filter(i => i.status !== "open").sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, 15);
@@ -2771,6 +2779,7 @@ async function boot() {
   // Opening the app shows what changed since the last session: with
   // news, and landing on home, the needs panel opens beside it (#367).
   App.reported = new Set();
+  App.reporting = new Set();
   App.feed = await api("POST", "/v1/home/opened", {}).catch(() => null);
   if (App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) && (!location.hash || location.hash === "#/home")) App.openAfter = "needs";
   background = [setInterval(refresh, 3000), setInterval(pollVersions, 30000)];
@@ -2783,7 +2792,7 @@ function stop() {
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   window.onhashchange = null;
   Panel.what = null;
-  App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null; App.feed = null; App.reported = new Set();
+  App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null; App.feed = null; App.reported = new Set(); App.reporting = new Set();
   // What one person was typing or filtering by is not the next one's here.
   Panel.lib = { q: "", project: "" };
   for (const k of Object.keys(drafts)) delete drafts[k];
