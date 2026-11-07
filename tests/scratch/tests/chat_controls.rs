@@ -56,6 +56,12 @@ async fn schedule(api: &Api, id: &str) -> Value {
     s["schedules"].as_array().unwrap().iter().find(|x| x["id"] == id).cloned().unwrap_or(Value::Null)
 }
 
+async fn schedule_set(api: &Api, text: &str) -> String {
+    let (st, v) = api.post("/v1/schedules", json!({ "text": text, "daily_at": "03:00" })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    v["id"].as_str().unwrap().to_string()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn magnus_cancels_a_task_in_conversation_and_says_what_it_had_done() {
     let calls = Arc::new(Mutex::new(vec![]));
@@ -400,5 +406,48 @@ async fn an_org_policy_can_stop_admins_cancelling_others_tasks() {
     dave.wait_item(&own, "question").await;
     let done = ask(&dave, &calls, "Cancel my own task.", "cancel_task", json!({ "id": own })).await;
     assert!(done.contains("cancelled"), "{done}");
+}
+
+/// An org policy tells schedule edits from cancels apart: forbidding one
+/// stops it and leaves the other (#347).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_org_policy_tells_schedule_edits_from_cancels() {
+    let person = |id: &str, roles: &[&str]| Person {
+        id: id.into(),
+        name: id.into(),
+        token: format!("tok-{id}"),
+        groups: vec!["staff".into()],
+        roles: roles.iter().map(|r| r.to_string()).collect(),
+    };
+    let spec = Spec {
+        people: vec![person("alice", &["owner"]), person("dave", &["admin"]), person("carol", &[])],
+        ..Spec::default()
+    };
+    let calls = Arc::new(Mutex::new(vec![]));
+    let m = FakeModel::start(model(calls.clone())).await;
+    let app = Appliance::start(spec, &m).await;
+    let (alice, dave, carol) = (app.api("alice"), app.api("dave"), app.api("carol"));
+    let plants = schedule_set(&carol, "Water the plants.").await;
+    let bins = schedule_set(&carol, "Take the bins out.").await;
+
+    // Edits forbidden: an admin's edit is refused, their cancel goes
+    // through.
+    let no_edits = format!("{DEFAULT_ORG}\nforbid(principal, action == Action::\"edit_schedule\", resource);");
+    assert!(alice.put_policy("org", &no_edits).await.is_success());
+    let refused = ask(&dave, &calls, "Make the plants 06:15.", "edit_schedule", json!({ "id": plants, "daily_at": "06:15" })).await;
+    assert!(refused.contains("policy forbids"), "{refused}");
+    assert_eq!(schedule(&carol, &plants).await["daily_at"], "03:00", "the edit went past the policy");
+    let done = ask(&dave, &calls, "Stop the plants for good.", "cancel_schedule", json!({ "id": plants })).await;
+    assert!(done.contains("\"cancelled\""), "{done}");
+
+    // Cancels forbidden: the cancel is refused, the edit goes through.
+    let no_cancels = format!("{DEFAULT_ORG}\nforbid(principal, action == Action::\"cancel_schedule\", resource);");
+    assert!(alice.put_policy("org", &no_cancels).await.is_success());
+    let said = ask(&dave, &calls, "Make the bins 06:15.", "edit_schedule", json!({ "id": bins, "daily_at": "06:15" })).await;
+    assert!(said.contains("06:15"), "{said}");
+    assert_eq!(schedule(&carol, &bins).await["daily_at"], "06:15");
+    let refused = ask(&dave, &calls, "Stop the bins for good.", "cancel_schedule", json!({ "id": bins })).await;
+    assert!(refused.contains("policy forbids"), "{refused}");
+    assert!(schedule(&carol, &bins).await["id"].is_string(), "the cancel went past the policy");
 }
 
