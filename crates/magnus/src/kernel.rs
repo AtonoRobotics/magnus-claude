@@ -364,7 +364,7 @@ impl Kernel {
         for sc in schedules {
             let title = self.schedule_title_for_notice(&sc).await;
             let notice = self.notice_to(None, None, person.to_string(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": told } }));
-            self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: told.to_string(), task: None }), ("kernel", notice)]).await;
+            self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: told.to_string(), task: None, admin: false }), ("kernel", notice)]).await;
         }
         ended
     }
@@ -604,7 +604,7 @@ impl Kernel {
             for (sc, task, why) in hold {
                 let title = self.schedule_title_for_notice(&sc).await;
                 let notice = self.notice_to(Some(task.clone()), None, sc.person.clone(), format!("A schedule paused until you answer its run: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why, "task": task } }));
-                self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: Some(task) }), ("kernel", notice)]).await;
+                self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: Some(task), admin: false }), ("kernel", notice)]).await;
             }
             for id in release {
                 let _ = self.emit("kernel", Ev::ScheduleResumed { id }).await;
@@ -626,7 +626,7 @@ impl Kernel {
                 if n > 0 && self.read(|s| s.failures_in_a_row(&sc.id)) >= n {
                     let why = format!("its last {n} runs failed");
                     let notice = self.notice_to(None, None, sc.person.clone(), format!("A schedule paused: {title}"), serde_json::json!({ "reason": "schedule_paused", "evidence": { "schedule": sc.id, "why": why } }));
-                    self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: None }), ("kernel", notice)]).await;
+                    self.tell(vec![("kernel", Ev::SchedulePaused { id: sc.id.clone(), reason: why, task: None, admin: false }), ("kernel", notice)]).await;
                     continue;
                 }
                 // A scheduled task acts for the person who set it up (K54),

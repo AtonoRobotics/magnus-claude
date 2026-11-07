@@ -482,6 +482,8 @@ pub struct Schedule {
     pub paused: Option<String>,
     /// The task whose run it is paused on, waiting on a person.
     pub paused_on: Option<String>,
+    /// An admin suspended it: only an admin lifts it.
+    pub paused_by_admin: bool,
     /// From when failures count toward pausing it again.
     pub resumed: Option<DateTime<Utc>>,
 }
@@ -1545,6 +1547,7 @@ impl State {
                         skipped: None,
                         paused: None,
                         paused_on: None,
+                        paused_by_admin: false,
                         resumed: None,
                     },
                 );
@@ -1699,10 +1702,11 @@ impl State {
                     s.skipped = Some((e.at, task.clone(), reason.clone()));
                 }
             }
-            Ev::SchedulePaused { id, reason, task } => {
+            Ev::SchedulePaused { id, reason, task, admin } => {
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.paused = Some(reason.clone());
                     s.paused_on = task.clone();
+                    s.paused_by_admin = *admin;
                 }
             }
             Ev::ScheduleChanged { id, every_minutes, daily_at, until, max_runs } => {
@@ -1716,6 +1720,7 @@ impl State {
             Ev::ScheduleResumed { id } => {
                 if let Some(s) = self.schedules.get_mut(id) {
                     s.paused = None;
+                    s.paused_by_admin = false;
                     // Failures count afresh only after a person resumes a
                     // schedule paused for them.
                     if s.paused_on.take().is_none() {
@@ -2333,6 +2338,21 @@ mod tests {
         // And when the firing is recorded, it is not counted twice.
         s.apply(&ev(3, "kernel", json!({ "kind": "schedule_fired", "id": "s1", "task": "t1" })));
         assert_eq!(s.schedules["s1"].started, 1);
+    }
+
+    /// An admin's suspension marks the schedule until a resume clears it;
+    /// pauses written before suspensions existed replay unmarked (#262).
+    #[test]
+    fn an_admin_suspension_marks_the_schedule_until_resumed() {
+        let mut s = State::default();
+        s.apply(&ev(1, "person:alice", json!({ "kind": "schedule_set", "id": "s1", "person": "alice", "text": "Say hi.", "every_minutes": 60, "max_runs": 1 })));
+        s.apply(&ev(2, "kernel", json!({ "kind": "schedule_paused", "id": "s1", "reason": "its last 3 runs failed" })));
+        assert!(!s.schedules["s1"].paused_by_admin, "an old pause replayed as an admin's suspension");
+        s.apply(&ev(3, "kernel", json!({ "kind": "schedule_resumed", "id": "s1" })));
+        s.apply(&ev(4, "admin:root", json!({ "kind": "schedule_paused", "id": "s1", "reason": "Suspended by Root, an admin", "admin": true })));
+        assert!(s.schedules["s1"].paused_by_admin, "the suspension left no mark");
+        s.apply(&ev(5, "admin:root", json!({ "kind": "schedule_resumed", "id": "s1" })));
+        assert!(!s.schedules["s1"].paused_by_admin, "the resume kept the mark");
     }
 
     /// A model call the provider charged for and then failed (a reply it

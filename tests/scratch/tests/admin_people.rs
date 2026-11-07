@@ -2,7 +2,7 @@
 //! console spec; invariant "An admin reading a user's private data succeeds,
 //! and the read appears in the audit log with admin, target, resource and
 //! time"; owner's ruling 14), against a real Keycloak and a real appliance:
-//! an admin suspends and resumes a person's schedule; reads their files, and
+//! an admin suspends (which the person cannot lift) and resumes a person's schedule; reads their files, and
 //! one file's words, each read in the audit log and in the person's inbox,
 //! and refused while the organisation keeps people's data private; deletes
 //! them, only with a fresh password and their email typed, after which their
@@ -100,6 +100,12 @@ async fn root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_del
     assert!(mine["schedules"][0]["paused"].to_string().contains("an admin"), "Bob's own list does not say an admin suspended it: {mine}");
     let (st, v) = s.send(&alice, Method::POST, &format!("/users/{b_id}/schedules/{sid}/suspend"), None).await;
     assert_eq!(st, StatusCode::CONFLICT, "suspended twice: {v}");
+    // An admin's suspension is lifted only by an admin: Bob can neither
+    // resume it nor pause over it himself (#262).
+    let r = bob(Method::POST, &format!("/v1/schedules/{sid}/resume")).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 409, "Bob lifted the admin's suspension");
+    let r = bob(Method::POST, &format!("/v1/schedules/{sid}/pause")).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 409, "Bob paused over the admin's suspension: {}", r.text().await.unwrap());
     let (st, v) = s.send(&alice, Method::POST, &format!("/users/{b_id}/schedules/{sid}/resume"), None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let mine: Value = bob(Method::GET, "/v1/schedules").send().await.unwrap().json().await.unwrap();
