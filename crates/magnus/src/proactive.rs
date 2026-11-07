@@ -191,17 +191,10 @@ impl crate::kernel::Kernel {
                     s.reviews_overnight.get(&person).cloned(),
                 )
             });
-            if in_window(m, st.working)
-                && last.is_none_or(|t| {
-                    now.signed_duration_since(t).num_minutes() >= st.every_minutes as i64
-                })
-            {
-                self.start_review(&person, "cadence".into()).await;
-            } else if !in_window(m, st.working) && overnight.as_deref() != Some(today.as_str()) {
-                self.start_review(&person, "overnight".into()).await;
-            }
-            for reason in self.read(|s| {
-                let mut out = vec![];
+            // One sweep starts at most one review per person: an event
+            // first (it is marked, so the cadence cannot starve it, and it
+            // is the more urgent), else the periodic one (#381).
+            let event = self.read(|s| {
                 for sc in s
                     .schedules
                     .values()
@@ -214,7 +207,7 @@ impl crate::kernel::Kernel {
                         .get(&format!("{person}:schedule {}", sc.id))
                         .is_some_and(|d| d == &today)
                     {
-                        out.push(schedule_reason(&sc.id));
+                        return Some(schedule_reason(&sc.id));
                     }
                 }
                 for c in s
@@ -231,7 +224,7 @@ impl crate::kernel::Kernel {
                             .get(&format!("{person}:commitment {}", c.id))
                             .is_some_and(|d| d == &today)
                     {
-                        out.push(commitment_reason(&c.id));
+                        return Some(commitment_reason(&c.id));
                     }
                 }
                 for i in s.items.values().filter(|i| {
@@ -243,13 +236,21 @@ impl crate::kernel::Kernel {
                             .get(&format!("{person}:approval {}", i.id))
                             .is_some_and(|d| d == &today)
                     {
-                        out.push(approval_reason(&i.id));
+                        return Some(approval_reason(&i.id));
                     }
                 }
-                out
-            }) {
+                None
+            });
+            if let Some(reason) = event {
                 self.start_review(&person, reason).await;
-                break;
+            } else if in_window(m, st.working)
+                && last.is_none_or(|t| {
+                    now.signed_duration_since(t).num_minutes() >= st.every_minutes as i64
+                })
+            {
+                self.start_review(&person, "cadence".into()).await;
+            } else if !in_window(m, st.working) && overnight.as_deref() != Some(today.as_str()) {
+                self.start_review(&person, "overnight".into()).await;
             }
         }
     }
