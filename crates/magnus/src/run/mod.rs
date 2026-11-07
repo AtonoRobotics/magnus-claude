@@ -5,6 +5,7 @@
 mod agent_loop;
 pub mod lost;
 mod memory;
+pub(crate) mod reviewer;
 mod verify;
 
 pub use agent_loop::Flow;
@@ -1054,17 +1055,22 @@ impl Kernel {
         let summary = input["summary"].as_str().unwrap_or_default().to_string();
         // The verifier judges only criteria without a check: one whose check
         // could not run goes to the person unchanged (K37).
-        let (no_check, could_not_run): (Vec<Value>, Vec<Value>) = unchecked.into_iter().partition(|cr| cr.get("check").is_none_or(|v| v.is_null()));
+        let (mut judgeable, could_not_run): (Vec<Value>, Vec<Value>) = unchecked.into_iter().partition(|cr| cr.get("check").is_none_or(|v| v.is_null()));
         unchecked = could_not_run;
-        if !no_check.is_empty() && run.config.module("verifier") {
-            let goal = contract["goal"].as_str().unwrap_or_default();
-            match self.verifier_on_completion(run, call_id, step_id, goal, no_check, &summary).await? {
-                Ok(left) => unchecked.extend(left),
+        let goal = contract["goal"].as_str().unwrap_or_default();
+        if !judgeable.is_empty() && run.config.module("verifier") {
+            match self.verifier_on_completion(run, call_id, step_id, goal, judgeable, &summary).await? {
+                Ok(left) => judgeable = left,
                 Err(flow) => return Ok(flow),
             }
-        } else {
-            unchecked.extend(no_check);
         }
+        // The reviewer judges what the verifier left, or everything without
+        // a check when the verifier is off: what it holds is recorded, what
+        // it flags stays for the person with its reason (#179).
+        if !judgeable.is_empty() && run.config.module("reviewer") {
+            judgeable = self.reviewer_on_completion(run, goal, judgeable, &summary).await?;
+        }
+        unchecked.extend(judgeable);
         if !unchecked.is_empty() {
             // No executable check, and the verifier off or unsure: the person reviews (K37).
             let (item, ev) = self.item_event(

@@ -870,7 +870,7 @@ impl Kernel {
     }
 }
 
-fn notice_event(task: Option<String>, run: Option<String>, person: String, summary: String, details: serde_json::Value) -> (String, Ev) {
+pub(crate) fn notice_event(task: Option<String>, run: Option<String>, person: String, summary: String, details: serde_json::Value) -> (String, Ev) {
     let id = new_id("item");
     (id.clone(), Ev::Item { id, item_kind: "notice".into(), task, run, person, summary, details })
 }
