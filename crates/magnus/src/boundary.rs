@@ -1466,7 +1466,16 @@ impl Kernel {
                 self.mcp.call(&c.url, bearer, &f.remote, &a.input, k).await
             };
             return match out {
-                Ok(o) => Ok((o.text, o.is_error, o.structured)),
+                Ok(o) => {
+                    // A watched read answered: diff for new items that
+                    // wake a review. Only watched tools pay for the
+                    // answer's clone (#369).
+                    if !o.is_error && self.cfg.connectors.iter().any(|c| c.name == f.app && c.watch.iter().any(|w| w.tool == f.remote)) {
+                        let data = o.structured.clone().or_else(|| serde_json::from_str(&o.text).ok()).unwrap_or(Value::Null);
+                        self.note_watched(&person, &f.app, &f.remote, &data).await;
+                    }
+                    Ok((o.text, o.is_error, o.structured))
+                }
                 Err(crate::apps::CallError::NotSent(m)) if self.still_running(&a.run, &f.app).is_err() => Err(CallFailure::Stopped(m)),
                 Err(crate::apps::CallError::NotSent(m)) => Err(CallFailure::NotDone(m)),
                 Err(crate::apps::CallError::Unknown(m)) => Err(CallFailure::Unknown(m)),

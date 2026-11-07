@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, TimeZone, Timelike, Utc};
 use crate::tools::Label;
+use serde_json::Value;
 use std::sync::Arc;
 
 /// The ended task that woke a review: its ID, its outcome line, and the
@@ -170,6 +171,23 @@ pub fn approval_reason(id: &str) -> String {
     format!("approval {id} waiting")
 }
 
+/// Item ids from a watched answer: the array at `items` (a JSON
+/// pointer, `""` for the answer itself), each item's `id` field.
+/// Anything misshapen yields nothing, and items without an id are
+/// skipped, never waked on (#369).
+fn watched_ids(data: &Value, items: &str, id: &str) -> Vec<String> {
+    let Some(list) = data.pointer(items).and_then(|v| v.as_array()) else {
+        return vec![];
+    };
+    list.iter()
+        .filter_map(|item| match &item[id] {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 impl crate::kernel::Kernel {
     /// Wake review runs whose time has come: cadence in working hours, once
     /// overnight, coming-up schedules, due commitments and stale approvals
@@ -301,22 +319,68 @@ impl crate::kernel::Kernel {
     /// used to skip when any review had woken within five minutes, which
     /// silently dropped failures after a cadence review or a boot; a
     /// per-task mark is the precise dedup (a task ends once).
-    pub async fn review_wake(self: &Arc<Self>, person: &str, reason: String, ended: Option<Ended>) {
+    pub async fn review_wake(self: &Arc<Self>, person: &str, reason: String, ended: Option<Ended>) -> bool {
         if !self.cfg.proactive.on {
-            return;
+            return false;
         }
         if self.read(|s| {
             s.review_runs.values().any(|p| p == person)
                 || ended.as_ref().is_some_and(|e| s.wake_marks.contains_key(&format!("{person}:task {}", e.task)))
         }) {
-            return;
+            return false;
         }
-        self.start_review(person, reason, ended).await;
+        self.start_review(person, reason, ended).await
+    }
+
+    /// Wake one review for new items in a connected app, unless one is
+    /// already going (#369). True when a review started: the caller
+    /// advances its baseline only then, so a dropped wake retries on
+    /// the next read. The reason carries the count only; the review
+    /// pulls the items itself, tainting normally through the boundary.
+    pub async fn review_wake_items(self: &Arc<Self>, person: &str, app: &str, n: usize) -> bool {
+        if !self.cfg.proactive.on {
+            return false;
+        }
+        if self.read(|s| s.review_runs.values().any(|p| p == person)) {
+            return false;
+        }
+        self.start_review(person, format!("{n} new in {app}"), None).await
+    }
+
+    /// A watched tool answered for the person: diff its items against
+    /// the baseline, waking a review for new ones (#369). The first
+    /// sighting seeds silently; the baseline advances only when the
+    /// wake starts a review, so a dropped wake retries on the next
+    /// read instead of losing the items.
+    pub(crate) async fn note_watched(self: &Arc<Self>, person: &str, app: &str, remote: &str, data: &Value) {
+        let watches: Vec<crate::config::Watch> =
+            self.cfg.connectors.iter().find(|c| c.name == app).map(|c| c.watch.clone()).unwrap_or_default();
+        for w in watches.iter().filter(|w| w.tool == remote) {
+            let mut ids = watched_ids(data, &w.items, &w.id);
+            ids.sort();
+            ids.dedup();
+            let known = self.read(|s| s.watched_seen.get(&(person.to_string(), app.to_string(), remote.to_string())).cloned());
+            let Some(known) = known else {
+                let _ = self
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids })
+                    .await;
+                continue;
+            };
+            let fresh: Vec<String> = ids.into_iter().filter(|id| !known.contains(id)).collect();
+            if fresh.is_empty() {
+                continue;
+            }
+            if self.review_wake_items(person, app, fresh.len()).await {
+                let _ = self
+                    .emit(&format!("person:{person}"), crate::events::Ev::WatchedSeen { person: person.into(), app: app.into(), tool: remote.into(), ids: fresh })
+                    .await;
+            }
+        }
     }
 
     /// Start the review run itself: the review instruction over the
     /// person's state, on a small wake budget (#237).
-    async fn start_review(self: &Arc<Self>, person: &str, reason: String, ended: Option<Ended>) {
+    async fn start_review(self: &Arc<Self>, person: &str, reason: String, ended: Option<Ended>) -> bool {
         let context = self.review_context(person, ended.as_ref()).await;
         let text = format!("Review the person's state ({reason}).\n\n{context}");
         let budget = crate::config::Budget {
@@ -353,8 +417,12 @@ impl crate::kernel::Kernel {
                     )
                     .await;
             }
-            Err(e) => tracing::warn!("review wake for {person}: {e:#}"),
+            Err(e) => {
+                tracing::warn!("review wake for {person}: {e:#}");
+                return false;
+            }
         }
+        true
     }
 
     /// The review's context: the ended task that woke it, if any, then
@@ -614,6 +682,17 @@ impl crate::kernel::Kernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Watched ids come from the pointed array's id field; misshapen
+    /// answers and id-less items yield nothing, never a wake (#369).
+    #[test]
+    fn watched_ids_reads_the_pointed_array() {
+        let data = serde_json::json!({ "messages": [{ "subject": "a" }, { "subject": "b" }, { "nope": true }, { "subject": 7 }] });
+        assert_eq!(watched_ids(&data, "/messages", "subject"), vec!["a", "b", "7"]);
+        assert!(watched_ids(&data, "/missing", "subject").is_empty());
+        assert!(watched_ids(&data, "", "subject").is_empty());
+        assert_eq!(watched_ids(&serde_json::json!([{ "id": "x" }]), "", "id"), vec!["x"]);
+    }
 
     /// Windows hold across midnight; garbage falls back to defaults.
     #[test]

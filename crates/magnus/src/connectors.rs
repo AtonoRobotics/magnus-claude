@@ -1095,6 +1095,7 @@ impl Kernel {
             handoff: None,
             destinations: Default::default(),
             sent: None,
+            watch: vec![],
         };
         self.emit(actor, Ev::ConnectorAdded { connector: c }).await.map_err(failed)?;
         Ok(json!({ "name": name, "sign_in": oauth }))
