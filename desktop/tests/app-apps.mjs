@@ -20,8 +20,13 @@ const d = await open(wd, app, process.env.MAGNUS_SHOTS, "apps");
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await d.step("connect it from its card in the Library; the code comes back to this computer", async () => {
-  // Settings has no workspace sidebar: the Library by its address.
-  await d.run(`location.hash = "#/library"`);
+  // The sidebar's link, not the Library's address: setting the hash before
+  // the app's router is ready loses to its initial route, and the step then
+  // waits for the card on the wrong page (run 42059799939, #200). The link
+  // exists only once the app can navigate. (The address was for reaching
+  // the Library from Settings, which has no sidebar; the app is added
+  // through the API now, so sign-in lands on the workspace with its own.)
+  await d.click(d.xpath("//nav//a[normalize-space()='Library']"));
   // Connect opens the app's page in this computer's browser (the test's, as
   // a person's would): the page approves and sends its code to the shell's
   // one-time loopback address, and the card turns Connected. Nothing else

@@ -873,6 +873,19 @@ fn the_update_script_waits_two_minutes_to_accept_the_task_that_waited() {
     assert!(src.contains("seen(\"Accepted.\", 120_000)"), "{src}");
 }
 
+/// The Library step reaches it through the sidebar's link, not its address:
+/// setting the hash before the app's router is ready loses to its initial
+/// route, and the step then waits 60 s for the card on the wrong page (run
+/// 42059799939, #200: the kept FAILED screenshot shows New conversation,
+/// not the Library). The address was for reaching the Library from
+/// Settings, which has no sidebar; the app is added through the API now.
+#[test]
+fn the_apps_script_reaches_the_library_through_the_sidebar() {
+    let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests/app-apps.mjs")).unwrap();
+    assert!(src.contains("//nav//a[normalize-space()='Library']"), "{src}");
+    assert!(!src.contains("location.hash"), "hash navigation is back:\n{src}");
+}
+
 /// A click lands where the element was when the driver measured it. A card
 /// sizes its outcome frame once the frame has loaded, which moves the
 /// buttons below it; on a busy runner the update test's Accept was clicked
