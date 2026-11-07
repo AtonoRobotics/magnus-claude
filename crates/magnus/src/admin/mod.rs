@@ -270,6 +270,8 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/auth/step-up", get(session::step_up))
         .route("/auth/callback", get(session::callback))
         .route("/auth/done", get(session::done))
+        .route("/auth/local", get(session::local_login).post(session::local_login_post))
+        .route("/auth/local/step-up", get(session::local_step_up).post(session::local_step_up_post))
         .route("/status", get(status))
         .merge(api)
         .fallback(not_found)

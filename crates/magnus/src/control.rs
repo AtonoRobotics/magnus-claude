@@ -74,6 +74,8 @@ pub async fn serve(k: Arc<Kernel>, l: tokio::net::UnixListener) -> Result<()> {
         .route("/v1/admin/connectors", axum::routing::get(connectors).post(add_connector))
         .route("/v1/admin/connectors/{name}", axum::routing::patch(connector_settings).delete(remove_connector))
         .route("/v1/admin/connectors/{name}/credential", axum::routing::put(set_credential).delete(revoke_credential))
+        .route("/v1/admin/console-sign-in", post(console_sign_in))
+        .route("/v1/admin/console-standing/{person}", axum::routing::get(console_standing))
         .with_state(k);
     axum::serve(l, app).await?;
     Ok(())
@@ -207,6 +209,46 @@ async fn people(State(k): State<Arc<Kernel>>) -> Response {
 async fn sessions(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): axum::extract::Path<String>) -> Response {
     let list: Vec<Value> = person_of(&k, &sub).map(|p| k.accounts.sessions_of(&p, "")).unwrap_or_default().into_iter().map(|(s, _)| json!({ "id": s.id, "client": s.client, "created": s.created, "expires": s.expires })).collect();
     Json(json!({ "sessions": list })).into_response()
+}
+
+/// Check an admin's local console sign-in: password and code against the
+/// local store, on the console's own lockout counter. Answers ok only for
+/// an active admin; everyone else refuses alike, and a right password with
+/// a code still to come asks for it. Always 200: the verdict is data.
+/// Only the console calls this, over the control socket (#429).
+async fn console_sign_in(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let person = b["person"].as_str().unwrap_or_default().trim().to_lowercase();
+    let password = b["password"].as_str().unwrap_or_default();
+    let code = b["code"].as_str().map(str::trim).filter(|c| !c.is_empty());
+    let name = match k.person(&person) {
+        Some(p) => {
+            if p.name.is_empty() {
+                person.clone()
+            } else {
+                p.name.clone()
+            }
+        }
+        None => {
+            let _ = k.accounts.sign_in(&person, password);
+            return Json(json!({ "result": "refused" })).into_response();
+        }
+    };
+    let counter = crate::accounts::Accounts::console_counter(&person);
+    let admin = k.accounts.role(&person) == crate::accounts::Role::Admin;
+    match k.accounts.sign_in_counted_with_code(&person, password, code, &counter) {
+        Ok(Ok(_)) if admin => Json(json!({ "result": "ok", "name": name })).into_response(),
+        Ok(Err(crate::accounts::SignInError::NeedsCode)) if admin => Json(json!({ "result": "needs_code" })).into_response(),
+        Ok(Err(crate::accounts::SignInError::Locked(until))) => Json(json!({ "result": "locked", "retry_at": until })).into_response(),
+        Ok(_) => Json(json!({ "result": "refused" })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+    }
+}
+
+/// Whether `person` still holds the console: here, active and an admin.
+/// The guard asks on its refresh round (#429).
+async fn console_standing(State(k): State<Arc<Kernel>>, axum::extract::Path(person): axum::extract::Path<String>) -> Response {
+    let ok = k.person(&person).is_some() && k.accounts.status(&person) == crate::accounts::Status::Active && k.accounts.role(&person) == crate::accounts::Role::Admin;
+    Json(json!({ "ok": ok })).into_response()
 }
 
 fn actor(b: &Value) -> Option<String> {
