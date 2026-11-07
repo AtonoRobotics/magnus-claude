@@ -11,6 +11,7 @@
 use magnus_invariants::*;
 use magnus_scratch::*;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 const ALICE: &str = "Map the CRM for the bundle.";
 const BOB: &str = "Look up Acme in the bundle.";
@@ -527,4 +528,85 @@ async fn a_conventions_verifications_are_the_kernels_record_and_no_write_of_magn
     assert!(!r.is_error, "{}", r.text);
     let (_, d) = doc().await;
     assert_eq!((d["body"].as_str(), &d["frontmatter"]["verified"]), (Some("Discounts over 15% need the head of sales."), &review()), "{d}");
+}
+
+/// Say `text` in a new conversation; the answer, as the model wrote it.
+async fn ask(api: &Api, text: &str) -> String {
+    let (st, v) = api.post("/v1/chat", json!({ "text": text })).await;
+    assert_eq!(st.as_u16(), 201, "{v}");
+    let (thread, turn) = (v["thread"].as_str().unwrap().to_string(), v["task_id"].as_str().unwrap().to_string());
+    for _ in 0..300 {
+        let (_, t) = api.get(&format!("/v1/chat/{thread}")).await;
+        if let Some(a) = t["entries"].as_array().into_iter().flatten().find(|e| e["kind"] == "answer" && e["task_id"] == turn.as_str()) {
+            return a["text"].as_str().unwrap_or_default().to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("no answer to {text:?}");
+}
+
+/// The writer shares a writer-only org document in conversation (#299):
+/// staff can read and find it, recorded as hers; only the writer may share
+/// it, and a new version clears the share.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_writer_shares_a_writer_only_document_in_conversation() {
+    use base64::Engine;
+    let finance = || json!({ "type": "Area", "title": "Finance", "owner": "human:alice", "ask_channel": "#finance", "scope": "org", "sources": [{ "resource": "human:alice" }] });
+    let m = FakeModel::start(script(move |c| async move {
+        let body = c.body.to_string();
+        let t = c.turn();
+        if body.contains("talking with the person") {
+            return match t {
+                0 => tool("bundle_share", json!({ "path": "/people/finance.md", "groups": ["staff"] })),
+                _ => Reply::Text(c.last_results().first().map(|r| r.text.clone()).unwrap_or_else(|| "Done.".into())),
+            };
+        }
+        let steps: Vec<Reply> = if body.contains(BOB_PAY) {
+            vec![contract_unchecked("look up pay", "found or not"), tool("bundle_read", json!({ "path": "/people/finance.md" })), tool("bundle_search", json!({ "query": "carol" })), complete("Looked.")]
+        } else if body.contains(PAY) {
+            vec![contract_unchecked("note pay", "it is noted"), tool("bundle_write", json!({ "path": "/people/finance.md", "frontmatter": finance(), "body": "Carol earns 91,000 a year." })), complete("Noted.")]
+        } else {
+            vec![]
+        };
+        steps.get(t).cloned().unwrap_or_else(|| Reply::Text(String::new()))
+    }))
+    .await;
+    let app = Appliance::start(Spec::default(), &m).await;
+    let (alice, bob) = (app.api("alice"), app.api("bob"));
+    let (st, f) = alice.post("/v1/files", json!({ "name": "pay.txt", "media_type": "text/plain", "data_b64": base64::engine::general_purpose::STANDARD.encode("Carol earns 91,000 a year.") })).await;
+    assert_eq!(st.as_u16(), 201, "{f}");
+    let (st, v) = alice.post("/v1/tasks", json!({ "text": PAY, "files": [f["id"]] })).await;
+    assert!(st.is_success(), "{v}");
+    let task = v["task_id"].as_str().or(v["id"].as_str()).unwrap().to_string();
+    let ask_approval = alice.wait_item(&task, "approval").await;
+    assert!(alice.respond(ask_approval["id"].as_str().unwrap(), json!({ "decision": "approve", "scope": "once" })).await.is_success());
+    alice.wait_item(&task, "review").await;
+
+    // Bob looks: refused and unfound, until Alice shares it in conversation.
+    let bob_looks = || async {
+        let b = bob.submit(BOB_PAY).await;
+        bob.wait_item(&b, "review").await;
+        let runs: Vec<_> = m.requests().into_iter().filter(|c| c.body.to_string().contains(BOB_PAY)).collect();
+        let at = |turn: usize| runs.iter().filter(|c| c.turn() == turn).last().map(|c| c.last_results()[0].clone()).unwrap();
+        (at(2), at(3))
+    };
+    let (read, search) = bob_looks().await;
+    assert!(read.is_error && read.text.contains("no such document"), "bob read it before the share: {}", read.text);
+    let said = ask(&alice, "Share the finance page with staff.").await;
+    assert!(said.contains("shared /people/finance.md"), "{said}");
+    let (read, search) = bob_looks().await;
+    assert!(!read.is_error && read.text.contains("91,000"), "bob cannot read the shared document: {}", read.text);
+    assert!(search.text.contains("finance"), "bob's search misses the shared document: {}", search.text);
+    let (st, d) = control(&app, "GET", "/v1/admin/knowledge/doc?path=/people/finance.md", Value::Null).await;
+    assert_eq!((st, d["shared"].clone(), d["shared_by"].clone()), (200, json!(["group:staff"]), json!("alice")), "{d}");
+
+    // Not the writer, not a share.
+    let refused = ask(&bob, "Share the finance page with staff.").await;
+    assert!(refused.contains("Not shared"), "{refused}");
+
+    // A new version is new text: the share does not cover it.
+    let (st, v) = control(&app, "POST", "/v1/admin/knowledge/doc", json!({ "sub": "admin-1", "path": "/people/finance.md", "frontmatter": finance(), "body": "Carol earns 91,000 a year (checked)." })).await;
+    assert_eq!(st, 200, "{v}");
+    let (read, _) = bob_looks().await;
+    assert!(read.is_error && read.text.contains("no such document"), "bob read the new version unshared: {}", read.text);
 }

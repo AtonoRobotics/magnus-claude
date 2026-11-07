@@ -506,3 +506,39 @@ async fn an_entry_saved_while_the_embedder_was_down_is_still_found() {
     assert!(hits.iter().any(|h| h["id"] == shed["id"]), "an entry saved while the embedder was down was not found: {hits:?}");
     assert!(search(&carol, "when does the office open").await.iter().any(|h| h["id"] == other["id"]), "search by meaning stopped working");
 }
+
+/// A reader shares a person-only entry with a group (#299): widening only,
+/// recorded as theirs; the group's searches find it through row security.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_shares_a_person_only_entry_with_a_group() {
+    let k = start().await;
+    let (bob, carol) = (k.app.api("bob"), k.app.api("carol"));
+    let (_, e) = bob.post("/v1/knowledge", json!({ "title": "Ledger notes", "text": "The ledger closes on Fridays." })).await;
+    let id = e["id"].as_str().unwrap().to_string();
+    assert_eq!(e["readers"], json!([["person:bob"]]), "{e}");
+    assert!(search(&carol, "ledger closes").await.iter().all(|h| h["id"] != id.as_str()), "carol found bob's person-only entry");
+
+    // Not a reader, not a share: refused as if it were not there.
+    let (st, v) = carol.post(&format!("/v1/knowledge/{id}/share"), json!({ "groups": ["staff"] })).await;
+    assert_eq!(st.as_u16(), 404, "{v}");
+
+    // Bob shares it with staff: carol finds it, recorded as his.
+    let (st, v) = bob.post(&format!("/v1/knowledge/{id}/share"), json!({ "groups": ["staff"] })).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert_eq!((v["readers"].clone(), v["shared"]["by"].clone()), (json!([["group:staff", "person:bob"]]), json!("bob")), "{v}");
+    let hits = search(&carol, "ledger closes").await;
+    assert!(hits.iter().any(|h| h["id"] == id.as_str()), "carol still cannot find the shared entry: {hits:?}");
+    let admin = k.app.db.admin().await;
+    let logged = admin.query("SELECT actor, body::text FROM events WHERE kind = 'knowledge_shared'", &[]).await.unwrap();
+    assert_eq!(logged.len(), 1);
+    let body: Value = serde_json::from_str(logged[0].get(1)).unwrap();
+    assert_eq!((logged[0].get::<_, String>(0), body["by"].clone()), ("person:bob".to_string(), json!("bob")), "{body}");
+
+    // Shared twice is no wider: refused, while everyone stays a step.
+    let (st, _) = bob.post(&format!("/v1/knowledge/{id}/share"), json!({ "groups": ["staff"] })).await;
+    assert_eq!(st.as_u16(), 409);
+    let (st, v) = bob.post(&format!("/v1/knowledge/{id}/share"), json!({ "everyone": true })).await;
+    assert_eq!((st.as_u16(), v["readers"].clone()), (200, json!([])), "{v}");
+    let (st, _) = bob.post(&format!("/v1/knowledge/{id}/share"), json!({ "everyone": true })).await;
+    assert_eq!(st.as_u16(), 409);
+}

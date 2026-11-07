@@ -169,6 +169,7 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin { name: "bundle_read", app: "bundle", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "bundle_search", app: "bundle", risk: Risk::Read, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "bundle_write", app: "bundle", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
+    Builtin { name: "bundle_share", app: "bundle", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     Builtin { name: "knowledge_add", app: "knowledge", risk: Risk::ReversibleWrite, label: Label::PRINCIPAL, audience: Audience::Private },
     // A project's reference file, read when the work needs it (M2). Its
     // result carries the file's own taint; an upload is private and untrusted.
@@ -368,6 +369,11 @@ pub fn chat_specs() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec { name: "revoke_grant".into(), description: d("revoke_grant"), input_schema: obj(json!({ "grant": { "type": "string" } }), &["grant"]) },
+        ToolSpec {
+            name: "bundle_share".into(),
+            description: d("bundle_share"),
+            input_schema: obj(json!({ "path": { "type": "string" }, "groups": { "type": "array", "items": { "type": "string" } }, "everyone": { "type": "boolean" } }), &["path"]),
+        },
         ToolSpec { name: "list_tasks".into(), description: d("list_tasks"), input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "list_schedules".into(), description: d("list_schedules"), input_schema: obj(json!({}), &[]) },
         ToolSpec { name: "get_task".into(), description: d("get_task"), input_schema: obj(json!({ "id": { "type": "string" } }), &["id"]) },

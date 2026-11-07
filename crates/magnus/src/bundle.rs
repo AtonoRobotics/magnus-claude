@@ -8,6 +8,7 @@
 //! the content store, which the kernel reads itself, deciding who may see
 //! what (K2).
 
+use crate::events::Ev;
 use crate::kernel::Kernel;
 use crate::tools::Label;
 use serde_json::{json, Map, Value};
@@ -415,7 +416,37 @@ impl Kernel {
         if d.sources.iter().all(|s| s.starts_with('/') || s.starts_with("human:")) {
             return true;
         }
-        d.writer.as_deref() == Some(person)
+        if d.writer.as_deref() == Some(person) {
+            return true;
+        }
+        // Shared (#299): everyone, or one of the person's principals.
+        if d.shared_everyone {
+            return true;
+        }
+        let mine = self.person(person).map(|p| crate::knowledge::principals(&p)).unwrap_or_default();
+        d.shared.iter().any(|r| mine.contains(r))
+    }
+
+    /// The writer shares the current version of an org document with groups
+    /// or everyone (#299): widening only, recorded as theirs. A new version
+    /// clears it, so a share covers only the text seen.
+    pub async fn bundle_share(&self, person: &str, path: &str, groups: &[String], everyone: bool) -> Result<serde_json::Value, String> {
+        let Some(d) = self.read(|s| s.bundle.get(path).cloned()) else {
+            return Err(format!("{path}: no such document, or not one the person can see"));
+        };
+        if d.scope != "org" {
+            return Err(format!("{path}: only an org document can be shared"));
+        }
+        if d.writer.as_deref() != Some(person) {
+            return Err(format!("{path}: no such document, or not one the person can see"));
+        }
+        if d.shared_everyone || (!everyone && groups.iter().all(|g| d.shared.contains(&format!("group:{g}")))) {
+            return Err(format!("{path}: they may already read it"));
+        }
+        let add: Vec<String> = groups.iter().map(|g| format!("group:{g}")).collect();
+        self.emit(&format!("person:{person}"), Ev::BundleShared { path: path.into(), add, everyone, by: person.into() }).await.map_err(|e| format!("{e:#}"))?;
+        let d = self.read(|s| s.bundle.get(path).cloned()).ok_or_else(|| format!("{path}: no such document"))?;
+        Ok(serde_json::json!({ "path": path, "version": d.version(), "shared": d.shared, "everyone": d.shared_everyone, "by": person }))
     }
 
     /// A document for `person`: its frontmatter and body, links to what
@@ -574,6 +605,17 @@ impl Kernel {
                 let limit = input["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize;
                 let (hits, label) = self.bundle_search(&person, &s("query"), &kinds, limit).await?;
                 (json!({ "hits": hits }).to_string(), false, Some(json!({ "hits": hits, "untrusted": label.untrusted, "private": label.private })))
+            }
+            "bundle_share" => {
+                let groups: Vec<String> = input["groups"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(String::from)).collect();
+                if groups.is_empty() && input["everyone"] != true {
+                    (format!("{}: share with groups or everyone", s("path")), true, None)
+                } else {
+                    match self.bundle_share(&person, &s("path"), &groups, input["everyone"] == true).await {
+                        Ok(v) => (format!("shared {} (version {})", s("path"), v["version"]), false, Some(v)),
+                        Err(why) => (format!("Not shared: {why}"), true, None),
+                    }
+                }
             }
             // The person's relationship memory enters every run of theirs
             // as their own words: it changes only through relationship_note,
