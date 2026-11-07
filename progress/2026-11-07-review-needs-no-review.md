@@ -1,4 +1,5 @@
 # A review that decides nothing completes quietly (2026-11-07)
 
 - `run/mod.rs` `task_complete`: a review or poll that started no work completes without a contract check, even when it recorded one. Seen by the owner on task `task_604aa80fb2f84121822cc4dd32ec489c`.
-- Test: new `a_review_that_decides_nothing_needs_no_review_whatever_its_contract` in `tests/scratch/tests/proactive.rs`; it fails without the change (the review suspends on a `review` item).
+- Test: new `a_review_that_decides_nothing_needs_no_review_whatever_its_contract` in `tests/scratch/tests/proactive.rs`; it fails without the change (the review suspends on a `review` item and never completes) and passed 5 of 5 runs with it.
+- Found while testing, not fixed here: outside 09:00 to 17:00 UTC a review starts at boot and can reach the model before the harness stores the provider key. It pauses on the sign-in notice, and a paused review holds every later review for that person. The proactive tests that trigger their own review then time out; on unchanged master `review_observes_and_the_person_sees_it` failed 2 of 3 runs at 18:50 UTC. The new test resumes that paused review first. The same hold applies in the product when a model sign-in expires during a review.
