@@ -248,6 +248,7 @@ async fn a_schedule_that_keeps_failing_pauses_until_its_person_resumes_it() {
     let alice = app.api("alice");
     let id = add(&alice, json!({ "title": "Report", "text": "Fetch the report.", "every_minutes": 1 })).await;
     let other = add(&alice, json!({ "text": "Never fails.", "daily_at": "03:00" })).await;
+    let once = add(&alice, json!({ "title": "Once", "text": "Fetch it once.", "every_minutes": 1, "max_runs": 1 })).await;
     assert_eq!(alice.post(&format!("/v1/schedules/{other}/resume"), json!({})).await.0.as_u16(), 409, "a running schedule was resumed");
 
     let s = eventually("the schedule pauses", MINUTE * 3, || async { schedule(&alice, &id).await.filter(|s| s["paused"].is_string()) }).await;
@@ -258,9 +259,13 @@ async fn a_schedule_that_keeps_failing_pauses_until_its_person_resumes_it() {
     assert_eq!(written_with(&app, &n).await, ("schedule_paused".into(), true), "the pause and its notice are two writes");
     assert_eq!(app.api("carol").post(&format!("/v1/schedules/{id}/resume"), json!({})).await.0.as_u16(), 404, "someone else resumed it");
 
+    // An ended schedule stays until its person deletes it (#264, #452).
+    eventually("the one-run schedule ends", MINUTE * 2, || async { schedule(&alice, &once).await.filter(|s| !s["ended"].is_null()) }).await;
+
     assert!(set_password(&app, "alice", PASSWORD));
     let out = tokio::process::Command::new("node")
         .arg(workspace_root().join("desktop/tests/schedules.mjs"))
+        .env("MAGNUS_ENDED", &once)
         .env("MAGNUS_URL", &app.base)
         .env("MAGNUS_PERSON", "alice")
         .env("MAGNUS_PASSWORD", PASSWORD)
@@ -273,6 +278,7 @@ async fn a_schedule_that_keeps_failing_pauses_until_its_person_resumes_it() {
     let log = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "the Schedules screen check failed:\n{log}");
     assert!(schedule(&alice, &id).await.is_none(), "Stop schedule left it set");
+    assert!(schedule(&alice, &once).await.is_none(), "Delete schedule left the ended schedule");
     assert_eq!(alice.post(&format!("/v1/schedules/{id}/resume"), json!({})).await.0.as_u16(), 404);
 }
 

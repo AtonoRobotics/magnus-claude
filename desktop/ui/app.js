@@ -757,9 +757,10 @@ function scheduleFacts(sc) {
 }
 // Resume, for a schedule paused until the person says so (one paused on a
 // run waiting for them goes on once they answer it), and Stop schedule.
-// An ended schedule is history: nothing to resume or stop.
+// An ended schedule stays until its person deletes it (#264): Delete
+// schedule is its one control (#452).
 function scheduleButtons(sc, stop = "Stop schedule") {
-  if (sc.ended) return "";
+  if (sc.ended) return `<button data-act="delete-schedule" data-id="${esc(sc.id)}">Delete schedule</button>`;
   return `${sc.paused && !sc.paused_on ? `<button data-act="resume-schedule" data-id="${esc(sc.id)}">Resume</button>` : ""}<button data-act="stop-schedule" data-id="${esc(sc.id)}">${stop}</button>`;
 }
 
@@ -999,8 +1000,9 @@ async function showThread(main, thread) {
         } else {
           const id = enc(sa.dataset.scheduleId), k = sa.dataset.schedAct;
           if (k === "cancel") {
-            if (!await ask("Cancel this schedule? No more of its runs start, and a run still going stops.", "Cancel schedule")) { el.disabled = false; return; }
-            await api("DELETE", `/v1/schedules/${id}`); toast("The schedule is cancelled.");
+            const ended = App.schedules.find(x => x.id === sa.dataset.scheduleId)?.ended;
+            if (!await ask(ended ? "Delete this schedule? It has ended, so nothing stops; its runs stay in Tasks." : "Cancel this schedule? No more of its runs start, and a run still going stops.", ended ? "Delete schedule" : "Cancel schedule")) { el.disabled = false; return; }
+            await api("DELETE", `/v1/schedules/${id}`); toast(ended ? "The schedule is deleted." : "The schedule is cancelled.");
           } else { await api("POST", `/v1/schedules/${id}/${k}`, {}); toast(k === "pause" ? "Paused." : "Resumed."); }
         }
         await refresh();
@@ -1190,7 +1192,7 @@ function scheduleLine(e) {
   if (!sc) return `<p class="small" data-schedule-gone="${esc(e.schedule || "")}"><span class="chip">Cancelled</span> ${esc(e.title || "This schedule")} no longer runs.</p>`;
   const act = (k, label) => `<button class="link small" data-sched-act="${k}" data-schedule-id="${esc(sc.id)}">${label}</button>`;
   const chip = sc.ended ? `<span class="chip">Ended</span>` : `<span class="chip sch">${sc.paused ? "Paused" : "Scheduled"}</span>`;
-  const acts = sc.ended ? "" : `${sc.paused ? act("resume", "Resume") : act("pause", "Pause")}${act("cancel", "Cancel")}`;
+  const acts = sc.ended ? act("cancel", "Delete") : `${sc.paused ? act("resume", "Resume") : act("pause", "Pause")}${act("cancel", "Cancel")}`;
   return `<div class="reqgroup sched-state" data-schedule="${esc(sc.id)}"><a class="rg-row" href="#/schedules" data-open="schedule:${esc(sc.id)}" title="Open the schedule">
     <span class="st sch">${icon("calendar")}</span><span class="rg-main"><span class="ttl">${esc(sc.title)}</span><span class="sub" data-last>${esc(scheduleText(sc))}</span></span>${chip}${icon("chev", "chev")}</a>
     <div class="card-acts">${acts}<a class="small" href="#/schedules" data-open="schedule:${esc(sc.id)}">Open</a>${sc.started ? `<a class="small" href="#/chat/${enc(`schedule-${sc.id}`)}" data-schedule-runs>Its runs</a>` : ""}</div></div>`;
@@ -2246,6 +2248,9 @@ function wirePanel() {
         case "stop-schedule":
           if (!await ask("Stop this schedule? No more of its runs start. Runs already started go on, and stay in Tasks.", "Stop schedule")) return;
           await api("DELETE", `/v1/schedules/${enc(id)}`); toast("The schedule is stopped."); break;
+        case "delete-schedule":
+          if (!await ask("Delete this schedule? It has ended, so nothing stops; its runs stay in Tasks.", "Delete schedule")) return;
+          await api("DELETE", `/v1/schedules/${enc(id)}`); toast("The schedule is deleted."); break;
         case "resume-schedule": await api("POST", `/v1/schedules/${enc(id)}/resume`, {}); toast("Schedule resumed."); break;
         case "connect": connectApp(a.dataset.app).catch(err => toast(err.message)); return;
         case "connect-page": await Magnus.openExternal(a.dataset.url); return;
