@@ -180,6 +180,21 @@ pub fn set_password(state_dir: &Path, cfg: &SignIn, person: &str, password: &str
     Ok(())
 }
 
+/// A person the appliance itself keeps: config-independent identity for
+/// the embedded directory (#429). The id is the key in `people.json`, not
+/// repeated here; everything else about them (password, authenticator,
+/// status, role) lives in the files the earlier slices added.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct LocalPerson {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+fn valid_person_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
 impl Accounts {
     pub fn open(state_dir: &Path, cfg: SignIn) -> Result<Accounts> {
         let d = dir(state_dir);
@@ -247,6 +262,78 @@ impl Accounts {
         Ok(enabled(person) && !roles.keys().any(|p| p != person && enabled(p)))
     }
 
+    /// The appliance's own directory: local people by id, read fresh so
+    /// the CLI and the server never disagree for long.
+    fn people_map(&self) -> Result<BTreeMap<String, LocalPerson>> {
+        read_json(&self.dir.join("people.json"))
+    }
+
+    /// Whether the appliance itself keeps this person (as opposed to the
+    /// config or an outside directory).
+    pub fn is_local(&self, person: &str) -> bool {
+        self.people_map().map(|m| m.contains_key(person)).unwrap_or(false)
+    }
+
+    /// The appliance's record for a local person, if there is one.
+    pub fn local_person(&self, person: &str) -> Option<LocalPerson> {
+        self.people_map().ok()?.remove(person)
+    }
+
+    /// Every local person by id.
+    pub fn local_people(&self) -> Vec<(String, LocalPerson)> {
+        self.people_map().map(|m| m.into_iter().collect()).unwrap_or_default()
+    }
+
+    /// Add a person to the appliance's own directory. Refuses a second
+    /// person with the id, and an id outside 1 to 64 letters, digits,
+    /// dots, dashes and underscores.
+    pub fn add_person(&self, id: &str, name: &str, email: Option<&str>) -> Result<()> {
+        anyhow::ensure!(valid_person_id(id), "a person id is 1 to 64 letters, digits, dots, dashes and underscores");
+        let _g = self.people.lock().unwrap();
+        let path = self.dir.join("people.json");
+        let mut all: BTreeMap<String, LocalPerson> = read_json(&path)?;
+        anyhow::ensure!(!all.contains_key(id), "{id} is already a person here");
+        all.insert(id.to_string(), LocalPerson { name: name.to_string(), email: email.map(str::to_string) });
+        write_private(&path, &serde_json::to_vec_pretty(&all)?)
+    }
+
+    /// Remove a local person and every local trace: the record, password,
+    /// authenticator, used codes, status, role, invites and sessions.
+    /// Refuses an unknown id, and the organisation's last enabled admin.
+    pub fn remove_person(&self, person: &str) -> Result<Vec<String>> {
+        let _g = self.people.lock().unwrap();
+        let people_path = self.dir.join("people.json");
+        let mut people: BTreeMap<String, LocalPerson> = read_json(&people_path)?;
+        anyhow::ensure!(people.remove(person).is_some(), "{person} is not a person here");
+        if self.sole_enabled_admin(person)? {
+            anyhow::bail!("This is the organisation's last admin: make someone else an admin first.");
+        }
+        write_private(&people_path, &serde_json::to_vec_pretty(&people)?)?;
+        for file in ["passwords.json", "totp.json", "status.json", "roles.json"] {
+            let path = self.dir.join(file);
+            let mut all: BTreeMap<String, serde_json::Value> = read_json(&path)?;
+            if all.remove(person).is_some() {
+                write_private(&path, &serde_json::to_vec_pretty(&all)?)?;
+            }
+        }
+        {
+            let mut used = self.totp_steps.lock().unwrap();
+            if used.remove(person).is_some() {
+                write_private(&self.dir.join("totp-steps.json"), &serde_json::to_vec_pretty(&*used)?)?;
+            }
+        }
+        let invites_path = self.dir.join("invites.json");
+        let mut invites: BTreeMap<String, Invite> = read_json(&invites_path)?;
+        let before = invites.len();
+        invites.retain(|_, inv| inv.person != person);
+        if invites.len() != before {
+            write_private(&invites_path, &serde_json::to_vec_pretty(&invites)?)?;
+        }
+        self.failures.lock().unwrap().remove(person);
+        self.failures.lock().unwrap().remove(&Self::console_counter(person));
+        self.end_all(person)
+    }
+
     /// Set a person's role. Refuses to demote the organisation's last
     /// enabled admin.
     pub fn set_role(&self, person: &str, role: Role) -> Result<()> {
@@ -261,11 +348,10 @@ impl Accounts {
     }
 
     /// Invite a person: a single-use token, good for 7 days, is stored by
-    /// its hash and returned to pass on; the person must already be in the
-    /// config (the local user store lifts that in a later #429 slice).
-    /// Someone with neither a password nor a record is marked invited;
-    /// anyone else keeps their status, so an invite never revokes working
-    /// access.
+    /// its hash and returned to pass on. The person is local or in the
+    /// config; someone with neither a password nor a record is marked
+    /// invited, anyone else keeps their status, so an invite never
+    /// revokes working access. Callers pass a real person.
     pub fn invite(&self, person: &str, email: Option<&str>) -> Result<String> {
         let _g = self.people.lock().unwrap();
         let d = &self.dir;
@@ -878,6 +964,57 @@ mod tests {
         let accounts = Accounts::open(dir.path(), cfg).unwrap();
         accounts.set_status("ada", Status::Disabled).unwrap();
         assert_eq!(accounts.status("ada"), Status::Disabled, "disabling with no admin records refused");
+    }
+
+    /// Local people round-trip and remove cleanly: adding records them,
+    /// removing drops every local trace (person, password, code, status,
+    /// role, invites, used steps), never touching another's; adding twice
+    /// or with a wild id refuses, as does removing the last admin (#429).
+    #[test]
+    fn local_people_round_trip_and_remove_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SignIn { session_days: 1, max_failures: 5, lockout_minutes: 15, min_password_length: 10, oidc: None };
+        let accounts = Accounts::open(dir.path(), cfg.clone()).unwrap();
+        assert!(!accounts.is_local("ada"), "nobody local yet");
+        accounts.add_person("ada", "Ada", Some("ada@example.com")).unwrap();
+        assert!(accounts.is_local("ada"), "adding did not stick");
+        let ada = accounts.local_person("ada").unwrap();
+        assert_eq!((ada.name.as_str(), ada.email.as_deref()), ("Ada", Some("ada@example.com")), "the record came back wrong");
+        assert!(accounts.add_person("ada", "Ada", None).is_err(), "adding twice worked");
+        let long = "a".repeat(101);
+        for wild in ["../x", "", "a/b", long.as_str()] {
+            assert!(accounts.add_person(wild, "X", None).is_err(), "a wild id worked: {wild}");
+        }
+        set_password(dir.path(), &cfg, "ada", "a-long-password").unwrap();
+        let uri = enroll_totp(dir.path(), "ada").unwrap();
+        let secret = uri.split("secret=").nth(1).and_then(|s| s.split('&').next()).unwrap();
+        let now = chrono::Utc::now();
+        let code = crate::totp::generate(&crate::totp::base32_decode(secret).unwrap(), (now.timestamp() / 30) as u64, 6);
+        accounts.sign_in_counted_with_code_at("ada", "a-long-password", Some(&code), "console", now).unwrap();
+        let ada_token = accounts.invite("ada", None).unwrap();
+        let bea_token = accounts.invite("bea", None).unwrap();
+        accounts.set_role("ada", Role::Admin).unwrap();
+        accounts.add_person("bea", "Bea", None).unwrap();
+        accounts.set_role("bea", Role::Admin).unwrap();
+        assert_eq!(accounts.accept(&cfg, &bea_token, "bea-long-password").unwrap(), Some("bea".to_string()), "bea's invite did not work");
+        accounts.remove_person("ada").unwrap();
+        assert!(!accounts.is_local("ada"), "removing left the person");
+        assert!(!accounts.has_password("ada"), "removing left the password");
+        assert!(!accounts.has_totp("ada"), "removing left the code");
+        assert_eq!(accounts.status("ada"), Status::Active, "removing left the status");
+        assert_eq!(accounts.role("ada"), Role::Member, "removing left the role");
+        assert_eq!(accounts.accept(&cfg, &ada_token, "another-long-password").unwrap(), None, "removing left the invite");
+        assert!(accounts.has_password("bea"), "removing ada burned bea's account");
+        let steps: BTreeMap<String, i64> = read_json(&dir.path().join("accounts/totp-steps.json")).unwrap();
+        assert!(!steps.contains_key("ada"), "removing left used steps");
+        let e = accounts.remove_person("bea").unwrap_err();
+        assert!(format!("{e:#}").contains("last admin"), "removing the last admin refused wrongly: {e:#}");
+        // A second admin unlocks the removal.
+        accounts.add_person("ada", "Ada", None).unwrap();
+        accounts.set_role("ada", Role::Admin).unwrap();
+        accounts.remove_person("bea").unwrap();
+        assert!(!accounts.is_local("bea"), "a second admin did not unlock the removal");
+        assert!(accounts.remove_person("ghost").is_err(), "removing nobody worked");
     }
 
     /// Without an enrolled second factor, the code path behaves exactly as
