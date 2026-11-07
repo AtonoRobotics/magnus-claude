@@ -37,8 +37,8 @@ pub const REACTIONS: &[(&str, &str)] = &[("great", "that was great"), ("annoying
 
 /// The thread entries that are Magnus's messages: its answers (or what it
 /// said when it could not answer), its tasks' results, the tasks a turn
-/// started, and the cards it proposed (#267). The person's own messages
-/// and openers are not its to be judged on.
+/// started, the cards it proposed (#267), and its own openings (#359).
+/// The person's own messages are not its to be judged on.
 const MAGNUS: &[&str] = &[
     "answer",
     "turn",
@@ -49,6 +49,7 @@ const MAGNUS: &[&str] = &[
     "suggestion_card",
     "schedule_card",
     "connector_card",
+    "opener",
 ];
 
 /// The thread's entries with the person's reaction on each of Magnus's
