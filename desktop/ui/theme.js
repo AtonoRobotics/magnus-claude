@@ -107,44 +107,136 @@
     return t;
   }
 
-  root.Theme = { LIGHT, DARK, GLASS, ACCENTS, MODES, MATERIALS, MOTIONS, MOTION_HINTS, DEFAULTS, GLASS_SURFACES, effective, tokens };
+  // Version 2 keeps legacy values for rollback and separates navigation's
+  // colors from reading surfaces. The array order is the baseline token table.
+  const PRESETS = {
+    light: ["F2F4F7", "F2F4F7", "FFFFFF", "F4F6F9", "17212E", "526173", "17212E", "526173", "3459D4", "FFFFFF", "3459D4", "D6DDE7", "E7EDFD", "E7EDFD"],
+    dark: ["0E1117", "131923", "171C24", "232C38", "F2F5FA", "AAB6C5", "F2F5FA", "AAB6C5", "9CB4FF", "101827", "9CB4FF", "394451", "29364E", "29364E"],
+    ember: ["111013", "171418", "1B181B", "272126", "F5EEE8", "BFB0A9", "F5EEE8", "BFB0A9", "E5A176", "201611", "E5A176", "494047", "3A2924", "3A2924"],
+    corporate: ["EDF1F6", "14253D", "FFFFFF", "F4F6F9", "18283D", "53657B", "F2F5FA", "B6C4D7", "245CC3", "FFFFFF", "A9C6FF", "CBD5E1", "E7EEFA", "213B60"],
+  };
+  const THEMES = [["light", "Light"], ["dark", "Dark"], ["ember", "Ember"], ["corporate", "Corporate"]];
+  const V2_DEFAULTS = { version: 2, theme: "light", followComputer: true, material: "solid", motion: "full", navigation: "expanded", conversationWidthPx: 420 };
+  const member = (v, choices, fallback) => choices.includes(v) ? v : fallback;
+  function preferences(value, legacy) {
+    const v = value?.version === 2 ? value : legacy ? { ...legacy, theme: "custom", followComputer: legacy.mode === "system" } : {};
+    return { ...V2_DEFAULTS, version: 2,
+      theme: member(v.theme, [...Object.keys(PRESETS), "custom"], "light"),
+      followComputer: typeof v.followComputer === "boolean" ? v.followComputer : true,
+      material: member(v.material, MATERIALS.map(x => x[0]), "solid"), motion: member(v.motion, MOTIONS.map(x => x[0]), "full"),
+      navigation: member(v.navigation, ["expanded", "compact"], "expanded"),
+      conversationWidthPx: Number.isFinite(v.conversationWidthPx) ? Math.max(360, Math.min(560, v.conversationWidthPx)) : 420,
+      mode: member(v.mode, MODES.map(x => x[0]), "system"), accent: member(v.accent, ACCENTS.map(x => x.id), "blue"),
+    };
+  }
+  const legacyEffective = effective, legacyTokens = tokens;
+  function effectiveV2(prefs, os = {}) {
+    // The pure legacy interface remains available to existing callers/tests.
+    if (!prefs?.version && !prefs?.theme) return legacyEffective(prefs, os);
+    const p = preferences(prefs), custom = p.theme === "custom";
+    const theme = p.followComputer ? (os.dark ? "dark" : "light") : p.theme;
+    const base = legacyEffective(p, os);
+    const mode = custom ? base.mode : ["dark", "ember"].includes(theme) ? "dark" : "light";
+    const material = p.material === "glass" && !os.reduceTransparency && os.blur !== false && !os.forcedColors ? "glass" : "solid";
+    return { ...base, theme: custom ? "custom" : theme, mode, material, followComputer: p.followComputer };
+  }
+  function contrast(a, b) {
+    const l = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4).reduce((s, v, i) => s + v * [.2126, .7152, .0722][i], 0);
+    const x = l(a), y = l(b); return (Math.max(x, y) + .05) / (Math.min(x, y) + .05);
+  }
+  const tint = (hex, alpha = .92) => `rgba(${[1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)).join(",")},${alpha})`;
+  function tokensV2(look) {
+    if (!look.theme) return legacyTokens(look);
+    const dark = look.mode === "dark", custom = look.theme === "custom";
+    const v = PRESETS[custom ? look.mode : look.theme].map(h => `#${h}`);
+    const [shell, chrome, canvas, raised, text, muted, chromeText, chromeMuted, accent, accentFg, chromeFocus, border, selected, chromeSelected] = v;
+    const t = { ...legacyTokens({ ...look, material: "solid" }),
+      shell, chrome, canvas, bg: shell, side: chrome, panel: canvas, main: canvas, surface: canvas, raised,
+      bubble: raised, seg: raised, "seg-on": selected, fg: text, fg2: text, muted, faint: muted,
+      line: border, hair: border, "line-strong": muted, "btn-border": muted, "button-bg": canvas,
+      "row-sel": selected, search: raised, "group-head": raised, "row-hi": selected,
+      accent, "accent-fg": accentFg, "accent-text": accent, "accent-soft": selected, focus: accent,
+      "chrome-text": chromeText, "chrome-muted": chromeMuted, "chrome-focus": chromeFocus, "chrome-selected": chromeSelected,
+      "chrome-surface": chrome, "chrome-accent-fg": chrome, "chrome-line": chromeMuted,
+      "search-muted": muted, "panel-edge": border, "main-gap": "0px", "main-radius": "0px", "main-shadow": "none",
+      blur: "none", backdrop: shell,
+    };
+    if (custom) {
+      Object.assign(t, legacyTokens({ ...look, material: "solid" }));
+      t.focus = t["accent-text"];
+      // Preserve the chosen values; only effective rendering is adjusted.
+      t["contrast-adjusted"] = "false";
+      for (const fg of ["fg", "fg2", "muted", "faint", "accent-text"]) {
+        if (["main", "surface", "raised", "row-sel", "accent-soft"].some(bg => /^#[\da-f]{6}$/i.test(t[bg]) && contrast(t[fg], t[bg]) < 4.5)) {
+          t[fg] = fg === "accent-text" ? accent : fg === "muted" || fg === "faint" ? muted : text;
+          t["contrast-adjusted"] = "true";
+        }
+      }
+      if (contrast(t["accent-fg"], t.accent) < 4.5) { t.accent = accent; t["accent-fg"] = accentFg; t["contrast-adjusted"] = "true"; }
+      t["chrome-text"] = t.fg; t["chrome-muted"] = t.muted; t["chrome-focus"] = t["accent-text"];
+      t["chrome-surface"] = t.side; t["chrome-selected"] = t["row-hi"]; t["chrome-line"] = t.muted;
+    }
+    const success = dark ? "#86DBA0" : "#176B3A", warning = dark ? "#FFBE78" : "#8A4200", error = dark ? "#FF8A80" : "#B42318";
+    Object.assign(t, { ok: success, "ok-icon": success, "ok-soft": t.surface, warn: warning, "warn-icon": warning, "warn-soft": t.surface, bad: error, "bad-soft": t.surface, "approval-bg": t.surface, "approval-border": warning });
+    if (look.theme === "ember") t.backdrop = "radial-gradient(at top left,rgba(160,75,38,.12),transparent 65%),radial-gradient(at bottom right,rgba(94,35,55,.10),transparent 65%),#111013";
+    else if (look.theme === "dark") t.backdrop = `radial-gradient(at top left,rgba(80,100,130,.10),transparent 65%),${shell}`;
+    else if (look.theme === "light") t.backdrop = `radial-gradient(at top left,rgba(100,130,170,.08),transparent 65%),${shell}`;
+    if (look.material === "glass") { t.side = tint(t["chrome-surface"]); t.blur = "blur(20px)"; }
+    return t;
+  }
+  root.Theme = { LIGHT, DARK, GLASS, ACCENTS, MODES, MATERIALS, MOTIONS, MOTION_HINTS, DEFAULTS, V2_DEFAULTS, PRESETS, THEMES, GLASS_SURFACES, preferences, contrast, effective: effectiveV2, tokens: tokensV2 };
   if (typeof document === "undefined") return;
 
   // In the page: the person's choices are kept on this device (the look
   // suits the screen), applied before anything is drawn, and again when
   // the system's settings change.
-  const KEY = "magnus.appearance";
-  const media = q => (typeof matchMedia === "function" ? matchMedia(q) : null);
-  const darkQ = media("(prefers-color-scheme: dark)"), motionQ = media("(prefers-reduced-motion: reduce)"), clearQ = media("(prefers-reduced-transparency: reduce)");
-  let system = { reduceTransparency: false };
-  Theme.prefs = () => { try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) || "{}") }; } catch { return { ...DEFAULTS }; } };
-  Theme.os = () => ({ dark: !!darkQ?.matches, reduceMotion: !!motionQ?.matches, reduceTransparency: !!clearQ?.matches || system.reduceTransparency });
+  const LEGACY_KEY = "magnus.appearance";
+  const media = q => typeof matchMedia === "function" ? matchMedia(q) : null;
+  const darkQ = media("(prefers-color-scheme: dark)"), motionQ = media("(prefers-reduced-motion: reduce)"), clearQ = media("(prefers-reduced-transparency: reduce)"), forcedQ = media("(forced-colors: active)");
+  let system = {}, key = null, current = preferences(), revision = 0;
+  const parse = k => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } };
+  Theme.prefs = () => ({ ...current });
+  Theme.scope = (appliance, person) => {
+    key = person ? `magnus.ui.v2.${appliance}.${person}` : null;
+    const saved = key && parse(key);
+    current = preferences(saved, key && !saved ? parse(LEGACY_KEY) : null);
+    Theme.saved = true;
+    if (key && !saved) { try { localStorage.setItem(key, JSON.stringify(current)); } catch { Theme.saved = false; } }
+    return Theme.apply();
+  };
+  Theme.os = () => ({ dark: !!darkQ?.matches, reduceMotion: !!motionQ?.matches, reduceTransparency: !!clearQ?.matches || !!system.reduce_transparency,
+    forcedColors: !!forcedQ?.matches, blur: !root.CSS?.supports || CSS.supports("backdrop-filter", "blur(20px)") || CSS.supports("-webkit-backdrop-filter", "blur(20px)") });
   Theme.apply = () => {
-    const look = effective(Theme.prefs(), Theme.os());
-    const el = document.documentElement, t = tokens(look);
+    const rev = ++revision, look = effectiveV2(current, Theme.os()), el = document.documentElement, t = tokensV2(look);
     for (const [k, v] of Object.entries(t)) el.style.setProperty(`--${k}`, v);
     el.style.colorScheme = look.mode;
-    Object.assign(el.dataset, { mode: look.mode, material: look.material, motion: look.motion, accent: look.accent });
+    Object.assign(el.dataset, { mode: look.mode, theme: look.theme, material: look.material, motion: look.motion, accent: look.accent });
     Theme.look = look;
-    // The system's own material behind the window where it has one; the
-    // page's drawn backdrop where it has none.
-    const glass = look.material === "glass";
-    const tint = GLASS[look.mode].system.match(/[\d.]+/g).map(Number);
-    if (root.Magnus?.setMaterial) root.Magnus.setMaterial(glass, look.mode === "dark", [...tint.slice(0, 3), Math.round(tint[3] * 255)]).then(m => { el.dataset.backdrop = glass && m.native ? "native" : "drawn"; });
+    // Sandboxed same-origin frames contain no scripts. Update their variables
+    // in place: preserve data, selection and scroll without fetching again.
+    for (const f of document.querySelectorAll("iframe.composed")) {
+      try { const r = f.contentDocument?.documentElement; if (r) { for (const [k, v] of Object.entries(t)) r.style.setProperty(`--${k}`, v); r.style.colorScheme = look.mode; } } catch { /* frame still loading */ }
+    }
+    const glass = look.material === "glass", color = t["chrome-surface"];
+    if (root.Magnus?.setMaterial) root.Magnus.setMaterial(glass, look.mode === "dark", [...[1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16)), 235])
+      .then(m => { if (rev === revision) el.dataset.backdrop = glass && m.native ? "native" : "drawn"; }).catch(() => { if (rev === revision) el.dataset.backdrop = "drawn"; });
     else el.dataset.backdrop = "drawn";
+    root.dispatchEvent(new CustomEvent("magnus-theme", { detail: { look, saved: Theme.saved } }));
     return look;
   };
   Theme.set = change => {
-    try { localStorage.setItem(KEY, JSON.stringify({ ...Theme.prefs(), ...change })); } catch { /* private window: this session only */ }
+    const next = { ...current, ...change };
+    if (change.theme && change.theme !== "custom") next.followComputer = false;
+    if (change.followComputer === true) next.theme = Theme.os().dark ? "dark" : "light";
+    if (change.mode || change.accent) { next.theme = "custom"; next.followComputer = change.mode === "system"; }
+    current = preferences(next);
+    Theme.saved = true;
+    if (key) { try { localStorage.setItem(key, JSON.stringify(current)); } catch { Theme.saved = false; } }
     return Theme.apply();
   };
-  for (const q of [darkQ, motionQ, clearQ]) q?.addEventListener?.("change", Theme.apply);
+  for (const q of [darkQ, motionQ, clearQ, forcedQ]) q?.addEventListener?.("change", Theme.apply);
   Theme.apply();
-  // What the page cannot read itself (Windows' transparency setting).
   addEventListener("DOMContentLoaded", async () => {
-    if (!root.Magnus?.systemLook) return;
-    const s = await root.Magnus.systemLook();
-    system = { reduceTransparency: !!s.reduce_transparency };
-    Theme.apply();
+    if (root.Magnus?.systemLook) { try { system = await root.Magnus.systemLook(); Theme.apply(); } catch { /* CSS fallback remains usable */ } }
   });
 })(typeof window !== "undefined" ? window : globalThis);

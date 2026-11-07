@@ -1,0 +1,6 @@
+# Workspace appearance baseline (2026-11-07, #460)
+
+- Full owner-requested version 1.2 implementation is tracked by #460–#464; this PR handles the first integrated concern: appearance tokens, scoped preferences, Appearance controls, open-frame inheritance and host fallback. The remaining issues still govern required completion.
+- Added all four exact preset tables, chrome/content scopes, 92% chrome glass, accessible custom fallback, forced colors and shorter motion; preserved legacy migration input and accent choices. Appearance applies immediately, preserves focused choice and reports local persistence failures.
+- `node desktop/tests/theme-check.mjs`: green, including the new v2 checks for all preset/material pairs, extreme black/white glass backdrops, 72 legacy combinations, invalid-width clamping, identity isolation, custom contrast fallback and storage failure. Current master lacks the tested presets/v2 API.
+- Browser/installed appearance tests now cover the new preset choices. Real-appliance browser test is being run after rebuilding the binary that embeds the UI; the first local attempt used the preexisting stale binary. Installed-host results and CI remain pending until recorded below.

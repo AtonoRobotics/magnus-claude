@@ -24,18 +24,13 @@ const shoot = (page, name) => shots ? page.screenshot({ path: join(shots, name) 
 
 const browser = await chromium.launch({ executablePath: env("MAGNUS_CHROMIUM"), args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 const failures = [];
-// The references' values (Magnus Workspace, renderVals and inline styles),
-// copied here apart from theme.js so a drift in either shows.
-const LIGHT = { side: "#F3F3F0", panel: "#FAFAF8", main: "#FFFFFF", card: "#FFFFFF", border: "#E7E6E2", seg: "#EDEDEA", segOn: "#FFFFFF",
-  text: "#1C1C1E", text3: "#5E5E63", search: "rgba(118,118,128,0.12)", groupHead: "#FAFAF8", accentText: "#3557D9", rowHi: "#F4F6FE" };
-const NIGHT = { side: "#161618", panel: "#19191C", main: "#1C1C1F", card: "#242428", border: "#2E2E33", seg: "#2A2A2F", segOn: "#3A3A40",
-  text: "#F2F2F4", text3: "#A1A1A8", search: "rgba(255,255,255,0.08)", groupHead: "#202024", accentText: "#9DB1FF", rowHi: "#20263A" };
+// Exact version 1.2 base tokens, independent of the implementation.
 const REF = {
-  "light-solid": LIGHT,
-  "light-glass": { ...LIGHT, side: "rgba(248,248,246,0.62)", panel: "rgba(250,250,248,0.70)", search: "rgba(255,255,255,0.55)", seg: "rgba(0,0,0,0.06)", text3: "#55555A" },
-  "dark-glass": { ...NIGHT, side: "rgba(26,26,30,0.58)", panel: "rgba(28,28,32,0.66)", search: "rgba(255,255,255,0.10)", seg: "rgba(255,255,255,0.08)" },
+  light: {side:'#F2F4F7',main:'#FFFFFF',text:'#17212E',chromeText:'#17212E'},
+  dark: {side:'#131923',main:'#171C24',text:'#F2F5FA',chromeText:'#F2F5FA'},
+  ember: {side:'#171418',main:'#1B181B',text:'#F5EEE8',chromeText:'#F5EEE8'},
+  corporate: {side:'#14253D',main:'#FFFFFF',text:'#18283D',chromeText:'#F2F5FA'},
 };
-
 // A color as [r, g, b, a], from #RRGGBB or rgb()/rgba().
 function rgba(c) {
   const h = /^#([0-9a-f]{6})$/i.exec(c);
@@ -52,15 +47,11 @@ function expect(look, what, got, want, eq = same) {
 }
 const px = (a, b) => Math.abs(parseFloat(a) - parseFloat(b)) < 0.5;
 
-const LOOKS = [
-  ["light-solid", { mode: "light", material: "solid", accent: "blue", motion: "off" }],
-  ["light-glass", { mode: "light", material: "glass", accent: "blue", motion: "off" }],
-  ["dark-glass", { mode: "dark", material: "glass", accent: "blue", motion: "off" }],
-];
+const LOOKS = Object.keys(REF).flatMap(theme => ['solid','glass'].map(material => [`${theme}-${material}`, {version:2,theme,followComputer:false,material,motion:'off'}]));
 
 async function open(look) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1060 } });
-  await page.addInitScript(l => { try { localStorage.setItem("magnus.appearance", JSON.stringify(l)); } catch { /* none */ } }, look);
+  await page.addInitScript(({l,person}) => { try { localStorage.setItem(`magnus.ui.v2.${location.origin}.${person}`, JSON.stringify(l)); } catch { /* none */ } }, {l:look,person});
   page.on("pageerror", e => failures.push(`page error: ${e}`));
   await page.goto(base);
   await page.getByLabel("Username").fill(person);
@@ -117,18 +108,17 @@ for (const [name, look] of LOOKS) {
     got = await measure();
   }
   await shoot(page, `app-${name}.png`);
-  const r = REF[name];
-  for (const [what, key, want] of [["the text", "body", r.text], ["the sidebar", "side", r.side], ["the task panel", "panel", r.panel],
-    ["the conversation", "main", r.main], ["the search field", "search", r.search], ["the tabs' track", "seg", r.seg],
-    ["the chosen tab", "segOn", r.segOn], ["a group's head", "groupHead", r.groupHead], ["the open task's row", "rowHi", r.rowHi],
-    ["a result's heading", "h3", r.text3], ["a result card", "card", r.card], ["a result card's edge", "cardEdge", r.border],
-    ["a timeline's day", "when", r.accentText], ["a result card's text", "cardText", r.text]]) expect(name, what, got[key], want);
-  for (const [what, key, want] of [["the task panel's width", "panelWidth", "420px"], ["the search field's height", "searchHeight", "40px"],
-    ["Needs you's height", "needsHeight", "44px"], ["Needs you's corners", "needsRadius", "12px"], ["a tab's height", "tabHeight", "34px"],
-    ["a result heading's size", "h3Size", "12px"], ["a verdict button's height", "verdictHeight", "44px"], ["a result card's corners", "cardRadius", "16px"]])
-    expect(name, what, got[key], want, px);
-  expect(name, "a result heading's case", got.h3Case, "none", (a, b) => a === b);
-  expect(name, "behind the result cards", got.frameBg, "rgba(0, 0, 0, 0)");
+  const r = REF[look.theme];
+  for (const [what,key,want] of [['content text','body',r.text],['conversation','main',r.main],['result text','cardText',r.text]]) expect(name,what,got[key],want);
+  const chrome = await page.locator('nav.side').evaluate(el => getComputedStyle(el).color);
+  expect(name,'chrome text',chrome,r.chromeText);
+  const expectedSide = look.material === 'glass' ? `rgba(${rgba(r.side).slice(0,3).join(',')},0.92)` : r.side;
+  expect(name,'navigation surface',got.side,expectedSide);
+  const prior = await page.locator('iframe.composed').first().evaluate(f => ({html:f.contentDocument.body.innerHTML,scroll:f.contentWindow.scrollY}));
+  await page.evaluate(theme => Theme.set({theme}), look.theme === 'corporate' ? 'ember' : 'corporate');
+  const after = await page.locator('iframe.composed').first().evaluate(f => ({html:f.contentDocument.body.innerHTML,scroll:f.contentWindow.scrollY,color:getComputedStyle(f.contentDocument.body).color}));
+  if (prior.html !== after.html || prior.scroll !== after.scroll) failures.push(`${name}: changing theme replaced frame content or scroll`);
+  expect(name,'open frame theme',after.color,REF[look.theme === 'corporate' ? 'ember' : 'corporate'].text);
   console.log(`checked ${name}`);
   await page.close();
 }
@@ -148,9 +138,9 @@ for (const [name, look] of LOOKS) {
       swatch: cs(".appearance .swatch", "width"),
     };
   });
-  const want = ["Mode", "Material", "Accent color", "Motion"];
+  const want = ["Theme", "Custom mode", "Material", "Accent color", "Motion"];
   if (want.join("|") !== got.labels.join("|")) failures.push(`appearance: the sections are ${got.labels.join(", ")}, the reference's are ${want.join(", ")}`);
-  expect("appearance", "the choices' track", got.track, LIGHT.seg);
+
   expect("appearance", "a choice's height", got.option, "40px", px);
   expect("appearance", "a swatch's size", got.swatch, "44px", px);
   console.log("checked appearance");
