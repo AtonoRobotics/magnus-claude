@@ -28,6 +28,7 @@ pub fn main() {
             Some("totp-enroll") => totp_enroll(&args),
             Some("invite") => invite(&args),
             Some("person-status") => person_status(&args),
+            Some("person-role") => person_role(&args),
             Some("sign-in-code") => sign_in_code(&args),
             Some("restore") => restore(&args).await,
             Some("check") => check(&args).await,
@@ -36,7 +37,7 @@ pub fn main() {
                 Ok(())
             }
             _ => {
-                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus totp-enroll --config <file> --person <id>   (prints the enrollment URI)\n       magnus invite --config <file> --person <id> [--email <address>]   (prints the invite token)\n       magnus person-status --config <file> --person <id> --status active|disabled\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>\n       magnus check --config <file>   (reads the log and the vault, as a new release must)\n       magnus version");
+                eprintln!("usage: magnus migrate --config <file> --admin-url <url>\n       magnus serve --config <file>\n       magnus password --config <file> --person <id>   (password on stdin)\n       magnus totp-enroll --config <file> --person <id>   (prints the enrollment URI)\n       magnus invite --config <file> --person <id> [--email <address>]   (prints the invite token)\n       magnus person-status --config <file> --person <id> --status active|disabled\n       magnus person-role --config <file> --person <id> --role admin|member\n       magnus conformance --config <file> --adapter <id> [--model <id>]\n       magnus restore --config <file> --admin-url <url> --from <backup file>\n       magnus check --config <file>   (reads the log and the vault, as a new release must)\n       magnus version");
                 std::process::exit(2);
             }
         }
@@ -283,6 +284,25 @@ fn person_status(args: &[String]) -> Result<()> {
     } else {
         eprintln!("{person} is now disabled; ended sessions: {}", ended.join(", "));
     }
+    Ok(())
+}
+
+/// Set a local-password person's console role: admins enter the console,
+/// members do not. Refuses to demote the organisation's last enabled
+/// admin.
+fn person_role(args: &[String]) -> Result<()> {
+    let cfg = config(args)?;
+    let person = arg(args, "--person").context("--person is required")?;
+    anyhow::ensure!(cfg.person(&person).is_some(), "{person} is not a person in the config");
+    anyhow::ensure!(cfg.may_use_password(&person), "{person} signs in through the identity provider; only local sign-in takes a local role");
+    let role = match arg(args, "--role").as_deref() {
+        Some("admin") => crate::accounts::Role::Admin,
+        Some("member") => crate::accounts::Role::Member,
+        x => anyhow::bail!("--role is admin or member, not {}", x.unwrap_or("(missing)")),
+    };
+    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+    accounts.set_role(&person, role)?;
+    eprintln!("{person} is now {}", if role == crate::accounts::Role::Admin { "an admin" } else { "a member" });
     Ok(())
 }
 
