@@ -93,6 +93,7 @@ pub fn render(s: &State, p: &Person, i: &Item) -> Value {
         "summary": i.summary,
         "details": i.details,
         "created_at": i.created_at,
+        "opened_at": s.items_opened.get(&i.id),
         "status": if i.resolution.is_some() { "resolved" } else { "open" },
         "resolution": i.resolution.as_ref().map(|(d, s, t, by)| json!({ "decision": d, "scope": s, "text": t, "by": by })),
         "can_respond": i.resolution.is_none() && may_respond(p, i),

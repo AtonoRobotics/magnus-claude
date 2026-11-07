@@ -870,6 +870,13 @@ pub struct State {
     pub signed_in_before: HashSet<String>,
     /// When each person last signed in here (the console's Users list).
     pub last_sign_in: HashMap<String, DateTime<Utc>>,
+    /// When each person last opened the app's home: the feed starts
+    /// here (#367).
+    pub home_last_open: HashMap<String, DateTime<Utc>>,
+    /// When each inbox item was first presented to its person (#367).
+    pub items_opened: HashMap<String, DateTime<Utc>>,
+    /// When each inbox item was decided, for the feed (#367).
+    pub items_resolved_at: HashMap<String, DateTime<Utc>>,
     /// How many times each person has connected each app (by person, then
     /// app): the first connection is the one Magnus opens a conversation
     /// about, never a reconnection.
@@ -1021,6 +1028,7 @@ impl State {
             // An org document is nobody's; a person's own is theirs.
             Ev::BundleWritten { owner_user, .. } => return owner_user.clone(),
             Ev::ItemResolved { id, .. } => return self.items.get(id).map(|i| i.person.clone()),
+            Ev::ItemOpened { id } => return self.items.get(id).map(|i| i.person.clone()),
             Ev::ScheduleEnded { id, .. } => return self.schedules.get(id).map(|s| s.person.clone()),
             _ => {}
         }
@@ -1576,6 +1584,14 @@ impl State {
                 self.last_sign_in.insert(person.clone(), e.at);
                 // Signed in again: the provider has them back.
                 self.turned_off.remove(person);
+            }
+            Ev::HomeOpened { person } => {
+                self.home_last_open.insert(person.clone(), e.at);
+            }
+            Ev::ItemOpened { id } => {
+                // First presentation stands: opened is when it was
+                // first seen, and the app reports it on every open.
+                self.items_opened.entry(id.clone()).or_insert(e.at);
             }
             Ev::SignedOut { .. } | Ev::DevicePaired { .. } | Ev::DeviceRevoked { .. } => {}
             Ev::PersonTurnedOff { person, .. } => {
@@ -2236,6 +2252,7 @@ impl State {
                 }
             }
             Ev::ItemResolved { id, decision, scope, text } => {
+                self.items_resolved_at.insert(id.clone(), e.at);
                 if let Some(i) = self.items.get_mut(id) {
                     i.resolution = Some((decision.clone(), scope.clone(), text.clone(), e.actor.clone()));
                     // A stopped run's notice put away: the run waits on no

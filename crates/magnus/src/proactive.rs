@@ -200,17 +200,10 @@ impl crate::kernel::Kernel {
                     s.reviews_overnight.get(&person).cloned(),
                 )
             });
-            if in_window(m, st.working)
-                && last.is_none_or(|t| {
-                    now.signed_duration_since(t).num_minutes() >= st.every_minutes as i64
-                })
-            {
-                self.start_review(&person, "cadence".into(), None).await;
-            } else if !in_window(m, st.working) && overnight.as_deref() != Some(today.as_str()) {
-                self.start_review(&person, "overnight".into(), None).await;
-            }
-            for (reason, ended) in self.read(|s| {
-                let mut out: Vec<(String, Option<Ended>)> = vec![];
+            // One sweep starts at most one review per person: an event
+            // first (it is marked, so the cadence cannot starve it, and it
+            // is the more urgent), else the periodic one (#381).
+            let event: Option<(String, Option<Ended>)> = self.read(|s| {
                 for sc in s
                     .schedules
                     .values()
@@ -223,7 +216,7 @@ impl crate::kernel::Kernel {
                         .get(&format!("{person}:schedule {}", sc.id))
                         .is_some_and(|d| d == &today)
                     {
-                        out.push((schedule_reason(&sc.id), None));
+                        return Some((schedule_reason(&sc.id), None));
                     }
                 }
                 for c in s
@@ -240,7 +233,7 @@ impl crate::kernel::Kernel {
                             .get(&format!("{person}:commitment {}", c.id))
                             .is_some_and(|d| d == &today)
                     {
-                        out.push((commitment_reason(&c.id), None));
+                        return Some((commitment_reason(&c.id), None));
                     }
                 }
                 for i in s.items.values().filter(|i| {
@@ -252,7 +245,7 @@ impl crate::kernel::Kernel {
                             .get(&format!("{person}:approval {}", i.id))
                             .is_some_and(|d| d == &today)
                     {
-                        out.push((approval_reason(&i.id), None));
+                        return Some((approval_reason(&i.id), None));
                     }
                 }
                 // The backstop (#386): a task that ended while a review
@@ -285,12 +278,20 @@ impl crate::kernel::Kernel {
                     .max_by_key(|(ended, _, _, _, _)| *ended)
                     .map(|(_, id, verb, outcome, label)| (id, verb, outcome, label))
                 {
-                    out.push((format!("task {id} {verb}"), Some(Ended { task: id, outcome, label })));
+                    return Some((format!("task {id} {verb}"), Some(Ended { task: id, outcome, label })));
                 }
-                out
-            }) {
+                None
+            });
+            if let Some((reason, ended)) = event {
                 self.start_review(&person, reason, ended).await;
-                break;
+            } else if in_window(m, st.working)
+                && last.is_none_or(|t| {
+                    now.signed_duration_since(t).num_minutes() >= st.every_minutes as i64
+                })
+            {
+                self.start_review(&person, "cadence".into(), None).await;
+            } else if !in_window(m, st.working) && overnight.as_deref() != Some(today.as_str()) {
+                self.start_review(&person, "overnight".into(), None).await;
             }
         }
     }
