@@ -235,6 +235,66 @@ fn shrink(v: &Value) -> Value {
     }
 }
 
+/// Which tool each call of these events is, from the intents and replies
+/// that name them, so a result (which carries no name) can be judged.
+fn call_tools(events: &[crate::log::Event]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for e in events {
+        match &e.ev {
+            Ev::Intent { call_id, tool, .. } => {
+                out.entry(call_id.clone()).or_insert_with(|| tool.clone());
+            }
+            Ev::ModelReply { blocks, .. } => {
+                for b in blocks {
+                    if let magnus_adapter_proto::Block::ToolCall { id, name, .. } = b {
+                        out.entry(id.clone()).or_insert_with(|| name.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Hide one person's relationship notes and disagreement words from another
+/// developer reading this run's log (#257): the calls stay listed, with
+/// their names and decisions, but their words do not come back.
+fn redact_event_body(body: &mut Value, call_tool: &HashMap<String, String>) {
+    let only = crate::tools::person_only_tool;
+    match body["kind"].as_str().unwrap_or_default() {
+        "model_reply" => {
+            if let Some(blocks) = body["blocks"].as_array_mut() {
+                for b in blocks {
+                    if b["type"] == "tool_call" && only(b["name"].as_str().unwrap_or_default()) {
+                        b["input"] = json!(crate::tools::REDACTED_CALL);
+                    }
+                }
+            }
+        }
+        "intent" => {
+            if only(body["tool"].as_str().unwrap_or_default()) {
+                body["input"] = json!(crate::tools::REDACTED_CALL);
+            }
+        }
+        "tool_result" => {
+            let tool = body["call_id"].as_str().and_then(|c| call_tool.get(c));
+            if tool.is_some_and(|t| only(t)) {
+                body["text"] = json!(crate::tools::REDACTED_CALL);
+                body["data"] = Value::Null;
+            }
+        }
+        "disagreement_recorded" => {
+            body["position"] = json!(crate::tools::REDACTED_CALL);
+            body["decision"] = json!(crate::tools::REDACTED_CALL);
+        }
+        "disagreement_outcome" => {
+            body["outcome"] = json!(crate::tools::REDACTED_CALL);
+        }
+        _ => {}
+    }
+}
+
 fn issuer_of(actor: &str) -> &'static str {
     if actor == "model" {
         "model"
@@ -258,8 +318,11 @@ impl Sources {
 /// with tokens), what it did, and what the harness did, with who issued each
 /// action (V7). Built from the run's raw events.
 async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    dev!(k, h);
+    let req = dev!(k, h);
     let Some(run) = k.read(|s| s.runs.get(&id).cloned()) else { return err(StatusCode::NOT_FOUND, "no such run") };
+    // Another developer reads the run's shape, not the words of the calls
+    // that are its person's alone (#257).
+    let redact = req.id != run.person;
     let events = match k.run_events(&id).await {
         Ok(e) => e,
         Err(e) => return internal(e),
@@ -280,7 +343,7 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
     let mut steps: BTreeMap<u32, Map<String, Value>> = BTreeMap::new();
     let mut actions: Vec<Value> = vec![];
     let mut action_ix: HashMap<String, usize> = HashMap::new();
-    let mut call_tool: HashMap<String, String> = HashMap::new();
+    let call_tool = call_tools(&events);
     let mut harness: Vec<Value> = vec![];
     let mut records: Vec<Value> = vec![];
     for e in &events {
@@ -330,7 +393,7 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
                         }
                         magnus_adapter_proto::Block::ToolCall { id, name, input } => {
                             chars += name.len() + input.to_string().len();
-                            call_tool.insert(id.clone(), name.clone());
+                            let input = if redact && crate::tools::person_only_tool(name) { json!(crate::tools::REDACTED_CALL) } else { input.clone() };
                             calls.push(json!({ "call_id": id, "tool": name, "input": input }));
                         }
                         _ => {}
@@ -353,7 +416,7 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
                 });
                 let a = &mut actions[ix];
                 a["step_id"] = json!(step_id);
-                a["input"] = input.clone();
+                a["input"] = if redact && crate::tools::person_only_tool(tool) { json!(crate::tools::REDACTED_CALL) } else { input.clone() };
                 a["issuer"] = json!(if issuer == "check" { "code (a check the model wrote)" } else { issuer.as_str() });
                 a["intent_seq"] = json!(e.seq);
             }
@@ -367,7 +430,8 @@ async fn inspect(AxState(k): K, h: HeaderMap, Path(id): Path<String>) -> Respons
             Ev::ToolResult { call_id, status, text, is_error, label, .. } => {
                 let tool = call_tool.get(call_id).cloned().unwrap_or_else(|| "run records".into());
                 seen.add(&format!("tool results: {tool}"), text.len().min(crate::run::MAX_RESULT_IN_CONTEXT));
-                let res = json!({ "seq": e.seq, "status": status, "is_error": is_error, "label": label, "text": clip(text, 4000), "recorded_by": who });
+                let shown = if redact && crate::tools::person_only_tool(&tool) { crate::tools::REDACTED_CALL } else { text.as_str() };
+                let res = json!({ "seq": e.seq, "status": status, "is_error": is_error, "label": label, "text": clip(shown, 4000), "recorded_by": who });
                 match action_ix.get(call_id) {
                     Some(ix) => actions[*ix]["result"] = res,
                     None => records.push(json!({ "seq": e.seq, "kind": "record_result", "call_id": call_id, "tool": tool, "issuer": who, "result": res })),
@@ -432,12 +496,15 @@ struct LogQuery {
 
 /// The full log of one run (V4), with large payloads shortened for reading.
 async fn raw_log(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Query(q): Query<LogQuery>) -> Response {
-    dev!(k, h);
+    let req = dev!(k, h);
     if k.read(|s| !s.runs.contains_key(&id)) {
         return err(StatusCode::NOT_FOUND, "no such run");
     }
     match k.run_events(&id).await {
         Ok(evs) => {
+            let person = k.read(|s| s.runs.get(&id).map(|r| r.person.clone())).unwrap_or_default();
+            let redact = req.id != person;
+            let call_tool = call_tools(&evs);
             let after = q.after.unwrap_or(0);
             let limit = q.limit.unwrap_or(1000);
             let rows: Vec<Value> = evs
@@ -445,7 +512,10 @@ async fn raw_log(AxState(k): K, h: HeaderMap, Path(id): Path<String>, Query(q): 
                 .filter(|e| e.seq > after)
                 .take(limit)
                 .map(|e| {
-                    let body = serde_json::to_value(&e.ev).unwrap_or_default();
+                    let mut body = serde_json::to_value(&e.ev).unwrap_or_default();
+                    if redact {
+                        redact_event_body(&mut body, &call_tool);
+                    }
                     json!({ "seq": e.seq, "at": e.at, "actor": e.actor, "kind": body["kind"], "body": shrink(&body) })
                 })
                 .collect();

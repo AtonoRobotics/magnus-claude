@@ -101,9 +101,12 @@ impl Kernel {
                 s.tasks.values().filter(|t| t.person == target.id && !t.is_chat_turn()).filter_map(|t| s.runs.get(&t.run_id).map(|r| crate::api::task_row(self, s, target, t, r, &words))).collect::<Vec<Value>>()
             })),
             ("tasks", Some(id)) => {
-                let found = self.read(|s| s.tasks.get(id).filter(|t| t.person == target.id).and_then(|t| s.runs.get(&t.run_id).map(|r| (crate::api::task_row(self, s, target, t, r, &words), r.clone()))));
+                // A chat turn is not a task: the list leaves turns out, and
+                // so does this, or a turn's tool calls (among them the
+                // person's relationship notes) come back here (#257).
+                let found = self.read(|s| s.tasks.get(id).filter(|t| t.person == target.id && !t.is_chat_turn()).and_then(|t| s.runs.get(&t.run_id).map(|r| (crate::api::task_row(self, s, target, t, r, &words), r.clone()))));
                 let (row, run) = found.ok_or_else(none)?;
-                json!({ "task": row, "timeline": crate::api::timeline_of(&run) })
+                json!({ "task": row, "timeline": crate::api::timeline_of(&run, !own) })
             }
             ("chats", None) => json!(self.threads(&target.id).await.map_err(failed)?),
             ("chats", Some(id)) => json!({ "thread": id, "entries": self.thread_entries(&target.id, id).await.map_err(failed)?.ok_or_else(none)? }),

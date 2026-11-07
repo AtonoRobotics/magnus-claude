@@ -7,6 +7,7 @@
 //! removes it. Beside it, each run sees Magnus's recent messages to the
 //! person in their other conversations, so it does not repeat itself.
 
+use magnus_invariants::appliance::Person;
 use magnus_invariants::*;
 use magnus_scratch::*;
 use serde_json::{json, Value};
@@ -242,6 +243,110 @@ async fn erasing_a_person_removes_their_relationship_memory() {
     let text = "Hello again.";
     chat(&carol, None, text).await;
     assert!(!system_for(&m, text).contains("Relationship memory"));
+}
+
+const TASKNOTE: &str = "File vendors every Friday (tasknote-4b1c).";
+const DISPOS: &str = "I advised waiting for the written quote (disagree-pos-8d2f).";
+const DISDEC: &str = "They decided to sign the order now (disagree-dec-5e6a).";
+
+/// Chat records a note and a disagreement when told to; a clean task records
+/// a note of its own. Apart from the memory pass, which is answered empty.
+fn leak_model() -> model::Script {
+    script(|c| async move {
+        let sys = system(&c);
+        if sys.contains(PASS) {
+            return Reply::Text(String::new());
+        }
+        let s = said(&c);
+        if !sys.contains(CHAT) {
+            return match c.turn() {
+                0 => contract_unchecked("file the vendor summary", "vendors filed"),
+                1 => tool("relationship_note", json!({ "action": "add", "text": TASKNOTE })),
+                _ => fail("done"),
+            };
+        }
+        match c.turn() {
+            0 if s.contains("stop joking") => tool("relationship_note", json!({ "action": "add", "text": NOTE })),
+            1 if s.contains("stop joking") => tool("disagreement", json!({ "action": "record", "position": DISPOS, "decision": DISDEC })),
+            _ => Reply::Text("Understood.".into()),
+        }
+    })
+}
+
+fn dev_spec() -> Spec {
+    let mut s = Spec::default();
+    s.people.push(Person { id: "dana".into(), name: "Dana".into(), token: format!("tok-dana-{}", canary("x").rsplit('-').next().unwrap()), groups: vec!["staff".into()], roles: vec!["developer".into()] });
+    s
+}
+
+/// An admin's read of one of the person's tasks, as the console makes it.
+async fn admin_task_item(app: &Appliance, sub: &str, id: &str) -> (u16, Value) {
+    let path = format!("/v1/people/{sub}/data/tasks");
+    control(app, "POST", &path, json!({ "actor": "admin:root", "name": "Root", "item": id })).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admins_item_read_refuses_a_chat_turn_and_hides_notes_in_task_timelines() {
+    let m = FakeModel::start(leak_model()).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let kc = Keycloak::start().await;
+    kc.add_person("carol").await;
+    kc.configure(&mut app).await;
+    let (st, v) = kc.app_sign_in(&app, "carol").await;
+    assert_eq!(st, 200, "{v}");
+    let mut carol = app.api("carol");
+    carol.token = v["token"].as_str().unwrap().to_string();
+    let (_, people) = control(&app, "GET", "/v1/people", Value::Null).await;
+    let sub = people["people"].as_object().unwrap().keys().next().expect("carol's account is bound").clone();
+
+    // Carol tells Magnus; the turn records a note and a disagreement.
+    let (_, turn) = chat(&carol, None, "Please stop joking around with me.").await;
+    assert_eq!(notes(&carol).await["notes"], json!([NOTE]));
+
+    // A chat turn is not a task: the list leaves turns out, and the item
+    // read refuses one too, instead of returning its tool calls.
+    let (st, v) = admin_task_item(&app, &sub, &turn).await;
+    assert_eq!(st, 404, "an admin read a chat turn's tool calls: {v}");
+
+    // A task of hers records a note of its own; it succeeds, as the task
+    // read nothing from outside.
+    let task = carol.submit("File the vendor summary.").await;
+    carol.wait_settled(&task).await;
+    assert!(notes(&carol).await["notes"].as_array().unwrap().iter().any(|n| n == TASKNOTE), "the task's note was not recorded");
+
+    // The admin's item read of the task keeps the call listed but hides
+    // every note and disagreement word.
+    let (st, v) = admin_task_item(&app, &sub, &task).await;
+    assert_eq!(st, 200, "{v}");
+    let read = v.to_string();
+    for canary in [NOTE, TASKNOTE, DISPOS, DISDEC] {
+        assert!(!read.contains(canary), "an admin read carol's words: {read}");
+    }
+    assert!(read.contains("relationship_note") && read.contains("redacted: this call is the person's alone"), "the call is gone, not redacted: {read}");
+
+    // Her own timeline still shows her words: the redaction is by reader.
+    let (st, v) = carol.get(&format!("/v1/tasks/{task}/timeline")).await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    assert!(v.to_string().contains(TASKNOTE), "carol lost her own timeline: {v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_developer_reading_another_persons_run_sees_no_note_or_disagreement_words() {
+    let m = FakeModel::start(leak_model()).await;
+    let app = Appliance::start(dev_spec(), &m).await;
+    let (carol, dana) = (app.api("carol"), app.api("dana"));
+    let (_, turn) = chat(&carol, None, "Please stop joking around with me.").await;
+    let run = carol.task(&turn).await["run_id"].as_str().unwrap().to_string();
+
+    for path in [format!("/v1/dev/runs/{run}"), format!("/v1/dev/runs/{run}/log")] {
+        let (st, v) = dana.get(&path).await;
+        assert_eq!(st.as_u16(), 200, "{v}");
+        let read = v.to_string();
+        for canary in [NOTE, DISPOS, DISDEC] {
+            assert!(!read.contains(canary), "a developer read carol's words at {path}: {read}");
+        }
+        assert!(read.contains("relationship_note") && read.contains("disagreement") && read.contains("redacted: this call is the person's alone"), "calls gone, not redacted, at {path}: {read}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
