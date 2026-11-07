@@ -243,9 +243,10 @@ fn eval(cedar: &str, layer: &str, req: &Request, ents: &Entities) -> Result<(boo
     // Cedar refuses below 100KB of remaining stack as recursion-limit, and
     // an evaluation itself takes hundreds of KB: growing here keeps every
     // decision, for tool calls, controls and grants alike, independent of
-    // how deep its caller is (#375). The segment allocates only when the
-    // stack is short; a shallow call pays one check.
-    stacker::grow(2 * 1024 * 1024, || {
+    // how deep its caller is (#375). Below 1MB remaining (over twice the
+    // measured need) the eval moves to a fresh 2MB segment; a shallower
+    // caller runs inline (#377).
+    stacker::maybe_grow(1024 * 1024, 2 * 1024 * 1024, || {
         let set = PolicySet::from_str(cedar).map_err(|e| anyhow!("policy layer {layer} does not parse: {e}"))?;
         let resp = Authorizer::new().is_authorized(req, &set, ents);
         let errors: Vec<String> = resp.diagnostics().errors().map(|e| e.to_string()).collect();
