@@ -208,22 +208,19 @@ fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>()
 }
 
-/// Whether a form submission came from the console's own pages: its Origin
-/// names this host, or its Referer is one of this host's pages. Checked
-/// before credentials, so a forged post neither signs in nor burns the
-/// account's lockout (#456). Refuses when both are absent: every browser
-/// that submits a cross-origin form sends Origin.
-fn same_origin(h: &HeaderMap, host: &str) -> bool {
-    let ours = format!("https://{host}");
-    if let Some(o) = h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        return o == ours;
-    }
-    h.get(header::REFERER).and_then(|v| v.to_str().ok()).is_some_and(|r| r == ours || r.starts_with(&format!("{ours}/")))
-}
+/// The login form's CSRF binding: the GET sets it as a cookie and embeds
+/// it in the form, and the POST takes it once. A cross-origin attacker
+/// reads neither, so their post cannot ride a victim's browser (#456).
+/// Origin headers cannot bind instead: under the console's no-referrer
+/// policy browsers submit with `Origin: null`.
+const LOCAL_LOGIN_COOKIE: &str = "__Host-magnus_local";
 
-fn console_host<'a>(c: &'a Console, h: &'a HeaderMap) -> &'a str {
-    // The host is the console's own (checked before any route runs).
-    h.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or(&c.hostname)
+/// Mint a login binding: the token and the cookie that carries it back.
+/// None when too many logins are waiting.
+fn mint_login(c: &Console) -> Option<(String, String)> {
+    let token = crate::connectors::random();
+    c.store.add_login_token(token.clone()).ok()?;
+    Some((token.clone(), format!("{LOCAL_LOGIN_COOKIE}={token}; Path=/auth; Secure; HttpOnly; SameSite=Strict")))
 }
 
 fn escape(s: &str) -> String {
@@ -232,8 +229,8 @@ fn escape(s: &str) -> String {
 
 /// The local sign-in form: username and password, and the authenticator
 /// code where the account uses one. `error` says what went wrong, if
-/// anything did yet.
-fn local_form(action: &str, then: &str, person: &str, name: Option<&str>, code_needed: bool, error: Option<&str>) -> Response {
+/// anything did yet. `login_token` binds the submission to this rendering.
+fn local_form(action: &str, then: &str, person: &str, name: Option<&str>, code_needed: bool, error: Option<&str>, login_token: &str) -> Response {
     let who = match name {
         // A step-up names its admin and asks only for the secrets.
         Some(n) => format!("<p class=muted>Signed in as <strong>{}</strong>. Confirm it&rsquo;s you.</p>", escape(n)),
@@ -246,17 +243,32 @@ fn local_form(action: &str, then: &str, person: &str, name: Option<&str>, code_n
     };
     let error = error.map(|e| format!("<p class=error>{}</p>", escape(e))).unwrap_or_default();
     let body = format!(
-        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width, initial-scale=1\"><title>Sign in to the console</title><link rel=stylesheet href=/assets/app.css><link rel=stylesheet href=/assets/admin.css><script src=/assets/theme.js></script><main class=\"ad-main\"><section class=\"card ad-sign-in\"><h1>Sign in to the console</h1>{error}<form method=post action=\"{action}\"><input type=hidden name=then value=\"{}\">{who}<label>Password<input type=password name=password autocomplete=current-password required></label>{code}<div class=row><button class=\"button primary\" type=submit>Sign in</button></div></form></section></main>",
-        escape(then)
+        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width, initial-scale=1\"><title>Sign in to the console</title><link rel=stylesheet href=/assets/app.css><link rel=stylesheet href=/assets/admin.css><script src=/assets/theme.js></script><main class=\"ad-main\"><section class=\"card ad-sign-in\"><h1>Sign in to the console</h1>{error}<form method=post action=\"{action}\"><input type=hidden name=then value=\"{}\"><input type=hidden name=login_token value=\"{}\">{who}<label>Password<input type=password name=password autocomplete=current-password required></label>{code}<div class=row><button class=\"button primary\" type=submit>Sign in</button></div></form></section></main>",
+        escape(then),
+        escape(login_token)
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
 }
 
+/// Render a local form with a fresh binding, refusing the submission when
+/// no binding is left to mint.
+fn bound_form(c: &Console, render: impl FnOnce(&str) -> Response) -> Response {
+    match mint_login(c) {
+        Some((token, set)) => {
+            let mut r = render(&token).into_response();
+            r.headers_mut().append(header::SET_COOKIE, set.parse().unwrap());
+            r
+        }
+        None => page(StatusCode::TOO_MANY_REQUESTS, "Try again shortly", "Too many sign-ins are waiting; try again in a few minutes."),
+    }
+}
+
 /// Sign in against the local store instead of the provider (`/auth/login`
 /// stays the provider's way until the cutover removes it).
-pub async fn local_login(Query(q): Query<HashMap<String, String>>) -> Response {
+pub async fn local_login(State(c): State<Arc<Console>>, Query(q): Query<HashMap<String, String>>) -> Response {
     let empty = String::new();
-    local_form("/auth/local", &local_path(q.get("then")), q.get("person").unwrap_or(&empty), None, false, None)
+    let (person, then) = (q.get("person").unwrap_or(&empty).clone(), local_path(q.get("then")));
+    bound_form(&c, |token| local_form("/auth/local", &then, &person, None, false, None, token))
 }
 
 #[derive(Deserialize)]
@@ -265,24 +277,37 @@ pub struct LocalLogin {
     pub password: String,
     pub code: Option<String>,
     pub then: Option<String>,
+    pub login_token: Option<String>,
 }
 
 fn session_cookie(sid: &str) -> String {
     format!("{COOKIE}={sid}; Path=/; Secure; HttpOnly; SameSite=Strict")
 }
 
+/// Take a submission's login binding: the cookie and the form agree, and
+/// the token is live. Checked before credentials, so a forged post
+/// neither signs in nor burns the account's lockout.
+fn take_binding(c: &Console, h: &HeaderMap, token: Option<&str>) -> bool {
+    let cookie = cookie_of(h, LOCAL_LOGIN_COOKIE);
+    cookie.as_deref() == token && token.is_some_and(|t| c.store.take_login_token(t))
+}
+
 pub async fn local_login_post(State(c): State<Arc<Console>>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>, h: HeaderMap, Form(f): Form<LocalLogin>) -> Response {
     let person = f.person.trim().to_lowercase();
     let then = local_path(f.then.as_ref());
-    if !same_origin(&h, console_host(&c, &h)) {
-        tracing::warn!("admin console: local sign-in for {person} refused: not from the console's own page");
-        return local_form("/auth/local", &then, &person, None, false, Some("This sign-in did not come from the console's own page. Open the console and sign in there."));
+    let retry = |person: &str, code_needed: bool, error: &str| {
+        let (person, then, error) = (person.to_string(), then.clone(), error.to_string());
+        bound_form(&c, move |token| local_form("/auth/local", &then, &person, None, code_needed, Some(&error), token))
+    };
+    if !take_binding(&c, &h, f.login_token.as_deref()) {
+        tracing::warn!("admin console: local sign-in for {person} refused: no live login binding");
+        return retry(&person, false, "This sign-in expired. Start again from the console's sign-in page.");
     }
     let v = match c.kernel.call(Method::POST, "/v1/admin/console-sign-in", Some(&json!({ "person": person, "password": f.password, "code": f.code }))).await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!("admin console: local sign-in check: {e:#}");
-            return local_form("/auth/local", &then, &person, None, false, Some("Sign-in is unavailable. Try again in a moment."));
+            return retry(&person, false, "Sign-in is unavailable. Try again in a moment.");
         }
     };
     match v["result"].as_str() {
@@ -290,7 +315,7 @@ pub async fn local_login_post(State(c): State<Arc<Console>>, axum::extract::Conn
             let name = v["name"].as_str().unwrap_or(&person).to_string();
             if let Err(e) = c.audit((&person, &name), "sign_in", None, peer, None, None).await {
                 tracing::error!("admin console: {e:#}");
-                return local_form("/auth/local", &then, &person, None, false, Some("The console could not record this sign-in, so it did not let it through. Try again in a moment."));
+                return retry(&person, false, "The console could not record this sign-in, so it did not let it through. Try again in a moment.");
             }
             let now = Utc::now();
             let sid = crate::connectors::random();
@@ -298,16 +323,19 @@ pub async fn local_login_post(State(c): State<Arc<Console>>, axum::extract::Conn
             // provider sign-in.
             let s = Session { sub: person, name, csrf: crate::connectors::random(), refresh_token: String::new(), local: true, started: now, seen: now, refreshed: now, stepped_up: Some(now) };
             c.store.sessions.lock().unwrap().insert(sid.clone(), s);
-            ([(header::SET_COOKIE, session_cookie(&sid))], Redirect::to(&then)).into_response()
+            let mut r = Redirect::to(&then).into_response();
+            r.headers_mut().append(header::SET_COOKIE, session_cookie(&sid).parse().unwrap());
+            r.headers_mut().append(header::SET_COOKIE, format!("{LOCAL_LOGIN_COOKIE}=; Path=/auth; Secure; HttpOnly; SameSite=Strict; Max-Age=0").parse().unwrap());
+            r
         }
-        Some("needs_code") => local_form("/auth/local", &then, &person, None, true, Some("Enter the 6-digit code from your authenticator app.")),
+        Some("needs_code") => retry(&person, true, "Enter the 6-digit code from your authenticator app."),
         Some("locked") => {
             tracing::warn!("admin console: local sign-in locked for {person}");
-            local_form("/auth/local", &then, &person, None, false, Some("Too many wrong passwords. Try again in a few minutes."))
+            retry(&person, false, "Too many wrong passwords. Try again in a few minutes.")
         }
         _ => {
             tracing::warn!("admin console: local sign-in refused for {person}");
-            local_form("/auth/local", &then, &person, None, false, Some("The name, password or code is wrong."))
+            retry(&person, false, "The name, password or code is wrong.")
         }
     }
 }
@@ -318,7 +346,8 @@ pub async fn local_step_up(State(c): State<Arc<Console>>, h: HeaderMap, Query(q)
     if !s.local {
         return Redirect::to(&format!("/auth/step-up?then={}", urlencode(&local_path(q.get("then"))))).into_response();
     }
-    local_form("/auth/local/step-up", &local_path(q.get("then")), &s.sub, Some(&s.name), false, None)
+    let (sub, name, then) = (s.sub.clone(), s.name.clone(), local_path(q.get("then")));
+    bound_form(&c, move |token| local_form("/auth/local/step-up", &then, &sub, Some(&name), false, None, token))
 }
 
 #[derive(Deserialize)]
@@ -326,6 +355,7 @@ pub struct LocalStepUp {
     pub password: String,
     pub code: Option<String>,
     pub then: Option<String>,
+    pub login_token: Option<String>,
 }
 
 /// Confirm a local session: the password just typed stamps the step-up.
@@ -335,11 +365,16 @@ pub async fn local_step_up_post(State(c): State<Arc<Console>>, axum::extract::Co
         return Redirect::to(&format!("/auth/step-up?then={}", urlencode(&local_path(f.then.as_ref())))).into_response();
     }
     let then = local_path(f.then.as_ref());
-    let form = |code_needed: bool, error: &str| local_form("/auth/local/step-up", &then, &s.sub, Some(&s.name), code_needed, Some(error));
-    if !same_origin(&h, console_host(&c, &h)) {
-        tracing::warn!("admin console: local step-up for {} refused: not from the console's own page", s.sub);
-        return form(false, "This confirmation did not come from the console's own page. Open the console and confirm there.");
+    let render = |code_needed: bool, error: Option<&str>| {
+        let (sub, name, then) = (s.sub.clone(), s.name.clone(), then.clone());
+        let error = error.map(str::to_string);
+        move |token: &str| local_form("/auth/local/step-up", &then, &sub, Some(&name), code_needed, error.as_deref(), token)
+    };
+    if !take_binding(&c, &h, f.login_token.as_deref()) {
+        tracing::warn!("admin console: local step-up for {} refused: no live login binding", s.sub);
+        return bound_form(&c, render(false, Some("This confirmation expired. Start again from the console.")));
     }
+    let form = |code_needed: bool, error: &str| bound_form(&c, render(code_needed, Some(error)));
     let v = match c.kernel.call(Method::POST, "/v1/admin/console-sign-in", Some(&json!({ "person": s.sub, "password": f.password, "code": f.code }))).await {
         Ok(v) => v,
         Err(e) => {
@@ -603,35 +638,5 @@ pub async fn confirm(axum::Extension(a): axum::Extension<Admin>) -> Response {
     match a.step_up() {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(r) => r,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn headers(origin: Option<&str>, referer: Option<&str>) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        if let Some(o) = origin {
-            h.insert(header::ORIGIN, o.parse().unwrap());
-        }
-        if let Some(r) = referer {
-            h.insert(header::REFERER, r.parse().unwrap());
-        }
-        h
-    }
-
-    /// The form answers its own pages: an exact Origin, else a Referer on
-    /// the host; anything else, or nothing to judge, refuses (#456).
-    #[test]
-    fn origin_binding_judges_submissions() {
-        let host = "admin.magnus.test:20392";
-        assert!(same_origin(&headers(Some("https://admin.magnus.test:20392"), None), host), "the console's own Origin refused");
-        assert!(same_origin(&headers(None, Some("https://admin.magnus.test:20392/auth/local")), host), "the console's own Referer refused");
-        assert!(!same_origin(&headers(Some("https://evil.test"), None), host), "a cross-origin post accepted");
-        assert!(!same_origin(&headers(Some("https://admin.magnus.test.evil.test"), None), host), "a lookalike Origin accepted");
-        assert!(!same_origin(&headers(Some("http://admin.magnus.test:20392"), None), host), "a downgraded Origin accepted");
-        assert!(!same_origin(&headers(None, Some("https://evil.test/auth/local")), host), "a cross-origin Referer accepted");
-        assert!(!same_origin(&headers(None, None), host), "a post with nothing to judge accepted");
     }
 }

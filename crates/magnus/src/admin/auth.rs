@@ -159,6 +159,9 @@ pub struct Pending {
 pub struct Store {
     pub sessions: Mutex<HashMap<String, Session>>,
     pub pending: Mutex<HashMap<String, Pending>>,
+    /// Login-CSRF tokens for the local forms: token to minted. In-memory
+    /// only; a restart just asks the browser to reload its form (#456).
+    pub login_tokens: Mutex<HashMap<String, DateTime<Utc>>>,
 }
 
 impl Store {
@@ -176,6 +179,23 @@ impl Store {
     pub fn take_pending(&self, state: &str) -> Option<Pending> {
         let p = self.pending.lock().unwrap().remove(state)?;
         (Utc::now() - p.started < Duration::minutes(PENDING_MINUTES)).then_some(p)
+    }
+
+    pub fn add_login_token(&self, token: String) -> Result<()> {
+        let mut m = self.login_tokens.lock().unwrap();
+        let now = Utc::now();
+        m.retain(|_, minted| now - *minted < Duration::minutes(PENDING_MINUTES));
+        if m.len() >= 200 {
+            bail!("too many sign-ins are waiting; try again in a few minutes");
+        }
+        m.insert(token, now);
+        Ok(())
+    }
+
+    /// Take a login token: true once, while fresh.
+    pub fn take_login_token(&self, token: &str) -> bool {
+        let minted = self.login_tokens.lock().unwrap().remove(token);
+        minted.is_some_and(|t| Utc::now() - t < Duration::minutes(PENDING_MINUTES))
     }
 }
 
@@ -253,5 +273,17 @@ mod tests {
         let mut c = ok.clone();
         c["azp"] = json!("magnus-test");
         assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", Some("n1"), now).is_err());
+    }
+
+    /// A login token takes once, while fresh: unknown and used ones refuse (#456).
+    #[test]
+    fn login_tokens_take_once() {
+        let s = Store::default();
+        s.add_login_token("t1".to_string()).unwrap();
+        assert!(s.take_login_token("t1"), "a fresh token refused");
+        assert!(!s.take_login_token("t1"), "a used token took again");
+        assert!(!s.take_login_token("nope"), "an unknown token took");
+        s.login_tokens.lock().unwrap().insert("old".to_string(), Utc::now() - Duration::minutes(PENDING_MINUTES + 1));
+        assert!(!s.take_login_token("old"), "an expired token took");
     }
 }
