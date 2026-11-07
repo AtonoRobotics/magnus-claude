@@ -299,6 +299,55 @@ async fn a_failed_task_wakes_a_review_that_names_it() {
     .await;
 }
 
+/// A review woken by a tainted task carries the taint from its first
+/// step: the outcome it reads can quote what the task read, and must
+/// not enter clean (#390).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_review_woken_by_a_tainted_task_carries_the_taint() {
+    let mail = mcp::mail().start().await;
+    let m = FakeModel::start(script(|c| async move {
+        if !c.body["system"].to_string().contains(REVIEW) {
+            return match c.turn() {
+                0 => tool("mail__list_inbox", json!({})),
+                _ => tool("task_fail", json!({ "reason": "saw the mail" })),
+            };
+        }
+        done("Reviewed quietly.")
+    }))
+    .await;
+    let app = Appliance::start(Spec::default().proactive(json!({ "on": true })).app("mail", &mail, "private", "private+untrusted", &[("list_inbox", "read")]), &m).await;
+    let bob = app.api("bob");
+    // Drain the boot review first: a wake during an active review is
+    // dropped with no retry (#386).
+    eventually("bob's boot review drained", Duration::from_secs(60), || {
+        let me = bob.clone();
+        async move {
+            let (_, v) = me.get("/v1/tasks").await;
+            let reviews: Vec<_> = v["tasks"].as_array().cloned().unwrap_or_default().into_iter().filter(|t| t["review"] == true).collect();
+            (!reviews.is_empty() && reviews.iter().all(|t| t["status"] == "completed" || t["status"] == "failed")).then_some(())
+        }
+    })
+    .await;
+    let id = bob.submit("Read the mail.").await;
+    let t = bob.wait_settled(&id).await;
+    assert_eq!(t["status"], "failed", "{t}");
+    assert_eq!(t["taint"], json!({ "untrusted": true, "private": true }), "the failed task is not tainted: {t}");
+    eventually("a tainted review", Duration::from_secs(60), || {
+        let me = bob.clone();
+        async move {
+            let (_, v) = me.get("/v1/tasks").await;
+            let reviews: Vec<_> = v["tasks"].as_array().cloned().unwrap_or_default().into_iter().filter(|t| t["review"] == true).collect();
+            let mut tainted = false;
+            for r in &reviews {
+                let t = me.task(r["task_id"].as_str().unwrap()).await;
+                tainted |= t["taint"] == json!({ "untrusted": true, "private": true });
+            }
+            tainted.then_some(())
+        }
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn proactive_off_runs_no_reviews() {
     let calls = Arc::new(Mutex::new(vec![(
