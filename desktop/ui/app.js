@@ -1295,7 +1295,8 @@ const ICONS = {
 // by its tooltip and, for screen readers, by hidden text.
 function msgActions(e, ui) {
   if (!e.id) return "";
-  const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn", said = magnus || e.kind === "result";
+  const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn";
+  const said = magnus || e.kind === "result" || e.kind === "tasks" || String(e.kind || "").endsWith("_card");
   const acts = [["copy", "Copy"], mine && ["edit", "Edit"], magnus && ["retry", "Retry"], e.kind === "answer" && ["listen", "Read aloud"], e.kind === "answer" && ["hush", "Stop"],
     said && ["great", "That was great"], said && ["annoying", "That was annoying"], ["branch", "Branch"], ["share", "Share"],
     ["export", "Export"], ["save", "Save to Files"], ["task", "Make a task"], ["delete", "Delete"]].filter(Boolean);

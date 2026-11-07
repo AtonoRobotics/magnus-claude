@@ -5,6 +5,9 @@
 // card says it ended, with why and no acts; the plan's result, which came
 // after the person's newer message, quotes what they asked.
 //
+// Answers, started tasks and cards offer great/annoying; the person's own
+// messages do not (#360).
+//
 // MAGNUS_URL, MAGNUS_PERSON, MAGNUS_PASSWORD  where and who
 // MAGNUS_THREAD  the conversation; MAGNUS_MEMO, MAGNUS_PLAN  its tasks
 // MAGNUS_ENDED  an ended schedule's id, for its card
@@ -75,6 +78,19 @@ await step("an ended schedule's card says it ended, with why and no acts", async
   await card.getByText(/reached its end/).waitFor({ timeout: T });
   if (await card.getByText("Cancelled").count()) throw new Error("an ended schedule's card says Cancelled");
   if (await card.getByRole("button").count()) throw new Error("an ended schedule's card offers acts");
+});
+
+await step("Magnus's messages offer a reaction: answers, started tasks and cards", async () => {
+  for (const kind of ["answer", "tasks", "schedule_card"]) {
+    const entries = page.locator(`#thread [data-kind="${kind}"]`);
+    if (!await entries.count()) throw new Error(`no ${kind} entry to react to`);
+    const first = entries.first();
+    for (const act of ["great", "annoying"]) {
+      if (!await first.locator(`[data-msg-act="${act}"]`).count()) throw new Error(`no ${act} button on the ${kind} entry`);
+    }
+  }
+  const mine = page.locator(`#thread [data-kind="message"]`).first();
+  if (await mine.locator(`[data-msg-act="great"]`).count()) throw new Error("the person's own message offers a reaction");
 });
 
 await step("Cancel on the memo's card cancels it", async () => {
