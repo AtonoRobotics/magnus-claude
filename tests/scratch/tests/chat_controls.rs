@@ -480,7 +480,7 @@ async fn a_cancelled_runs_log_says_button_or_conversation() {
             .unwrap_or(Value::Null)
     };
 
-    // By conversation: the chat run is named.
+    // By conversation: the chat turn is named (#358).
     let first = bob.submit("Draft the quarterly numbers.").await;
     bob.wait_item(&first, "question").await;
     calls.lock().unwrap().push(("Cancel it.".into(), "cancel_task".into(), json!({ "id": first })));
@@ -490,7 +490,7 @@ async fn a_cancelled_runs_log_says_button_or_conversation() {
     let run = bob.task(&first).await["run_id"].as_str().unwrap().to_string();
     let (_, log) = dana.get(&format!("/v1/dev/runs/{run}/log")).await;
     let ev = cancelled(&log);
-    assert_eq!((ev["source"].as_str(), ev["turn"].as_str()), (Some("conversation"), chat["run_id"].as_str()), "{ev}");
+    assert_eq!((ev["source"].as_str(), ev["turn"].as_str()), (Some("conversation"), chat["task_id"].as_str()), "{ev}");
 
     // By button: no turn.
     let second = bob.submit("Draft the annual numbers.").await;
@@ -515,7 +515,7 @@ async fn a_cancelled_runs_log_says_button_or_conversation() {
     let rows: Vec<Value> =
         db.query("SELECT body FROM public.events WHERE kind = 'schedule_paused' ORDER BY seq", &[]).await.unwrap().iter().map(|r| r.get(0)).collect();
     assert_eq!(rows.len(), 2, "{rows:?}");
-    assert_eq!((rows[0]["source"].as_str(), rows[0]["turn"].as_str()), (Some("conversation"), chat["run_id"].as_str()), "{}", rows[0]);
+    assert_eq!((rows[0]["source"].as_str(), rows[0]["turn"].as_str()), (Some("conversation"), chat["task_id"].as_str()), "{}", rows[0]);
     assert_eq!((rows[1]["source"].as_str(), rows[1]["turn"].is_null()), (Some("button"), true), "{}", rows[1]);
 }
 

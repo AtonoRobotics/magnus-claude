@@ -1176,8 +1176,8 @@ impl Kernel {
                     })
                 }
                 t if crate::controls::TOOLS.contains(&t) => {
-                    let person = self.read(|s| s.runs.get(&a.run).map(|r| r.person.clone())).unwrap_or_default();
-                    Ok(self.chat_control(&person, t, &a.input, &a.run).await)
+                    let (person, turn) = self.read(|s| s.runs.get(&a.run).map(|r| (r.person.clone(), r.task.clone())).unwrap_or_default());
+                    Ok(self.chat_control(&person, t, &a.input, &turn).await)
                 }
                 "sandbox_exec" => {
                     let t = a.input["timeout_s"].as_u64().unwrap_or(120);
