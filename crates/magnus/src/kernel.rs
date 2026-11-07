@@ -608,8 +608,8 @@ impl Kernel {
     pub async fn sweep(self: Arc<Self>) {
         loop {
             let now = chrono::Utc::now();
-            // A schedule past its end or out of runs is over: it goes, and
-            // its person is told.
+            // A schedule past its end or out of runs is over: it stays,
+            // marked with why, and its person is told.
             let finished: Vec<(crate::state::Schedule, String)> =
                 self.read(|s| s.schedules.values().filter_map(|x| x.finished(now).map(|why| (x.clone(), why))).collect());
             for (sc, why) in finished {
@@ -625,7 +625,7 @@ impl Kernel {
                 let mut release = vec![];
                 for x in s.schedules.values() {
                     match (s.held_by_person(&x.id), &x.paused_on) {
-                        (Some((task, why)), None) if x.paused.is_none() => hold.push((x.clone(), task, why)),
+                        (Some((task, why)), None) if x.paused.is_none() && x.ended.is_none() => hold.push((x.clone(), task, why)),
                         (None, Some(_)) => release.push(x.id.clone()),
                         _ => {}
                     }
