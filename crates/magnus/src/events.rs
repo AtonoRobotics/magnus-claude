@@ -1023,6 +1023,7 @@ pub enum Ev {
         person: String,
         app: String,
         tool: String,
+        #[serde(default)]
         ids: Vec<String>,
     },
     Approval {
@@ -1300,6 +1301,7 @@ pub const CONTENT: &[(&str, &[&str])] = &[
     ("grant_set", &["title"]),
     ("commitment_recorded", &["what", "to", "quote"]),
     ("commitment_changed", &["what", "to", "note"]),
+    ("watched_seen", &["ids"]),
 ];
 
 /// The content fields of one kind of event; none for most.

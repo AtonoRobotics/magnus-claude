@@ -782,5 +782,14 @@ mod tests {
 
         let plain = serde_json::json!({ "kind": "resumed", "run": "r1" });
         assert!(matches!(split(plain.clone()), (r, None) if r == plain), "an event without content is stored whole");
+
+        // Watched ids are source-derived content: they leave the log
+        // for the deletable store, or erasure cannot remove them (#408).
+        let seen = serde_json::json!({ "kind": "watched_seen", "person": "bob", "app": "mail", "tool": "list_inbox", "ids": ["Q3 numbers"] });
+        let (record, content) = split(seen.clone());
+        let content = content.expect("watched ids are content");
+        assert!(!record.to_string().contains("Q3 numbers"), "watched ids stayed in the log: {record}");
+        assert_eq!(join(record.clone(), Some(content.body)), seen);
+        assert_eq!(join(record.clone(), None)["ids"], Value::Null, "deleted ids leave no body behind");
     }
 }
