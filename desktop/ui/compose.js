@@ -187,6 +187,7 @@ const Compose = (() => {
   const vars = t => VARS.map(k => `--${k}:${(t || DEFAULT_LIGHT)[k] ?? DEFAULT_LIGHT[k]};`).join("");
   const CSS = `
     :root { --bar: var(--accent); --s0: var(--accent); --s1:#c2410c; --s2:#0f766e; --s3:#7c3aed; --s4:#a16207; --s5:#be123c; }
+    :is(a,button,input,textarea,select,summary,[tabindex]):focus-visible { outline:2px solid var(--accent-text); outline-offset:2px; }
     html,body { margin:0; background: transparent; color:var(--fg); font: 15px/1.5 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; font-feature-settings: "tnum" 1, "cv11" 1; }
     body { padding: 1px 1px 2px; display: flex; flex-direction: column; gap: 16px; }
     body > * { margin: 0; }

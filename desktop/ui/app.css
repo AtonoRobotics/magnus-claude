@@ -727,3 +727,17 @@ svg.ic { stroke-width: 1.8; }
 nav.side .group a.more, .whoami .link, .frow .sub, table.t th, .item .kind { font-size: 13px; }
 .ftype { font-size: 12px; }
 .fprev .glimpse pre { font-size: 13px; line-height: 1.45; }
+.ptitle, .detail-head h2 { overflow-wrap: anywhere; }
+.lib-bar select, .lib-bar input { max-width: 100%; }
+/* Shared shape, identifiable input boundaries and a consistent focus ring. */
+.shell > main, .shell > aside.detail { border-radius: 16px; }
+button, .button, .icon-btn, input, textarea, select, nav.side a, .frow, button.material, .lsearch, .lseg, .lseg button, .lcard { border-radius: 12px; }
+.card { border-radius: 12px; padding: 16px; }
+.say, .msg.me { border-radius: 16px; }
+.say, .lsearch { border-color: var(--line-strong); }
+#find input { border: 1px solid var(--line-strong); }
+:is(a, button, input, textarea, select, summary, [tabindex]):focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+#find input:focus, .lsearch:focus-within, .button:focus-within, .say:focus-within { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+nav.side .group a.more { min-width: 44px; min-height: 44px; justify-content: center; }
+nav.side a.conv, nav.side button { min-height: 44px; min-width: 44px; }
+nav.side .who a.icon-btn { width: 44px; height: 44px; min-width: 44px; min-height: 44px; }
