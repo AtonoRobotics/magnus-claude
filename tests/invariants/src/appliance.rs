@@ -328,13 +328,37 @@ impl Appliance {
             String::from_utf8_lossy(&out.stderr)
         );
 
+        // The secrets live in the vault before the first boot: a review
+        // or run starting in the first sweep must never meet an empty
+        // vault, whatever time it is — outside working hours the
+        // overnight review reached the model before the puts below
+        // landed, suspended on the sign-in, and held its review slot
+        // forever (#445). The API puts still run, storing the same
+        // values and recording them in the log.
+        let provider_key = crate::canary("provider");
+        let mut app_secrets = HashMap::new();
+        {
+            let vault = magnus::vault::Vault::open(&state_dir).expect("seed the vault");
+            vault.put("anthropic_api_key", &provider_key).expect("seed the provider key");
+            for c in &spec.connectors {
+                if spec.missing_secrets.contains(&c.name) {
+                    continue;
+                }
+                let v = crate::canary(&c.name);
+                vault.put(&c.credential, &v).expect("seed the app secret");
+                app_secrets.insert(c.name.clone(), v);
+            }
+            for (n, v) in &spec.secrets {
+                vault.put(n, v).expect("seed the extra secret");
+            }
+        }
         let mut a = Appliance {
             db,
             dir,
             state_dir,
             model: model.clone(),
-            provider_key: crate::canary("provider"),
-            app_secrets: HashMap::new(),
+            provider_key,
+            app_secrets,
             // Known once the first start names its port.
             base: String::new(),
             config_path,
