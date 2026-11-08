@@ -16,15 +16,21 @@ pub struct Mail {
 }
 
 pub struct Inbox {
-    /// Where Keycloak sends: in its own network.
+    /// Where the sender sends.
     pub addr: SocketAddr,
     dir: tempfile::TempDir,
-    container: String,
+    container: Option<String>,
+    local: Option<std::process::Child>,
 }
 
 impl Drop for Inbox {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("timeout").args([DOCKER_PATIENCE, "docker", "rm", "-f", &self.container]).output();
+        if let Some(child) = self.local.as_mut() {
+            let _ = child.kill();
+        }
+        if let Some(container) = &self.container {
+            let _ = std::process::Command::new("timeout").args([DOCKER_PATIENCE, "docker", "rm", "-f", container]).output();
+        }
     }
 }
 
@@ -78,15 +84,40 @@ impl Inbox {
             }
         }
         let container = container.unwrap_or_else(|e| panic!("{e}"));
-        let inbox = Inbox { addr: SocketAddr::from(([127, 0, 0, 1], port)), dir, container };
+        let inbox = Inbox { addr: SocketAddr::from(([127, 0, 0, 1], port)), dir, container: Some(container), local: None };
         for _ in 0..300 {
             if inbox.dir.path().join("ready").exists() {
                 return inbox;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        let logs = std::process::Command::new("timeout").args([DOCKER_PATIENCE, "docker", "logs", &inbox.container]).output().map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
+        let logs = std::process::Command::new("timeout")
+            .args([DOCKER_PATIENCE, "docker", "logs", inbox.container.as_deref().unwrap_or_default()])
+            .output()
+            .map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+            .unwrap_or_default();
         panic!("the mail server beside Keycloak did not start: {logs}");
+    }
+
+    /// The same sink as a plain child process on loopback: for senders on
+    /// this machine (the kernel mailer), with no Keycloak beside it.
+    pub async fn start_local() -> Inbox {
+        for _ in 0..3 {
+            let dir = tempfile::tempdir().unwrap();
+            let port = 20000 + (uuid::Uuid::new_v4().as_u128() % 20000) as u16;
+            let mut child = std::process::Command::new(bin("mail-sink")).arg(port.to_string()).arg(dir.path()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().expect("run mail-sink");
+            for _ in 0..100 {
+                if dir.path().join("ready").exists() {
+                    return Inbox { addr: SocketAddr::from(([127, 0, 0, 1], port)), dir, container: None, local: Some(child) };
+                }
+                if child.try_wait().unwrap_or(None).is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            let _ = child.kill();
+        }
+        panic!("the local mail sink did not start");
     }
 
     fn all(&self) -> Vec<Mail> {

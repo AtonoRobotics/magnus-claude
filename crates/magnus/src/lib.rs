@@ -37,6 +37,7 @@ pub mod knowledge;
 pub mod knowledge_admin;
 pub mod library;
 pub mod log;
+pub mod mailer;
 pub mod identity;
 pub mod oidc;
 pub mod openers;

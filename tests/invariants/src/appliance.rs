@@ -80,6 +80,9 @@ pub struct Spec {
     /// The `[proactive]` config. Off by default, so reviews never wake in
     /// tests that are not about the proactive loop (#237).
     pub proactive: Value,
+    /// The `[mail]` config, when the test's appliance sends account email.
+    /// None: no mail section, and nothing is sent.
+    pub mail: Option<Value>,
 }
 
 fn person(id: &str, groups: &[&str], roles: &[&str]) -> Person {
@@ -109,6 +112,7 @@ impl Default for Spec {
             missing_secrets: vec![],
             secrets: vec![],
             proactive: json!({ "on": false }),
+            mail: None,
         }
     }
 }
@@ -199,6 +203,11 @@ impl Spec {
         self
     }
 
+    pub fn mail(mut self, v: Value) -> Self {
+        self.mail = Some(v);
+        self
+    }
+
     pub fn token(&self, who: &str) -> String {
         self.people.iter().find(|p| p.id == who).expect("person").token.clone()
     }
@@ -276,7 +285,7 @@ impl Appliance {
         listen_socket.set_nonblocking(true).expect("nonblocking");
         let listen_at = listen_socket.local_addr().unwrap().to_string();
 
-        let config = json!({
+        let mut config = json!({
             "appliance": { "state_dir": state_dir, "listen": listen_at },
             "database": { "url": db.kernel_url() },
             // The kernel speaks the adapter contract to a separate adapter
@@ -312,6 +321,9 @@ impl Appliance {
             "people": spec.people,
             "connectors": spec.connectors,
         });
+        if let Some(mail) = spec.mail.clone() {
+            config["mail"] = mail;
+        }
         let config_path = dir.path().join("magnus.toml");
         std::fs::write(&config_path, toml::to_string(&config).expect("config as toml")).unwrap();
 

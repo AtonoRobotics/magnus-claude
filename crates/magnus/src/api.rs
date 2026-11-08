@@ -10,7 +10,7 @@ use crate::inbox::{self, Answer};
 use crate::kernel::{new_id, Kernel, HARNESS_VERSION};
 use crate::state::{Run, Status};
 use axum::{
-    extract::{ConnectInfo, Path, Query, Request, State},
+    extract::{ConnectInfo, Form, Path, Query, Request, State},
     http::{HeaderMap, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -121,6 +121,8 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/sign-in/device", post(device_start))
         .route("/v1/sign-in/device/{flow}", post(device_poll))
         .route("/v1/invites/accept", post(accept_invite))
+        .route("/v1/password-reset/request", post(password_reset_request))
+        .route("/reset", get(reset_page).post(reset_confirm))
         .route("/v1/password", post(choose_password))
         .route("/v1/sign-out", post(sign_out))
         .route("/v1/tasks/{id}/live", get(live))
@@ -748,6 +750,107 @@ async fn accept_invite(State(k): K, Extension(t): Extension<Transport>, ConnectI
     match k.accounts.accept(token, password).await {
         Ok(Some(person)) if k.cfg.person(&person).is_some() || k.accounts.is_local(&person) => Json(json!({ "person": person })).into_response(),
         Ok(_) => err(StatusCode::UNAUTHORIZED, "The invitation is wrong or expired."),
+        Err(e) => internal(e),
+    }
+}
+
+/// Where account links point: the mail base when set, else the public
+/// hostname when pairing is on, else the request's own host (tests and
+/// local use; never production — see `Mail::link_base`).
+fn link_base(k: &Kernel, t: Transport, h: &HeaderMap) -> String {
+    if let Some(base) = k.cfg.mail.as_ref().and_then(|m| m.link_base.clone()) {
+        return base.trim_end_matches('/').to_string();
+    }
+    if let Some(host) = k.cfg.client_certs.as_ref().map(|c| c.hostname.clone()) {
+        return format!("https://{host}");
+    }
+    let scheme = if t == Transport::Tls { "https" } else { "http" };
+    let host = h.get("host").and_then(|v| v.to_str().ok()).unwrap_or("localhost");
+    format!("{scheme}://{host}")
+}
+
+/// Ask for a password recovery email: whoever holds the address gets a
+/// one-hour link. The answer never says whether anyone did (#533).
+async fn password_reset_request(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let email = b["email"].as_str().unwrap_or_default().trim().to_string();
+    let req = match k.accounts.request_reset(&email).await {
+        Ok(r) => r,
+        Err(e) => return internal(e),
+    };
+    if let Some(r) = req.filter(|r| r.send) {
+        let link = format!("{}/reset?token={}", link_base(&k, t, &h), r.token);
+        let text = format!("Someone asked to recover the Magnus password for this address. Choose a new one in the next hour:\n\n{link}\n\nIf that was not you, ignore this email: the password stays as it is. Choosing a new password signs every device out, and any authenticator codes stop working until new ones are enrolled.");
+        match crate::mailer::send(&k, &email, "Recover your Magnus password", text).await {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!("password reset for {}: no [mail] is set, nothing sent", r.person),
+            Err(e) => tracing::error!("password reset email to {email} failed: {e:#}"),
+        }
+    }
+    Json(json!({ "ok": true })).into_response()
+}
+
+fn h_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+fn reset_shell(title: &str, body: &str) -> Response {
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        format!(
+            "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{title}</title><style>body{{font-family:system-ui,sans-serif;max-width:28em;margin:4em auto;padding:0 1em;color:#1a1a1a}}input,button{{font:inherit}}input{{display:block;width:100%;box-sizing:border-box;margin:.4em 0 1em;padding:.5em}}button{{padding:.5em 1.2em}}.error{{color:#a00}}</style></head><body>{body}</body></html>"
+        ),
+    )
+        .into_response()
+}
+
+/// The recovery page behind an emailed link: a live token gets the form,
+/// anything else an explanation and no oracle beyond it.
+async fn reset_page(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Query(q): Query<std::collections::HashMap<String, String>>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let token = q.get("token").map(|s| s.trim().to_string()).unwrap_or_default();
+    if token.is_empty() || !k.accounts.reset_live(&token).await {
+        return reset_shell("Link expired", "<h1>This recovery link is spent or expired.</h1><p>Ask for a new email and follow its link within the hour.</p>");
+    }
+    reset_shell(
+        "Choose a new password",
+        &format!(
+            "<h1>Choose a new password</h1><p>It signs every device out, and any authenticator codes stop working until new ones are enrolled.</p><form method=post action=/reset><input type=hidden name=token value=\"{}\"><label>New password<input type=password name=password autocomplete=new-password required></label><label>Repeat it<input type=password name=confirm autocomplete=new-password required></label><button>Set password</button></form>",
+            h_escape(&token)
+        ),
+    )
+}
+
+/// Set the password from the recovery page.
+async fn reset_confirm(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Form(f): Form<std::collections::HashMap<String, String>>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let token = f.get("token").map(|s| s.trim().to_string()).unwrap_or_default();
+    let password = f.get("password").cloned().unwrap_or_default();
+    if f.get("confirm").map(|s| s.as_str()) != Some(password.as_str()) {
+        return reset_shell("Choose a new password", &format!("<h1>Choose a new password</h1><p class=error>The two passwords do not match.</p><form method=post action=/reset><input type=hidden name=token value=\"{}\"><label>New password<input type=password name=password autocomplete=new-password required></label><label>Repeat it<input type=password name=confirm autocomplete=new-password required></label><button>Set password</button></form>", h_escape(&token)));
+    }
+    if password.chars().count() < k.cfg.sign_in.min_password_length {
+        return reset_shell("Choose a new password", &format!("<h1>Choose a new password</h1><p class=error>A password needs at least {} characters.</p><form method=post action=/reset><input type=hidden name=token value=\"{}\"><label>New password<input type=password name=password autocomplete=new-password required></label><label>Repeat it<input type=password name=confirm autocomplete=new-password required></label><button>Set password</button></form>", k.cfg.sign_in.min_password_length, h_escape(&token)));
+    }
+    match k.accounts.confirm_reset(&token, &password).await {
+        Ok(Some((person, ended))) => {
+            let evs: Vec<(String, Ev)> = ended.into_iter().map(|session| (person.clone(), Ev::SignedOut { person: person.clone(), session })).collect();
+            if !evs.is_empty() {
+                let refs: Vec<(&str, Ev)> = evs.iter().map(|(a, e)| (a.as_str(), e.clone())).collect();
+                if let Err(e) = k.emit_all(refs).await {
+                    return internal(e);
+                }
+            }
+            reset_shell("Password set", "<h1>The new password is set.</h1><p>Every device is signed out. If codes were enrolled, they no longer work: enroll new ones after signing in.</p>")
+        }
+        Ok(None) => reset_shell("Link expired", "<h1>This recovery link is spent or expired.</h1><p>Ask for a new email and follow its link within the hour.</p>"),
         Err(e) => internal(e),
     }
 }
