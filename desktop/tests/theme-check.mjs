@@ -92,6 +92,6 @@ if (Theme.effective({ mode: "system" }, { ...os, dark: true }).mode !== "dark") 
 console.log(report.join("\n"));
 if (failures.length) { console.error(`\n${failures.length} below ${MIN}:1 or wrong:\n${failures.join("\n")}`); process.exit(1); }
 console.log(`every look reaches ${MIN}:1`);
-await import('./theme-v2-check.mjs');
+await import('./preferences-check.mjs');
 
 await import("./native-material-check.mjs");

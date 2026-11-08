@@ -24,12 +24,14 @@ const shoot = (page, name) => shots ? page.screenshot({ path: join(shots, name) 
 
 const browser = await chromium.launch({ executablePath: env("MAGNUS_CHROMIUM"), args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 const failures = [];
-// Exact version 1.2 base tokens, independent of the implementation.
+// The Magnus Workspace design's values (owner-approved 2026-11-01), copied
+// here apart from theme.js so a drift in either shows. Glass frosts the
+// navigation chrome only; the conversation and the work panel stay solid.
+const LIGHT = { side: "#F3F3F0", main: "#FFFFFF", text: "#1C1C1E" };
+const NIGHT = { side: "#161618", main: "#1C1C1F", text: "#F2F2F4" };
 const REF = {
-  light: {side:'#F2F4F7',main:'#FFFFFF',text:'#17212E',chromeText:'#17212E'},
-  dark: {side:'#131923',main:'#171C24',text:'#F2F5FA',chromeText:'#F2F5FA'},
-  ember: {side:'#171418',main:'#1B181B',text:'#F5EEE8',chromeText:'#F5EEE8'},
-  corporate: {side:'#14253D',main:'#FFFFFF',text:'#18283D',chromeText:'#F2F5FA'},
+  "light-solid": LIGHT, "light-glass": { ...LIGHT, side: "rgba(248,248,246,0.62)" },
+  "dark-solid": NIGHT, "dark-glass": { ...NIGHT, side: "rgba(26,26,30,0.58)" },
 };
 // A color as [r, g, b, a], from #RRGGBB or rgb()/rgba().
 function rgba(c) {
@@ -47,7 +49,7 @@ function expect(look, what, got, want, eq = same) {
 }
 const px = (a, b) => Math.abs(parseFloat(a) - parseFloat(b)) < 0.5;
 
-const LOOKS = Object.keys(REF).flatMap(theme => ['solid','glass'].map(material => [`${theme}-${material}`, {version:2,theme,followComputer:false,material,motion:'off'}]));
+const LOOKS = Object.keys(REF).map(name => { const [mode, material] = name.split('-'); return [name, { mode, material, accent: 'blue', motion: 'off' }]; });
 
 async function open(look) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1060 } });
@@ -109,10 +111,10 @@ for (const [name, look] of LOOKS) {
     got = await measure();
   }
   await shoot(page, `app-${name}.png`);
-  const r = REF[look.theme];
+  const r = REF[name];
   for (const [what,key,want] of [['content text','body',r.text],['conversation','main',r.main],['result text','cardText',r.text]]) expect(name,what,got[key],want);
   const chrome = await page.locator('nav.side').evaluate(el => getComputedStyle(el).color);
-  expect(name,'chrome text',chrome,r.chromeText);
+  expect(name,'chrome text',chrome,r.text);
   // Check a real chrome control's hover/pressed fills and contrast, cancelling the pointer click.
   const action=page.locator('[data-expand-work]');const box=await action.boundingBox();
   const color=()=>action.evaluate(el=>{const c=document.createElement('canvas');c.width=c.height=1;const x=c.getContext('2d');const rgba=value=>{x.clearRect(0,0,1,1);x.fillStyle=value;x.fillRect(0,0,1,1);return [...x.getImageData(0,0,1,1).data];};const s=getComputedStyle(el);return {fg:rgba(s.color),bg:rgba(s.backgroundColor)};});
@@ -127,13 +129,14 @@ for (const [name, look] of LOOKS) {
     const css = getComputedStyle(el); return Theme.contrast(hex(css.color), hex(css.backgroundColor));
   });
   if (avatarContrast < 4.5) failures.push(`${name}: avatar initial contrast ${avatarContrast.toFixed(2)}:1`);
-  const expectedSide = look.material === 'glass' ? `rgba(${rgba(r.side).slice(0,3).join(',')},0.92)` : r.side;
-  expect(name,'navigation surface',got.side,expectedSide);
+  expect(name,'navigation surface',got.side,r.side);
+  expect(name,'work panel',got.panel,r.main);
   const prior = await page.locator('iframe.composed').first().evaluate(f => ({html:f.contentDocument.body.innerHTML,scroll:f.contentWindow.scrollY}));
-  await page.evaluate(theme => Theme.set({theme}), look.theme === 'corporate' ? 'ember' : 'corporate');
+  const other = look.mode === 'dark' ? 'light' : 'dark';
+  await page.evaluate(mode => Theme.set({mode}), other);
   const after = await page.locator('iframe.composed').first().evaluate(f => ({html:f.contentDocument.body.innerHTML,scroll:f.contentWindow.scrollY,color:getComputedStyle(f.contentDocument.body).color}));
   if (prior.html !== after.html || prior.scroll !== after.scroll) failures.push(`${name}: changing theme replaced frame content or scroll`);
-  expect(name,'open frame theme',after.color,REF[look.theme === 'corporate' ? 'ember' : 'corporate'].text);
+  expect(name,'open frame theme',after.color,REF[`${other}-solid`].text);
   console.log(`checked ${name}`);
   await page.close();
 }
@@ -153,7 +156,7 @@ for (const [name, look] of LOOKS) {
       swatch: cs(".appearance .swatch", "width"),
     };
   });
-  const want = ["Theme", "Custom mode", "Material", "Accent color", "Motion"];
+  const want = ["Mode", "Material", "Accent color", "Motion"];
   if (want.join("|") !== got.labels.join("|")) failures.push(`appearance: the sections are ${got.labels.join(", ")}, the reference's are ${want.join(", ")}`);
 
   expect("appearance", "a choice's height", got.option, "40px", px);
