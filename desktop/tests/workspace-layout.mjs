@@ -20,12 +20,14 @@ try {
  await page.getByRole('button',{name:'Expand navigation',exact:true}).click();assert.equal((await state()).nav,'expanded');
  const sep=page.getByRole('separator',{name:'Conversation width'});await sep.focus();await page.keyboard.press('ArrowLeft');assert.equal((await state()).width,436);await page.keyboard.press('Shift+ArrowRight');assert.equal((await state()).width,388);await page.keyboard.press('End');assert.equal((await state()).width,560);await page.keyboard.press('Home');assert.equal((await state()).width,360);
  await page.evaluate(()=>Theme.set({conversationWidthPx:420}));
+ const handle=await sep.boundingBox();await page.mouse.move(handle.x+8,handle.y+80);await page.mouse.down();await page.mouse.move(handle.x-56,handle.y+80);await page.mouse.up();assert.equal((await state()).width,484);assert.equal((await state()).stored,484);
+ await page.evaluate(()=>Theme.set({conversationWidthPx:420}));
  // Available widths with compact navigation: 936/995/996.
  await page.getByRole('button',{name:'Collapse navigation',exact:true}).click();
  for(const [available,want] of [[936,360],[995,419],[996,420]]) {await page.setViewportSize({width:available+64,height:768});await until(w=>document.querySelector('#main').clientWidth===w,want);s=await state();assert.equal(s.width,want);assert.equal(s.stored,420);assert.ok(s.work>=560);}
  await page.setViewportSize({width:1440,height:900});await until(()=>document.querySelector('#main').clientWidth===420);
  // Expansion persists through responsive change; selecting conversation leaves work open.
- await page.getByRole('button',{name:'Expand work',exact:true}).click();assert.equal((await state()).mode,'single');await select('conversation');assert.equal(await page.locator('#msg').inputValue(),'Keep this composer text');await select('work');
+ await page.getByRole('button',{name:'Expand work',exact:true}).click();assert.equal((await state()).mode,'single');assert.equal(await page.evaluate(()=>history.state.workspace.expanded),true);await select('conversation');assert.equal(await page.locator('#msg').inputValue(),'Keep this composer text');await select('work');
  await page.setViewportSize({width:1024,height:768});assert.equal((await state()).mode,'single');await page.getByRole('button',{name:'Restore split view',exact:true}).click();assert.equal((await state()).mode,'split');
  await page.getByRole('button',{name:'Expand work',exact:true}).click();await page.setViewportSize({width:900,height:720});await page.getByRole('button',{name:'Restore split view',exact:true}).click();assert.equal((await state()).mode,'single');
  await select('conversation');assert.equal(await page.locator('#msg').inputValue(),'Keep this composer text');

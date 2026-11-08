@@ -252,9 +252,10 @@ const Workspace = (() => {
     for(const a of prior){if(!a.root.clientHeight)continue;a.root.scrollTop=a.follow ? a.root.scrollHeight : a.node?.isConnected ? a.root.scrollTop+a.node.getBoundingClientRect().top-a.root.getBoundingClientRect().top-a.offset : a.top;}
     return m;
   }
-  function choose(which) {region=which;update();if(which==="work") $("#detail h2")?.focus({preventScroll:true});else $("#msg")?.focus({preventScroll:true});}
-  function opened() {region="work";forceExpanded=false;update();}
-  function closed() {expanded=false;region="conversation";update();}
+  function remember() { history.replaceState({...history.state,workspace:{work:Panel.what,expanded,region}},"",location.href); }
+  function choose(which) {region=which;remember();update();if(which==="work") $("#detail h2")?.focus({preventScroll:true});else $("#msg")?.focus({preventScroll:true});}
+  function opened() {const saved=history.state?.workspace;if(saved?.work===Panel.what){expanded=!!saved.expanded;region=saved.region==="conversation" ? "conversation" : "work";}else region="work";forceExpanded=false;remember();update();}
+  function closed() {expanded=false;region="conversation";remember();update();}
   function openDrawer() {
     const dialog=$("#navigation-drawer"),nav=$("nav.side");if(dialog.open)return;
     dialog.append(nav);restoreDrawer=true;dialog.showModal();$("[data-close-drawer]",nav).focus();
@@ -265,7 +266,7 @@ const Workspace = (() => {
   function install() {
     expanded=false;region="conversation";forceExpanded=false;
     const d=$("#navigation-drawer");d.addEventListener("click",e=>{if(e.target===d){const r=d.getBoundingClientRect();if(e.clientX<r.left || e.clientX>r.right || e.clientY<r.top || e.clientY>r.bottom)closeDrawer();}});d.addEventListener("close",()=>{const nav=$("nav.side",d);if(nav)$(".shell").prepend(nav);if(restoreDrawer)$("[data-open-drawer]")?.focus({preventScroll:true});});
-    $("#workspace-bar").onclick=e=>{const b=e.target.closest("button");if(!b)return;if(b.matches("[data-open-drawer]"))openDrawer();if(b.dataset.region)choose(b.dataset.region);if(b.matches("[data-expand-work]")){expanded=!expanded;if(expanded)region="work";update();}if(b.matches("[data-close-work]"))closePanel();};
+    $("#workspace-bar").onclick=e=>{const b=e.target.closest("button");if(!b)return;if(b.matches("[data-open-drawer]"))openDrawer();if(b.dataset.region)choose(b.dataset.region);if(b.matches("[data-expand-work]")){expanded=!expanded;if(expanded)region="work";remember();update();}if(b.matches("[data-close-work]"))closePanel();};
     $("[data-nav-toggle]").onclick=()=>{const m=update(),navigation=m.nav==="compact" ? "expanded" : "compact";forceExpanded=navigation==="expanded";Theme.set({navigation});update();};
     $("[data-close-drawer]").onclick=()=>closeDrawer();
     $("[data-rail-search]").onclick=()=>{const dialog=$("#workspace-search");dialog.showModal();$("input",dialog).focus();};
@@ -1947,8 +1948,8 @@ function appOfferCard(e, theirs = true) {
   const app = { title: e.title, listing: { letters: e.letters, tint: e.tint } };
   const STATE = { needs_attention: "Needs signing in again", needs_more_access: "Needs more access", available: "Not connected" };
   const act = e.state === "connected" ? `<span class="chip ok">Connected</span>`
-    : !theirs ? `<span class="chip warn">${esc(STATE[e.state] || "Not in their Library")}</span>`
-    : e.state === "unavailable" ? `<span class="small muted">No longer in your Library.</span>`
+    : !theirs ? `<span class="chip warn">${esc(STATE[e.state] || "Not in their Apps")}</span>`
+    : e.state === "unavailable" ? `<span class="small muted">No longer in your Apps.</span>`
     : e.ready === false ? `<span class="small muted">Not ready on this appliance yet.</span>`
     : e.state === "needs_attention" ? `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Sign in to ${esc(e.title || "")} again</button>`
     : e.state === "needs_more_access" ? `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Approve more access</button>`
@@ -2477,7 +2478,7 @@ const changesFor = name => App.inbox.filter(i => i.status === "open" && (i.kind 
 async function connectorsSection(main) {
   const draw = async () => {
     const { connectors } = await api("GET", "/v1/connectors");
-    paint(main, `<h2>Connectors</h2><p class="muted">The apps in Magnus's catalog, already set up for your organisation. Each is in everyone's Library, and each person connects it with their own account; no one acts through anyone else's.</p>
+    paint(main, `<h2>Connectors</h2><p class="muted">The apps in Magnus's catalog, already set up for your organisation. Each is in everyone's Apps, and each person connects it with their own account; no one acts through anyone else's.</p>
       ${connectors.map(c => `<div class="card" data-app="${esc(c.name)}"><div class="spread"><strong>${esc(c.title)}</strong>
           <span class="row">${c.source === "config" ? `<span class="chip">set in the config file</span>` : c.source === "catalog" ? `<span class="chip">from the catalog</span>` : `<button class="link" data-act="remove" data-app="${esc(c.name)}">Remove for everyone</button>`}</span></div>
         <div class="small muted">${esc(c.summary)}</div>
@@ -2486,7 +2487,7 @@ async function connectorsSection(main) {
           ${c.tools.map(t => `<tr><td class="mono">${esc(t.name)}</td><td class="muted">${esc(t.description)}</td>
             <td><select data-tool="${esc(t.name)}" data-app="${esc(c.name)}" aria-label="What ${esc(t.name)} may do" ${c.source === "app" ? "" : "disabled"}>
               ${RISKS.map(([v, l]) => `<option value="${v}" ${(t.risk || "") === v ? "selected" : ""}>${esc(l)}${v && v === t.suggested && !t.risk ? " (the app's hint)" : ""}</option>`).join("")}</select></td></tr>`).join("")}</tbody></table>`
-          : c.signed_in ? "" : `<p class="small">Connect it in your Library to see its tools and choose what each may do.</p>`}
+          : c.signed_in ? "" : `<p class="small">Connect it in Apps to see its tools and choose what each may do.</p>`}
       </div>`).join("") || `<p class="empty">No apps yet.</p>`}`);
   };
   main.onchange = async e => {
