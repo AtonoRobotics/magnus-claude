@@ -1,7 +1,7 @@
 //! Users › Schedules and triggers, Data and Delete in the admin console (admin
 //! console spec; invariant "An admin reading a user's private data succeeds,
 //! and the read appears in the audit log with admin, target, resource and
-//! time"; owner's ruling 14), against a real Keycloak and a real appliance:
+//! time"; owner's ruling 14), against the local store and a real appliance:
 //! an admin suspends (which the person cannot lift) and resumes a person's schedule; reads their files, and
 //! one file's words, each read in the audit log and in the person's inbox,
 //! and refused while the organisation keeps people's data private; deletes
@@ -43,30 +43,24 @@ impl Setup {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_deletes_them_for_good() {
-    let kc = Keycloak::start().await;
-    kc.add_person("Alice").await;
-    kc.set_roles("Alice", &["admin"]).await;
-    kc.add_person("Bob").await;
     let m = FakeModel::start(steps(vec![])).await;
-    let mut app = Appliance::start(Spec::default(), &m).await;
+    let app = Appliance::start(Spec::default(), &m).await;
     local_user(&app, "Alice", PASSWORD, true);
-    kc.configure(&mut app).await;
+    local_user(&app, "Bob", PASSWORD, false);
     let mine = format!("{}/32", lan_ip());
     // Long enough for a browser's sign-in to hand back its session (that
     // has taken 23 seconds after the password on a loaded machine).
-    let lapse = 60;
-    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", lapse.into())]);
-    let jwks = p.jwks().await;
-    kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &jwks).await;
-    kc.add_admin_service("magnus-admin-svc", &jwks).await;
+    let lapse: i64 = 60;
+    let p = prepare(&app, &[&mine], &[("step_up_seconds", lapse.into())]);
     let url = p.url();
     let c = launch(p).await;
     let b = browser(&c, false);
     let s = Setup { url: url.clone(), c, b };
 
     // Bob signs in to the app, keeps a file and sets up a schedule.
-    let (st, v) = kc.app_sign_in(&app, "Bob").await;
-    assert_eq!(st, 200, "{v}");
+    let r = reqwest::Client::new().post(format!("{}/v1/sign-in", app.base)).header("x-magnus-app", "0.5.0").json(&json!({ "person": "bob", "password": PASSWORD, "client": "app" })).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let v: Value = r.json().await.unwrap();
     let bob_token = v["token"].as_str().unwrap().to_string();
     let http = reqwest::Client::new();
     let bob = |m: Method, path: &str| http.request(m, format!("{}{path}", app.base)).bearer_auth(&bob_token);
@@ -86,7 +80,7 @@ async fn root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_del
 
     let alice = s.session().await;
     let (_, users) = s.send(&alice, Method::GET, "/users", None).await;
-    let b_id = users["users"].as_array().unwrap().iter().find(|u| u["email"] == "bob@example.test").unwrap()["id"].as_str().unwrap().to_string();
+    let b_id = users["users"].as_array().unwrap().iter().find(|u| u["id"] == "bob").unwrap()["id"].as_str().unwrap().to_string();
 
     // Schedules: Bob's one, suspended by the admin and resumed.
     let (st, v) = s.send(&alice, Method::GET, &format!("/users/{b_id}/schedules"), None).await;
@@ -132,7 +126,7 @@ async fn root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_del
     let reads = audit["entries"].as_array().unwrap();
     let one = reads.iter().find(|e| e["after"]["item"] == fid.as_str()).unwrap_or_else(|| panic!("the file's read is not in the audit: {audit}"));
     // The name on the record is the appliance's own for the admin (the
-    // fixture person is "alice"), not the provider's "Alice Test".
+    // fixture person is "alice").
     assert_eq!((one["target"].as_str(), one["after"]["resource"].as_str(), one["name"].as_str()), (Some(b_id.as_str()), Some("files"), Some("alice")), "{one}");
     assert!(one["admin"].is_string() && one["at"].is_string(), "{one}");
     assert!(reads.len() >= 5, "a read is missing from the audit: {audit}");
@@ -146,26 +140,32 @@ async fn root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_del
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
     assert_eq!(app.api("alice").put("/v1/data-access", json!({ "private": false })).await.0.as_u16(), 204);
 
-    // Delete: never without a fresh password, and their email typed.
+    // Delete: never without a fresh password, and their id typed — Bob
+    // is a config person with no email address.
     tokio::time::sleep(std::time::Duration::from_secs(lapse as u64 + 1)).await;
-    let (st, v) = s.send(&alice, Method::DELETE, &format!("/users/{b_id}"), Some(json!({ "email": "bob@example.test" }))).await;
+    let (st, v) = s.send(&alice, Method::DELETE, &format!("/users/{b_id}"), Some(json!({ "email": "bob" }))).await;
     assert_eq!((st, v["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("step_up_required")), "{v}");
     let fresh = s.session().await;
-    let (st, v) = s.send(&fresh, Method::DELETE, &format!("/users/{b_id}"), Some(json!({ "email": "someone@example.test" }))).await;
+    let (st, v) = s.send(&fresh, Method::DELETE, &format!("/users/{b_id}"), Some(json!({ "email": "someone" }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
-    let (st, v) = s.send(&fresh, Method::DELETE, &format!("/users/{b_id}"), Some(json!({ "email": "bob@example.test" }))).await;
+    let (st, v) = s.send(&fresh, Method::DELETE, &format!("/users/{b_id}"), Some(json!({ "email": "bob" }))).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!((v["schedules_ended"].as_u64(), v["sessions_ended"].as_u64()), (Some(1), Some(1)), "{v}");
+    assert_eq!(v["account_removed"], false, "a config person has no local account to remove: {v}");
+    let erased = &v["erased"];
+    assert_eq!((erased["schedules_ended"].as_u64(), erased["sessions_ended"].as_u64()), (Some(1), Some(1)), "{v}");
     // His sign-in to the calendar is revoked at the app, both its tokens
     // (connectors spec, Isolation).
-    assert_eq!(v["sign_ins_revoked"].as_u64(), Some(1), "{v}");
+    assert_eq!(erased["sign_ins_revoked"].as_u64(), Some(1), "{v}");
     assert_eq!(cal.state.lock().unwrap().revoked.len(), 2, "the app did not revoke Bob's refresh and access tokens");
-    assert!(v["content_removed"].as_u64().unwrap_or(0) >= 2, "{v}");
+    assert!(erased["content_removed"].as_u64().unwrap_or(0) >= 2, "{v}");
 
-    // Gone: the account, the session, the schedule and every word of his.
-    assert!(!kc.password_works("bob", &password_of("Bob")).await, "Bob's account is still at the provider");
+    // Gone: his data, session and schedule; the config person himself
+    // stays listed, turned off, with nothing left to sign in to.
+    let r = reqwest::Client::new().post(format!("{}/v1/sign-in", app.base)).json(&json!({ "person": "bob", "password": PASSWORD })).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "here still signs in deleted Bob");
     let (_, users) = s.send(&fresh, Method::GET, "/users", None).await;
-    assert!(users["users"].as_array().unwrap().iter().all(|u| u["email"] != "bob@example.test"), "{users}");
+    let row = users["users"].as_array().unwrap().iter().find(|u| u["id"] == "bob").cloned().unwrap_or_else(|| panic!("{users}"));
+    assert_eq!(row["status"], "disabled", "{row}");
     assert_eq!(bob(Method::GET, "/v1/schedules").send().await.unwrap().status().as_u16(), 401, "Bob's session still works");
     let db = app.db.admin().await;
     let left: i64 = db.query_one("SELECT count(*) FROM public.content WHERE person = 'bob'", &[]).await.unwrap().get(0);

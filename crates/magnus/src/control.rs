@@ -42,7 +42,14 @@ pub async fn serve(k: Arc<Kernel>, l: tokio::net::UnixListener) -> Result<()> {
         .route("/v1/people", axum::routing::get(people))
         .route("/v1/people/{person}/sessions", axum::routing::get(sessions).delete(end_sessions))
         .route("/v1/people/{person}/sessions/{id}", axum::routing::delete(end_session))
-        .route("/v1/people/{person}/turn-off", post(turn_off))
+        .route("/v1/admin/people", axum::routing::get(admin_people).post(admin_invite))
+        .route("/v1/admin/people/{id}", axum::routing::get(admin_person).patch(admin_patch_person).delete(admin_delete))
+        .route("/v1/admin/people/{id}/disable", post(admin_disable))
+        .route("/v1/admin/people/{id}/enable", post(admin_enable))
+        .route("/v1/admin/people/{id}/cancel-invite", post(admin_cancel_invite))
+        .route("/v1/admin/people/{id}/invite", post(admin_resend_invite))
+        .route("/v1/admin/people/{id}/invite/password", post(admin_invite_password))
+        .route("/v1/admin/sign-in-policy", axum::routing::get(sign_in_policy).put(set_sign_in_policy))
         .route("/v1/people/{person}/schedules", axum::routing::get(person_schedules))
         .route("/v1/people/{person}/schedules/{id}/{change}", post(person_schedule))
         .route("/v1/people/{person}/data/{what}", post(person_data))
@@ -192,8 +199,11 @@ async fn overview(State(k): State<Arc<Kernel>>) -> Response {
 /// The person here whom the identity provider knows as `sub` (owner's
 /// ruling 3: people are bound to their provider's subject at their first
 /// sign-in through it). The console names people by their `sub`.
+/// A console path id to a person: a provider `sub` first, while the
+/// provider still binds people, else the id itself when it is a person here
+/// (#508: the console now addresses local ids).
 fn person_of(k: &Kernel, sub: &str) -> Option<String> {
-    k.read(|s| s.subjects.iter().find(|(_, v)| v.as_str() == sub).map(|(p, _)| p.clone()))
+    k.read(|s| s.subjects.iter().find(|(_, v)| v.as_str() == sub).map(|(p, _)| p.clone())).or_else(|| k.person(sub).map(|p| p.id.clone()))
 }
 
 /// Each person known here, by their provider `sub`: when they last signed
@@ -206,6 +216,344 @@ async fn people(State(k): State<Arc<Kernel>>) -> Response {
         out.insert(sub, json!({ "last_sign_in": at, "sessions": k.accounts.sessions_of(&p, "").await.len() }));
     }
     Json(json!({ "people": out })).into_response()
+}
+
+/// Everyone the appliance keeps — config people and local ones — with the
+/// role, status, last sign-in and open sessions the console's Users list
+/// shows (#508). The realm directory is no longer read for this.
+async fn admin_people(State(k): State<Arc<Kernel>>) -> Response {
+    let mut ids: std::collections::BTreeSet<String> = k.cfg.people.iter().map(|p| p.id.clone()).collect();
+    ids.extend(k.accounts.local_people().into_iter().map(|(id, _)| id));
+    let mut rows = Vec::new();
+    for id in ids {
+        rows.push(admin_person_row(&k, &id).await);
+    }
+    Json(json!({ "people": rows })).into_response()
+}
+
+async fn admin_person_row(k: &Kernel, id: &str) -> Value {
+    let p = k.person(id);
+    let email = k.accounts.local_person(id).and_then(|l| l.email);
+    let (role, status) = tokio::join!(k.accounts.role(id), k.accounts.status(id));
+    let at = k.read(|s| s.last_sign_in.get(id).copied());
+    let sessions = k.accounts.sessions_of(id, "").await.len();
+    json!({
+        "id": id,
+        "name": p.map(|p| if p.name.is_empty() { id.to_string() } else { p.name }).unwrap_or_else(|| id.to_string()),
+        "email": email,
+        "username": id,
+        "role": match role { crate::accounts::Role::Admin => "admin", crate::accounts::Role::Member => "member" },
+        "status": match status { crate::accounts::Status::Invited => "invited", crate::accounts::Status::Active => "active", crate::accounts::Status::Disabled => "disabled" },
+        "created": Value::Null,
+        "last_sign_in": at,
+        "sessions": sessions,
+    })
+}
+
+/// One person the appliance keeps, by their id.
+async fn admin_person(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    let id = id.trim().to_lowercase();
+    if k.person(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+    }
+    Json(admin_person_row(&k, &id).await).into_response()
+}
+
+fn last_admin_refused(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("last admin")
+}
+
+fn last_admin() -> Response {
+    (StatusCode::CONFLICT, Json(json!({ "error": "last_admin", "message": "This is the organisation's last admin: make someone else an admin first." }))).into_response()
+}
+
+/// Change a role, a status, or both. Ending sessions are recorded, so the
+/// person's devices sign out on the record.
+async fn admin_patch_person(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let id = id.trim().to_lowercase();
+    if k.person(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+    }
+    if let Some(role) = b["role"].as_str() {
+        let role = match role {
+            "admin" => crate::accounts::Role::Admin,
+            "member" => crate::accounts::Role::Member,
+            _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid", "message": "The role is admin or member." }))).into_response(),
+        };
+        if let Err(e) = k.accounts.set_role(&id, role).await {
+            if last_admin_refused(&e) {
+                return last_admin();
+            }
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
+        }
+    }
+    if let Some(status) = b["status"].as_str() {
+        let status = match status {
+            "active" => crate::accounts::Status::Active,
+            "disabled" => crate::accounts::Status::Disabled,
+            _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid", "message": "The status is active or disabled." }))).into_response(),
+        };
+        let Some(actor) = actor(&b) else { return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who changes them" }))).into_response() };
+        match k.accounts.set_status(&id, status).await {
+            Ok(ended) => {
+                let evs: Vec<(&str, Ev)> = ended.into_iter().map(|session| (actor.as_str(), Ev::SignedOut { person: id.clone(), session })).collect();
+                if !evs.is_empty() {
+                    if let Err(e) = k.emit_all(evs).await {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
+                    }
+                }
+            }
+            Err(e) => {
+                if last_admin_refused(&e) {
+                    return last_admin();
+                }
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
+            }
+        }
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Turn someone off: no sign-in, their sessions ended on the record, their
+/// schedules paused. Never the last admin.
+async fn admin_disable(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who turns them off" }))).into_response() };
+    let id = id.trim().to_lowercase();
+    if k.person(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+    }
+    let due = k.read(|s| s.schedules.values().filter(|x| x.person == id && x.next_due().is_some()).count());
+    let ended = match k.accounts.set_status(&id, crate::accounts::Status::Disabled).await {
+        Ok(ended) => ended,
+        Err(e) => {
+            if last_admin_refused(&e) {
+                return last_admin();
+            }
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
+        }
+    };
+    let evs: Vec<(&str, Ev)> = ended.into_iter().map(|session| (actor.as_str(), Ev::SignedOut { person: id.clone(), session })).collect();
+    let sessions = evs.len();
+    if !evs.is_empty() {
+        if let Err(e) = k.emit_all(evs).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
+        }
+    }
+    k.turn_off(&id, &format!("{actor} turned {id} off in the admin console"), "An administrator has turned your account off").await;
+    Json(json!({ "sessions_ended": sessions, "schedules_paused": due })).into_response()
+}
+
+/// Turn them back on. Their paused schedules stay paused until they resume
+/// them; the turned-off mark clears when they sign in again.
+async fn admin_enable(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    let id = id.trim().to_lowercase();
+    if k.person(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+    }
+    match k.accounts.set_status(&id, crate::accounts::Status::Active).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+    }
+}
+
+/// Delete them: their content erased, then their local account where the
+/// appliance keeps one. A config person cannot be unmade here, so they are
+/// turned off instead and stay listed, disabled.
+async fn admin_delete(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let Some(actor) = actor(&b) else { return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who deletes them" }))).into_response() };
+    let id = id.trim().to_lowercase();
+    if k.person(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+    }
+    let erased = match k.erase_person(&actor, &id).await {
+        Ok(v) => v,
+        Err(r) => return person_refused(r),
+    };
+    if k.accounts.is_local(&id) {
+        if let Err(e) = k.accounts.remove_person(&id).await {
+            if last_admin_refused(&e) {
+                return last_admin();
+            }
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
+        }
+        Json(json!({ "erased": erased, "account_removed": true })).into_response()
+    } else {
+        let _ = k.accounts.set_status(&id, crate::accounts::Status::Disabled).await;
+        Json(json!({ "erased": erased, "account_removed": false })).into_response()
+    }
+}
+
+/// Withdraw an invitation sent from here: the local account goes, never
+/// having held anything. Only a local invited person can be withdrawn.
+async fn admin_cancel_invite(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    let id = id.trim().to_lowercase();
+    if k.person(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+    }
+    if k.accounts.status(&id).await != crate::accounts::Status::Invited || !k.accounts.is_local(&id) {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "not_invited", "message": "Only an invitation sent from here can be withdrawn." }))).into_response();
+    }
+    match k.accounts.remove_person(&id).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            if last_admin_refused(&e) {
+                return last_admin();
+            }
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response()
+        }
+    }
+}
+
+/// Invite someone: the appliance makes their local account and a
+/// single-use token, shown once here for the admin to pass on — the
+/// appliance cannot send mail, so there is no email step (#508). The id
+/// derives from the email's local part; a held id refuses `taken`,
+/// never a surprising sibling.
+async fn admin_invite(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let email = b["email"].as_str().map(str::trim).unwrap_or_default().to_lowercase();
+    let name = b["name"].as_str().map(str::trim).unwrap_or_default();
+    let role = match b["role"].as_str() {
+        Some("admin") => crate::accounts::Role::Admin,
+        Some("member") => crate::accounts::Role::Member,
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid", "message": "The role is admin or member." }))).into_response(),
+    };
+    if !invite_email(&email) || name.is_empty() || name.len() > 200 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid", "message": "An invitation needs an email address and a name." }))).into_response();
+    }
+    let id: String = email.split('@').next().unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '_' || *c == '-').collect();
+    if id.is_empty() || id.len() > 64 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid", "message": "No person id derives from that address." }))).into_response();
+    }
+    if k.person(&id).is_some() {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "taken", "message": format!("{id} is already a person here.") }))).into_response();
+    }
+    if let Err(e) = k.accounts.add_person(&id, name, Some(&email)).await {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "taken", "message": format!("{e:#}") }))).into_response();
+    }
+    if let Err(e) = k.accounts.set_role(&id, role).await {
+        let _ = k.accounts.remove_person(&id).await;
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
+    }
+    match k.accounts.invite(&id, Some(&email)).await {
+        Ok(token) => (StatusCode::CREATED, Json(json!({ "id": id, "email": email, "invite_token": token, "invite_expires": chrono::Utc::now() + chrono::Duration::days(crate::accounts::INVITE_DAYS) }))).into_response(),
+        Err(e) => {
+            let _ = k.accounts.remove_person(&id).await;
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response()
+        }
+    }
+}
+
+fn invite_email(e: &str) -> bool {
+    let Some((user, host)) = e.split_once('@') else { return false };
+    !user.is_empty() && host.contains('.') && !host.starts_with('.') && !host.ends_with('.') && e.len() <= 254 && !e.chars().any(|c| c.is_whitespace() || c == '<' || c == '>' || c == ',')
+}
+
+/// Send the invitation again: a fresh token, shown once here; the old
+/// one dies with it. Only an invitation still waiting.
+async fn admin_resend_invite(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    let id = id.trim().to_lowercase();
+    if k.person(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+    }
+    if k.accounts.status(&id).await != crate::accounts::Status::Invited {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "not_invited", "message": "They have already chosen their password: this is an account, not an invitation." }))).into_response();
+    }
+    match k.accounts.invite(&id, None).await {
+        Ok(token) => Json(json!({ "id": id, "invite_token": token, "invite_expires": chrono::Utc::now() + chrono::Duration::days(crate::accounts::INVITE_DAYS) })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+    }
+}
+
+/// Give an invited person a password to choose with once, shown to the
+/// admin here only. It never signs in; choosing with it sets their own.
+async fn admin_invite_password(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
+    let id = id.trim().to_lowercase();
+    if k.person(&id).is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
+    }
+    if k.accounts.status(&id).await != crate::accounts::Status::Invited {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "not_invited", "message": "They have already chosen their password: this is an account, not an invitation." }))).into_response();
+    }
+    let password = b["password"].as_str().unwrap_or_default();
+    match k.accounts.set_temporary_password(&id, password).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            let message = format!("{e:#}");
+            if message.contains("not an invitation") {
+                return (StatusCode::CONFLICT, Json(json!({ "error": "not_invited", "message": "They have already chosen their password: this is an account, not an invitation." }))).into_response();
+            }
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid", "message": message }))).into_response()
+        }
+    }
+}
+
+/// The sign-in rules the console shows and the kernel enforces on the
+/// local path (#508).
+async fn sign_in_policy(State(k): State<Arc<Kernel>>) -> Response {
+    match k.accounts.policy().await {
+        Ok(p) => Json(json!(p)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+    }
+}
+
+/// Change the sign-in rules: only what is given changes. The longest
+/// wait cannot be shorter than the first, against the merged rules.
+async fn set_sign_in_policy(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let mut p = match k.accounts.policy().await {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+    };
+    let invalid = |message: String| (StatusCode::BAD_REQUEST, Json(json!({ "error": "invalid", "message": message }))).into_response();
+    let ranged = |v: &Value, range: std::ops::RangeInclusive<i64>, what: &str| match v {
+        Value::Null => Ok(None),
+        x => x.as_i64().filter(|n| range.contains(n)).map(Some).ok_or_else(|| format!("{what} is a whole number from {} to {}.", range.start(), range.end())),
+    };
+    if let Some(required) = b["code_required"].as_bool() {
+        p.code_required = required;
+    } else if !b["code_required"].is_null() && b.get("code_required").is_some() {
+        return invalid("Whether a code is required is true or false.".into());
+    }
+    let apply = (|| -> Result<(), String> {
+        if let Some(n) = ranged(&b["idle_minutes"], 5..=1440, "Members' idle time")? {
+            p.idle_minutes = n;
+        }
+        if let Some(n) = ranged(&b["max_hours"], 1..=720, "Members' longest session")? {
+            p.max_hours = n;
+        }
+        if let Some(n) = ranged(&b["lockout_failures"], 1..=100, "Failures before a lockout")? {
+            p.lockout_failures = n;
+        }
+        if let Some(n) = ranged(&b["lockout_wait_minutes"], 1..=1440, "The first wait")? {
+            p.lockout_wait_minutes = n;
+        }
+        if let Some(n) = ranged(&b["lockout_max_wait_minutes"], 1..=10080, "The longest wait")? {
+            p.lockout_max_wait_minutes = n;
+        }
+        Ok(())
+    })();
+    if let Err(message) = apply {
+        return invalid(message);
+    }
+    for (field, name) in [(b.get("lockout_enabled"), "lockout_enabled"), (b.get("lockout_permanent"), "lockout_permanent")] {
+        match field {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(on)) => {
+                if name == "lockout_enabled" {
+                    p.lockout_enabled = *on;
+                } else {
+                    p.lockout_permanent = *on;
+                }
+            }
+            Some(_) => return invalid(format!("{name} is true or false.")),
+        }
+    }
+    if p.lockout_max_wait_minutes < p.lockout_wait_minutes {
+        return invalid("The longest wait cannot be shorter than the first.".into());
+    }
+    match k.accounts.set_policy(p).await {
+        Ok(_) => Json(json!(p)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+    }
 }
 
 /// A person's open sessions here, newest first: each a device signed in.
@@ -295,17 +643,6 @@ async fn end_session(State(k): State<Arc<Kernel>>, axum::extract::Path((sub, id)
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({ "error": "no such session" }))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
     }
-}
-
-/// An admin turned the person off: as when the provider does, their
-/// sessions end and their schedules pause (admin console spec, Users:
-/// "Disabling also suspends their schedules and triggers").
-async fn turn_off(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
-    let Some(actor) = actor(&b) else { return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who turns them off" }))).into_response() };
-    let Some(person) = person_of(&k, &sub) else { return Json(json!({ "sessions_ended": 0, "schedules_paused": 0 })).into_response() };
-    let due = k.read(|s| s.schedules.values().filter(|x| x.person == person && x.next_due().is_some()).count());
-    let ended = k.turn_off(&person, &format!("{actor} turned {person} off in the admin console"), "An administrator has turned your account off").await;
-    Json(json!({ "sessions_ended": ended, "schedules_paused": due })).into_response()
 }
 
 // The organisation's apps and their credentials (admin console spec,

@@ -13,7 +13,7 @@
 //! - reads the map as a person's agent receives it.
 //!
 //! Once through the kernel's own operations (the control socket), and once
-//! through the console in a real browser against a real Keycloak.
+//! through the console in a real browser against the local store.
 
 use magnus_invariants::*;
 use magnus_scratch::admin::*;
@@ -151,22 +151,15 @@ async fn the_kernel_keeps_every_knowledge_change_and_root_rolls_any_back() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn root_oversees_corrects_and_rolls_back_the_organisations_knowledge_from_the_console() {
-    let kc = Keycloak::start().await;
-    kc.add_person("Alice").await;
-    kc.set_roles("Alice", &["admin"]).await;
     let m = FakeModel::start(script(model())).await;
-    let mut app = Appliance::start(Spec::default(), &m).await;
+    let app = Appliance::start(Spec::default(), &m).await;
     local_user(&app, "Alice", PASSWORD, true);
-    kc.configure(&mut app).await;
     agent_maps_the_customers(&app).await;
     let mine = format!("{}/32", lan_ip());
     // Long enough for a browser's sign-in to hand back its session (that
     // has taken 23 seconds after the password on a loaded machine).
     let lapse = 60;
-    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", lapse.into())]);
-    let jwks = p.jwks().await;
-    kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &jwks).await;
-    kc.add_admin_service("magnus-admin-svc", &jwks).await;
+    let p = prepare(&app, &[&mine], &[("step_up_seconds", lapse.into())]);
     let url = p.url();
     let c = launch(p).await;
     let b = browser(&c, false);

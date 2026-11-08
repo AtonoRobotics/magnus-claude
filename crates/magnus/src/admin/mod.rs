@@ -13,7 +13,6 @@
 pub mod auth;
 pub mod cert;
 pub mod connectors;
-pub mod directory;
 pub mod kernel;
 pub mod knowledge;
 pub mod live;
@@ -46,8 +45,6 @@ pub struct Console {
     /// The other names it answers to (`admin.aliases`).
     pub aliases: Vec<String>,
     pub org: String,
-    pub idp: session::Idp,
-    pub key: auth::Key,
     pub store: auth::Store,
     /// The console's own session lifetimes: the config's, until an admin
     /// sets them under Security › Sign-in (kept in the log).
@@ -58,8 +55,6 @@ pub struct Console {
     pub kernel: kernel::Kernel,
     /// The appliance's state, whose disk Health watches.
     pub state_dir: std::path::PathBuf,
-    /// The organisation's people at the provider, as the console's service account reaches them.
-    pub directory: directory::Directory,
     /// The certificates the appliance serves, by what each is for: Overview
     /// warns two weeks before one expires.
     pub certs: Vec<(String, std::path::PathBuf)>,
@@ -74,11 +69,6 @@ pub struct Console {
     pub public_hostnames: Vec<String>,
     /// The certificates it serves, renewed while it runs.
     pub tls: Arc<trusted::Tls>,
-    /// Held by every change that can take an admin away (demote, turn off,
-    /// delete, cancel an admin's invitation) from its last-admin check
-    /// until the provider has made the change, so two such changes never
-    /// both pass the check (#192).
-    pub admin_removals: tokio::sync::Mutex<()>,
 }
 
 impl Console {
@@ -132,20 +122,10 @@ pub async fn serve(cfg: Config) -> Result<()> {
         anyhow::ensure!(valid_host(alias), "admin.aliases: {alias:?} is not a hostname or an address");
     }
     let tls = Arc::new(trusted::Tls::new(&a)?);
-    let oidc = cfg.sign_in.oidc.as_ref();
-    let issuer = a.issuer.clone().or_else(|| oidc.map(|o| o.issuer.clone())).context("user management still reaches the organisation's identity provider (slice B moves it to the local store): set sign_in.oidc or admin.issuer")?;
-    let roles_claim = oidc.and_then(|o| o.roles_claim.clone()).unwrap_or_else(|| "/realm_access/roles".into());
-    // The admin API's own origin: the console's setting, else the
-    // appliance's, which reaches the same server for the same reason.
-    let admin_url = a.idp_admin_url.clone().or_else(|| oidc.and_then(|o| o.status_admin_url.clone()));
-    let admin_ca = a.idp_admin_ca.clone().or_else(|| oidc.and_then(|o| o.status_admin_ca.clone()));
-    let directory = directory::Directory::new(&issuer, a.service_client_id.clone(), admin_url.as_deref(), admin_ca.as_deref());
     let console = Arc::new(Console {
         hostname: a.hostname.to_ascii_lowercase(),
         aliases: a.aliases.iter().map(|x| x.to_ascii_lowercase()).collect(),
         org: a.org.clone().unwrap_or_else(|| "Magnus".into()),
-        idp: session::Idp::new(issuer, a.client_id.clone(), roles_claim, a.idp_internal.clone()),
-        key: auth::Key::load_or_make(&key_dir(&cfg))?,
         store: Default::default(),
         idle_minutes: std::sync::atomic::AtomicI64::new(a.idle_minutes.into()),
         session_hours: std::sync::atomic::AtomicI64::new(a.session_hours.into()),
@@ -153,7 +133,6 @@ pub async fn serve(cfg: Config) -> Result<()> {
         refresh_seconds: a.refresh_seconds.into(),
         kernel: kernel::Kernel { path: crate::control::socket_path(&cfg.appliance.state_dir) },
         state_dir: cfg.appliance.state_dir.clone(),
-        directory,
         certs: [
             ("The admin console's trusted certificate".to_string(), tls.trusted_path()),
             ("The admin console's certificate".to_string(), Some(a.tls_cert.clone())),
@@ -168,7 +147,6 @@ pub async fn serve(cfg: Config) -> Result<()> {
         tunnel_ready: a.tunnel_ready.clone(),
         public_hostnames: a.public_hostnames.clone(),
         tls: tls.clone(),
-        admin_removals: Default::default(),
     });
     // Lifetimes an admin set before this start.
     if let Ok(v) = console.kernel.call(axum::http::Method::GET, "/v1/admin/console-settings", None).await {

@@ -57,23 +57,15 @@ async fn the_console_serves_the_tailnets_certificate_for_its_hostname_and_its_ow
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_admin_renews_the_consoles_certificate_and_sees_why_it_could_not_be_issued() {
-    let kc = Keycloak::start().await;
-    kc.add_person("Alice").await;
-    kc.set_roles("Alice", &["admin"]).await;
     let m = FakeModel::start(steps(vec![])).await;
-    let mut app = Appliance::start(Spec::default(), &m).await;
+    let app = Appliance::start(Spec::default(), &m).await;
     local_user(&app, "Alice", PASSWORD, true);
-    kc.configure(&mut app).await;
     let mine = format!("{}/32", lan_ip());
     let ts = FakeTailscale::new();
     let first = ts.ready(HOST);
     let keep = tempfile::tempdir().unwrap();
-    let mut more = ts.config(keep.path());
-    more.push(("issuer", kc.issuer.clone().into()));
+    let more = ts.config(keep.path());
     let p = prepare(&app, &[&mine], &more);
-    let jwks = p.jwks().await;
-    kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &jwks).await;
-    kc.add_admin_service("magnus-admin-svc", &jwks).await;
     let url = p.url();
     let c = launch(p).await;
     eventually("the trusted certificate served", PATIENCE, || async { presented(&c, ts.public_ca()).await.ok() }).await;

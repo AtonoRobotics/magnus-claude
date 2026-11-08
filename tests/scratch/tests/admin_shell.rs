@@ -1,8 +1,8 @@
 //! The patterns every screen of the admin console uses (admin console spec,
-//! Web UI, Shell), in a real Chromium against a real Keycloak: the admin's
+//! Web UI, Shell), in a real Chromium against the local store: the admin's
 //! menu sets the theme; live data arrives over server-sent events (the kill
-//! switch's banner appears with no reload); a step-up opens the provider's
-//! sign-in in its own window and the action goes on after it; a list's row
+//! switch's banner appears with no reload); a step-up opens the console's
+//! own sign-in in its own window and the action goes on after it; a list's row
 //! opens its detail panel; a confirm sheet cancelled changes nothing; a
 //! reversible change offers Undo. The stream itself: refused without a
 //! session, a `status` event first, and over once the session is.
@@ -16,20 +16,12 @@ use serde_json::Value;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_consoles_screens_share_a_live_stream_a_step_up_sheet_panels_sheets_and_undo() {
-    let kc = Keycloak::start().await;
-    kc.add_person("Alice").await;
-    kc.set_roles("Alice", &["admin"]).await;
-    kc.add_person("Bob").await;
     let m = FakeModel::start(steps(vec![])).await;
-    let mut app = Appliance::start(Spec::default(), &m).await;
+    let app = Appliance::start(Spec::default(), &m).await;
     local_user(&app, "Alice", PASSWORD, true);
-    kc.configure(&mut app).await;
     let mine = format!("{}/32", lan_ip());
     let lapse = 20;
-    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", lapse.into())]);
-    let jwks = p.jwks().await;
-    kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &jwks).await;
-    kc.add_admin_service("magnus-admin-svc", &jwks).await;
+    let p = prepare(&app, &[&mine], &[("step_up_seconds", lapse.into())]);
     let url = p.url();
     let c = launch(p).await;
     let b = browser(&c, false);
@@ -44,7 +36,7 @@ async fn the_consoles_screens_share_a_live_stream_a_step_up_sheet_panels_sheets_
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
     // In the browser, every pattern.
-    let more = [("MAGNUS_SHELL", "1".to_string()), ("MAGNUS_OTHER", "Bob Test".to_string()), ("MAGNUS_STEP_UP_SECONDS", lapse.to_string())];
+    let more = [("MAGNUS_SHELL", "1".to_string()), ("MAGNUS_OTHER", "bob".to_string()), ("MAGNUS_STEP_UP_SECONDS", lapse.to_string())];
     let sid = sign_in_with(&url, c.addr, "Alice", PASSWORD, "admin", false, Some("#/overview"), &more).await.unwrap_or_else(|e| panic!("{e}"));
 
     // What the browser did is what happened: the switch is off again, Bob
@@ -53,7 +45,7 @@ async fn the_consoles_screens_share_a_live_stream_a_step_up_sheet_panels_sheets_
     let me: Value = with_cookie(b.get(api("/session")), &sid).send().await.unwrap().json().await.unwrap();
     let csrf = me["csrf"].as_str().unwrap().to_string();
     let users: Value = with_cookie(b.get(api("/users")), &sid).send().await.unwrap().json().await.unwrap();
-    let bob = users["users"].as_array().unwrap().iter().find(|u| u["email"] == "bob@example.test").cloned().unwrap_or_else(|| panic!("{users}"));
+    let bob = users["users"].as_array().unwrap().iter().find(|u| u["id"] == "bob").cloned().unwrap_or_else(|| panic!("{users}"));
     assert_eq!(bob["status"], "active", "Undo did not turn Bob back on: {bob}");
     let audit: Value = with_cookie(b.get(api("/audit")), &sid).send().await.unwrap().json().await.unwrap();
     let actions: Vec<&str> = audit["entries"].as_array().unwrap().iter().filter_map(|e| e["action"].as_str()).collect();

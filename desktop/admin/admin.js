@@ -12,7 +12,7 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": 
 const Admin = { me: null, live: null, status: null };
 const when = t => (t ? new Date(t).toLocaleString() : "–");
 const pct = x => (typeof x === "number" ? `${Math.round(x * 100)}%` : "–");
-// Who did something, by name: an admin is named by their provider id in
+// Who did something, by name: an admin is named by their local id in
 // the log, and the console knows the names from Users.
 const who = by => {
   const b = String(by || "");
@@ -99,9 +99,9 @@ const UI = {
     $("#main").classList.remove("with-panel");
   },
 
-  // The step-up sheet: the provider's sign-in in its own small window; the
-  // action goes on once the console has the fresh password. Where windows
-  // are blocked, the whole page goes and comes back.
+  // The step-up sheet: the console's own sign-in in its own small window;
+  // the action goes on once the console has the fresh password. Where
+  // windows are blocked, the whole page goes and comes back.
   stepUp() {
     return new Promise(done => {
       const d = document.createElement("dialog");
@@ -564,7 +564,7 @@ async function signInView(box) {
     <p class="small">With their password, typed in the app or on the sign-in page.</p>
     <fieldset class="ad-choice"><legend>A code from an authenticator app</legend>
       <label class="row"><input type="radio" name="code" value="optional" ${v.members.code === "optional" ? "checked" : ""}> Optional: whoever sets one up is asked for it</label>
-      <label class="row"><input type="radio" name="code" value="required" ${v.members.code === "required" ? "checked" : ""}> Required: everyone sets one up and is asked for it</label>
+      <label class="row"><input type="radio" name="code" value="required" ${v.members.code === "required" ? "checked" : ""}> Required: a password alone signs no one in</label>
     </fieldset>
     <h2>How admins sign in</h2>
     <p class="small">With their password, and their code as members do. This is fixed: the console has no other way in.</p>
@@ -886,7 +886,7 @@ function addConnector(box) {
 
 // ---- Users -------------------------------------------------------------
 //
-// Everyone in the organisation's realm, with Invite; a row opens the person
+// Everyone the appliance keeps, with Invite; a row opens the person
 // in the detail panel, as tabs.
 
 async function usersView(view, id, tab) {
@@ -920,21 +920,39 @@ function drawUsers(view) {
       <td>${u.status === "invited" ? `<button class="link small" data-resend="${esc(u.id)}">Resend</button> <button class="link small" data-otp="${esc(u.id)}">One-time password</button> <button class="link small" data-cancel="${esc(u.id)}">Cancel</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`
     : UI.empty(all.length ? "Nobody matches." : "Nobody is in the organisation yet.", all.length ? null : "Invite the first person.");
   rowLinks(box);
-  for (const b of $$("[data-resend]", box)) b.onclick = () => act("POST", `/users/${b.dataset.resend}/invite`, null, () => UI.toast("The invitation was sent again."));
+  for (const b of $$("[data-resend]", box)) b.onclick = () => act("POST", `/users/${b.dataset.resend}/invite`, null, v => { if (v) showInviteToken(all.find(x => x.id === b.dataset.resend), v); });
   for (const b of $$("[data-otp]", box)) b.onclick = () => oneTimePassword(all.find(x => x.id === b.dataset.otp));
   for (const b of $$("[data-cancel]", box)) b.onclick = async () => {
     const u = all.find(x => x.id === b.dataset.cancel);
-    if (await UI.confirm({ title: "Cancel this invitation?", body: `${u?.email || "Their"} account goes, and the link in the email stops working.`, verb: "Cancel invitation", danger: true }))
+    if (await UI.confirm({ title: "Cancel this invitation?", body: `${u?.email || "Their"} account goes, and the invitation link stops working.`, verb: "Cancel invitation", danger: true }))
       act("DELETE", `/users/${b.dataset.cancel}/invite`, null, () => { UI.toast("The invitation is cancelled."); loadUsers(view); });
   };
 }
 
-// For when the invitation email cannot reach them: a password to sign in
-// with once, shown here only, which the admin passes on; the provider then
-// asks them to choose their own.
+// An invitation's single-use token, shown once for the admin to pass on:
+// the appliance sends no email. The old token dies when a new one shows.
+function showInviteToken(u, v) {
+  const d = document.createElement("dialog");
+  d.className = "ad-sheet";
+  d.setAttribute("aria-labelledby", "invite-token-title");
+  d.innerHTML = `<h2 id="invite-token-title">Pass on the invitation</h2>
+    <p class="small muted">Pass this token on to ${esc(u?.name || "them")}. They set their password with it, within seven days. It is shown only now.</p>
+    <label>Username <input readonly value="${esc(u?.id || v.id || "")}"></label>
+    <label>Invitation token <input readonly id="invite-token-value" value="${esc(v.invite_token)}"></label>
+    <div class="row ad-sheet-actions"><button type="button" id="invite-token-copy">Copy token</button><button type="button" class="primary" id="invite-token-done">Done</button></div>`;
+  document.body.append(d);
+  d.addEventListener("close", () => d.remove());
+  $("#invite-token-copy", d).onclick = () => navigator.clipboard?.writeText(v.invite_token).then(() => UI.toast("Copied."), () => $("#invite-token-value", d).select());
+  $("#invite-token-done", d).onclick = () => d.close();
+  d.showModal();
+}
+
+// For when no invite token can reach them: a password to choose with
+// once, shown here only, which the admin passes on; choosing with it
+// sets their own. It never signs in.
 async function oneTimePassword(u) {
   if (!u) return;
-  if (!(await UI.confirm({ title: "Give a one-time password?", body: `${u.email || u.name} signs in with it once on ${org()}'s sign-in page, then chooses their own password. It is shown only now: pass it on yourself.`, verb: "Make password" }))) return;
+  if (!(await UI.confirm({ title: "Give a one-time password?", body: `${u.email || u.name} chooses their own password with it. It is shown only now: pass it on yourself.`, verb: "Make password" }))) return;
   let v;
   try { v = await api("POST", `/users/${u.id}/invite/password`); }
   catch (e) { return UI.toast(e.message); }
@@ -942,8 +960,7 @@ async function oneTimePassword(u) {
   d.className = "ad-sheet";
   d.setAttribute("aria-labelledby", "otp-title");
   d.innerHTML = `<h2 id="otp-title">One-time password</h2>
-    <p class="small muted">Pass these on to ${esc(u.name)}. The password works once; they then choose their own.</p>
-    <label>Sign in at <input readonly value="${esc(v.sign_in)}"></label>
+    <p class="small muted">Pass these on to ${esc(u.name)}. The password chooses their own; it never signs in.</p>
     <label>Username <input readonly value="${esc(v.username)}"></label>
     <label>One-time password <input readonly id="otp-value" value="${esc(v.password)}"></label>
     <div class="row ad-sheet-actions"><button type="button" id="otp-copy">Copy password</button><button type="button" class="primary" id="otp-done">Done</button></div>`;
@@ -960,12 +977,12 @@ function invite(view) {
   d.setAttribute("aria-labelledby", "invite-title");
   d.innerHTML = `<form id="invite-form">
     <h2 id="invite-title">Invite someone</h2>
-    <p class="small muted">They get an email from ${esc(org())}'s sign-in with a link to choose their password.</p>
+    <p class="small muted">The appliance makes their account and shows a token to pass on, which they set their password with. The appliance sends no email.</p>
     <label>Email <input name="email" type="email" required autocomplete="off"></label>
     <label>Name <input name="name" required autocomplete="off"></label>
     <label>Role <select name="role"><option value="member">Member</option><option value="admin">Admin (asks for your password again)</option></select></label>
     <p class="error" id="invite-error" hidden></p>
-    <div class="row ad-sheet-actions"><button type="button" id="invite-cancel">Cancel</button><button class="primary">Send invitation</button></div>
+    <div class="row ad-sheet-actions"><button type="button" id="invite-cancel">Cancel</button><button class="primary">Invite</button></div>
   </form>`;
   document.body.append(d);
   d.addEventListener("close", () => d.remove());
@@ -975,8 +992,8 @@ function invite(view) {
     try {
       const v = await api("POST", "/users", Object.fromEntries(new FormData(e.target)));
       d.close();
-      UI.toast(v.email_sent ? "Invitation sent." : `The account is made, but the email could not be sent (${v.email_error}). Use Resend once email works, or One-time password to pass it on yourself.`);
       loadUsers(view);
+      showInviteToken({ id: v.id, name: e.target.name.value }, v);
     } catch (err) { const el = $("#invite-error", d); el.textContent = err.message; el.hidden = false; }
   };
   d.showModal();
@@ -1014,7 +1031,7 @@ async function userPanel(view, id, tab) {
       ${u.status === "disabled" ? `<button id="u-enable">Turn on</button>` : `<button id="u-disable" class="danger">Turn off</button>`}
       <button id="u-end">End all sessions</button>
     </div>
-    <p class="small muted">Turning someone off ends their sessions here and at sign-in, and pauses their schedules until they resume them. A role change asks for your password again.</p>`;
+    <p class="small muted">Turning someone off ends their sessions here, and pauses their schedules until they resume them. A role change asks for your password again.</p>`;
   $("#u-role", pane).onclick = async () => {
     if (await UI.confirm({ title: `Make ${u.name} ${other === "admin" ? "an admin" : "a member"}?`, body: other === "admin" ? "An admin has full authority over everything on the appliance." : "They lose the admin console.", verb: "Change role" }))
       act("PATCH", `/users/${id}`, { role: other }, () => { UI.toast(`${u.name} is now ${other === "admin" ? "an admin" : "a member"}.`); again(); });
@@ -1027,7 +1044,7 @@ async function userPanel(view, id, tab) {
   const en = $("#u-enable", pane);
   if (en) en.onclick = () => act("POST", `/users/${id}/enable`, null, () => { UI.toast(`${u.name} is turned on. Their paused schedules stay paused until they resume them.`); again(); });
   $("#u-end", pane).onclick = async () => {
-    if (await UI.confirm({ title: `End every session ${u.name} has open?`, body: "Every device they use is signed out, here and at sign-in.", verb: "End all sessions", danger: true }))
+    if (await UI.confirm({ title: `End every session ${u.name} has open?`, body: "Every device they use is signed out here.", verb: "End all sessions", danger: true }))
       act("DELETE", `/users/${id}/sessions`, null, () => { UI.toast("Every session ended."); again(); });
   };
 }
@@ -1113,15 +1130,17 @@ async function dataItem(box, u, id, kind, item) {
 // Users › Delete: the account and everything of theirs, for good. It asks
 // for a fresh password, and their email typed.
 function userDelete(pane, u, id, view) {
-  pane.innerHTML = `<p>Deleting ${esc(u.name)} removes their account at sign-in and everything of theirs on the appliance: their running tasks stop, their schedules end, their sessions and their sign-ins to apps are revoked, and their tasks, conversations, files and memory are deleted, from the backups too. It cannot be undone.</p>
+  const proof = u.email || u.id;
+  pane.innerHTML = `<p>Deleting ${esc(u.name)} removes their account here and everything of theirs on the appliance: their running tasks stop, their schedules end, their sessions and their sign-ins to apps are revoked, and their tasks, conversations, files and memory are deleted, from the backups too. It cannot be undone.</p>
     <div class="row ad-bar"><button class="danger" id="u-delete">Delete ${esc(u.name)}</button></div>
-    <p class="small muted">It asks for your password again, and for their email address typed.</p>`;
+    <p class="small muted">It asks for your password again, and for their ${u.email ? "email address" : "id"} typed.</p>`;
   $("#u-delete", pane).onclick = async () => {
-    if (!(await UI.confirm({ title: `Delete ${u.name} for good?`, body: "Their account and all of their data go, and nothing brings them back.", verb: "Delete", danger: true, typed: u.email }))) return;
-    act("DELETE", `/users/${id}`, { email: u.email }, v => {
-      UI.toast(v?.erasure === "incomplete"
-        ? `${u.name} is deleted, but not fully erased: ${(v.backups_pending || []).length} backups still hold their data. Magnus tries again every hour and at start; the audit log says when it is done.`
-        : `${u.name} is deleted: ${v?.runs_stopped ?? 0} tasks stopped, ${v?.schedules_ended ?? 0} schedules ended, ${v?.content_removed ?? 0} records removed.`);
+    if (!(await UI.confirm({ title: `Delete ${u.name} for good?`, body: "Their account and all of their data go, and nothing brings them back.", verb: "Delete", danger: true, typed: proof }))) return;
+    act("DELETE", `/users/${id}`, { email: proof }, v => {
+      const erased = v?.erased || {};
+      UI.toast(erased.erasure === "incomplete"
+        ? `${u.name} is deleted, but not fully erased: ${(erased.backups_pending || []).length} backups still hold their data. Magnus tries again every hour and at start; the audit log says when it is done.`
+        : `${u.name} is deleted: ${erased.runs_stopped ?? 0} tasks stopped, ${erased.schedules_ended ?? 0} schedules ended, ${erased.content_removed ?? 0} records removed.`);
       location.hash = "#/users";
       loadUsers(view);
     });
