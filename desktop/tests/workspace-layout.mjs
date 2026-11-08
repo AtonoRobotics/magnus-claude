@@ -10,6 +10,16 @@ const page=await browser.newPage({viewport:{width:1440,height:900}}), errors=[];
 const until=async(fn,arg)=>{const end=Date.now()+15000;while(Date.now()<end){if(await page.evaluate(fn,arg))return;await page.waitForTimeout(40);}throw Error('UI condition timed out');};
 const state=()=>page.evaluate(()=>({nav:document.body.dataset.navigation,mode:document.body.dataset.workspace,region:document.body.dataset.region,width:document.querySelector('#main').getBoundingClientRect().width,work:document.querySelector('#detail').getBoundingClientRect().width,stored:Theme.prefs().conversationWidthPx,overflow:document.documentElement.scrollWidth>innerWidth}));
 const select=async region=>{const b=page.locator(`button[data-region=${region}]`);if(await b.isVisible())await b.click();};
+const composerGeometry=async()=>{
+ const g=await page.evaluate(()=>{
+  const form=document.querySelector('#say'),style=getComputedStyle(form),r=form.getBoundingClientRect(),thread=document.querySelector('#thread'),reading=thread.getBoundingClientRect(),insets=getComputedStyle(thread),box=document.querySelector('#msg').getBoundingClientRect(),status=document.querySelector('.draft-status').getBoundingClientRect(),bar=document.querySelector('.say-bar').getBoundingClientRect(),controls=[...form.querySelectorAll('.say-bar button,.say-bar select')].filter(e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden');
+  return {width:innerWidth,formWidth:r.width,readingWidth:reading.width-parseFloat(insets.paddingLeft)-parseFloat(insets.paddingRight),readingLeft:reading.left+parseFloat(insets.paddingLeft),formLeft:r.left,left:box.left-(r.left+parseFloat(style.borderLeftWidth)+parseFloat(style.paddingLeft)),right:r.right-parseFloat(style.borderRightWidth)-parseFloat(style.paddingRight)-box.right,boxBottom:box.bottom,statusTop:status.top,statusBottom:status.bottom,barTop:bar.top,contained:[box,status,bar,...controls].every(e=>{const b=e.getBoundingClientRect?e.getBoundingClientRect():e;return b.left>=r.left && b.right<=r.right;})};
+ });
+ assert.ok(Math.abs(g.formWidth-g.readingWidth)<1 && Math.abs(g.formLeft-g.readingLeft)<1,`the composer must use and align with the conversation column: ${JSON.stringify(g)}`);
+ assert.ok(Math.abs(g.left)<1 && Math.abs(g.right)<1,`the message editor must span the composer above its controls: ${JSON.stringify(g)}`);
+ assert.ok(g.boxBottom<=g.statusTop && g.statusBottom<=g.barTop,`draft status and controls must follow the message editor: ${JSON.stringify(g)}`);
+ assert.ok(g.contained,`composer content must stay inside its box: ${JSON.stringify(g)}`);
+};
 try {
  await page.goto(process.env.MAGNUS_URL);await page.getByLabel('Username').fill('alice');await page.getByLabel('Password').fill(process.env.MAGNUS_PASSWORD);await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.locator('#msg').waitFor();
  { // Only actual unresolved decisions count; informational sharing remains in Activity.
@@ -21,7 +31,9 @@ try {
   assert.equal(await page.evaluate(async id=>(await Magnus.api('GET','/v1/inbox')).items.find(i=>i.id===id).status,shared.id),'open','viewing Activity cannot decide or dismiss the item');
   await page.getByRole('button',{name:'Close work',exact:true}).click();
  }
- await page.locator('#msg').fill('Keep this composer text');assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('.say')).outlineOffset),'2px');await page.locator('#q').focus();assert.equal(await page.evaluate(()=>getComputedStyle(document.activeElement).outlineOffset),'2px');
+ await page.locator('#msg').fill('Keep this composer text');
+ if(process.env.MAGNUS_SHOTS){mkdirSync(process.env.MAGNUS_SHOTS,{recursive:true});await page.screenshot({path:join(process.env.MAGNUS_SHOTS,'composer-conversation-only.png')});}
+ await composerGeometry();assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('.say')).outlineOffset),'2px');await page.locator('#q').focus();assert.equal(await page.evaluate(()=>getComputedStyle(document.activeElement).outlineOffset),'2px');
  await page.getByRole('link',{name:'Files',exact:true}).click();await page.locator('[data-panel=files]').waitFor();
  let s=await state();assert.equal(s.mode,'split');assert.equal(s.width,420);assert.ok(s.work>=560);assert.equal(s.nav,'expanded');
  await page.getByRole('button',{name:'Collapse navigation',exact:true}).click();assert.equal((await state()).work,s.work+164);
@@ -41,7 +53,7 @@ try {
  await page.getByRole('button',{name:'Expand work',exact:true}).click();await page.setViewportSize({width:900,height:720});await page.getByRole('button',{name:'Restore split view',exact:true}).click();assert.equal((await state()).mode,'single');
  await select('conversation');assert.equal(await page.locator('#msg').inputValue(),'Keep this composer text');
  for(const [width,height] of [[1920,1080],[1440,900],[1280,720],[1024,768],[390,844],[320,640]]) {
-  await page.setViewportSize({width,height});await page.waitForTimeout(50);s=await state();assert.equal(s.overflow,false,`${width} page overflow`);
+  await page.setViewportSize({width,height});await page.waitForTimeout(50);s=await state();assert.equal(s.overflow,false,`${width} page overflow`);await select('conversation');await composerGeometry();
   if(width<760){assert.equal(s.nav,'drawer');assert.equal(s.mode,'single');await page.getByRole('button',{name:'Open navigation',exact:true}).click();const drawer=page.getByRole('dialog',{name:'Navigation',exact:true});await drawer.waitFor();await page.getByRole('link',{name:/^Needs you/}).focus();await page.keyboard.press('Escape');await until(()=>!document.querySelector('#navigation-drawer').open);assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute('aria-label')),'Open navigation');}
   if(width<760){await select('work');assert.ok(await page.locator('#lq').isVisible());assert.ok(await page.evaluate(()=>{const r=document.querySelector('#detail .detail-body');return r.scrollWidth<=r.clientWidth;}),'work controls reflow locally');}
   await select('conversation');assert.equal(await page.locator('#msg').inputValue(),'Keep this composer text');const box=await page.locator('#send').boundingBox();assert.ok(box.y>=0 && box.y+box.height<=height,`${width} composer reachable`);
