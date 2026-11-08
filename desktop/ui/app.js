@@ -1257,24 +1257,27 @@ function scheduleView(id) {
 // ---------- Model choice ----------
 
 // The models a person may run a task or a message on, as the adapters'
-// providers list them now. The choice is kept per viewer; the appliance's
-// default is used until they pick another.
+// providers list them now. The appliance's default is used until the viewer
+// picks another; a pick holds only while the default it was made under is
+// still the default, so changing the default reaches new messages (#540).
 async function modelPicker() {
   const { default: dflt, adapters } = await api("GET", "/v1/models").catch(() => ({ default: null, adapters: [] }));
   const key = m => JSON.stringify([m.adapter, m.model]);
   const opts = adapters.flatMap(a => a.models.map(model => ({ adapter: a.adapter, model })));
   if (dflt && !opts.some(o => key(o) === key(dflt))) opts.unshift(dflt);
+  const under = dflt ? key(dflt) : "";
   const saved = load("model-choice", null);
-  const pick = opts.find(o => saved && key(o) === key(saved)) || dflt || opts[0];
+  const pick = opts.find(o => saved?.under === under && key(o) === key(saved)) || dflt || opts[0];
   const groups = [...new Set(opts.map(o => o.adapter))];
-  return `<label class="model"><span class="sr">Model</span><select data-model aria-label="Model">${groups.map(g => `<optgroup label="${esc(g)}">${opts.filter(o => o.adapter === g).map(o =>
+  return `<label class="model"><span class="sr">Model</span><select data-model data-default="${esc(under)}" aria-label="Model">${groups.map(g => `<optgroup label="${esc(g)}">${opts.filter(o => o.adapter === g).map(o =>
     `<option value="${esc(key(o))}"${pick && key(o) === key(pick) ? " selected" : ""}>${esc(o.model)}${dflt && key(o) === key(dflt) ? " (default)" : ""}</option>`).join("")}</optgroup>`).join("")}</select></label>`;
 }
 function chosenModel(root) {
   const sel = $("select[data-model]", root);
   if (!sel || !sel.value) return undefined;
   const [adapter, model] = JSON.parse(sel.value);
-  save("model-choice", { adapter, model });
+  // Sending on the default is not a pick: nothing is kept to outlive it.
+  save("model-choice", sel.value === sel.dataset.default ? null : { adapter, model, under: sel.dataset.default });
   return { adapter, model };
 }
 
@@ -1297,10 +1300,10 @@ function wireComposer(thread, project, record) {
   let replacing = null, active = true;
   box.value = record.text;
   const model = $("[data-model]",form);
-  if (record.model && [...model.options].some(o => o.value === record.model)) model.value = record.model;
+  if (record.model && record.modelUnder === model.dataset.default && [...model.options].some(o => o.value === record.model)) model.value = record.model;
   const fit = () => { box.style.height = "auto"; box.style.height = `${Math.min(box.scrollHeight, innerHeight / 3)}px`; };
   const selected = () => { record.selection = [box.selectionStart,box.selectionEnd]; };
-  const read = (selection=true) => { if(record.text!==box.value)record.editRevision=(record.editRevision||0)+1; record.text = box.value; record.model = model?.value || ""; if(selection)selected(); MessageDrafts.changed(); };
+  const read = (selection=true) => { if(record.text!==box.value)record.editRevision=(record.editRevision||0)+1; record.text = box.value; record.model = model?.value || ""; record.modelUnder = model?.dataset.default || ""; if(selection)selected(); MessageDrafts.changed(); };
   const status = () => MessageDrafts.saved() === true ? "Draft saved" : MessageDrafts.saved() === false ? "Draft not saved on this device" : "Saving draft…";
   const chips = () => record.files.map(f => `<span class="attachment-chip" data-upload="${esc(f.uid)}"><span>${esc(f.name)}</span><span class="small muted">${esc(f.state === "ready" ? "Ready" : f.state === "uploading" ? "Uploading…" : f.state === "unavailable" ? "Unavailable" : "Failed")}</span>${f.error ? `<span class="small">${esc(f.error)}</span>` : ""}${["failed","unavailable"].includes(f.state) ? `<button type="button" data-retry-upload="${esc(f.uid)}">Retry</button>` : ""}<button type="button" class="icon-btn" data-remove-upload="${esc(f.uid)}" aria-label="Remove ${esc(f.name)} from message" title="Remove ${esc(f.name)} from message">${icon("close")}</button></span>`).join("");
   const submitted = () => record.pending.map(p => `<div class="submitted-message" data-submission="${esc(p.id)}"><strong>${p.state === "dispatching" ? "Sending message…" : p.state === "rejected" ? "Message was not accepted" : "Send outcome not confirmed"}</strong><p class="small">${esc(p.state === "unconfirmed" ? "This device cannot safely retry this submission. Delivery is not confirmed; no automatic resend will occur. Discarding the local draft does not cancel submitted work." : p.error || "You can continue typing.")}</p><details><summary>Submitted message</summary><p class="pre">${esc(p.draftText ?? p.body.text)}</p>${p.files.map(f => `<span class="small">${esc(f.name)}</span>`).join(" ")}</details>${p.state === "rejected" ? `<button type="button" data-recover-message="${esc(p.id)}">Edit rejected message</button>` : ""}</div>`).join("");
@@ -1353,7 +1356,7 @@ function wireComposer(thread, project, record) {
     // Recovery is another locally named draft so the current newer edits
     // remain separate, rather than being concatenated or overwritten.
     const recovered=MessageDrafts.create(record.project,record.thread);
-    recovered.localEntry=true; recovered.text=p.draftText ?? p.body.text; recovered.selection=[...(p.selection || [recovered.text.length,recovered.text.length])]; recovered.files=p.files; recovered.model=record.model;
+    recovered.localEntry=true; recovered.text=p.draftText ?? p.body.text; recovered.selection=[...(p.selection || [recovered.text.length,recovered.text.length])]; recovered.files=p.files; recovered.model=record.model; recovered.modelUnder=record.modelUnder;
     record.pending=record.pending.filter(x=>x.id!==p.id); MessageDrafts.changed(true);
     location.hash=`#/draft/${enc(recovered.id)}`;
   };
