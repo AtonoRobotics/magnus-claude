@@ -135,7 +135,7 @@ const MessageDrafts = (() => {
     const r = {id:uid(), thread, project, text:"", files:[], pending:[], selection:[0,0], anchor:null};
     rows[r.id] = r; changed(true); return r;
   }
-  function forThread(thread, project = null) { return Object.values(rows).find(r => r.thread === thread) || create(project,thread); }
+  function forThread(thread, project = null) { return Object.values(rows).find(r => r.thread === thread && !r.localEntry) || create(project,thread); }
   function discard(id) { if (!rows[id]) return; for (const f of rows[id].files) originals.delete(f.uid); delete rows[id]; changed(true); }
   function acknowledge(record, submission, response) {
     if (!rows[record.id] || !record.pending.some(p => p.id === submission.id)) return;
@@ -333,6 +333,9 @@ function paint(el, html) {
   // panel, Needs you), each copy with the same draft key: the copy being
   // typed in is the draft, and only a region that held the focus takes it.
   const active = document.activeElement;
+  // Keep explicitly transient credential controls in the live DOM only.
+  // Polling may redraw their surrounding form; never put keys in drafts.
+  const ephemeral=new Map($$("input[data-ephemeral][id]",el).map(input=>[input.id,{input,start:input.selectionStart,end:input.selectionEnd}]));
   const menuState = Menus.capture(el);
   $$("[data-draft]", el).forEach(i => { if (!(active !== i && active?.dataset?.draft === i.dataset.draft)) drafts[i.dataset.draft] = i.type === "checkbox" ? i.checked : i.value; });
   const opened = new Set($$("details[data-key]", el).filter(d => d.open).map(d => d.dataset.key));
@@ -344,6 +347,10 @@ function paint(el, html) {
   } : null;
   el.innerHTML = html;
   el._html = html;
+  for(const input of $$("input[data-ephemeral][id]",el)){
+    const prior=ephemeral.get(input.id);if(!prior || prior.input.type!==input.type)continue;
+    input.replaceWith(prior.input);if(prior.start!==null)prior.input.setSelectionRange(prior.start,prior.end);
+  }
   loadMarkdownImages(el);
   $$("details[data-key]", el).forEach(d => { if (opened.has(d.dataset.key)) d.open = true; });
   $$("[data-draft]", el).forEach(i => { const v = drafts[i.dataset.draft]; if (v === undefined) return; if (i.type === "checkbox") i.checked = !!v; else i.value = v; });
@@ -3065,7 +3072,7 @@ async function modelsSection(main) {
         if (step.event === "error") { show(a, `<p class="small" style="color:var(--bad)">${esc(step.message)}</p>`); return; }
         const head = `<div style="margin-top:12px"><p class="small">${esc(step.instructions)}</p>`;
         if (step.flow?.kind === "api_key") {
-          show(a, `${head}<label for="key-${esc(a)}">API key</label><input type="password" id="key-${esc(a)}" style="width:100%" autocomplete="off">
+          show(a, `${head}<label for="key-${esc(a)}">API key</label><input type="password" id="key-${esc(a)}" data-ephemeral style="width:100%" autocomplete="off">
             <div class="row" style="margin-top:8px"><button class="primary" data-act="key" data-adapter="${esc(a)}">Save to the vault</button></div></div>`);
           signins[`${a}:step`] = step;
         } else {

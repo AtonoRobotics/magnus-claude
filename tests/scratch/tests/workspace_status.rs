@@ -5,10 +5,11 @@ use serde_json::json;
 fn workspace_root() -> std::path::PathBuf { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap() }
 #[tokio::test(flavor="multi_thread")]
 async fn partial_refresh_failure_retains_cached_data_and_reconciles_latest() {
- let model=FakeModel::start(script(|c|async move{
+ let mut model=FakeModel::start(script(|c|async move{
   if c.body["system"].to_string().contains("talking with the person you work for in a chat") {return Reply::Text("Recorded.".into());}
   match c.turn(){0=>contract_unchecked("Readable result","Useful text"),_=>tool("task_complete",json!({"summary":"Verification result","deliverable":[{"type":"text","text":"Actual stored deliverable"}]}))}
  })).await;
+ model.url=provider(&model).await;
  let mail=magnus_invariants::mcp::mail().start().await;
  let app=Appliance::start(Spec::default().app("mail",&mail,"public","private",&[("send","irreversible")]),&model).await;
  let alice=app.api("alice");let task=alice.submit("Verify work details.").await;
