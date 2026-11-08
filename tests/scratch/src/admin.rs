@@ -140,27 +140,55 @@ pub fn browser(c: &Console, max_tls12: bool) -> reqwest::Client {
     b.build().unwrap()
 }
 
+/// A local console user with a password: person-add, role, password.
+/// Tests sign in as them through the local flow (#505).
+pub fn local_user(app: &Appliance, name: &str, password: &str, admin: bool) {
+    let config = app.dir.path().join("magnus.toml");
+    // Person ids are lowercase and canonical (#470); the display name keeps
+    // its case.
+    let id = name.to_lowercase();
+    let run = |argv: &[&str]| std::process::Command::new(magnus_invariants::appliance::bin("magnus-appliance")).args(argv).arg("--config").arg(&config).output().unwrap();
+    // A fixture person (alice, bob, carol) is already in the config: only
+    // a stranger is added.
+    let out = run(&["person-add", "--person", &id, "--name", name]);
+    assert!(out.status.success() || String::from_utf8_lossy(&out.stderr).contains("already a person"), "magnus person-add: {}", String::from_utf8_lossy(&out.stderr));
+    let role = if admin { "admin" } else { "member" };
+    let out = run(&["person-role", "--person", &id, "--role", role]);
+    assert!(out.status.success(), "magnus person-role: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(crate::set_password(app, &id, password), "magnus password for {name}");
+}
+
+/// An admin made or unmade at the appliance: `person-status --status`.
+pub fn set_status(app: &Appliance, name: &str, status: &str) {
+    let out = std::process::Command::new(magnus_invariants::appliance::bin("magnus-appliance"))
+        .args(["person-status", "--person", name, "--status", status, "--config"])
+        .arg(app.dir.path().join("magnus.toml"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "magnus person-status {name} {status}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
 /// The browser signs in as `who` (and steps up after, if asked): the
 /// console's session cookie, or the script's log when it fails.
-pub async fn sign_in(p_url: &str, at: std::net::SocketAddr, who: &str, expect: &str, step_up: bool) -> Result<String, String> {
-    sign_in_and_visit(p_url, at, who, expect, step_up, None).await
+pub async fn sign_in(p_url: &str, at: std::net::SocketAddr, who: &str, password: &str, expect: &str, step_up: bool) -> Result<String, String> {
+    sign_in_and_visit(p_url, at, who, password, expect, step_up, None).await
 }
 
 /// The same, then the screen `visit` (e.g. `#/users`) checked in every look
 /// and at phone width.
-pub async fn sign_in_and_visit(p_url: &str, at: std::net::SocketAddr, who: &str, expect: &str, step_up: bool, visit: Option<&str>) -> Result<String, String> {
-    sign_in_with(p_url, at, who, expect, step_up, visit, &[]).await
+pub async fn sign_in_and_visit(p_url: &str, at: std::net::SocketAddr, who: &str, password: &str, expect: &str, step_up: bool, visit: Option<&str>) -> Result<String, String> {
+    sign_in_with(p_url, at, who, password, expect, step_up, visit, &[]).await
 }
 
 /// The same, with more of the script's settings (`MAGNUS_SHELL` and its
 /// own, in `desktop/tests/admin-sign-in.mjs`).
-pub async fn sign_in_with(p_url: &str, at: std::net::SocketAddr, who: &str, expect: &str, step_up: bool, visit: Option<&str>, more: &[(&str, String)]) -> Result<String, String> {
+pub async fn sign_in_with(p_url: &str, at: std::net::SocketAddr, who: &str, password: &str, expect: &str, step_up: bool, visit: Option<&str>, more: &[(&str, String)]) -> Result<String, String> {
     let out = tokio::process::Command::new("node")
         .arg(magnus_invariants::appliance::workspace_root().join("desktop/tests/admin-sign-in.mjs"))
         .env("MAGNUS_ADMIN_URL", p_url)
         .env("MAGNUS_ADMIN_AT", at.to_string())
         .env("MAGNUS_PERSON", who.to_lowercase())
-        .env("MAGNUS_PASSWORD", crate::keycloak::password_of(who))
+        .env("MAGNUS_PASSWORD", password)
         .env("MAGNUS_EXPECT", expect)
         .env("MAGNUS_STEP_UP", if step_up { "1" } else { "0" })
         .envs(visit.map(|v| ("MAGNUS_VISIT", v)))

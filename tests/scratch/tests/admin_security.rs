@@ -30,7 +30,7 @@ struct Setup {
 
 impl Setup {
     async fn session(&self) -> (String, String) {
-        let sid = sign_in(&self.url, self.c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
+        let sid = sign_in(&self.url, self.c.addr, "Alice", PASSWORD, "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
         let me: Value = with_cookie(self.b.get(format!("{}/api/v1/session", self.url)), &sid).send().await.unwrap().json().await.unwrap();
         (sid, me["csrf"].as_str().unwrap().to_string())
     }
@@ -54,6 +54,7 @@ async fn root_sets_the_sign_in_rules_and_edits_tests_applies_and_rolls_back_the_
     kc.add_person("Carol").await;
     let m = FakeModel::start(steps(vec![])).await;
     let mut app = Appliance::start(Spec::default(), &m).await;
+    local_user(&app, "Alice", PASSWORD, true);
     kc.configure(&mut app).await;
     let mine = format!("{}/32", lan_ip());
     // Long enough for a browser's sign-in to hand back its session (that
@@ -179,6 +180,6 @@ async fn root_sets_the_sign_in_rules_and_edits_tests_applies_and_rolls_back_the_
     assert!(entry("policy_draft_dropped", "group:sales")["before"]["cedar"].as_str().is_some_and(|c| c.contains("financial")));
 
     // The screens, in every look and at phone width.
-    sign_in_and_visit(&url, s.c.addr, "Alice", "admin", false, Some("#/security/policy/org")).await.unwrap_or_else(|e| panic!("{e}"));
-    sign_in_and_visit(&url, s.c.addr, "Alice", "admin", false, Some("#/security/sign-in")).await.unwrap_or_else(|e| panic!("{e}"));
+    sign_in_and_visit(&url, s.c.addr, "Alice", PASSWORD, "admin", false, Some("#/security/policy/org")).await.unwrap_or_else(|e| panic!("{e}"));
+    sign_in_and_visit(&url, s.c.addr, "Alice", PASSWORD, "admin", false, Some("#/security/sign-in")).await.unwrap_or_else(|e| panic!("{e}"));
 }

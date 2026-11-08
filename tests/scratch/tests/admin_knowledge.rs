@@ -156,6 +156,7 @@ async fn root_oversees_corrects_and_rolls_back_the_organisations_knowledge_from_
     kc.set_roles("Alice", &["admin"]).await;
     let m = FakeModel::start(script(model())).await;
     let mut app = Appliance::start(Spec::default(), &m).await;
+    local_user(&app, "Alice", PASSWORD, true);
     kc.configure(&mut app).await;
     agent_maps_the_customers(&app).await;
     let mine = format!("{}/32", lan_ip());
@@ -170,7 +171,7 @@ async fn root_oversees_corrects_and_rolls_back_the_organisations_knowledge_from_
     let c = launch(p).await;
     let b = browser(&c, false);
     let session = || async {
-        let sid = sign_in(&url, c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
+        let sid = sign_in(&url, c.addr, "Alice", PASSWORD, "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
         let me: Value = with_cookie(b.get(format!("{url}/api/v1/session")), &sid).send().await.unwrap().json().await.unwrap();
         (sid, me["csrf"].as_str().unwrap().to_string())
     };
@@ -264,6 +265,6 @@ async fn root_oversees_corrects_and_rolls_back_the_organisations_knowledge_from_
 
     // The screens, in every look and at phone width.
     for screen in ["#/knowledge/ontology/customer", "#/knowledge/context", "#/knowledge/memory", "#/knowledge/activity"] {
-        sign_in_and_visit(&url, c.addr, "Alice", "admin", false, Some(screen)).await.unwrap_or_else(|e| panic!("{e}"));
+        sign_in_and_visit(&url, c.addr, "Alice", PASSWORD, "admin", false, Some(screen)).await.unwrap_or_else(|e| panic!("{e}"));
     }
 }

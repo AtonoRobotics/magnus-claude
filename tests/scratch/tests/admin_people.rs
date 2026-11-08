@@ -25,7 +25,7 @@ struct Setup {
 
 impl Setup {
     async fn session(&self) -> (String, String) {
-        let sid = sign_in(&self.url, self.c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
+        let sid = sign_in(&self.url, self.c.addr, "Alice", PASSWORD, "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
         let me: Value = with_cookie(self.b.get(format!("{}/api/v1/session", self.url)), &sid).send().await.unwrap().json().await.unwrap();
         (sid, me["csrf"].as_str().unwrap().to_string())
     }
@@ -49,6 +49,7 @@ async fn root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_del
     kc.add_person("Bob").await;
     let m = FakeModel::start(steps(vec![])).await;
     let mut app = Appliance::start(Spec::default(), &m).await;
+    local_user(&app, "Alice", PASSWORD, true);
     kc.configure(&mut app).await;
     let mine = format!("{}/32", lan_ip());
     // Long enough for a browser's sign-in to hand back its session (that
@@ -173,5 +174,5 @@ async fn root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_del
     assert_eq!(audit["entries"][0]["target"], b_id.as_str(), "{audit}");
 
     // The screens, in every look and at phone width.
-    sign_in_and_visit(&url, s.c.addr, "Alice", "admin", false, Some("#/users")).await.unwrap_or_else(|e| panic!("{e}"));
+    sign_in_and_visit(&url, s.c.addr, "Alice", PASSWORD, "admin", false, Some("#/users")).await.unwrap_or_else(|e| panic!("{e}"));
 }

@@ -112,14 +112,13 @@ const UI = {
         <p class="small muted" id="step-wait" hidden>Waiting for you to sign in in the other window. Closed it by mistake? Choose Open it again.</p>
         <div class="row ad-sheet-actions"><button value="no" formnovalidate>Cancel</button><button value="go" class="primary" id="step-go">Continue</button></div></form>`;
       document.body.append(d);
-      // The window is followed through the session, not its handle: the
-      // console's opener policy cuts the link when it goes to the provider.
+      // The window is followed through the session, not its handle.
       let w = null, timer = null, ok = false;
       const finish = v => { ok = v; clearInterval(timer); d.close(); };
       $("#step-go", d).onclick = e => {
         e.preventDefault();
-        w = window.open("/auth/step-up?then=/auth/done", "magnus-step-up", "popup,width=520,height=680");
-        if (!w) { location.href = `/auth/step-up?then=${encodeURIComponent(location.pathname + location.hash)}`; return; }
+        w = window.open("/auth/local/step-up?then=/auth/done", "magnus-step-up", "popup,width=520,height=680");
+        if (!w) { location.href = `/auth/local/step-up?then=${encodeURIComponent(location.pathname + location.hash)}`; return; }
         $("#step-wait", d).hidden = false;
         $("#step-go", d).textContent = "Open it again";
         clearInterval(timer);

@@ -34,10 +34,6 @@ fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
-fn unb64(s: &str) -> Result<Vec<u8>> {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s.trim_end_matches('=')).context("not base64url")
-}
-
 /// The console's own key, made on its first start and kept on the
 /// appliance (readable by its owner only). Keycloak holds its public half.
 pub struct Key {
@@ -84,39 +80,6 @@ impl Key {
 }
 
 /// Check a JWT's signature against a JWK set: ES256 or RS256 only.
-pub fn verify(jwt: &str, jwks: &Value) -> Result<Value> {
-    let mut parts = jwt.split('.');
-    let (Some(h), Some(c), Some(s), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { bail!("not a signed JWT") };
-    let header: Value = serde_json::from_slice(&unb64(h)?).context("its header")?;
-    let alg = header["alg"].as_str().unwrap_or_default();
-    let kid = header["kid"].as_str();
-    let key = jwks["keys"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|k| kid.is_none_or(|kid| k["kid"].as_str() == Some(kid)) && k["use"].as_str().is_none_or(|u| u == "sig") && k["alg"].as_str().is_none_or(|a| a == alg))
-        .ok_or_else(|| anyhow!("signed with a key the provider does not publish"))?;
-    let (msg, sig) = (format!("{h}.{c}"), unb64(s)?);
-    let ok = match (alg, key["kty"].as_str()) {
-        ("ES256", Some("EC")) if key["crv"] == "P-256" => {
-            let mut point = vec![4u8];
-            point.extend(unb64(key["x"].as_str().unwrap_or_default())?);
-            point.extend(unb64(key["y"].as_str().unwrap_or_default())?);
-            signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, point).verify(msg.as_bytes(), &sig).is_ok()
-        }
-        ("RS256", Some("RSA")) => {
-            let n = unb64(key["n"].as_str().unwrap_or_default())?;
-            let e = unb64(key["e"].as_str().unwrap_or_default())?;
-            signature::RsaPublicKeyComponents { n, e }.verify(&signature::RSA_PKCS1_2048_8192_SHA256, msg.as_bytes(), &sig).is_ok()
-        }
-        _ => bail!("signed with {alg}, which the console does not accept"),
-    };
-    if !ok {
-        bail!("its signature does not verify");
-    }
-    serde_json::from_slice(&unb64(c)?).context("its claims")
-}
-
 /// An admin's console session. The provider's refresh token stays here,
 /// never in the browser.
 #[derive(Clone, Debug)]
@@ -124,11 +87,6 @@ pub struct Session {
     pub sub: String,
     pub name: String,
     pub csrf: String,
-    pub refresh_token: String,
-    /// Signed in against the local store (`/auth/local`) rather than the
-    /// provider: the guard rechecks standing with the kernel, and sign-out
-    /// skips the provider (#429).
-    pub local: bool,
     pub started: DateTime<Utc>,
     pub seen: DateTime<Utc>,
     pub refreshed: DateTime<Utc>,
@@ -142,45 +100,15 @@ impl Session {
     }
 }
 
-/// A sign-in or step-up waiting on the provider's page.
-#[derive(Clone, Debug)]
-pub struct Pending {
-    pub verifier: String,
-    pub nonce: String,
-    /// The session a step-up is for; None for a sign-in.
-    pub step_up: Option<String>,
-    /// Where the console goes back to.
-    pub then: String,
-    pub redirect_uri: String,
-    pub started: DateTime<Utc>,
-}
-
 #[derive(Default)]
 pub struct Store {
     pub sessions: Mutex<HashMap<String, Session>>,
-    pub pending: Mutex<HashMap<String, Pending>>,
     /// Login-CSRF tokens for the local forms: token to minted. In-memory
     /// only; a restart just asks the browser to reload its form (#456).
     pub login_tokens: Mutex<HashMap<String, DateTime<Utc>>>,
 }
 
 impl Store {
-    pub fn add_pending(&self, state: String, p: Pending) -> Result<()> {
-        let mut m = self.pending.lock().unwrap();
-        let now = Utc::now();
-        m.retain(|_, x| now - x.started < Duration::minutes(PENDING_MINUTES));
-        if m.len() >= 200 {
-            bail!("too many sign-ins are waiting; try again in a few minutes");
-        }
-        m.insert(state, p);
-        Ok(())
-    }
-
-    pub fn take_pending(&self, state: &str) -> Option<Pending> {
-        let p = self.pending.lock().unwrap().remove(state)?;
-        (Utc::now() - p.started < Duration::minutes(PENDING_MINUTES)).then_some(p)
-    }
-
     pub fn add_login_token(&self, token: String) -> Result<()> {
         let mut m = self.login_tokens.lock().unwrap();
         let now = Utc::now();
@@ -197,37 +125,6 @@ impl Store {
         let minted = self.login_tokens.lock().unwrap().remove(token);
         minted.is_some_and(|t| Utc::now() - t < Duration::minutes(PENDING_MINUTES))
     }
-}
-
-/// The checks every console ID token passes: our client, the realm's
-/// issuer, current, answering this sign-in's nonce, and with a subject. A
-/// refresh's ID token answers no sign-in (`nonce` None): Keycloak leaves
-/// the nonce out of it, and every other check still holds.
-pub fn check_claims(c: &Value, issuer: &str, client_id: &str, nonce: Option<&str>, now: DateTime<Utc>) -> Result<String> {
-    if c["iss"].as_str() != Some(issuer) {
-        bail!("from {}, not {issuer}", c["iss"]);
-    }
-    let aud_ok = match &c["aud"] {
-        Value::String(a) => a == client_id,
-        Value::Array(a) => a.iter().any(|x| x.as_str() == Some(client_id)),
-        _ => false,
-    };
-    if !aud_ok || c.get("azp").and_then(|v| v.as_str()).is_some_and(|azp| azp != client_id) {
-        bail!("not for client {client_id}");
-    }
-    if c["exp"].as_i64().is_none_or(|e| e <= now.timestamp()) {
-        bail!("expired");
-    }
-    if nonce.is_some_and(|n| c["nonce"].as_str() != Some(n)) {
-        bail!("not an answer to this sign-in");
-    }
-    c["sub"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from).ok_or_else(|| anyhow!("no subject"))
-}
-
-/// The realm roles an ID token carries, at the claim the appliance reads
-/// them from (`sign_in.oidc.roles_claim`, by default Keycloak's).
-pub fn roles(c: &Value, pointer: &str) -> Vec<String> {
-    c.pointer(pointer).and_then(|v| v.as_array()).into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect()
 }
 
 #[cfg(test)]
@@ -251,28 +148,6 @@ mod tests {
         assert!(verify(&jwt, &other.jwks()).is_err());
         let none = format!("{}.{}.", b64(br#"{"alg":"none"}"#), b64(br#"{"sub":"x"}"#));
         assert!(verify(&none, &key.jwks()).is_err());
-    }
-
-    #[test]
-    fn an_id_token_is_for_this_client_this_realm_this_sign_in_and_current() {
-        let now = Utc::now();
-        let ok = json!({ "iss": "https://idp/realms/m", "aud": "magnus-admin", "exp": now.timestamp() + 60, "nonce": "n1", "sub": "abc" });
-        assert_eq!(check_claims(&ok, "https://idp/realms/m", "magnus-admin", Some("n1"), now).unwrap(), "abc");
-        for (k, v) in [("iss", json!("https://evil")), ("aud", json!("magnus-test")), ("exp", json!(now.timestamp() - 1)), ("nonce", json!("n2")), ("sub", json!(""))] {
-            let mut c = ok.clone();
-            c[k] = v;
-            assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", Some("n1"), now).is_err(), "{k}");
-        }
-        // A refresh's ID token, without a nonce, is checked for the rest.
-        let mut c = ok.clone();
-        c.as_object_mut().unwrap().remove("nonce");
-        assert_eq!(check_claims(&c, "https://idp/realms/m", "magnus-admin", None, now).unwrap(), "abc");
-        assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", Some("n1"), now).is_err(), "a sign-in's token without its nonce passed");
-        c["aud"] = json!("magnus-test");
-        assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", None, now).is_err());
-        let mut c = ok.clone();
-        c["azp"] = json!("magnus-test");
-        assert!(check_claims(&c, "https://idp/realms/m", "magnus-admin", Some("n1"), now).is_err());
     }
 
     /// A login token takes once, while fresh: unknown and used ones refuse (#456).

@@ -84,6 +84,7 @@ async fn the_console_sets_rotates_and_revokes_the_organisations_credentials_and_
     kc.set_roles("Alice", &["admin"]).await;
     let m = FakeModel::start(steps(vec![])).await;
     let mut app = Appliance::start(Spec::default(), &m).await;
+    local_user(&app, "Alice", PASSWORD, true);
     kc.configure(&mut app).await;
     let crm = FakeOAuthApp::start(3600).await;
     let closed = FakeOAuthApp::start(3600).await;
@@ -97,7 +98,7 @@ async fn the_console_sets_rotates_and_revokes_the_organisations_credentials_and_
     let url = p.url();
     let c = launch(p).await;
     let b = browser(&c, false);
-    let sid = sign_in(&url, c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
+    let sid = sign_in(&url, c.addr, "Alice", PASSWORD, "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
     let me: Value = with_cookie(b.get(format!("{url}/api/v1/session")), &sid).send().await.unwrap().json().await.unwrap();
     let s = Setup { url: url.clone(), b, s: (sid, me["csrf"].as_str().unwrap().to_string()) };
     let alice = app.api("alice");
@@ -210,5 +211,5 @@ async fn the_console_sets_rotates_and_revokes_the_organisations_credentials_and_
     assert_eq!(rotated["after"], json!({ "kind": "client_secret", "set": true }), "{rotated}");
 
     // The screen, in every look and at phone width.
-    sign_in_and_visit(&url, c.addr, "Alice", "admin", false, Some("#/security/connectors/google-gmail")).await.unwrap_or_else(|e| panic!("{e}"));
+    sign_in_and_visit(&url, c.addr, "Alice", PASSWORD, "admin", false, Some("#/security/connectors/google-gmail")).await.unwrap_or_else(|e| panic!("{e}"));
 }
