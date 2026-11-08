@@ -11,46 +11,59 @@ const enc = encodeURIComponent;
 // Read aloud in the appliance's own voice, a sentence at a time, so the first
 // is heard while the next is made. With no voice on the appliance, the
 // system's own voice reads it.
-const voice = { run: 0, audio: null, done: null };
+const voice = { run: 0, audio: null, done: null, entry: null };
+function speechEntry(id) {
+  voice.entry=id;
+  for(const button of document.querySelectorAll("button[data-voice-entry]")) {
+    const reading=button.dataset.voiceEntry===id, action=reading ? "hush" : "listen", label=reading ? "Stop reading" : "Read aloud";
+    if(button.hasAttribute("data-msg-act"))button.dataset.msgAct=action;else button.dataset.act=reading ? "hush" : "speak";
+    button.setAttribute("aria-label",label);button.dataset.tooltip=label;
+    const svg=button.querySelector("svg");if(svg)svg.innerHTML=ICONS[action];
+  }
+}
 function hush() {
   voice.run++;
   if (voice.audio) voice.audio.pause();
   if (voice.done) voice.done();
   voice.audio = voice.done = null;
+  speechEntry(null);
   return Magnus.stopSpeaking();
 }
-async function readAloud(text) {
-  await hush();
-  // A sentence at a time; a very long one in pieces, as the appliance reads
-  // at most 2000 characters at once.
-  const pieces = s => { const out = []; let cur = ""; for (const w of s.split(/\s+/)) { if (cur && (cur + " " + w).length > 1500) { out.push(cur); cur = w; } else cur = cur ? `${cur} ${w}` : w; } if (cur) out.push(cur); return out; };
-  const run = voice.run, parts = text.split(/(?<=[.!?])\s+/).filter(s => s.trim()).flatMap(pieces);
-  // The voice makes a few pieces at a time for everyone: busy, wait and ask again.
-  const ask = async (s, tries = 8) => {
-    try { return await api("POST", "/v1/speak", { text: s }); } catch (e) {
-      if (e.status !== 429 || tries <= 1 || run !== voice.run) throw e;
-      await new Promise(r => setTimeout(r, 400));
-      return ask(s, tries - 1);
+async function readAloud(source, entryId) {
+  const textReady=Promise.resolve(source);textReady.catch(()=>{});
+  const stopped=hush(), run=voice.run;
+  speechEntry(entryId);
+  // Own startup before awaiting the host or the spoken-script request.
+  try {
+    await stopped;if(run!==voice.run)return;
+    const text=await textReady;if(run!==voice.run)return;
+    if(typeof text!=="string")throw new Error("No spoken text is available.");
+    const pieces = s => { const out = []; let cur = ""; for (const w of s.split(/\s+/)) { if (cur && (cur + " " + w).length > 1500) { out.push(cur); cur = w; } else cur = cur ? `${cur} ${w}` : w; } if (cur) out.push(cur); return out; };
+    const parts=text.split(/(?<=[.!?])\s+/).filter(s=>s.trim()).flatMap(pieces);
+    const ask=async(s,tries=8)=>{
+      if(run!==voice.run)return null;
+      try{return await api("POST","/v1/speak",{text:s});}catch(e){
+        if(e.status!==429 || tries<=1 || run!==voice.run)throw e;
+        await new Promise(r=>setTimeout(r,400));return ask(s,tries-1);
+      }
+    };
+    const make=s=>{const p=ask(s);p.catch(()=>{});return p;};
+    let next=parts.length ? make(parts[0]) : null;
+    for(let i=0;i<parts.length;i++) {
+      let r;
+      try{r=await next;}catch(e){if(e.status===503 && i===0 && run===voice.run){for(const part of parts){if(run!==voice.run)return;await Magnus.speak(part);}return;}throw e;}
+      if(run!==voice.run || !r)return;
+      next=i+1<parts.length ? make(parts[i+1]) : null;
+      const src=URL.createObjectURL(new Blob([Uint8Array.from(atob(r.audio_b64),c=>c.charCodeAt(0))],{type:r.media_type}));
+      await new Promise((done,fail)=>{
+        const audio=voice.audio=new Audio(src);voice.done=done;
+        audio.onended=done;audio.onerror=()=>fail(new Error("Could not play the audio."));audio.play().catch(fail);
+      }).finally(()=>URL.revokeObjectURL(src));
+      if(run!==voice.run)return;
     }
-  };
-  const make = s => { const p = ask(s); p.catch(() => {}); return p; };
-  let next = parts.length ? make(parts[0]) : null;
-  for (let i = 0; i < parts.length; i++) {
-    let r;
-    try { r = await next; } catch (e) { if (e.status === 503 && i === 0) return run === voice.run && Magnus.speak(text); throw e; }
-    if (run !== voice.run) return;
-    next = i + 1 < parts.length ? make(parts[i + 1]) : null;
-    const src = URL.createObjectURL(new Blob([Uint8Array.from(atob(r.audio_b64), c => c.charCodeAt(0))], { type: r.media_type }));
-    await new Promise((done, fail) => {
-      const a = voice.audio = new Audio(src);
-      voice.done = done;
-      a.onended = done;
-      a.onerror = () => fail(new Error("Could not play the audio."));
-      a.play().catch(fail);
-    }).finally(() => URL.revokeObjectURL(src));
-    if (run !== voice.run) return;
+  } finally {
+    if(run===voice.run){voice.audio=voice.done=null;speechEntry(null);}
   }
-  voice.audio = voice.done = null;
 }
 
 const App = {
@@ -261,6 +274,7 @@ function paint(el, html) {
   // panel, Needs you), each copy with the same draft key: the copy being
   // typed in is the draft, and only a region that held the focus takes it.
   const active = document.activeElement;
+  const menuState = Menus.capture(el);
   $$("[data-draft]", el).forEach(i => { if (!(active !== i && active?.dataset?.draft === i.dataset.draft)) drafts[i.dataset.draft] = i.type === "checkbox" ? i.checked : i.value; });
   const opened = new Set($$("details[data-key]", el).filter(d => d.open).map(d => d.dataset.key));
   const focused = el.contains(active) ? active?.dataset?.draft : undefined;
@@ -271,6 +285,7 @@ function paint(el, html) {
   } : null;
   el.innerHTML = html;
   el._html = html;
+  loadMarkdownImages(el);
   $$("details[data-key]", el).forEach(d => { if (opened.has(d.dataset.key)) d.open = true; });
   $$("[data-draft]", el).forEach(i => { const v = drafts[i.dataset.draft]; if (v === undefined) return; if (i.type === "checkbox") i.checked = !!v; else i.value = v; });
   if (focused) $(`[data-draft="${CSS.escape(focused)}"]`, el)?.focus({preventScroll:true});
@@ -279,6 +294,7 @@ function paint(el, html) {
     const target=control.id ? $(`#${CSS.escape(control.id)}`,el) : within && (control.act ? $(`[data-msg-act="${CSS.escape(control.act)}"]`,within) : control.open ? $(`[data-open="${CSS.escape(control.open)}"]`,within) : control.label ? $(`${control.tag}[aria-label="${CSS.escape(control.label)}"]`,within) : null);
     target?.focus({preventScroll:true});
   }
+  Menus.restore(menuState);
   return true;
 }
 
@@ -396,6 +412,143 @@ function shell() {
   if (!App.wired) { App.wired = true; wireDocument(); }
 }
 
+// One open menu and one shared tooltip, for both input families.
+const Menus = (() => {
+  let current = null, trigger = null, anchorPosition = null;
+  const items = () => current ? $$('[role="menuitem"]:not(:disabled), [role="menuitemcheckbox"]:not(:disabled)', current) : [];
+  function close(restore = false) {
+    if (!current) return;
+    current.hidden = true; trigger?.setAttribute("aria-expanded", "false");
+    const back = trigger; current = trigger = null; anchorPosition=null;
+    if (restore && back?.isConnected) back.focus({ preventScroll: true });
+  }
+  function open(button, focus = true) {
+    const menu = document.getElementById(button.dataset.menu);
+    if (!menu) return;
+    if (current === menu) return close(true);
+    // A transformed entry becomes the containing block of fixed descendants.
+    // End its entrance before placing a viewport-relative menu.
+    button.closest('.entry.enter')?.classList.remove('enter');
+    close(); current = menu; trigger = button; menu.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    const anchor = button.getBoundingClientRect(), r = menu.getBoundingClientRect();
+    anchorPosition={left:anchor.left,top:anchor.top};
+    menu.style.left = `${Math.max(8, Math.min(anchor.left, innerWidth - r.width - 8))}px`;
+    menu.style.top = `${anchor.bottom + r.height <= innerHeight - 8 ? anchor.bottom : Math.max(8, anchor.top - r.height)}px`;
+    if (focus) items()[0]?.focus({ preventScroll: true });
+  }
+  function install() {
+    document.addEventListener("click", e => {
+      const button = e.target.closest("[data-menu]");
+      if (button) { e.preventDefault(); open(button); return; }
+      if (current && (e.target.closest('[role="menuitem"], [role="menuitemcheckbox"]') || !current.contains(e.target))) close();
+    });
+    document.addEventListener("keydown", e => {
+      if (!current) return;
+      if (e.key === "Escape") { e.preventDefault(); close(true); return; }
+      if (e.key === "Tab") { trigger?.focus({ preventScroll: true }); close(); return; }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+      e.preventDefault(); const list = items(), n = list.indexOf(document.activeElement);
+      const at = e.key === "Home" ? 0 : e.key === "End" ? list.length - 1 : (n + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length;
+      list[at]?.focus({ preventScroll: true });
+    });
+    document.addEventListener("scroll", e => {
+      if(!current || current.contains(e.target))return;
+      const now=trigger.getBoundingClientRect();
+      if(!anchorPosition || Math.abs(now.left-anchorPosition.left)>1 || Math.abs(now.top-anchorPosition.top)>1)close();
+    }, true);
+    window.addEventListener("resize", () => close(true));
+    new MutationObserver(() => { if (current && (!current.isConnected || !trigger?.isConnected)) { close(); $("#conv-head h1")?.focus({ preventScroll: true }); } }).observe(document.body, { childList: true, subtree: true });
+  }
+  function capture(root) {
+    return current && root.contains(current) ? {id:current.id, action:document.activeElement?.dataset?.msgAct, focused:current.contains(document.activeElement)} : null;
+  }
+  function restore(state) {
+    if (!state) return;
+    close();
+    const button = $$("[data-menu]").find(b => b.dataset.menu === state.id);
+    if (button) { open(button,state.focused); if (state.focused && state.action) items().find(b => b.dataset.msgAct === state.action)?.focus({preventScroll:true}); }
+  }
+  return { install, close, capture, restore };
+})();
+const Tooltips = (() => {
+  let trigger = null, tip = null, showTimer, closeTimer, hovered = false, overTip = false, focused = false, suppressed = null, warm = 0;
+  const eligible = node => node instanceof Element ? node.closest("[data-tooltip]") : null;
+  const label = el => el.dataset.tooltip || el.getAttribute("aria-label") || el.textContent.trim();
+  function hide() {
+    clearTimeout(showTimer); clearTimeout(closeTimer);
+    if (tip) { const ids = (trigger?.getAttribute("aria-describedby") || "").split(/\s+/).filter(x => x && x !== tip.id); if (ids.length) trigger?.setAttribute("aria-describedby", ids.join(" ")); else trigger?.removeAttribute("aria-describedby"); tip.remove(); tip = null; }
+  }
+  function place() {
+    if (!tip || !trigger?.isConnected) return hide();
+    const r = trigger.getBoundingClientRect(), v = window.visualViewport, x = v?.offsetLeft || 0, y = v?.offsetTop || 0, w = v?.width || innerWidth, h = v?.height || innerHeight;
+    tip.style.maxWidth = `${Math.min(280, w - 16)}px`;
+    const t = tip.getBoundingClientRect();
+    tip.style.left = `${Math.max(x + 8, Math.min(r.left + (r.width - t.width) / 2, x + w - t.width - 8))}px`;
+    const top = r.bottom + 8 + t.height <= y + h - 8 ? r.bottom + 8 : r.top - t.height - 8;
+    tip.style.top = `${Math.max(y + 8, Math.min(top, y + h - t.height - 8))}px`;
+  }
+  function show() {
+    if (!trigger?.isConnected || suppressed === trigger || !(hovered || focused)) return;
+    tip = document.createElement("div"); tip.id = "magnus-tooltip"; tip.className = "tooltip"; tip.role = "tooltip"; tip.textContent = label(trigger);
+    document.body.append(tip); trigger.setAttribute("aria-describedby", [trigger.getAttribute("aria-describedby"), tip.id].filter(Boolean).join(" "));
+    tip.onpointerenter = () => { overTip = true; clearTimeout(closeTimer); };
+    tip.onpointerleave = () => { overTip = false; scheduleClose(); };
+    place(); warm = Date.now() + 1000;
+  }
+  function scheduleClose() {
+    clearTimeout(closeTimer);
+    if (!hovered && !focused && !overTip) closeTimer = setTimeout(() => { hide(); if (suppressed === trigger) suppressed = null; }, 150);
+  }
+  function enter(el, focus, touch = false) {
+    if (!el || touch) return;
+    if (el !== trigger) { hide(); trigger = el; hovered = false; overTip = false; focused = false; }
+    if (focus) focused = true; else hovered = true;
+    clearTimeout(closeTimer); clearTimeout(showTimer);
+    if (!tip && suppressed !== el) showTimer = setTimeout(show, focus || warm > Date.now() ? 80 : 350);
+  }
+  function dismiss() { if (trigger) suppressed = trigger; hide(); }
+  function decorate(root) {
+    for (const el of [root, ...root.querySelectorAll("[title]")]) {
+      if (!el.hasAttribute?.("title")) continue;
+      const title = el.getAttribute("title"); if (title) { el.dataset.tooltip = title; if (el.matches("button, a") && !el.getAttribute("aria-label") && !el.textContent.trim()) el.setAttribute("aria-label", title); }
+      el.removeAttribute("title");
+    }
+  }
+  function install() {
+    decorate(document.body);
+    document.addEventListener("pointerover", e => { const el = eligible(e.target); if (el && !el.contains(e.relatedTarget)) enter(el, false, e.pointerType === "touch"); });
+    document.addEventListener("pointerout", e => { if (trigger?.contains(e.target) && !trigger.contains(e.relatedTarget)) { hovered = false; if (!focused && suppressed === trigger) suppressed = null; scheduleClose(); } });
+    document.addEventListener("focusin", e => enter(eligible(e.target), true));
+    document.addEventListener("focusout", e => { if (trigger?.contains(e.target) && !trigger.contains(e.relatedTarget)) { focused = false; if (!hovered && suppressed === trigger) suppressed = null; scheduleClose(); } });
+    document.addEventListener("click", dismiss, true);
+    document.addEventListener("keydown", e => { if (e.key === "Escape" && (tip || showTimer)) dismiss(); });
+    document.addEventListener("scroll", dismiss, true); window.addEventListener("resize", place); window.visualViewport?.addEventListener("resize", place);
+    new MutationObserver(records => {
+      for (const r of records) { if (r.type === "attributes") decorate(r.target); for (const n of r.addedNodes || []) if (n.nodeType === 1) decorate(n); }
+      if (trigger && !trigger.isConnected) { hide(); trigger = null; }
+    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["title"] });
+  }
+  return { install, dismiss };
+})();
+function loadMarkdownImages(root) {
+  for (const img of root.querySelectorAll("img[data-prose-image]")) {
+    if (img._loading) continue; img._loading = true;
+    const path = img.dataset.proseImage;
+    if (!/^\/v1\/files\/[^/?#]+$/.test(path)) continue;
+    Magnus.dataUrl(path).then(src => { if (img.isConnected) img.src = src; }).catch(() => { img.alt = `${img.alt || "Image"} (unavailable)`; });
+  }
+}
+function wireMarkdown(root) {
+  if (root._markdownWired) return; root._markdownWired = true;
+  loadMarkdownImages(root);
+  root.addEventListener("click", async e => {
+    const copy = e.target.closest("[data-code-copy]"), link = e.target.closest("[data-prose-link]");
+    if (copy) { e.preventDefault(); try { await copyText(copy.closest(".code-block").querySelector("code").textContent); toast("Code copied."); } catch (err) { toast(err.message); } }
+    if (link) { e.preventDefault(); const url = Compose.safeUrl(link.getAttribute("href")); if (url) Magnus.openExternal(url).catch(err => toast(err.message)); }
+  });
+}
+
 // What works wherever it is shown, set once for the page.
 function wireDocument() {
   window.addEventListener("popstate",()=>{
@@ -405,6 +558,10 @@ function wireDocument() {
   document.addEventListener("click", e => { const b=e.target.closest("[data-attach-open]"); if (b) b.closest(".attachment-picker").querySelector("input").click(); });
   window.addEventListener("pagehide", () => MessageDrafts.flush());
   document.addEventListener("visibilitychange", () => { if (document.hidden) MessageDrafts.flush(); });
+  Menus.install(); Tooltips.install(); wireMarkdown(document);
+  const style = document.createElement("style"); style.textContent = Compose.markdownStyles; document.head.append(style);
+  document.addEventListener("load", e => { if (e.target.matches?.("iframe.composed")) { try { wireMarkdown(e.target.contentDocument); sizeComposedFrame(e.target); } catch { /* frame unavailable */ } } }, true);
+  new MutationObserver(()=>{for(const [frame,sizing] of frameSizing)if(!frame.isConnected){sizing.observer.disconnect();frameSizing.delete(frame);}}).observe(document.body,{childList:true,subtree:true});
   // Anything that names an item opens it beside the conversation, without
   // leaving it.
   document.addEventListener("click", e => {
@@ -1149,10 +1306,11 @@ async function showThread(main, thread, draftRecord) {
     for (const id of running) if (!listening[id]) listening[id] = Magnus.live(id, t => {
       ui.live[id] = (ui.live[id] || "") + t;
       const el = $(`[data-live="${CSS.escape(id)}"]`, main);
-      if (el) ReadingAnchors.hold($("#thread",main),()=>{
-        el.textContent = ui.live[id];
-        if (!ReadingAnchors.capture($("#thread",main)).follow) $("[data-jump-latest]",main).hidden=false;
-      });
+      if(el){
+        const root=$("#thread",main), followed=ReadingAnchors.capture(root)?.follow;
+        ReadingAnchors.hold(root,()=>{el.innerHTML=Compose.markdown(ui.live[id]);loadMarkdownImages(el);});
+        if(!followed)$("[data-jump-latest]",main).hidden=false;
+      }
     });
     for (const id of Object.keys(listening)) if (!running.has(id)) { listening[id](); delete listening[id]; delete ui.live[id]; }
   };
@@ -1218,13 +1376,21 @@ async function showThread(main, thread, draftRecord) {
       }
       case "export": return toast(`Saved ${await Magnus.download(path(id, "export"), safeName(e))}`);
       case "save": await api("POST", path(id, "save"), {}); return toast("Saved to Files.");
-      case "listen": { b.disabled = true; try { await readAloud((await api("POST", path(id, "spoken"), {})).script); } finally { b.disabled = false; } return; }
+      case "listen": return readAloud(api("POST",path(id,"spoken"),{}).then(r=>r.script),id);
       case "hush": return hush();
+      case "feedback": {
+        const d = document.createElement("dialog"); d.className = "feedback-dialog"; d.setAttribute("aria-label", "Feedback");
+        d.innerHTML = `<h2>Feedback</h2>${e.task_id ? verdictBar(e.task_id, e.verdict) : ""}<div class="row">${["great", "annoying"].map(a => `<button data-msg-act="${a}" aria-pressed="${e.reaction === a}">${a === "great" ? "That was great" : "That was annoying"}</button>`).join("")}</div><button data-close-feedback>Close feedback</button>`;
+        d.onclick = async event => { const action=event.target.closest("[data-msg-act]");if(event.target.closest("[data-close-feedback]"))d.close();if(action){const status=document.createElement("p");status.className="small";status.setAttribute("role","status");status.textContent="Saving feedback…";d.append(status);try{await msgAct(action,el);d.close();}catch(err){status.textContent="Feedback was not confirmed. Try again when connected.";toast(err.message);action.disabled=false;}} };
+        d.onclose = () => { d.remove(); $(`[data-entry="${CSS.escape(id)}"] .menu-trigger`, main)?.focus({preventScroll:true}); };
+        document.body.append(d); d.showModal(); return;
+      }
       case "great": case "annoying": b.disabled = true; await api("POST", path(id, "reaction"), { reaction: e.reaction === act ? null : act }); return draw();
       case "task": { const r = await api("POST", path(id, "task"), {}); toast("Started a task."); await refresh(); return r; }
       case "delete":
         if (!await ask("Delete this message? It leaves this chat and what Magnus reads next, and waits in the trash until it is gone for good.", "Delete")) return;
-        await api("POST", path(id, "delete"), {}); return draw();
+        await api("POST", path(id, "delete"), {}); await draw();
+        const heading = $("#conv-head h1"); if (heading) { heading.tabIndex = -1; heading.focus({preventScroll:true}); } return;
     }
   };
   App.redraw = draw;
@@ -1466,7 +1632,10 @@ function motion(el, ui) {
   ui.status ||= {};
   for (const n of $$(".entry[data-entry]", el)) {
     const k = n.dataset.entry;
-    if (!first && k && !ui.seen.has(k)) n.classList.add("enter");
+    if (!first && k && !ui.seen.has(k)) {
+      n.classList.add("enter");
+      n.addEventListener("animationend",()=>n.classList.remove("enter"),{once:true});
+    }
     ui.seen.add(k);
   }
   for (const n of $$("[data-chat-task]", el)) {
@@ -1555,17 +1724,16 @@ const ICONS = {
 function msgActions(e, ui) {
   if (!e.id) return "";
   const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn";
-  // Every kind the server takes reactions on (reactions.rs MAGNUS, #359): its answers, turns,
-  // results, started tasks, proposed cards, and its own openings (#360).
   const said = ["answer", "turn", "result", "tasks", "proposal_card", "grant_card", "suggestion_card", "schedule_card", "connector_card", "opener"].includes(e.kind);
-  const acts = [["copy", "Copy"], mine && ["edit", "Edit"], magnus && ["retry", "Retry"], e.kind === "answer" && ["listen", "Read aloud"], e.kind === "answer" && ["hush", "Stop"],
-    said && ["great", "That was great"], said && ["annoying", "That was annoying"], ["branch", "Branch"], ["share", "Share"],
-    ["export", "Export"], ["save", "Save to Files"], ["task", "Make a task"], ["delete", "Delete"]].filter(Boolean);
+  const id = `message-menu-${enc(e.id)}`, reading = voice.entry === e.id;
+  const button = (a, label) => `<button class="icon" data-msg-act="${a}"${a==="listen" || a==="hush" ? ` data-voice-entry="${esc(e.id)}"` : ""} aria-label="${label}" data-tooltip="${label}"><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[a]}</svg></button>`;
+  const primary = mine ? button("edit", "Edit") : button("copy", "Copy response") + (e.kind === "answer" && App.canReadAloud ? button(reading ? "hush" : "listen", reading ? "Stop reading" : "Read aloud") : "");
+  const actions = [mine && ["copy", "Copy message"], magnus && ["retry", "Retry"], ["branch", "Branch"], ["share", "Share"], ["export", "Export"], ["save", "Save to Files"], ["task", "Make a task"], said && ["feedback", "Feedback"], ["delete", "Delete message"]].filter(Boolean);
   const share = ui.sharing === e.id ? `<div class="row small share-to"><label class="sr" for="share-${esc(e.id)}">Share with</label>
     <select id="share-${esc(e.id)}" data-share-to>${ui.people.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>
     <button class="primary" data-msg-act="share-send">Share</button><button class="link" data-msg-act="share-cancel">Cancel</button></div>` : "";
-  const pressed = a => a === "great" || a === "annoying" ? ` aria-pressed="${e.reaction === a}"` : "";
-  return `<div class="msg-actions small" role="toolbar" aria-label="Actions">${acts.map(([a, l]) => `<button class="icon${e.reaction === a ? " on" : ""}" data-msg-act="${a}" title="${l}"${pressed(a)}><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[a]}</svg><span class="sr">${l}</span></button>`).join("")}</div>${share}`;
+  return `<div class="msg-actions small" role="group" aria-label="Message actions">${primary}<div class="message-menu-wrap"><button class="icon menu-trigger" data-menu="${esc(id)}" aria-label="More message actions" data-tooltip="More message actions" aria-haspopup="menu" aria-expanded="false" aria-controls="${esc(id)}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+    <div id="${esc(id)}" class="action-menu" role="menu" aria-label="More message actions" hidden>${actions.map(([a, label]) => `<button role="menuitem" tabindex="-1" data-msg-act="${a}">${label}</button>`).join("")}</div></div></div>${share}`;
 }
 
 function entry(e, ui = {}) {
@@ -1575,10 +1743,10 @@ function entry(e, ui = {}) {
         <div class="row small"><button class="primary" data-msg-act="edit-send">Send</button><button class="link" data-msg-act="edit-cancel">Cancel</button></div></div>`
       : `<div class="msg me"><div class="small faint">You · ${esc(when(e.at))}</div><div>${esc(e.text)}</div>${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}</div>`;
     case "opener": return `<div class="msg magnus" data-opener><div class="small faint">Magnus · ${esc(when(e.at))}</div><div class="small muted">${e.app_title ? `You connected ${esc(e.app_title)}, so I had a look at what I could take over there.` : "You are new here, so I had a look at what I could take over for you."}</div></div>`;
-    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="pre">${esc(e.text || "")}</div>${e.view ? shownFrame(e.id, "What Magnus showed") : ""}${verdictBar(e.task_id, e.verdict)}</div>`;
+    case "answer": return `<div class="msg magnus" data-answer><div class="small faint">Magnus${e.model ? ` · ${esc(e.model.model)}` : ""} · ${esc(when(e.at))}</div><div class="answer-body">${Compose.markdown(e.text || "")}</div>${e.view ? shownFrame(e.id, "What Magnus showed") : ""}</div>`;
     case "turn": return e.status === "failed" || e.status === "cancelled"
       ? `<div class="msg magnus"><div class="small bad">Could not answer: ${esc(e.text || e.status)}</div></div>`
-      : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}</div>${e.status === "running" ? `<div class="pre" data-live="${esc(e.task_id)}">${esc(ui.live?.[e.task_id] || "")}</div>` : ""}</div>${waitingCard(e.waiting_item, ui)}`;
+      : `<div class="msg magnus"><div class="small faint">${e.status === "running" ? "Working on an answer…" : esc(WAITING[e.waiting_on] || "paused")}</div>${e.status === "running" ? `<div class="pre" data-live="${esc(e.task_id)}">${Compose.markdown(ui.live?.[e.task_id] || "")}</div>` : ""}</div>${waitingCard(e.waiting_item, ui)}`;
     case "tasks": {
       const done = e.tasks.filter(t => t.status === "completed").length, need = e.tasks.filter(needsYou).length;
       return `<div class="reqgroup chatcard" data-chat-tasks="${esc(e.from_run)}"><div class="rg-head"><span>From this request</span><span class="small muted num">${done} of ${e.tasks.length} done${need ? ` · ${need} need${need === 1 ? "s" : ""} you` : ""}</span></div>
@@ -1586,7 +1754,7 @@ function entry(e, ui = {}) {
         ${e.tasks.map(t => t.waiting_item && waitingCard(t.waiting_item, ui) ? `<div class="decide" data-for-task="${esc(t.task_id)}">${waitingCard(t.waiting_item, ui)}</div>` : "").join("")}`;
     }
     case "result": return `<div class="result" data-result="${esc(e.task_id)}">${ui.movedOn?.has(e.task_id) ? `<blockquote class="asked small"><span class="faint">You asked:</span> ${esc(firstLine(e.text))}</blockquote>` : ""}<details data-key="result:${esc(e.task_id)}"><summary>${chip(e.status)} <span class="ttl">${esc(e.title)}</span> <span class="muted">${esc(firstLine(e.summary))}</span></summary>
-      <div class="pre">${esc(e.summary || "")}</div>${ENDED.includes(e.status) ? verdictBar(e.task_id, e.verdict) : ""}</details>
+      <div class="pre">${esc(e.summary || "")}</div></details>
       ${e.view ? shownFrame(e.id, "The deliverable") : ""}
       ${e.files?.length ? `<div class="previews">${e.files.map(filePreview).join("")}</div>` : ""}<a class="small see" href="#/task/${enc(e.task_id)}" data-open="task:${esc(e.task_id)}">See the outcome</a></div>`;
     case "connector_card": return appOfferCard(e);
@@ -1885,21 +2053,64 @@ const frameHeights = {};
 // same and a loaded frame does not make the thread draw itself again.)
 const shownFrame = (id, title) => `<iframe class="composed" sandbox="allow-same-origin" title="${title}" data-shown="${esc(id)}"></iframe>`;
 const keepHeights = el => $$("iframe[data-shown]", el).forEach(f => { if (frameHeights[f.dataset.shown]) f.style.height = frameHeights[f.dataset.shown] + "px"; });
+const frameSizing = new Map();
+// Native WebKit blocks frame event handlers when scripts are sandboxed. Keep
+// actions in the trusted parent, aligned to inert reading-surface markers.
+function frameActions(frame,doc) {
+  let wrapper=frame.parentElement;
+  if(!wrapper.classList.contains('composed-wrap')) {
+    wrapper=document.createElement('div');wrapper.className='composed-wrap';
+    frame.before(wrapper);wrapper.append(frame);
+  }
+  if(wrapper._actionDocument!==doc) {
+    wrapper.querySelector('.frame-actions')?.remove();
+    const layer=document.createElement('div');layer.className='frame-actions';wrapper.append(layer);
+    for(const marker of doc.querySelectorAll('[data-code-copy-anchor], [data-prose-url]')) {
+      const copy=marker.hasAttribute('data-code-copy-anchor'),control=document.createElement(copy?'button':'a');
+      control.className=copy?'frame-code-copy':'frame-prose-link';
+      if(copy){control.type='button';control.dataset.codeCopy='';control.textContent='Copy code';control.setAttribute('aria-label','Copy code');control.dataset.tooltip='Copy code';
+        const text=marker.closest('.code-block').querySelector('code').textContent;
+        control.onclick=async e=>{e.preventDefault();e.stopPropagation();Tooltips.dismiss();try{await copyText(text);toast('Code copied.');}catch(err){toast(err.message);}};
+      }else{control.textContent=marker.textContent;control.href=marker.dataset.proseUrl;control.rel='noopener noreferrer';control.onclick=e=>{e.preventDefault();Magnus.openExternal(control.href).catch(err=>toast(err.message));};}
+      layer.append(control);control._marker=marker;
+    }
+    wrapper._actionDocument=doc;
+  }
+  for(const control of wrapper.querySelectorAll('.frame-actions > *')) {
+    const r=control._marker.getBoundingClientRect();
+    Object.assign(control.style,{left:`${r.left}px`,top:`${r.top}px`,width:`${r.width}px`,height:`${r.height}px`});
+  }
+}
+function sizeComposedFrame(frame) {
+  try {
+    const doc=frame.contentDocument;
+    if(!frame.isConnected || !frame.hasAttribute("srcdoc") || !doc?.body || doc.URL==="about:blank")return;
+    let sizing=frameSizing.get(frame);
+    if(sizing?.doc!==doc) {
+      sizing?.observer.disconnect();
+      const measure=()=>{
+        if(!frame.isConnected){frameSizing.get(frame)?.observer.disconnect();frameSizing.delete(frame);return;}
+        if(frame.contentDocument!==doc)return;
+        const height=Math.ceil(Math.max(doc.body.scrollHeight,doc.body.getBoundingClientRect().height))+4;
+        if(frame.style.height!==`${height}px`)frame.style.height=`${height}px`;
+        if(frame.dataset.shown)frameHeights[frame.dataset.shown]=height;
+        frameActions(frame,doc);
+        frame.dataset.sized="1";
+      };
+      const observer=new ResizeObserver(measure);observer.observe(doc.body);
+      sizing={doc,observer,measure};frameSizing.set(frame,sizing);
+    }
+    sizing.measure();
+  }catch{/* A frame still loading cannot be measured yet. */}
+}
+
 async function fill(frame, view, taskId, task) {
   if (!frame || frame._drawn) return;
   frame._drawn = true;
   const t = task || (view?.some(c => c.type === "image" || c.type === "file") ? await api("GET", `/v1/tasks/${enc(taskId)}`) : null);
+  frame.removeAttribute("data-sized");
   frame.srcdoc = Compose.documentFor(view, await fileData(view, t), fontCss(), t?.preview, ...look());
-  frame.onload = () => {
-    try {
-      const h = frame.contentDocument.documentElement.scrollHeight + 4;
-      frame.style.height = h + "px";
-      if (frame.dataset.shown) frameHeights[frame.dataset.shown] = h;
-    } catch { /* sized by CSS */ }
-    // At its height: what is below it has stopped moving (the installed-app
-    // driver clicks once its card's frames are, #207).
-    frame.dataset.sized = "1";
-  };
+  frame.onload=()=>{wireMarkdown(frame.contentDocument);sizeComposedFrame(frame);};
 }
 
 async function respond(btn, root) {
@@ -2205,7 +2416,7 @@ async function taskView(id, composed) {
   // The result leads with the deliverable, then its files, the person's
   // verdict, and the evidence; what it cost closes it.
   const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="pview"></iframe>` : running ? "" : `<p class="empty">No result yet.</p>`}
-    ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
+    ${t.spoken && App.canReadAloud ? `<div class="row" style="margin:10px 0"><button type="button" class="icon-btn" data-act="${voice.entry===`task:${id}` ? "hush" : "speak"}" data-voice-entry="task:${esc(id)}" aria-label="${voice.entry===`task:${id}` ? "Stop reading" : "Read aloud"}" data-tooltip="${voice.entry===`task:${id}` ? "Stop reading" : "Read aloud"}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[voice.entry===`task:${id}` ? "hush" : "listen"]}</svg></button></div>` : ""}
     ${files.length ? `<div class="frows">${files.map(f => fileRow(f, t.project)).join("")}</div>` : ""}
     ${t.outcome_view && t.summary ? `<h3>Summary</h3><p data-summary>${esc(t.summary)}</p>` : ""}
     <h3>Checks</h3><div class="checklist">${doneLine(t)}${criteria(t)}</div>
@@ -2257,7 +2468,8 @@ async function fileView(id) {
         else if (Compose.TEXT.test(f.media_type)) files[f.name] = { text: decodeText(await Magnus.dataUrl(path, f.media_type)), media_type: f.media_type };
       } catch (e) { toast(e.message); }
       const frame = $("#fview", el);
-      frame.srcdoc = Compose.documentFor([{ type: "file", file: f.name }], files, fontCss(), f.preview, ...look());
+      frame.removeAttribute("data-sized");
+  frame.srcdoc = Compose.documentFor([{ type: "file", file: f.name }], files, fontCss(), f.preview, ...look());
       frame.onload = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* sized by CSS */ } };
     },
   };
@@ -2524,7 +2736,7 @@ function wirePanel() {
     const id = a.dataset.id;
     try {
       switch (a.dataset.act) {
-        case "speak": await readAloud(Panel.task.spoken); break;
+        case "speak": await readAloud(Panel.task.spoken,`task:${Panel.task.task_id}`); break;
         case "hush": await hush(); break;
         case "cancel":
           if (!await ask("Cancel this task? What it already did stays done.", "Cancel task")) return;
@@ -3086,10 +3298,15 @@ async function updateRequiredScreen(info) {
 window.addEventListener("magnus-update-required", e => updateRequiredScreen(e.detail));
 
 async function boot() {
+  App.me = await api("GET", "/v1/me");
   Theme.scope(App.appliance, App.me.id);
   App.unsubscribeDrafts?.();
   MessageDrafts.open(App.appliance, App.me.id);
   App.unsubscribeDrafts=MessageDrafts.subscribe(()=>{ if ($("#side")) sidebar(); });
+  const host = await Magnus.systemLook().catch(() => ({}));
+  const canRead = () => { App.canReadAloud = !!App.me?.read_aloud || !!host.native_speech || ("speechSynthesis" in window && speechSynthesis.getVoices().length > 0); };
+  canRead();
+  if ("speechSynthesis" in window) speechSynthesis.addEventListener("voiceschanged", () => { canRead(); App.redraw?.(); });
   shell();
   window.onhashchange = go;
   Magnus.onUpdateReady(() => refreshUpdate());
