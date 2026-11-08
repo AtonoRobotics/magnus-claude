@@ -121,6 +121,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/sign-in/device", post(device_start))
         .route("/v1/sign-in/device/{flow}", post(device_poll))
         .route("/v1/invites/accept", post(accept_invite))
+        .route("/v1/password", post(choose_password))
         .route("/v1/sign-out", post(sign_out))
         .route("/v1/tasks/{id}/live", get(live))
         .route("/v1/tasks/{id}/outputs/{out}", get(output))
@@ -499,8 +500,11 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
                 Ok(Ok(_)) => issue(&k, t, &person, app, device.as_deref()).await,
                 // Unreachable: the password-only check never asks for the
                 // authenticator code (the machine code is already the second
-                // factor here). Answered as wrong, like everything else.
-                Ok(Err(crate::accounts::SignInError::Rejected | crate::accounts::SignInError::NeedsCode)) => err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong."),
+                // factor here), and a temporary password never takes the
+                // backup. Answered as wrong, like everything else.
+                Ok(Err(crate::accounts::SignInError::Rejected | crate::accounts::SignInError::NeedsCode | crate::accounts::SignInError::MustChoose)) => {
+                    err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong.")
+                }
                 Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
                 Err(e) => internal(e),
             };
@@ -564,8 +568,34 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
     match k.accounts.sign_in_counted_with_code(&person, password, code, &counter).await {
         Ok(Ok(_)) => issue(&k, t, &person, app, device.as_deref()).await,
         Ok(Err(crate::accounts::SignInError::NeedsCode)) => code_needed(),
+        Ok(Err(crate::accounts::SignInError::MustChoose)) => (StatusCode::UNAUTHORIZED, Json(json!({ "must_choose": true, "error": "Choose your own password first." }))).into_response(),
         Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
         Ok(Err(crate::accounts::SignInError::Locked(until))) => locked(until),
+        Err(e) => internal(e),
+    }
+}
+
+/// Choose the permanent password with a temporary one: the console's
+/// one-time password, or any temp the owner set. A wrong temp answers
+/// as a wrong password; choosing activates, as accepting an invite
+/// does. No session opens here — they sign in after, with the new one.
+async fn choose_password(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Json(b): Json<Value>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let person = b["person"].as_str().unwrap_or_default().trim().to_lowercase();
+    let temp = b["password"].as_str().unwrap_or_default();
+    let password = b["new_password"].as_str().unwrap_or_default();
+    if password.chars().count() < k.cfg.sign_in.min_password_length {
+        return err(StatusCode::BAD_REQUEST, format!("a password needs at least {} characters", k.cfg.sign_in.min_password_length));
+    }
+    let counter = if on_this_machine(peer, &h) { crate::accounts::Accounts::local_counter(&person) } else { crate::accounts::Accounts::network_counter(&person) };
+    match k.accounts.choose_password(&person, temp, password, &counter).await {
+        Ok(Ok(_)) => Json(json!({ "person": person })).into_response(),
+        Ok(Err(crate::accounts::SignInError::Locked(until))) => {
+            (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": format!("Too many wrong passwords. Try again after {}.", until.format("%H:%M UTC")), "retry_at": until }))).into_response()
+        }
+        Ok(Err(_)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
         Err(e) => internal(e),
     }
 }

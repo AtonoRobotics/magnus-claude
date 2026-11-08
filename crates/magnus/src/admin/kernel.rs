@@ -16,6 +16,8 @@ pub struct Kernel {
 pub struct Refused {
     pub status: u16,
     pub message: String,
+    /// What the kernel said beyond the error's name, when it said more.
+    pub detail: String,
 }
 
 impl std::fmt::Display for Refused {
@@ -44,7 +46,12 @@ impl Kernel {
         let bytes = res.into_body().collect().await?.to_bytes();
         let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         if status.is_client_error() {
-            return Err(Refused { status: status.as_u16(), message: v["error"].as_str().unwrap_or("refused").to_string() }.into());
+            return Err(Refused {
+                status: status.as_u16(),
+                message: v["error"].as_str().unwrap_or("refused").to_string(),
+                detail: v["message"].as_str().unwrap_or_default().to_string(),
+            }
+            .into());
         }
         if !status.is_success() {
             return Err(anyhow!("the kernel answered {status}: {}", v["error"].as_str().unwrap_or_default()));

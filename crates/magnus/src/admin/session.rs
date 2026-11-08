@@ -1,9 +1,9 @@
 //! The console's sign-in flow, against the local store, and its guard
 //! on every API route (see `auth`).
 
-use super::auth::{self, Session, COOKIE};
+use super::auth::{Session, COOKIE};
 use super::Console;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::Result;
 use axum::extract::{Form, Query, Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
@@ -11,72 +11,9 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-/// The provider, as the console reaches it: only the directory (user
-/// management) still calls it; sign-in is local (#505).
-pub struct Idp {
-    pub issuer: String,
-    pub client_id: String,
-    pub roles_claim: String,
-    /// Where the provider answers the console, when not at its issuer.
-    pub internal: Option<String>,
-    pub http: reqwest::Client,
-    discovery: tokio::sync::OnceCell<Value>,
-}
-
-impl Idp {
-    pub fn new(issuer: String, client_id: String, roles_claim: String, internal: Option<String>) -> Idp {
-        Idp { issuer, client_id, roles_claim, internal, http: reqwest::Client::new(), discovery: Default::default() }
-    }
-
-    /// A public address of the provider, as the console reaches it.
-    pub fn inside(&self, url: &str) -> String {
-        match &self.internal {
-            Some(i) => {
-                let public = url::Url::parse(&self.issuer).map(|u| u.origin().ascii_serialization()).unwrap_or_default();
-                url.strip_prefix(&public).map(|rest| format!("{}{rest}", i.trim_end_matches('/'))).unwrap_or_else(|| url.to_string())
-            }
-            None => url.to_string(),
-        }
-    }
-
-    async fn discovery(&self) -> Result<&Value> {
-        self.discovery
-            .get_or_try_init(|| async {
-                let url = self.inside(&format!("{}/.well-known/openid-configuration", self.issuer.trim_end_matches('/')));
-                let d: Value = self.http.get(&url).send().await?.error_for_status()?.json().await.with_context(|| format!("read {url}"))?;
-                if d["issuer"].as_str() != Some(self.issuer.as_str()) {
-                    bail!("{url} names issuer {}, not {}", d["issuer"], self.issuer);
-                }
-                Ok(d)
-            })
-            .await
-    }
-
-    fn endpoint<'a>(d: &'a Value, name: &str) -> Result<&'a str> {
-        d[name].as_str().ok_or_else(|| anyhow!("the provider names no {name}"))
-    }
-
-    /// A call to the token endpoint as `client_id`, proven with the
-    /// console's key (`private_key_jwt`).
-    pub async fn token_as(&self, key: &auth::Key, client_id: &str, form: &[(&str, &str)]) -> Result<Value> {
-        let d = self.discovery().await?;
-        let endpoint = Self::endpoint(d, "token_endpoint")?;
-        let assertion = key.assertion(client_id, endpoint)?;
-        let mut f: Vec<(&str, &str)> = form.to_vec();
-        f.extend([("client_id", client_id), ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"), ("client_assertion", assertion.as_str())]);
-        let r = self.http.post(self.inside(endpoint)).form(&f).send().await?;
-        let status = r.status();
-        let b: Value = r.json().await.unwrap_or_default();
-        if !status.is_success() {
-            bail!("the provider refused: {}", b["error_description"].as_str().or(b["error"].as_str()).unwrap_or(status.as_str()));
-        }
-        Ok(b)
-    }
-}
 
 fn cookie_of(h: &HeaderMap, name: &str) -> Option<String> {
     h.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
@@ -324,9 +261,9 @@ fn refused(status: StatusCode, error: &str, message: &str) -> Response {
     (status, Json(json!({ "error": error, "message": message }))).into_response()
 }
 
-/// Every API route but health: an open admin session, checked with the
-/// provider at least every few minutes, and on a change, the session's
-/// CSRF token. The admin rides along to the route.
+/// Every API route but health: an open admin session, its standing
+/// checked with the kernel at least every few minutes, and on a change,
+/// the session's CSRF token. The admin rides along to the route.
 pub async fn guard(State(c): State<Arc<Console>>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>, mut req: Request, next: Next) -> Response {
     let Some((sid, mut s)) = current(&c, req.headers()) else { return refused(StatusCode::UNAUTHORIZED, "sign_in_required", "Sign in to the admin console.") };
     let now = Utc::now();

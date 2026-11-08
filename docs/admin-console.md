@@ -24,7 +24,7 @@ Each line names the pull request that built it, or the one building it.
 
 - [x] The `magnus-admin` confidential client, Authorization Code with PKCE, the one redirect URI per name, `private_key_jwt` (#69, #79)
 - [x] Back-channel calls to the provider's internal address, issuer unchanged (#69)
-- [ ] The realm role `admin`, checked on every request from the session's validated token. Built: checked at sign-in and again with the provider at each refresh, at most every 4 minutes (#69; `admin_sign_in.rs`); not on every request
+- [ ] The role `admin`, checked on every request from the session's validated token. Built: checked at sign-in and its standing checked with the kernel at each refresh, at most every 4 minutes (#69, #508; `admin_sign_in.rs`); not on every request
 - [x] Admins sign in and step up with their password and code (ruling 1, no passkeys) (#69)
 - [x] Server-side session, cookie `__Host-magnus_admin`, HttpOnly, Secure, SameSite=Strict (#69)
 - [x] 30 minutes idle, 12 hours absolute (#69); adjustable under Security › Sign-in (`admin-security`; `admin_security.rs`)
@@ -55,7 +55,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] Lists open a detail panel on the right; full screen at phone width (`admin-shell`; `admin_shell.rs`)
 - [x] Reversible changes show a toast with Undo (`admin-shell`; `admin_shell.rs`)
 - [x] Destructive changes open a confirm sheet; the riskiest ask for the target's name typed (`admin-shell`; `admin_shell.rs`; typed, under Users › Delete)
-- [x] Step-up opens the provider's sign-in in a sheet and returns to the action (`admin-shell`; `admin_shell.rs`)
+- [x] Step-up opens the console's own sign-in in a sheet and returns to the action (`admin-shell`; `admin_shell.rs`)
 - [x] Live data over server-sent events, `/api/v1/events`: status, the kill switch, tasks, microVMs and knowledge changes (`admin-shell`, `admin-operations`, `admin-knowledge`)
 - [x] Designed empty, loading and error states on every screen built so far (`admin-shell`), and on each section as it is built
 
@@ -88,7 +88,7 @@ Each line names the pull request that built it, or the one building it.
 
 ### Security
 
-- [x] Sign-in: member methods (password, and whether a code is required), admin method shown fixed, session lifetimes for members and the console, lockout thresholds; applied through the provider's admin API with step-up (`admin-security`; `admin_security.rs`)
+- [x] Sign-in: member methods (password, and whether a code is required), admin method shown fixed, session lifetimes for members and the console, lockout thresholds; applied to the kernel's sign-in rules, which it enforces on the local path, with step-up (`admin-security`; `admin_security.rs`)
 - [x] Agent policy: each Cedar policy set in an editor with highlighting and inline validation errors against Magnus's schema (`admin-security`; `admin_security.rs`, `policy_admin.rs`)
 - [x] Agent policy: a test panel (principal, action, resource, context → the decision and the policies that decided it) (`admin-security`; `admin_security.rs`)
 - [x] Agent policy: a diff against the live version; Apply with step-up; history and rollback (`admin-security`; `admin_security.rs`)
@@ -102,7 +102,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] Modules: name, version, status, what each provides; enable, disable (`admin-operations`; `admin_operations.rs`)
 - [ ] Install from a package and remove. Built: both answer 409 and say Magnus's modules come with its release; the spec's open question 22 (what "module" names) is not ruled, so this waits for the owner
 - [x] Model providers: enabled, endpoint, models, a connection test, last error; never a credential (`admin-operations`; `admin_operations.rs`)
-- [x] Health: kernel, event log, identity provider, console; CPU, memory, disk; recent errors (#71)
+- [x] Health: kernel, event log, admin console, tunnel; CPU, memory, disk; recent errors (#71)
 - [x] Health: cloudflared, running microVMs, live (`admin-operations`; `admin_operations.rs`)
 - [x] Updates: version, available update with notes, install and rollback with step-up; the desktop app's channels and published versions, and everyone's channel (`admin-operations`; `admin_operations.rs`)
 - [x] Network: tunnel status and public hostnames, the admin hostname, the allowlist (a change that would shut out the admin's own address refused), certificate expiry (`admin-operations`; `admin_operations.rs`); Renew, with why the trusted certificate could not be issued (`admin-certificate`; `admin_certificate.rs`)
@@ -112,7 +112,7 @@ Each line names the pull request that built it, or the one building it.
 - [x] One Rust binary serving the UI and a JSON API under `/api/v1` (#68)
 - [x] The kernel over a local Unix socket (#70)
 - [ ] Postgres as `magnus_root`, insert and select only on the log. Built: the role and its grants (#70); the console reads and writes through the kernel's control socket and never connects as it
-- [x] The provider's admin API through `magnus-admin-svc` with `private_key_jwt`, realm-management in the realm only (#72)
+- [x] User management through the kernel's local-store endpoints over the control socket (#508); the provider's admin API (`magnus-admin-svc`) is deleted with the realm's console client
 - [x] The kill switch the kernel's own, persisted, refusing new runs while on (#71, before)
 - [x] Every endpoint in the spec's table (`admin-shell` to `admin-certificate`); `POST /modules` and `DELETE /modules/{id}` answer 409 until the owner rules on the spec's open question 22 (see Modules)
 - [x] Every change audited before it answers; a step-up endpoint without a fresh check returns 401 `step_up_required` (#70, #69)

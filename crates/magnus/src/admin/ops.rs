@@ -265,7 +265,8 @@ pub async fn desktop_channel(State(c): State<Arc<Console>>, Extension(a): Extens
 /// Whether the tunnel says it is connected, if there is one.
 async fn tunnel_up(c: &Console) -> Option<bool> {
     let url = c.tunnel_ready.as_ref()?;
-    Some(matches!(tokio::time::timeout(std::time::Duration::from_secs(3), c.idp.http.get(url).send()).await, Ok(Ok(r)) if r.status().is_success()))
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).no_proxy().build().ok()?;
+    Some(matches!(tokio::time::timeout(std::time::Duration::from_secs(3), http.get(url).send()).await, Ok(Ok(r)) if r.status().is_success()))
 }
 
 /// The console takes an allowlist an admin set before this start.

@@ -126,27 +126,6 @@ pub struct Admin {
     /// The organisation's name, shown in the console's top bar.
     #[serde(default)]
     pub org: Option<String>,
-    /// The console's confidential client in the realm, which proves itself
-    /// with the console's own key (`magnus-admin jwk` prints its public half).
-    #[serde(default = "admin_client")]
-    pub client_id: String,
-    /// The realm, when not the app's (`sign_in.oidc.issuer`).
-    #[serde(default)]
-    pub issuer: Option<String>,
-    /// Where the console reaches the identity provider when not at the
-    /// issuer's address (its internal address on the appliance); the tokens
-    /// still name the public issuer.
-    #[serde(default)]
-    pub idp_internal: Option<String>,
-    /// Where the provider's admin API answers, when the server keeps it on
-    /// an origin of its own (Keycloak's `hostname-admin`, such as
-    /// `https://127.0.0.1:19446`), and the PEM CA its certificate is from.
-    /// Unset: the appliance's own `sign_in.oidc.status_admin_url` and
-    /// `status_admin_ca`, the same server's; else the issuer's host.
-    #[serde(default)]
-    pub idp_admin_url: Option<String>,
-    #[serde(default)]
-    pub idp_admin_ca: Option<PathBuf>,
     /// A session ends after this long unused, and after `session_hours`.
     #[serde(default = "admin_idle_minutes")]
     pub idle_minutes: u32,
@@ -155,7 +134,7 @@ pub struct Admin {
     /// A step-up (a fresh password) counts this long.
     #[serde(default = "admin_step_up_seconds")]
     pub step_up_seconds: u32,
-    /// The provider is asked again whether the admin is still one, and
+    /// The kernel is asked again whether the admin is still one, and
     /// still turned on, at least this often.
     #[serde(default = "admin_refresh_seconds")]
     pub refresh_seconds: u32,
@@ -164,11 +143,6 @@ pub struct Admin {
     /// changing it. `magnus migrate` creates it.
     #[serde(default)]
     pub database_url: Option<String>,
-    /// The console's service account in the realm (admin console spec,
-    /// Server and API): how it manages people there, proving itself with
-    /// the console's own key, and only after the admin's own check passes.
-    #[serde(default = "admin_service_client")]
-    pub service_client_id: String,
     /// Where the tunnel (cloudflared) says whether it is connected: its
     /// metrics address's `/ready`, on this machine. None: no tunnel here.
     #[serde(default)]
@@ -196,9 +170,6 @@ pub struct Admin {
     pub tailscale: Option<PathBuf>,
 }
 
-fn admin_service_client() -> String {
-    "magnus-admin-svc".into()
-}
 fn admin_step_up_seconds() -> u32 {
     300
 }
@@ -206,9 +177,6 @@ fn admin_refresh_seconds() -> u32 {
     240
 }
 
-fn admin_client() -> String {
-    "magnus-admin".into()
-}
 fn admin_idle_minutes() -> u32 {
     30
 }

@@ -49,13 +49,6 @@ impl Prepared {
     pub fn url(&self) -> String {
         format!("https://{HOST}:{}", self.addr.port())
     }
-
-    /// The console's public key, for its client in the realm.
-    pub async fn jwks(&self) -> serde_json::Value {
-        let out = tokio::process::Command::new(bin("magnus-admin")).arg("jwk").arg("--config").arg(&self.config).output().await.unwrap();
-        assert!(out.status.success(), "magnus-admin jwk: {}", String::from_utf8_lossy(&out.stderr));
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
 }
 
 pub struct Console {
@@ -91,10 +84,6 @@ pub fn config(app: &Appliance, admin: toml::Table) -> (PathBuf, reqwest::Certifi
     a.insert("org".into(), "Acme".into());
     a.insert("tls_cert".into(), c.display().to_string().into());
     a.insert("tls_key".into(), k.display().to_string().into());
-    if !a.contains_key("issuer") {
-        // Reach is decided before anyone signs in: this provider is never asked.
-        a.insert("issuer".into(), "http://127.0.0.1:9/realms/unused".into());
-    }
     cfg.insert("admin".into(), a.into());
     let path = app.dir.path().join(format!("magnus-admin-{}.toml", uuid::Uuid::new_v4()));
     std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();

@@ -1,7 +1,7 @@
 //! Operations in the admin console (admin console spec, Operations; the
 //! invariant "Every step-up endpoint returns step_up_required without a
 //! fresh check, and succeeds with one", for installing, rolling back and the
-//! network allowlist), against a real Keycloak and a real appliance: the
+//! network allowlist), against the local store and a real appliance: the
 //! kill switch says what it froze; a run module turned off for new tasks;
 //! the model providers listed, tested, the default's kept enabled; updates
 //! installed and rolled back only with a fresh password, the desktop app's
@@ -41,21 +41,14 @@ impl Setup {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn root_runs_the_appliance_modules_providers_updates_and_network_from_operations() {
-    let kc = Keycloak::start().await;
-    kc.add_person("Alice").await;
-    kc.set_roles("Alice", &["admin"]).await;
     let m = FakeModel::start(steps(vec![])).await;
-    let mut app = Appliance::start(Spec::default(), &m).await;
+    let app = Appliance::start(Spec::default(), &m).await;
     local_user(&app, "Alice", PASSWORD, true);
-    kc.configure(&mut app).await;
     let mine = format!("{}/32", lan_ip());
     // Long enough for a browser's sign-in to hand back its session (that
     // has taken 23 seconds after the password on a loaded machine).
     let lapse = 60;
-    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into()), ("step_up_seconds", lapse.into())]);
-    let jwks = p.jwks().await;
-    kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &jwks).await;
-    kc.add_admin_service("magnus-admin-svc", &jwks).await;
+    let p = prepare(&app, &[&mine], &[("step_up_seconds", lapse.into())]);
     let url = p.url();
     let c = launch(p).await;
     let b = browser(&c, false);

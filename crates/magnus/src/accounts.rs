@@ -54,6 +54,9 @@ pub enum SignInError {
     /// ask for the code and try again. Uncounted: needing the code says
     /// nothing was wrong, as with the identity provider's `NeedsCode`.
     NeedsCode,
+    /// The password was right but temporary: it chooses the permanent
+    /// one, never signs in. Uncounted, like `NeedsCode`.
+    MustChoose,
 }
 
 /// Whether a person may sign in: invited until they accept, active after,
@@ -121,8 +124,46 @@ impl Role {
     }
 }
 
+/// The sign-in rules the console shows under Security › Sign-in and the
+/// kernel enforces on the local path (#508): whether a code is required,
+/// how long member sessions last idle and at most, and when repeated
+/// failures lock an account. One row (`id = 1`) in
+/// `account_sign_in_policy`, seeded from the config at first open.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Policy {
+    pub code_required: bool,
+    pub idle_minutes: i64,
+    pub max_hours: i64,
+    pub lockout_enabled: bool,
+    pub lockout_failures: i64,
+    pub lockout_wait_minutes: i64,
+    pub lockout_max_wait_minutes: i64,
+    pub lockout_permanent: bool,
+}
+
+impl Policy {
+    fn seed(cfg: &SignIn) -> Policy {
+        Policy {
+            code_required: false,
+            idle_minutes: 30,
+            max_hours: cfg.session_days as i64 * 24,
+            lockout_enabled: true,
+            lockout_failures: cfg.max_failures as i64,
+            lockout_wait_minutes: cfg.lockout_minutes as i64,
+            // No escalation until an admin sets a longer wait: the lock
+            // then lasts exactly the first wait, as before.
+            lockout_max_wait_minutes: cfg.lockout_minutes as i64,
+            lockout_permanent: false,
+        }
+    }
+}
+
 /// Days an invitation stays usable.
-const INVITE_DAYS: i64 = 7;
+pub const INVITE_DAYS: i64 = 7;
+
+/// How long a permanent lockout is recorded for: nobody's lock outlives
+/// the century, and an admin's enable clears it anyway.
+const PERMANENT_YEARS: i64 = 100;
 
 /// How long the directory cache serves before a call refreshes it.
 const LOCAL_TTL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -138,6 +179,7 @@ pub const TABLES: &[&str] = &[
     "account_invites",
     "account_sessions",
     "account_machine_codes",
+    "account_sign_in_policy",
     "account_json_import",
 ];
 
@@ -154,6 +196,7 @@ pub fn migrate_sql(role: &str) -> String {
              person text PRIMARY KEY,
              phc    text NOT NULL
          );
+         ALTER TABLE public.account_passwords ADD COLUMN IF NOT EXISTS temporary bool NOT NULL DEFAULT false;
          CREATE TABLE IF NOT EXISTS public.account_totp (
              person text PRIMARY KEY,
              secret text NOT NULL
@@ -186,16 +229,28 @@ pub fn migrate_sql(role: &str) -> String {
              client  text NOT NULL,
              device  text
          );
+         ALTER TABLE public.account_sessions ADD COLUMN IF NOT EXISTS seen timestamptz;
          CREATE INDEX IF NOT EXISTS account_sessions_person ON public.account_sessions (person);
          CREATE TABLE IF NOT EXISTS public.account_machine_codes (
              hash  text PRIMARY KEY,
              until timestamptz NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS public.account_sign_in_policy (
+             id                     int PRIMARY KEY CHECK (id = 1),
+             code_required          bool NOT NULL,
+             idle_minutes           bigint NOT NULL,
+             max_hours              bigint NOT NULL,
+             lockout_enabled        bool NOT NULL,
+             lockout_failures       bigint NOT NULL,
+             lockout_wait_minutes   bigint NOT NULL,
+             lockout_max_wait_minutes bigint NOT NULL,
+             lockout_permanent      bool NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS public.account_json_import (
              imported_at timestamptz PRIMARY KEY
          );
-         REVOKE ALL ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes, public.account_json_import FROM PUBLIC;
-         GRANT SELECT, INSERT, UPDATE, DELETE ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes, public.account_json_import TO {role};"
+         REVOKE ALL ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes, public.account_sign_in_policy, public.account_json_import FROM PUBLIC;
+         GRANT SELECT, INSERT, UPDATE, DELETE ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes, public.account_sign_in_policy, public.account_json_import TO {role};"
     )
 }
 
@@ -286,11 +341,24 @@ pub struct Accounts {
     cfg: SignIn,
     url: String,
     client: tokio::sync::Mutex<Option<Client>>,
-    /// Failed attempts per counter: (count, first failure). In memory, as
-    /// before: a restart forgives guesses in flight.
-    failures: Mutex<BTreeMap<String, (u32, DateTime<Utc>)>>,
+    /// Failed attempts per counter. In memory, as before: a restart
+    /// forgives guesses in flight.
+    failures: Mutex<BTreeMap<String, Failures>>,
     /// The directory (id to record) and when it was read. See the module docs.
     local: Mutex<(Instant, BTreeMap<String, LocalPerson>)>,
+    /// The sign-in rules and when they were read. Async auth entries
+    /// refresh them from the store first, so a changed rule bites at
+    /// once; per-request session checks serve the cache within its TTL.
+    policy: Mutex<(Instant, Policy)>,
+}
+
+/// Wrong passwords on one counter: how many, since when, and until when
+/// the counter stays locked, if it does.
+#[derive(Clone, Copy, Debug)]
+struct Failures {
+    n: u32,
+    first: DateTime<Utc>,
+    until: Option<DateTime<Utc>>,
 }
 
 fn token_hash(token: &str) -> String {
@@ -328,7 +396,24 @@ impl Accounts {
     pub async fn open(db_url: &str, cfg: SignIn) -> Result<Accounts> {
         let client = crate::log::connect(db_url).await?;
         let local = Self::read_local(&client).await?;
-        Ok(Accounts { cfg, url: db_url.into(), client: tokio::sync::Mutex::new(Some(client)), failures: Mutex::new(BTreeMap::new()), local: Mutex::new((Instant::now(), local)) })
+        let seed = Policy::seed(&cfg);
+        client
+            .execute(
+                "INSERT INTO public.account_sign_in_policy (id, code_required, idle_minutes, max_hours, lockout_enabled, lockout_failures, lockout_wait_minutes, lockout_max_wait_minutes, lockout_permanent)
+                 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (id) DO NOTHING",
+                &[&seed.code_required, &seed.idle_minutes, &seed.max_hours, &seed.lockout_enabled, &seed.lockout_failures, &seed.lockout_wait_minutes, &seed.lockout_max_wait_minutes, &seed.lockout_permanent],
+            )
+            .await
+            .context("seed the sign-in rules")?;
+        let policy = Self::read_policy(&client).await?.unwrap_or(seed);
+        Ok(Accounts {
+            cfg,
+            url: db_url.into(),
+            client: tokio::sync::Mutex::new(Some(client)),
+            failures: Mutex::new(BTreeMap::new()),
+            local: Mutex::new((Instant::now(), local)),
+            policy: Mutex::new((Instant::now(), policy)),
+        })
     }
 
     async fn client(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Client>>> {
@@ -345,6 +430,70 @@ impl Accounts {
         if self.local.lock().unwrap().0.elapsed() > LOCAL_TTL {
             self.refresh_local(c).await?;
         }
+        Ok(())
+    }
+
+    async fn read_policy(c: &Client) -> Result<Option<Policy>> {
+        Ok(c
+            .query_opt("SELECT code_required, idle_minutes, max_hours, lockout_enabled, lockout_failures, lockout_wait_minutes, lockout_max_wait_minutes, lockout_permanent FROM public.account_sign_in_policy WHERE id = 1", &[])
+            .await
+            .context("read the sign-in rules")?
+            .map(|r| Policy {
+                code_required: r.get(0),
+                idle_minutes: r.get(1),
+                max_hours: r.get(2),
+                lockout_enabled: r.get(3),
+                lockout_failures: r.get(4),
+                lockout_wait_minutes: r.get(5),
+                lockout_max_wait_minutes: r.get(6),
+                lockout_permanent: r.get(7),
+            }))
+    }
+
+    /// The rules as they stand, read fresh: every password check starts
+    /// here, so a changed rule bites on the next attempt.
+    async fn fresh_policy(&self, c: &Client) -> Policy {
+        match Self::read_policy(c).await.ok().flatten() {
+            Some(p) => {
+                *self.policy.lock().unwrap() = (Instant::now(), p);
+                p
+            }
+            None => self.policy.lock().unwrap().1,
+        }
+    }
+
+    /// The cached rules, refreshing first when older than `LOCAL_TTL`:
+    /// for per-request session checks, which must not read the store
+    /// twice on every request.
+    async fn ttl_policy(&self, c: &Client) -> Policy {
+        if self.policy.lock().unwrap().0.elapsed() > LOCAL_TTL {
+            return self.fresh_policy(c).await;
+        }
+        self.policy.lock().unwrap().1
+    }
+
+    /// The sign-in rules, read fresh.
+    pub async fn policy(&self) -> Result<Policy> {
+        let mut g = self.client().await?;
+        let c = g.as_mut().context("accounts connection")?;
+        Ok(self.fresh_policy(c).await)
+    }
+
+    /// Set the sign-in rules whole: the caller checked the ranges.
+    pub async fn set_policy(&self, policy: Policy) -> Result<()> {
+        let mut g = self.client().await?;
+        let c = g.as_mut().context("accounts connection")?;
+        c.execute(
+            "INSERT INTO public.account_sign_in_policy (id, code_required, idle_minutes, max_hours, lockout_enabled, lockout_failures, lockout_wait_minutes, lockout_max_wait_minutes, lockout_permanent)
+             VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (id) DO UPDATE SET code_required = EXCLUDED.code_required, idle_minutes = EXCLUDED.idle_minutes, max_hours = EXCLUDED.max_hours,
+               lockout_enabled = EXCLUDED.lockout_enabled, lockout_failures = EXCLUDED.lockout_failures, lockout_wait_minutes = EXCLUDED.lockout_wait_minutes,
+               lockout_max_wait_minutes = EXCLUDED.lockout_max_wait_minutes, lockout_permanent = EXCLUDED.lockout_permanent",
+            &[&policy.code_required, &policy.idle_minutes, &policy.max_hours, &policy.lockout_enabled, &policy.lockout_failures, &policy.lockout_wait_minutes, &policy.lockout_max_wait_minutes, &policy.lockout_permanent],
+        )
+        .await?;
+        *self.policy.lock().unwrap() = (Instant::now(), policy);
+        self.refresh_local(c).await?;
         Ok(())
     }
 
@@ -427,6 +576,7 @@ impl Accounts {
         }
         tx.commit().await?;
         self.refresh_local(c).await?;
+        self.clear_counters(&person);
         Ok(ended)
     }
 
@@ -550,8 +700,7 @@ impl Accounts {
             ended.push(r.get("id"));
         }
         tx.commit().await?;
-        self.failures.lock().unwrap().remove(person.as_str());
-        self.failures.lock().unwrap().remove(Self::console_counter(&person).as_str());
+        self.clear_counters(&person);
         self.refresh_local(c).await?;
         Ok(ended)
     }
@@ -589,11 +738,68 @@ impl Accounts {
         let c = g.as_mut().context("accounts connection")?;
         let tx = c.transaction().await?;
         tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('magnus-accounts'))").await?;
-        tx.execute("INSERT INTO public.account_passwords (person, phc) VALUES ($1, $2) ON CONFLICT (person) DO UPDATE SET phc = EXCLUDED.phc", &[&person, &phc]).await?;
+        tx.execute("INSERT INTO public.account_passwords (person, phc, temporary) VALUES ($1, $2, false) ON CONFLICT (person) DO UPDATE SET phc = EXCLUDED.phc, temporary = false", &[&person, &phc]).await?;
         tx.execute("UPDATE public.account_statuses SET status = 'active' WHERE person = $1 AND status = 'invited'", &[&person]).await?;
         tx.commit().await?;
         self.refresh_local(c).await?;
         Ok(())
+    }
+
+    /// Give an invited person a password to choose with once, for when no
+    /// invite link can reach them: it is temporary, so it never signs in
+    /// (the check answers `MustChoose`), and they stay invited until
+    /// they choose their own. Anyone else keeps their password.
+    pub async fn set_temporary_password(&self, person: &str, password: &str) -> Result<()> {
+        let person = key(person);
+        anyhow::ensure!(password.chars().count() >= self.cfg.min_password_length, "a password needs at least {} characters", self.cfg.min_password_length);
+        let salt = SaltString::generate(&mut OsRng);
+        let phc = Argon2::default().hash_password(password.as_bytes(), &salt).map_err(|e| anyhow::anyhow!("hash: {e}"))?.to_string();
+        let mut g = self.client().await?;
+        let c = g.as_mut().context("accounts connection")?;
+        let n = c.execute("INSERT INTO public.account_passwords (person, phc, temporary) VALUES ($1, $2, true) ON CONFLICT (person) DO UPDATE SET phc = EXCLUDED.phc, temporary = true WHERE (SELECT status FROM public.account_statuses WHERE person = $1) IS NULL OR (SELECT status FROM public.account_statuses WHERE person = $1) = 'invited'", &[&person, &phc]).await?;
+        anyhow::ensure!(n == 1, "{person} is not an invitation waiting for its password");
+        self.refresh_local(c).await?;
+        Ok(())
+    }
+
+    /// Choose the permanent password with a temporary one: the temp plus
+    /// the new one, together. A wrong temp counts on `counter`, like a
+    /// wrong password; choosing activates, as accepting does.
+    pub async fn choose_password(&self, person: &str, temp: &str, password: &str, counter: &str) -> Result<std::result::Result<(), SignInError>> {
+        let person = key(person);
+        let counter = key(counter);
+        let mut g = self.client().await?;
+        let c = g.as_mut().context("accounts connection")?;
+        let _ = self.fresh_policy(c).await;
+        if let Some(until) = self.locked(&counter) {
+            self.failed(&counter);
+            return Ok(Err(SignInError::Locked(self.locked(&counter).unwrap_or(until))));
+        }
+        let row: Option<(String, bool)> = c.query_opt("SELECT phc, temporary FROM public.account_passwords WHERE person = $1", &[&person]).await?.map(|r| (r.get(0), r.get(1)));
+        // Unknown names refuse uncounted, so guessing them cannot grow
+        // the table; a held password counts, temporary or not.
+        let Some((phc, temporary)) = row else { return Ok(Err(SignInError::Rejected)) };
+        if !temporary || !Self::password_ok(Some(&phc), temp) {
+            self.failed(&counter);
+            return Ok(Err(SignInError::Rejected));
+        }
+        anyhow::ensure!(password.chars().count() >= self.cfg.min_password_length, "a password needs at least {} characters", self.cfg.min_password_length);
+        let salt = SaltString::generate(&mut OsRng);
+        let phc = Argon2::default().hash_password(password.as_bytes(), &salt).map_err(|e| anyhow::anyhow!("hash: {e}"))?.to_string();
+        let tx = c.transaction().await?;
+        tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('magnus-accounts'))").await?;
+        // Still temporary: a racing choose won, and this temp is spent.
+        let n = tx.execute("UPDATE public.account_passwords SET phc = $2, temporary = false WHERE person = $1 AND temporary", &[&person, &phc]).await?;
+        if n != 1 {
+            tx.rollback().await?;
+            self.failed(&counter);
+            return Ok(Err(SignInError::Rejected));
+        }
+        tx.execute("UPDATE public.account_statuses SET status = 'active' WHERE person = $1 AND status = 'invited'", &[&person]).await?;
+        tx.commit().await?;
+        self.succeeded(&counter);
+        self.refresh_local(c).await?;
+        Ok(Ok(()))
     }
 
     /// Enroll a person's authenticator app: a fresh 160-bit secret is
@@ -704,28 +910,51 @@ impl Accounts {
         Ok(Some(person))
     }
 
-    /// Until when a person may not try another password, after too many
+    /// Until when a counter may not try another password, after too many
     /// wrong ones: the appliance's own and the identity provider's alike.
+    /// Reads the cached rules; async auth entries refresh them first.
     pub fn locked(&self, person: &str) -> Option<DateTime<Utc>> {
         let person = key(person);
-        let now = Utc::now();
-        let window = Duration::minutes(self.cfg.lockout_minutes as i64);
-        let mut f = self.failures.lock().unwrap();
-        let (n, first) = f.get(person.as_str()).copied()?;
-        if now - first > window {
-            f.remove(person.as_str());
+        if !self.policy.lock().unwrap().1.lockout_enabled {
             return None;
         }
-        (n >= self.cfg.max_failures).then_some(first + window)
+        let now = Utc::now();
+        let horizon = Duration::minutes(self.policy.lock().unwrap().1.lockout_max_wait_minutes.max(1));
+        let mut f = self.failures.lock().unwrap();
+        let r = f.get(person.as_str()).copied()?;
+        if r.until.is_some_and(|u| now < u) {
+            return r.until;
+        }
+        // A lapsed lock, or failures gone quiet past the longest wait,
+        // forgives the counter.
+        if r.until.is_some() || now - r.first > horizon {
+            f.remove(person.as_str());
+        }
+        None
     }
 
     /// Count a wrong password. Only for people of this appliance, so
-    /// guessing names cannot grow the table.
+    /// guessing names cannot grow the table. Past the threshold each
+    /// failure holds the counter until now plus the first wait, capped
+    /// at the first failure plus the longest wait — or out the century,
+    /// when a lockout is permanent.
     pub fn failed(&self, person: &str) {
         let person = key(person);
+        let p = self.policy.lock().unwrap().1;
+        if !p.lockout_enabled {
+            return;
+        }
+        let now = Utc::now();
         let mut f = self.failures.lock().unwrap();
-        let e = f.entry(person).or_insert((0, Utc::now()));
-        e.0 += 1;
+        let e = f.entry(person).or_insert(Failures { n: 0, first: now, until: None });
+        e.n += 1;
+        if e.n >= p.lockout_failures.max(1) as u32 {
+            e.until = Some(if p.lockout_permanent {
+                e.first + Duration::days(365 * PERMANENT_YEARS)
+            } else {
+                (e.until.filter(|u| *u > now).unwrap_or(now) + Duration::minutes(p.lockout_wait_minutes.max(1))).min(e.first + Duration::minutes(p.lockout_max_wait_minutes.max(1)))
+            });
+        }
     }
 
     pub fn succeeded(&self, person: &str) {
@@ -739,7 +968,18 @@ impl Accounts {
         let person = key(person);
         let mut f = self.failures.lock().unwrap();
         if let Some(e) = f.get_mut(person.as_str()) {
-            e.0 = e.0.saturating_sub(1);
+            e.n = e.n.saturating_sub(1);
+        }
+    }
+
+    /// Clear every counter of a person: their own and each scope's. A
+    /// status switch does this, so turning someone back on also unlocks
+    /// them, including out of a permanent lockout.
+    fn clear_counters(&self, person: &str) {
+        let person = key(person);
+        let mut f = self.failures.lock().unwrap();
+        for c in [person.clone(), Self::network_counter(&person), Self::local_counter(&person), Self::console_counter(&person), Self::backup_counter(&person)] {
+            f.remove(&key(&c));
         }
     }
 
@@ -819,17 +1059,28 @@ impl Accounts {
     pub async fn sign_in_counted(&self, person: &str, password: &str, counter: &str) -> Result<std::result::Result<(), SignInError>> {
         let person = key(person);
         let counter = key(counter);
-        if let Some(until) = self.locked(&counter) {
-            return Ok(Err(SignInError::Locked(until)));
-        }
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
-        let phc: Option<String> = c.query_opt("SELECT phc FROM public.account_passwords WHERE person = $1", &[&person]).await?.map(|r| r.get(0));
-        if !Self::password_ok(phc.as_deref(), password) || phc.is_none() {
-            if phc.is_some() {
-                self.failed(&counter);
-            }
+        let _ = self.fresh_policy(c).await;
+        if let Some(until) = self.locked(&counter) {
+            // Counted too: hammering a lock extends it, up to the rules'
+            // longest wait, while waiting it out never does.
+            self.failed(&counter);
+            return Ok(Err(SignInError::Locked(self.locked(&counter).unwrap_or(until))));
+        }
+        let row: Option<(String, bool)> = c.query_opt("SELECT phc, temporary FROM public.account_passwords WHERE person = $1", &[&person]).await?.map(|r| (r.get(0), r.get(1)));
+        let Some((phc, temporary)) = row else {
+            // The same work as a wrong password, so timing does not tell
+            // which names exist.
+            let _ = Self::password_ok(None, password);
             return Ok(Err(SignInError::Rejected));
+        };
+        if !Self::password_ok(Some(&phc), password) {
+            self.failed(&counter);
+            return Ok(Err(SignInError::Rejected));
+        }
+        if temporary {
+            return Ok(Err(SignInError::MustChoose));
         }
         self.succeeded(&counter);
         Ok(Ok(()))
@@ -857,17 +1108,26 @@ impl Accounts {
     pub async fn sign_in_counted_with_code_at(&self, person: &str, password: &str, code: Option<&str>, counter: &str, at: DateTime<Utc>) -> Result<std::result::Result<(), SignInError>> {
         let person = key(person);
         let counter = key(counter);
-        if let Some(until) = self.locked(&counter) {
-            return Ok(Err(SignInError::Locked(until)));
-        }
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
-        let phc: Option<String> = c.query_opt("SELECT phc FROM public.account_passwords WHERE person = $1", &[&person]).await?.map(|r| r.get(0));
-        if !Self::password_ok(phc.as_deref(), password) || phc.is_none() {
-            if phc.is_some() {
-                self.failed(&counter);
-            }
+        let policy = self.fresh_policy(c).await;
+        if let Some(until) = self.locked(&counter) {
+            self.failed(&counter);
+            return Ok(Err(SignInError::Locked(self.locked(&counter).unwrap_or(until))));
+        }
+        let row: Option<(String, bool)> = c.query_opt("SELECT phc, temporary FROM public.account_passwords WHERE person = $1", &[&person]).await?.map(|r| (r.get(0), r.get(1)));
+        let Some((phc, temporary)) = row else {
+            let _ = Self::password_ok(None, password);
             return Ok(Err(SignInError::Rejected));
+        };
+        if !Self::password_ok(Some(&phc), password) {
+            self.failed(&counter);
+            return Ok(Err(SignInError::Rejected));
+        }
+        // A temporary password only chooses: it never reaches the code,
+        // whatever the rules require.
+        if temporary {
+            return Ok(Err(SignInError::MustChoose));
         }
         // After the password, so timing does not tell the status apart, and
         // before the code, so no NeedsCode betrays a right password for
@@ -880,6 +1140,12 @@ impl Accounts {
         // counts on their counter, as a wrong password does.
         let secret: Option<String> = c.query_opt("SELECT secret FROM public.account_totp WHERE person = $1", &[&person]).await?.map(|r| r.get(0));
         let Some(secret) = secret else {
+            // With a code required, a password alone signs no one in —
+            // they enroll first, through the owner — answered as a wrong
+            // password, and uncounted, as the password was not wrong.
+            if policy.code_required {
+                return Ok(Err(SignInError::Rejected));
+            }
             self.succeeded(&counter);
             return Ok(Ok(()));
         };
@@ -914,18 +1180,28 @@ impl Accounts {
 
     /// Open a session for a person whose identity is already established.
     /// `device` is the paired computer, when this sign-in presented one.
+    /// It lasts the rules' longest session: the lifetimes an admin sets
+    /// govern every member session the appliance issues, however the
+    /// person signed in (#508).
     pub async fn open_session(&self, person: &str, client: &str, device: Option<&str>) -> Result<(Session, String)> {
         let person = key(person);
         let now = Utc::now();
         let mut raw = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut raw);
         let token = format!("mgs_{}", hex::encode(raw));
-        let session =
-            Session { id: crate::kernel::new_id("sess"), person, created: now, expires: now + Duration::days(self.cfg.session_days as i64), client: client.to_string(), device: device.map(str::to_string) };
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
+        let policy = self.fresh_policy(c).await;
+        let session = Session {
+            id: crate::kernel::new_id("sess"),
+            person,
+            created: now,
+            expires: now + Duration::hours(policy.max_hours.max(1)),
+            client: client.to_string(),
+            device: device.map(str::to_string),
+        };
         c.execute(
-            "INSERT INTO public.account_sessions (hash, id, person, created, expires, client, device) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO public.account_sessions (hash, id, person, created, expires, client, device, seen) VALUES ($1, $2, $3, $4, $5, $6, $7, $4)",
             &[&token_hash(&token), &session.id, &session.person, &session.created, &session.expires, &session.client, &session.device],
         )
         .await?;
@@ -933,24 +1209,33 @@ impl Accounts {
         Ok((session, token))
     }
 
-    /// The live session a token belongs to: unexpired, its row still
-    /// there, and its person still active. Read from the store on every
-    /// call, so a removal or disabling from any process revokes here at
-    /// once, and a re-added id never inherits ended sessions (#469).
+    /// The live session a token belongs to: unexpired, lately used, its
+    /// row still there, and its person still active. Read from the store
+    /// on every call, so a removal or disabling from any process revokes
+    /// here at once, and a re-added id never inherits ended sessions
+    /// (#469). A live session's last-seen stamp is refreshed, at most
+    /// once a minute, so idle sessions end without a write on every
+    /// request.
     pub async fn session(&self, token: &str) -> Option<Session> {
         let mut g = self.client().await.ok()?;
         let c = g.as_mut()?;
         let _ = self.fresh_local(c).await;
-        c.query_opt(
-            "SELECT s.id, s.person, s.created, s.expires, s.client, s.device FROM public.account_sessions s
-             LEFT JOIN public.account_statuses t ON t.person = s.person
-             WHERE s.hash = $1 AND s.expires > now() AND (t.status IS NULL OR t.status = 'active')",
-            &[&token_hash(token)],
-        )
-        .await
-        .ok()
-        .flatten()
-        .map(|r| session_of(&r))
+        let policy = self.ttl_policy(c).await;
+        let r = c
+            .query_opt(
+                "SELECT s.id, s.person, s.created, s.expires, s.client, s.device, COALESCE(s.seen, s.created) FROM public.account_sessions s
+                 LEFT JOIN public.account_statuses t ON t.person = s.person
+                 WHERE s.hash = $1 AND s.expires > now() AND COALESCE(s.seen, s.created) > now() - make_interval(mins => $2::int) AND (t.status IS NULL OR t.status = 'active')",
+                &[&token_hash(token), &(policy.idle_minutes.max(1) as i32)],
+            )
+            .await
+            .ok()
+            .flatten()?;
+        let session = session_of(&r);
+        // Best-effort: a stamp that cannot be written does not end a live
+        // session, it only leaves the older one.
+        let _ = c.execute("UPDATE public.account_sessions SET seen = now() WHERE hash = $1 AND COALESCE(seen, created) < now() - '60 seconds'::interval", &[&token_hash(token)]).await;
+        Some(session)
     }
 
     /// A person's live sessions, newest first, each with whether it is the
@@ -1495,5 +1780,140 @@ mod tests {
         assert_eq!(import_json(&mut client, dir.path()).await.unwrap(), 0, "a migrate after a removal changed rows");
         assert!(!accounts.is_local("ada"), "the migrate resurrected the removed person");
         assert!(matches!(accounts.sign_in("ada", "a-long-password").await.unwrap(), Err(_)), "the resurrected password signs in");
+    }
+
+    /// The rules seed from the config at first open and round-trip whole:
+    /// a code optional, the config's lockout, no escalation (#508).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_sign_in_rules_seed_from_the_config_and_round_trip() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        let p = accounts.policy().await.unwrap();
+        assert_eq!((p.code_required, p.idle_minutes, p.max_hours, p.lockout_enabled, p.lockout_failures, p.lockout_wait_minutes, p.lockout_max_wait_minutes, p.lockout_permanent), (false, 30, 24, true, 5, 15, 15, false), "{p:?}");
+        let set = Policy { code_required: true, idle_minutes: 45, max_hours: 8, lockout_enabled: true, lockout_failures: 3, lockout_wait_minutes: 2, lockout_max_wait_minutes: 10, lockout_permanent: false };
+        accounts.set_policy(set).await.unwrap();
+        assert_eq!(accounts.policy().await.unwrap(), set, "the rules did not round-trip");
+        // A second handle reads what the first wrote, not the seed.
+        let again = Accounts::open(&url, cfg()).await.unwrap();
+        assert_eq!(again.policy().await.unwrap(), set, "the seed overwrote the set rules");
+    }
+
+    /// With a code required, a password alone signs no one in — answered
+    /// as a wrong password, and uncounted — while an enrolled code still
+    /// does; optional again, the password works (#508).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_required_code_refuses_a_password_alone() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        accounts.add_person("ada", "Ada", None).await.unwrap();
+        accounts.set_password("ada", "a-long-password").await.unwrap();
+        let counter = Accounts::network_counter("ada");
+        let mut p = accounts.policy().await.unwrap();
+        p.code_required = true;
+        accounts.set_policy(p).await.unwrap();
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "a-long-password", None, &counter).await.unwrap(), Err(SignInError::Rejected)), "a password alone signed in with a code required");
+        assert!(accounts.locked(&counter).is_none(), "the required-code refusal counted");
+        let uri = accounts.enroll_totp("ada").await.unwrap();
+        let secret = uri.split("secret=").nth(1).and_then(|s| s.split('&').next()).unwrap();
+        let secret = crate::totp::base32_decode(secret).unwrap();
+        let at = chrono::Utc::now();
+        let code = crate::totp::generate(&secret, (at.timestamp().div_euclid(30)) as u64, 6);
+        assert!(matches!(accounts.sign_in_counted_with_code_at("ada", "a-long-password", None, &counter, at).await.unwrap(), Err(SignInError::NeedsCode)), "no code asked after enrolling");
+        assert!(matches!(accounts.sign_in_counted_with_code_at("ada", "a-long-password", Some(&code), &counter, at).await.unwrap(), Ok(())), "the enrolled code did not sign in");
+        p.code_required = false;
+        accounts.set_policy(p).await.unwrap();
+        assert!(matches!(accounts.sign_in("ada", "a-long-password").await.unwrap(), Ok(())), "with a code optional, the password alone does not sign in");
+    }
+
+    /// A temporary password never signs in: the check answers `MustChoose`,
+    /// choosing with it sets the permanent password and activates, and a
+    /// temp for an account in use is refused (#508).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_temporary_password_only_chooses() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        accounts.add_person("ada", "Ada", None).await.unwrap();
+        accounts.invite("ada", None).await.unwrap();
+        accounts.set_temporary_password("ada", "a-temporary-password").await.unwrap();
+        assert_eq!(accounts.status("ada").await, Status::Invited, "the temp completed the invitation");
+        let counter = Accounts::network_counter("ada");
+        assert!(matches!(accounts.sign_in("ada", "a-temporary-password").await.unwrap(), Err(SignInError::MustChoose)), "the temp signed in");
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "a-temporary-password", None, &counter).await.unwrap(), Err(SignInError::MustChoose)), "the temp signed in past the code check");
+        assert!(matches!(accounts.choose_password("ada", "wrong-temp-password", "a-long-password", &counter).await.unwrap(), Err(SignInError::Rejected)), "a wrong temp chose");
+        assert!(accounts.locked(&counter).is_none(), "one wrong temp locked");
+        assert!(matches!(accounts.choose_password("ada", "a-temporary-password", "a-long-password", &counter).await.unwrap(), Ok(())), "choosing with the temp failed");
+        assert_eq!(accounts.status("ada").await, Status::Active, "choosing did not activate");
+        assert!(matches!(accounts.sign_in("ada", "a-long-password").await.unwrap(), Ok(())), "the chosen password does not sign in");
+        assert!(matches!(accounts.sign_in("ada", "a-temporary-password").await.unwrap(), Err(SignInError::Rejected)), "the spent temp still answers MustChoose");
+        assert!(accounts.set_temporary_password("ada", "another-temp-password").await.is_err(), "a temp landed on an account in use");
+    }
+
+    /// Lockouts extend while failures continue, cap at the longest wait,
+    /// and a permanent one holds until an admin's enable clears it; with
+    /// the lockout off, failures never lock (#508).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lockouts_extend_cap_and_end() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        let mut p = accounts.policy().await.unwrap();
+        p.lockout_failures = 2;
+        p.lockout_wait_minutes = 5;
+        p.lockout_max_wait_minutes = 6;
+        accounts.set_policy(p).await.unwrap();
+        accounts.set_password("ada", "a-long-password").await.unwrap();
+        let counter = Accounts::network_counter("ada");
+        for _ in 0..2 {
+            let _ = accounts.sign_in_counted("ada", "wrong-password", &counter).await;
+        }
+        let first = accounts.locked(&counter).expect("two failures did not lock");
+        assert!((first - chrono::Utc::now()).num_minutes() >= 4, "the first wait is short: {first}");
+        let _ = accounts.sign_in_counted("ada", "wrong-password", &counter).await;
+        let longer = accounts.locked(&counter).expect("the lock lapsed");
+        assert!(longer > first, "failing while locked did not extend: {first} to {longer}");
+        assert!((longer - chrono::Utc::now()).num_minutes() <= 6, "the lock passed the longest wait: {longer}");
+        // Permanent: still held far out, then an enable clears it.
+        p.lockout_permanent = true;
+        accounts.set_policy(p).await.unwrap();
+        accounts.failed(&counter);
+        let held = accounts.locked(&counter).expect("the permanent lock did not hold");
+        assert!((held - chrono::Utc::now()).num_days() > 365, "the permanent lock ends: {held}");
+        accounts.set_status("ada", Status::Active).await.unwrap();
+        assert!(accounts.locked(&counter).is_none(), "enabling did not clear the lock");
+        // Off: failures never lock.
+        p.lockout_permanent = false;
+        p.lockout_enabled = false;
+        accounts.set_policy(p).await.unwrap();
+        for _ in 0..5 {
+            let _ = accounts.sign_in_counted("ada", "wrong-password", &counter).await;
+        }
+        assert!(accounts.locked(&counter).is_none(), "failures locked with the lockout off");
+    }
+
+    /// Sessions last the rules' longest session, and end when idle past
+    /// the rules' idle minutes; a live session's last-seen stamp moves
+    /// (#508).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sessions_last_the_rules_longest_and_end_when_idle() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        let mut p = accounts.policy().await.unwrap();
+        p.idle_minutes = 30;
+        p.max_hours = 8;
+        accounts.set_policy(p).await.unwrap();
+        let (s, token) = accounts.open_session("ada", "app", None).await.unwrap();
+        assert!((s.expires - chrono::Utc::now()).num_hours() >= 7, "the session is short: {}", s.expires);
+        assert!(accounts.session(&token).await.is_some(), "a fresh session is not live");
+        // Idle past the rules: over.
+        let (client, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        client.execute("UPDATE public.account_sessions SET seen = now() - '31 minutes'::interval", &[]).await.unwrap();
+        assert!(accounts.session(&token).await.is_none(), "an idle session is still live");
+        // Used again, the stamp moves.
+        client.execute("UPDATE public.account_sessions SET seen = now() - '90 seconds'::interval", &[]).await.unwrap();
+        assert!(accounts.session(&token).await.is_some(), "a lately used session is not live");
+        let seen: chrono::DateTime<chrono::Utc> = client.query_one("SELECT seen FROM public.account_sessions", &[]).await.unwrap().get(0);
+        assert!((chrono::Utc::now() - seen).num_seconds() < 90, "the last-seen stamp did not move: {seen}");
     }
 }

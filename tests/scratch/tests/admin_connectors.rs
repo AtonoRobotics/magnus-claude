@@ -1,6 +1,6 @@
 //! Security › Connectors and credentials in the admin console (admin console
 //! spec; invariant "No admin endpoint ever returns a credential value"),
-//! against a real Keycloak and a real appliance: the organisation's apps
+//! against the local store and a real appliance: the organisation's apps
 //! with their status, sign-in, scopes and credential; Google's client secret
 //! set from the console serves every Google app; an app added by its address,
 //! people signing in to it themselves, and never with a key, nor a server
@@ -79,22 +79,15 @@ impl Setup {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_console_sets_rotates_and_revokes_the_organisations_credentials_and_never_shows_one() {
-    let kc = Keycloak::start().await;
-    kc.add_person("Alice").await;
-    kc.set_roles("Alice", &["admin"]).await;
     let m = FakeModel::start(steps(vec![])).await;
-    let mut app = Appliance::start(Spec::default(), &m).await;
+    let app = Appliance::start(Spec::default(), &m).await;
     local_user(&app, "Alice", PASSWORD, true);
-    kc.configure(&mut app).await;
     let crm = FakeOAuthApp::start(3600).await;
     let closed = FakeOAuthApp::start(3600).await;
     closed.state.lock().unwrap().no_registration = true;
     let keyed = keyed_server().await;
     let mine = format!("{}/32", lan_ip());
-    let p = prepare(&app, &[&mine], &[("issuer", kc.issuer.clone().into())]);
-    let jwks = p.jwks().await;
-    kc.add_admin_client("magnus-admin", &format!("{}/auth/callback", p.url()), &jwks).await;
-    kc.add_admin_service("magnus-admin-svc", &jwks).await;
+    let p = prepare(&app, &[&mine], &[]);
     let url = p.url();
     let c = launch(p).await;
     let b = browser(&c, false);

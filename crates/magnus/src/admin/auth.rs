@@ -6,9 +6,12 @@
 //! The session is the console's, server-side: the browser holds only a
 //! cookie (`__Host-magnus_admin`), every change carries the session's CSRF
 //! token, and the kernel is asked again at least every few minutes, so an
-//! admin turned off there loses the console within 5. The console's own
-//! key below now serves only the directory's service account until slice
-//! B moves user management to the local store too.
+//! admin turned off there loses the console within 5.
+//!
+//! The console's own key below proves nothing anymore (#508): it only
+//! re-prints its public half for the frozen live realm's console client
+//! (`magnus-admin jwk`, for `release/admin-on-appliance.sh`), until the
+//! removal slice deletes the realm registration with the realm.
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
@@ -22,8 +25,6 @@ use std::sync::Mutex;
 pub const COOKIE: &str = "__Host-magnus_admin";
 /// A sign-in or step-up form's binding must come back within this.
 const PENDING_MINUTES: i64 = 10;
-/// The realm role that opens the console.
-pub const ROLE: &str = "admin";
 
 fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
@@ -52,25 +53,11 @@ impl Key {
         Ok(Key { pair, kid })
     }
 
-    /// Its public half as a JWK set, for the provider's client.
+    /// Its public half as a JWK set, for the frozen live realm's
+    /// console client, until the removal slice deletes that registration.
     pub fn jwks(&self) -> Value {
         let p = self.pair.public_key().as_ref();
         json!({ "keys": [{ "kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig", "kid": self.kid, "x": b64(&p[1..33]), "y": b64(&p[33..65]) }] })
-    }
-
-    fn sign(&self, header: &Value, claims: &Value) -> Result<String> {
-        let input = format!("{}.{}", b64(header.to_string().as_bytes()), b64(claims.to_string().as_bytes()));
-        let sig = self.pair.sign(&ring::rand::SystemRandom::new(), input.as_bytes()).map_err(|_| anyhow!("sign"))?;
-        Ok(format!("{input}.{}", b64(sig.as_ref())))
-    }
-
-    /// A client assertion for one call to `aud` (RFC 7523).
-    pub fn assertion(&self, client_id: &str, aud: &str) -> Result<String> {
-        let now = Utc::now().timestamp();
-        self.sign(
-            &json!({ "alg": "ES256", "typ": "JWT", "kid": self.kid }),
-            &json!({ "iss": client_id, "sub": client_id, "aud": aud, "jti": crate::connectors::random(), "iat": now, "exp": now + 60 }),
-        )
     }
 }
 
@@ -127,13 +114,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_consoles_own_key_is_kept_and_signs_its_assertion() {
+    fn the_consoles_own_key_is_kept_and_prints_its_public_half() {
         let dir = tempfile::tempdir().unwrap();
         let key = Key::load_or_make(dir.path()).unwrap();
         let again = Key::load_or_make(dir.path()).unwrap();
         assert_eq!(key.jwks(), again.jwks(), "the key is not kept");
-        let jwt = key.assertion("magnus-admin", "https://idp.test/token").unwrap();
-        assert_eq!(jwt.split('.').count(), 3, "the assertion is not a JWT: {jwt}");
+        assert_eq!(key.jwks()["keys"][0]["kty"], "EC", "the public half is not a JWK set: {}", key.jwks());
     }
 
     /// A login token takes once, while fresh: unknown and used ones refuse (#456).
