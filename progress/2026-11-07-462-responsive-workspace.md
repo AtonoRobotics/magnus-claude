@@ -15,3 +15,5 @@ Project/file full-title tooltip attributes now live on their focusable links, so
 Added real hover/pressed fill checks across all eight rendered looks: light uses 6%/10%, dark (including Corporate chrome) 8%/12%, with readable foregrounds and distinct pressed state. The browser samples the actual computed control colors and verifies at least 4.5:1 contrast. Latest rebuilt `looks` and `workspace_layout` pass all three tests. No pointer click executes the sampled control's action.
 
 Explicit drawer/page navigation now focuses the new view (or a deliberately created conversation's composer), while checking that focus has not moved into subsequent typing during the load. Latest rebuilt `workspace_layout` passes including the touch Settings navigation focus check. Ordinary live status updates do not use that navigation focus intent.
+
+Expanded document code uses the same 15px reading size rather than reducing text to fit its pane; long code remains locally scrollable. This also needs to remain 15px when merging the shared Markdown controls foundation.
