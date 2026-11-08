@@ -644,8 +644,8 @@ aside.detail { -webkit-backdrop-filter: none; backdrop-filter: none; }
 /* Interactive frame affordances stay in the trusted parent document. */
 .composed-wrap { position:relative; min-width:0; }
 .composed-wrap > iframe.composed { display:block; width:100%; }
-.frame-actions { position:absolute; inset:0; pointer-events:none; }
+.frame-actions { position:absolute; inset:0; pointer-events:none; overflow:clip; }
 .frame-actions > * { position:absolute; pointer-events:auto; margin:0; }
 .frame-code-copy { min-height:36px; border:1px solid var(--muted); border-radius:8px; color:var(--fg); background:var(--surface); padding:4px 12px; }
-.frame-prose-link { color:var(--accent-text); text-decoration:underline; background:var(--surface); }
+.frame-prose-link { color:transparent; background:transparent; }
 @media(any-pointer:coarse) { .frame-code-copy { min-width:44px;min-height:44px; } }
