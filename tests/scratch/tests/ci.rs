@@ -120,6 +120,31 @@ fn every_test_has_a_time_limit() {
     assert!(workflow.contains("cargo nextest run --profile ci"));
 }
 
+/// The cap of eight (#294) still holds everything that works the machine;
+/// only tests that wait for real minutes run beside it (#518). A renamed
+/// test file would quietly go back to holding a slot, so each must exist.
+#[test]
+fn only_clock_waiting_tests_run_beside_the_cap_of_eight() {
+    let config: toml::Value = toml::from_str(&std::fs::read_to_string(repo().join(".config/nextest.toml")).unwrap()).unwrap();
+    let cap = config["test-groups"]["working"]["max-threads"].as_integer().unwrap();
+    assert_eq!(cap, config["profile"]["default"]["test-threads"].as_integer().unwrap());
+    assert!(config["profile"]["ci"]["test-threads"].as_integer().unwrap() > cap, "nothing can run beside the cap");
+    let overrides = config["profile"]["ci"]["overrides"].as_array().unwrap();
+    let working: Vec<&toml::Value> = overrides.iter().filter(|o| o.get("test-group").and_then(|g| g.as_str()) == Some("working")).collect();
+    assert_eq!(working.len(), 1, "{overrides:?}");
+    let filter = working[0]["filter"].as_str().unwrap();
+    assert!(filter.starts_with("not ("), "the tests beside the cap are named; everything else holds a slot: {filter}");
+    let names = filter.split("magnus-scratch::(").nth(1).unwrap().split(")$").next().unwrap();
+    for name in names.split('|') {
+        let source = std::fs::read_to_string(repo().join(format!("tests/scratch/tests/{name}.rs"))).unwrap_or_else(|_| panic!("{name} is named beside the cap and is gone"));
+        for (at, _) in source.match_indices(".mjs") {
+            let opener = source[..at].rfind("fn ").unwrap() + 3;
+            let test = source[opener..].split('(').next().unwrap();
+            assert!(filter.contains(&format!("not test(={test})")), "{name}::{test} drives a browser, which needs a working slot");
+        }
+    }
+}
+
 #[tokio::test]
 #[should_panic(expected = "did not come back to the app's loopback address")]
 async fn a_browser_that_never_comes_back_fails_its_test_and_does_not_hold_the_run() {

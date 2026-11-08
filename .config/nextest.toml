@@ -19,8 +19,23 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'binary_id(/^magnus-scratch::(admin_|brokered)/)'
 slow-timeout = { period = "60s", terminate-after = 10 }
 
+# What the cap of eight is for: anything that works the machine (#294).
+[test-groups]
+working = { max-threads = 8 }
+
 # CI's: every failure is reported, not only the first.
 [profile.ci]
 fail-fast = false
-test-threads = 8
+# The eight that work, and room for every clock-waiting test beside them
+# (the overrides below), so that those never wait for a slot.
+test-threads = 33
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# Everything but the tests that spend their time asleep, waiting for a
+# schedule's or a watch's real minute to pass, holds a working slot. Those
+# use no CPU while they wait, and they held half of the suite's slot-time
+# (#518). One schedule test also drives a browser, so it keeps its slot.
+# Only CI: a developer's run passes its own cap.
+[[profile.ci.overrides]]
+filter = 'not ((binary_id(/^magnus-scratch::(schedules|schedule_approved_once|ended_schedules|schedule_threads|watch_poll|ownership_review)$/) & not test(=a_schedule_that_keeps_failing_pauses_until_its_person_resumes_it)) | (binary_id(=magnus-scratch::chat) & (test(=a_confirmed_schedule_carries_its_scope) | test(=a_schedule_from_chat_fires_after_a_restart))))'
+test-group = 'working'
