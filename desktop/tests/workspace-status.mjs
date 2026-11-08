@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';import {join,dirname} from 'node:path';import {fileURLToPath} from 'node:url';
 const root=join(dirname(fileURLToPath(import.meta.url)),'../..');const {chromium}=createRequire(import.meta.url)(join(root,'browser/node_modules/playwright-core'));
 const browser=await chromium.launch({executablePath:process.env.MAGNUS_CHROMIUM,args:['--no-sandbox','--disable-dev-shm-usage']});const page=await browser.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
 const until=async(fn,arg)=>{for(const end=Date.now()+15000;Date.now()<end;await page.waitForTimeout(40))if(await page.evaluate(fn,arg))return;throw Error('UI condition timed out');};
 try{
- await page.goto(process.env.MAGNUS_URL);await page.getByLabel('Username').fill('alice');await page.getByLabel('Password').fill(process.env.MAGNUS_PASSWORD);await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.locator('#msg').waitFor();
+ await page.goto(process.env.MAGNUS_URL);const script=await page.locator('script[src]').evaluateAll(nodes=>nodes.find(n=>new URL(n.src).pathname.endsWith('/app.js')).src);const served=await (await page.request.get(script)).text(),digest=value=>createHash('sha256').update(value).digest('hex');assert.equal(digest(served),digest(readFileSync(join(root,'desktop/ui/app.js'))),'the appliance must serve this checkout’s actual UI artifact');await page.getByLabel('Username').fill('alice');await page.getByLabel('Password').fill(process.env.MAGNUS_PASSWORD);await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.locator('#msg').waitFor();
  await page.evaluate(()=>{background.forEach(clearInterval);background=[];});
  const missingSchedule=await page.evaluate(()=>scheduleLine({state:'confirmed',schedule:'not-in-current-view',title:'Known schedule'}));assert.ok(missingSchedule.includes('Details unavailable'));assert.ok(!missingSchedule.includes('Cancelled') && !missingSchedule.includes('no longer runs'),'missing collection data cannot establish cancellation');
  // A delayed catalog response from an older view cannot overwrite shared catalog state.
@@ -49,6 +51,10 @@ try{
  await page.route(`**/v1/files/${file.id}/info`,r=>r.fulfill({status:503,contentType:'application/json',body:'{"error":"unavailable"}'}));
  await page.evaluate(()=>drawPanel());await page.frameLocator('#fview').getByText('Readable cached work').waitFor();await page.locator('#connection-status').getByText(/Work may be stale/).waitFor();
  await page.unroute(`**/v1/files/${file.id}/info`);await page.evaluate(()=>drawPanel());await until(()=>document.querySelector('#connection-status').hidden);
+ // A server-accepted mutation with a lost response is never labeled a definite failure or resent.
+ await page.getByRole('link',{name:'All',exact:true}).click();const projectForm=page.locator('#detail #np');await projectForm.locator('#pn').fill('Project with unconfirmed response');let mutationPosts=0,acceptedProject;
+ await page.route('**/v1/projects',async route=>{if(route.request().method()!=='POST')return route.continue();mutationPosts++;const response=await route.fetch();assert.equal(response.status(),201);acceptedProject=(await response.json()).id;await route.abort('failed');});
+ await projectForm.getByRole('button',{name:'Create',exact:true}).click();const uncertainty=page.locator('.toast').filter({hasText:/fetch|Outcome not confirmed/i}).last();await uncertainty.waitFor();assert.match(await uncertainty.textContent(),/Outcome not confirmed/);assert.equal(mutationPosts,1);assert.ok(acceptedProject);assert.equal((await page.evaluate(id=>Magnus.api('GET',`/v1/projects/${id}`),acceptedProject)).id,acceptedProject);await page.evaluate(()=>refresh());assert.equal(mutationPosts,1,'resource reconciliation cannot repeat a mutation');await page.unroute('**/v1/projects');
  // A session failure invokes the existing sign-in flow and invalidates all outstanding resource replies.
  await page.route('**/v1/inbox',r=>r.fulfill({status:401,contentType:'application/json',body:'{"error":"session expired"}'}));await page.evaluate(()=>refresh());await page.getByLabel('Username').waitFor();assert.equal(await page.locator('#si').count(),1);
  assert.deepEqual(errors,[]);console.log('partial/all resource failures retain actual data; healthy updates, latest response and recovery passed');

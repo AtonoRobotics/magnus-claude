@@ -7,7 +7,15 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const api = async (m,p,b) => {
   const owner=App.me?.id, appliance=App.appliance, session=App.sessionGeneration, view=App.seq;
-  const result=await Magnus.api(m,p,b);
+  let result;
+  try { result=await Magnus.api(m,p,b); }
+  catch(error) {
+    // A lost mutation reply does not establish whether its effect happened.
+    // Keep authoritative error metadata (including send rejection handling).
+    if(!["GET","HEAD","OPTIONS"].includes(m) && (!error.status || error.status>=500))
+      throw Object.assign(new Error(`Outcome not confirmed. ${error.message || "Check the current state before trying again."}`),{status:error.status,body:error.body});
+    throw error;
+  }
   if(m==="GET" && (owner!==App.me?.id || appliance!==App.appliance || session!==App.sessionGeneration || view!==App.seq)) throw Object.assign(new Error("This view changed."),{cancelled:true});
   return result;
 };
