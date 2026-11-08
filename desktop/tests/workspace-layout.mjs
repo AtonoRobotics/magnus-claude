@@ -12,6 +12,15 @@ const state=()=>page.evaluate(()=>({nav:document.body.dataset.navigation,mode:do
 const select=async region=>{const b=page.locator(`button[data-region=${region}]`);if(await b.isVisible())await b.click();};
 try {
  await page.goto(process.env.MAGNUS_URL);await page.getByLabel('Username').fill('alice');await page.getByLabel('Password').fill(process.env.MAGNUS_PASSWORD);await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.locator('#msg').waitFor();
+ { // Only actual unresolved decisions count; informational sharing remains in Activity.
+  const shared=await page.evaluate(()=>App.inbox.find(i=>i.kind==='shared'));
+  assert.ok(shared?.can_respond,'actual shared inbox item is dismissible');assert.equal(await page.evaluate(()=>needsMe().length),1);
+  await page.getByRole('link',{name:/^Needs you, 1 decisions$/}).click();assert.equal(await page.locator('[data-needs]').count(),1);assert.equal(await page.locator(`[data-needs="${shared.id}"]`).count(),0);
+  await page.locator(`[data-needs="${process.env.MAGNUS_REVIEW_ITEM}"]`).getByRole('button',{name:'Accept',exact:true}).click();await until(id=>App.tasks.some(t=>t.task_id===id && t.status==='completed'),process.env.MAGNUS_REVIEW_TASK);assert.equal(await page.evaluate(()=>needsMe().length),0);
+  await page.getByRole('link',{name:'Activity',exact:true}).click();await page.locator('details[data-key=other] > summary').click();await page.locator(`article[data-id="${shared.id}"]`).waitFor();
+  assert.equal(await page.evaluate(async id=>(await Magnus.api('GET','/v1/inbox')).items.find(i=>i.id===id).status,shared.id),'open','viewing Activity cannot decide or dismiss the item');
+  await page.getByRole('button',{name:'Close work',exact:true}).click();
+ }
  await page.locator('#msg').fill('Keep this composer text');assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('.say')).outlineOffset),'2px');await page.locator('#q').focus();assert.equal(await page.evaluate(()=>getComputedStyle(document.activeElement).outlineOffset),'2px');
  await page.getByRole('link',{name:'Files',exact:true}).click();await page.locator('[data-panel=files]').waitFor();
  let s=await state();assert.equal(s.mode,'split');assert.equal(s.width,420);assert.ok(s.work>=560);assert.equal(s.nav,'expanded');

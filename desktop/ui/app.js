@@ -162,7 +162,9 @@ const chip = st => { const [c, l] = STATUS[st] || ["", st]; return `<span class=
 // it in a panel, and the sidebar. Everything it shows is read together
 // (refresh), so a task, a schedule or a decision is one object wherever it
 // appears, and acting on it anywhere redraws every place it is shown.
-const needsMe = () => App.inbox.filter(i => i.status === "open" && i.can_respond && !(i.details && i.details.notify_at && Date.parse(i.details.notify_at) > Date.now()));
+const DECISION_KINDS=new Set(["approval","question","contract_change","review","policy_proposal","schedule_proposal","task_proposal","tool_change","deletion_request","endorsement","tool_review"]);
+const needsDecision=i=>i.status==="open" && i.can_respond && (DECISION_KINDS.has(i.kind) || (i.kind==="notice" && i.blocking)) && !(i.details?.notify_at && Date.parse(i.details.notify_at)>Date.now());
+const needsMe = () => App.inbox.filter(needsDecision);
 
 // The workspace's icons, drawn as in the Magnus Workspace design: 24px
 // outlines in the current color.
@@ -647,7 +649,7 @@ async function pollInbox() {
     const wants = i => i.blocking ? App.prefs?.notify_blocking !== false : App.prefs?.notify_batched === true;
     // Each item is considered once, so turning a kind on later does not
     // bring back everything already waiting.
-    const fresh = items.filter(i => i.status === "open" && i.can_respond && !told.has(i.id));
+    const fresh = needsMe().filter(i => !told.has(i.id));
     for (const i of fresh.filter(wants)) Magnus.notify(i.blocking ? "A task needs you" : "Something for you", i.summary);
     if (fresh.length) save("told", [...told, ...fresh.map(i => i.id)].slice(-500));
     sidebar();
@@ -1181,7 +1183,7 @@ function ends(e) {
 }
 // Where a task stands, as the design draws it: an icon and a pill. A task
 // waiting on a decision the person can make needs them.
-const needsYou = t => !!t.waiting_item && App.inbox.some(i => i.id === t.waiting_item && i.status === "open" && i.can_respond);
+const needsYou = t => !!t.waiting_item && needsMe().some(i => i.id === t.waiting_item);
 function standing(t) {
   if (needsYou(t)) return ["need", `<span class="chip warn">Needs you</span>`];
   return [{ completed: "done", running: "working", failed: "stopped", cancelled: "stopped" }[t.status] || "working", chip(t.status)];
@@ -1754,7 +1756,7 @@ function activityLinks(selected="activity") {
 }
 function activityView(composed) {
   const feed=App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) ? `<section><h3>Since you were last here</h3>${feedRows(App.feed)}</section>` : "";
-  const other=App.inbox.filter(i=>i.status==="open" && !i.can_respond);
+  const other=App.inbox.filter(i=>i.status==="open" && !needsDecision(i));
   const decided=App.inbox.filter(i=>i.status!=="open").sort((a,b)=>(b.created_at || "").localeCompare(a.created_at || "")).slice(0,15);
   return `${activityLinks()}${feed}<section><h3>Work</h3>${tasksView()}</section><section><h3>Schedules</h3>${schedulesView()}</section>
     ${other.length ? `<details data-key="other"><summary>Updates and work waiting on others (${other.length})</summary>${other.map(i=>card(i,composed)).join("")}</details>` : ""}

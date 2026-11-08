@@ -55,9 +55,10 @@ const MEASURE = `
     const fg = rgba(getComputedStyle(el).color);
     for (const b of backs(el)) { const r = ratio(fg, b); if (r < 4.5) low.push(\`\${el.tagName.toLowerCase()}.\${el.className} "\${el.textContent.trim().slice(0, 30)}" \${r.toFixed(2)}:1\`); }
   }
+  for(const el of document.querySelectorAll('.conv-head select, #composer select'))if(shown(el))for(const b of backs(el)){const r=ratio(rgba(getComputedStyle(el).color),b);if(r<4.5)low.push('Selected control '+el.getAttribute('aria-label')+' '+r.toFixed(2)+':1');}
   const alpha = q => { const el = document.querySelector(q); return el ? rgba(getComputedStyle(el).backgroundColor)[3] : null; };
   const filter = q => { const s = getComputedStyle(document.querySelector(q)); return s.backdropFilter || s.webkitBackdropFilter || "none"; };
-  return JSON.stringify({ low, side: alpha("nav.side"), panel: alpha("#detail"), sideBlur: filter("nav.side"), panelBlur: filter("#detail"),
+  return JSON.stringify({ low, chromeScheme:getComputedStyle(document.querySelector('.conv-head')).colorScheme, side: alpha("nav.side"), panel: alpha("#detail"), sideBlur: filter("nav.side"), panelBlur: filter("#detail"),
     reading: ["main", "#composer .say", "#thread .msg.me", "#detail iframe.composed, #detail .card"].map(q => [q, alpha(q)]),
     look: { ...document.documentElement.dataset } });
 `;
@@ -89,6 +90,7 @@ for(const theme of ['light','dark','ember','corporate'])for(const material of ['
     if(material==='glass' && !(m.side>=.9 && m.side<1 && m.sideBlur.includes('blur')))throw Error(`Chrome glass lost: ${JSON.stringify(m)}`);
     if(m.panel!==1 || (material==='solid' && m.side!==1))throw Error('Reading panel or solid chrome is translucent');
     for(const [what,alpha] of m.reading)if(alpha!==null && alpha!==1)throw Error(`Translucent reading surface ${what}`);
+    if(theme==='corporate' && m.chromeScheme!=='dark')throw Error('Corporate native controls do not use dark chrome colors');
     if(m.low.length)throw Error(`Text below 4.5:1: ${m.low.join('; ')}`);
     const frame=await run("const f=document.getElementById('fview');return {mode:f.contentDocument.documentElement.style.colorScheme,text:f.contentDocument.body.textContent,sandbox:f.getAttribute('sandbox')} ");
     if(frame.mode!==mode || !frame.text.includes('Actual uploaded document.') || frame.sandbox!=='allow-same-origin')throw Error('Document theme/data/sandbox changed');

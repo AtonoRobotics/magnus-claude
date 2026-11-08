@@ -753,3 +753,11 @@ html[data-theme="corporate"] :is(nav.side, .conv-head, .workspace-bar, .connecti
   button.primary:enabled:active { background: color-mix(in srgb, var(--accent-fg) var(--pressed-mix), var(--accent)); color: var(--accent-fg); }
 }
 nav.side a { position: relative; }
+
+/* Corporate content is light while its native chrome controls are dark. */
+html[data-theme="corporate"] :is(nav.side, .conv-head, .workspace-bar) { color-scheme: dark; }
+.conv-head select {
+  -webkit-appearance:none; appearance:none; padding-right:28px;
+  background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);
+  background-position:right 14px center,right 10px center; background-size:4px 4px; background-repeat:no-repeat;
+}
