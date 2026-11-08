@@ -658,7 +658,7 @@ function wireDocument() {
   Menus.install(); Tooltips.install(); wireMarkdown(document);
   const style = document.createElement("style"); style.textContent = Compose.markdownStyles; document.head.append(style);
   document.addEventListener("load", e => { if (e.target.matches?.("iframe.composed")) { try { wireMarkdown(e.target.contentDocument); sizeComposedFrame(e.target); } catch { /* frame unavailable */ } } }, true);
-  new MutationObserver(()=>{for(const [frame,sizing] of frameSizing)if(!frame.isConnected){sizing.observer.disconnect();frameSizing.delete(frame);}}).observe(document.body,{childList:true,subtree:true});
+  new MutationObserver(()=>{for(const [frame,sizing] of frameSizing)if(!frame.isConnected){sizing.observer.disconnect();frame._frameActions?.dispose();delete frame._frameActions;frameSizing.delete(frame);}}).observe(document.body,{childList:true,subtree:true});
   // Anything that names an item opens it beside the conversation, without
   // leaving it.
   document.addEventListener("click", e => {
@@ -2165,40 +2165,78 @@ const keepHeights = el => $$("iframe[data-shown]", el).forEach(f => { if (frameH
 const frameSizing = new Map();
 // Native WebKit blocks frame event handlers when scripts are sandboxed. Keep
 // actions in the trusted parent, aligned to inert reading-surface markers.
+function alignFrameActions(frame,state) {
+  if(!frame.isConnected || frame.contentDocument!==state.doc)return;
+  const clips=new Map(), geometry=[];
+  for(const control of state.controls) {
+    const marker=control._marker;if(!marker.isConnected)continue;
+    const r=marker.getBoundingClientRect();
+    let left=0,top=0,right=frame.clientWidth,bottom=frame.clientHeight;
+    for(let node=marker.parentElement;node;node=node.parentElement) {
+      let clip=clips.get(node);
+      if(!clip){const style=state.doc.defaultView.getComputedStyle(node),box=node.getBoundingClientRect();clip={x:/auto|scroll|hidden|clip/.test(style.overflowX),y:/auto|scroll|hidden|clip/.test(style.overflowY),left:box.left+node.clientLeft,top:box.top+node.clientTop,right:box.left+node.clientLeft+node.clientWidth,bottom:box.top+node.clientTop+node.clientHeight};clips.set(node,clip);}
+      if(clip.x){left=Math.max(left,clip.left);right=Math.min(right,clip.right);}
+      if(clip.y){top=Math.max(top,clip.top);bottom=Math.min(bottom,clip.bottom);}
+    }
+    // Keep the 2px outline and 2px offset visible inside the scrollport.
+    const visible=Math.min(right,r.right)>Math.max(left,r.left) && Math.min(bottom,r.bottom)>Math.max(top,r.top);
+    geometry.push([control,{left:`${r.left}px`,top:`${r.top}px`,width:`${r.width}px`,height:`${r.height}px`,clipPath:visible?`inset(${Math.max(-4,top-r.top)}px ${Math.max(-4,r.right-right)}px ${Math.max(-4,r.bottom-bottom)}px ${Math.max(-4,left-r.left)}px)`:'inset(50%)'}]);
+  }
+  // Read frame geometry together before writing parent overlay styles.
+  for(const [control,style] of geometry)Object.assign(control.style,style);
+  state.scrollports=new Map([...clips].filter(([,clip])=>clip.x || clip.y).map(([node])=>[node,[node.scrollLeft,node.scrollTop]]));
+  const root=state.doc.scrollingElement;if(root)state.scrollports.set(root,[root.scrollLeft,root.scrollTop]);
+}
 function frameActions(frame,doc) {
   let wrapper=frame.parentElement;
   if(!wrapper.classList.contains('composed-wrap')) {
-    wrapper=document.createElement('div');wrapper.className='composed-wrap';
-    frame.before(wrapper);wrapper.append(frame);
+    wrapper=document.createElement('div');wrapper.className='composed-wrap';frame.before(wrapper);wrapper.append(frame);
   }
-  if(wrapper._actionDocument!==doc) {
-    wrapper.querySelector('.frame-actions')?.remove();
+  let state=frame._frameActions;
+  if(state?.doc!==doc || state?.body!==doc.body) {
+    state?.dispose();wrapper.querySelector('.frame-actions')?.remove();
     const layer=document.createElement('div');layer.className='frame-actions';wrapper.append(layer);
+    let scheduled=0,poll=0,disposed=false,visible=false,visibility;
+    state={doc,body:doc.body,controls:[],scrollports:new Map()};
+    const align=()=>alignFrameActions(frame,state);
+    const schedule=()=>{if(!disposed && !scheduled)scheduled=requestAnimationFrame(()=>{scheduled=0;align();});};
     for(const marker of doc.querySelectorAll('[data-code-copy-anchor], [data-prose-url]')) {
       const copy=marker.hasAttribute('data-code-copy-anchor'),control=document.createElement(copy?'button':'a');
       control.className=copy?'frame-code-copy':'frame-prose-link';
       if(copy){control.type='button';control.dataset.codeCopy='';control.textContent='Copy code';control.setAttribute('aria-label','Copy code');control.dataset.tooltip='Copy code';
         const text=marker.closest('.code-block').querySelector('code').textContent;
         control.onclick=async e=>{e.preventDefault();e.stopPropagation();Tooltips.dismiss();try{await copyText(text);toast('Code copied.');}catch(err){toast(err.message);}};
-      }else{control.textContent=marker.textContent;control.href=marker.dataset.proseUrl;control.rel='noopener noreferrer';control.onclick=e=>{e.preventDefault();Magnus.openExternal(control.href).catch(err=>toast(err.message));};}
-      layer.append(control);control._marker=marker;
+      }else{control.textContent=marker.textContent;control.setAttribute('aria-label',marker.textContent);control.href=marker.dataset.proseUrl;control.rel='noopener noreferrer';control.onclick=e=>{e.preventDefault();Magnus.openExternal(control.href).catch(err=>toast(err.message));};}
+      marker.style.scrollMargin='4px';
+      control.onfocus=()=>{marker.scrollIntoView({block:'nearest',inline:'nearest'});align();};
+      layer.append(control);control._marker=marker;state.controls.push(control);
     }
-    wrapper._actionDocument=doc;
+    const pollScroll=()=>{
+      poll=0;if(disposed || !visible || !frame.isConnected)return;
+      // Sandboxed WebKit may omit subdocument scroll events. Checking the
+      // few scrollport offsets is cheap; measure links only after movement.
+      if(!document.hidden && [...state.scrollports].some(([node,at])=>node.scrollLeft!==at[0] || node.scrollTop!==at[1]))align();
+      poll=requestAnimationFrame(pollScroll);
+    };
+    if(state.controls.length){
+      doc.addEventListener('scroll',schedule,true);doc.fonts?.addEventListener('loadingdone',schedule);doc.fonts?.ready.then(schedule);
+      if('IntersectionObserver' in window){visibility=new IntersectionObserver(entries=>{if(disposed)return;visible=entries[0].isIntersecting;if(visible){align();if(!poll)poll=requestAnimationFrame(pollScroll);}else{cancelAnimationFrame(poll);poll=0;}});visibility.observe(frame);}
+      else{visible=true;poll=requestAnimationFrame(pollScroll);}
+    }
+    state.dispose=()=>{disposed=true;cancelAnimationFrame(scheduled);cancelAnimationFrame(poll);visibility?.disconnect();doc.removeEventListener('scroll',schedule,true);doc.fonts?.removeEventListener('loadingdone',schedule);};
+    frame._frameActions=state;
   }
-  for(const control of wrapper.querySelectorAll('.frame-actions > *')) {
-    const r=control._marker.getBoundingClientRect();
-    Object.assign(control.style,{left:`${r.left}px`,top:`${r.top}px`,width:`${r.width}px`,height:`${r.height}px`});
-  }
+  alignFrameActions(frame,state);
 }
 function sizeComposedFrame(frame) {
   try {
     const doc=frame.contentDocument;
     if(!frame.isConnected || !frame.hasAttribute("srcdoc") || !doc?.body || doc.URL==="about:blank")return;
     let sizing=frameSizing.get(frame);
-    if(sizing?.doc!==doc) {
+    if(sizing?.doc!==doc || sizing?.body!==doc.body) {
       sizing?.observer.disconnect();
       const measure=()=>{
-        if(!frame.isConnected){frameSizing.get(frame)?.observer.disconnect();frameSizing.delete(frame);return;}
+        if(!frame.isConnected){frameSizing.get(frame)?.observer.disconnect();frame._frameActions?.dispose();delete frame._frameActions;frameSizing.delete(frame);return;}
         if(frame.contentDocument!==doc)return;
         const height=Math.ceil(Math.max(doc.body.scrollHeight,doc.body.getBoundingClientRect().height))+4;
         if(frame.style.height!==`${height}px`)frame.style.height=`${height}px`;
@@ -2207,7 +2245,7 @@ function sizeComposedFrame(frame) {
         frame.dataset.sized="1";
       };
       const observer=new ResizeObserver(measure);observer.observe(doc.body);
-      sizing={doc,observer,measure};frameSizing.set(frame,sizing);
+      sizing={doc,body:doc.body,observer,measure};frameSizing.set(frame,sizing);
     }
     sizing.measure();
   }catch{/* A frame still loading cannot be measured yet. */}

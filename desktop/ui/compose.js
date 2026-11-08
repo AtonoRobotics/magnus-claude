@@ -253,7 +253,7 @@ const Compose = (() => {
     :root { --bar: var(--accent); --s0: var(--accent); --s1:#c2410c; --s2:#0f766e; --s3:#7c3aed; --s4:#a16207; --s5:#be123c; }
     :is(a,button,input,textarea,select,summary,[tabindex]):focus-visible { outline:2px solid var(--accent-text); outline-offset:2px; }
     html,body { margin:0; background: transparent; color:var(--fg); font: 15px/1.5 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; font-feature-settings: "tnum" 1, "cv11" 1; }
-    body { padding: 1px 1px 2px; display: flex; flex-direction: column; gap: 16px; }
+    body { padding: 4px; display: flex; flex-direction: column; gap: 16px; }
     body > * { margin: 0; }
     h2 { font-size: 15px; font-weight: 600; letter-spacing: 0; }
     h3 { font-size: 16px; font-weight: 600; color: var(--muted); margin: 0 0 8px; }
@@ -316,7 +316,7 @@ const Compose = (() => {
   function documentFor(view, files, fontCss, limit, tokens, mode) {
     const body = (view || []).map(c => part(c, files || {}, limit || { chars: 160000, rows: 200 })).join("\n")
       .replace(/<button type="button" data-code-copy[^>]*>Copy code<\/button>/g,'<span data-code-copy-anchor aria-hidden="true" style="display:inline-flex;align-items:center;min-height:44px;padding:0 12px">Copy code</span>')
-      .replace(/<a href="([^"]*)" data-prose-link rel="noopener noreferrer">([\s\S]*?)<\/a>/g,'<span data-prose-url="$1" aria-hidden="true" style="color:var(--accent-text);text-decoration:underline">$2</span>');
+      .replace(/<a href="([^"]*)" data-prose-link rel="noopener noreferrer">([\s\S]*?)<\/a>/g,'<span data-prose-url="$1" style="color:var(--accent-text);text-decoration:underline">$2</span>');
     return `<!doctype html><html style="color-scheme: ${mode === "dark" ? "dark" : "light"}"><head><meta charset="utf-8">
       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data: ${location.origin}">
       <style>:root{${vars(tokens)}}${fontCss || ""}${CSS}${markdownStyles}</style></head><body>${body}</body></html>`;

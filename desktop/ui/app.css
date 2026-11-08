@@ -795,10 +795,10 @@ html[data-theme="corporate"] :is(nav.side, .conv-head, .workspace-bar) { color-s
 /* Interactive frame affordances stay in the trusted parent document. */
 .composed-wrap { position:relative; min-width:0; }
 .composed-wrap > iframe.composed { display:block; width:100%; }
-.frame-actions { position:absolute; inset:0; pointer-events:none; }
+.frame-actions { position:absolute; inset:0; pointer-events:none; overflow:clip; }
 .frame-actions > * { position:absolute; pointer-events:auto; margin:0; }
 .frame-code-copy { min-height:36px; border:1px solid var(--muted); border-radius:8px; color:var(--fg); background:var(--surface); padding:4px 12px; }
-.frame-prose-link { color:var(--accent-text); text-decoration:underline; background:var(--surface); }
+.frame-prose-link { color:transparent; background:transparent; }
 @media(any-pointer:coarse) { .frame-code-copy { min-width:44px;min-height:44px; } }
 /* Quiet scoped connection feedback reserves space instead of covering controls. */
 .connection-status { grid-column: 2 / -1; grid-row: 3; min-height: 28px; padding: 4px 12px; background: var(--side); color: var(--fg); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; border-top: 1px solid var(--line); }
