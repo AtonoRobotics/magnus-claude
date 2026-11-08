@@ -5,7 +5,12 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const api = (m, p, b) => Magnus.api(m, p, b);
+const api = async (m,p,b) => {
+  const owner=App.me?.id, appliance=App.appliance, session=App.sessionGeneration, view=App.seq;
+  const result=await Magnus.api(m,p,b);
+  if(m==="GET" && (owner!==App.me?.id || appliance!==App.appliance || session!==App.sessionGeneration || view!==App.seq)) throw Object.assign(new Error("This view changed."),{cancelled:true});
+  return result;
+};
 const enc = encodeURIComponent;
 
 // Read aloud in the appliance's own voice, a sentence at a time, so the first
@@ -69,6 +74,7 @@ const App = {
   leave: [],
   routes: [],
   seq: 0,
+  sessionGeneration: 0,
 };
 
 // Each resource retains its last good data; only its newest response may reconcile it.
@@ -87,10 +93,10 @@ const Resources = (()=>{
  function reset(){epoch++;states.clear();announced="";render();}
  function forget(name){states.delete(name);render();}
  function good(name){const s=states.get(name)||{};states.set(name,{...s,failed:false,at:Date.now()});render();}
- function bad(name,error){const s=states.get(name)||{};states.set(name,{...s,failed:true});render();if(error?.status===401 && App.me){stop();signInScreen("Your session ended. Sign in again.");}}
+ function bad(name,error){if(error?.cancelled)return;const s=states.get(name)||{};states.set(name,{...s,failed:true});render();if(error?.status===401 && App.me){stop();signInScreen("Your session ended. Sign in again.");}}
  async function read(name,path,key){const scope=epoch,token=++serial,prior=states.get(name)||{};states.set(name,{...prior,token});
   try{const value=await api("GET",path);if(scope!==epoch || states.get(name)?.token!==token)return;good(name);return key ? value[key] : value;}
-  catch(error){if(scope===epoch && states.get(name)?.token===token)bad(name,error);}
+  catch(error){if(!error?.cancelled && scope===epoch && states.get(name)?.token===token)bad(name,error);}
  }
  return {read,reset,forget,good,bad,render};
 })();
@@ -1880,6 +1886,7 @@ async function drawPanel() {
   try {
     ({ body, after, head } = await PANELS[kind](id, composed));
   } catch (e) {
+    if(e.cancelled)return;
     failed=true;
     if(n===Panel.seq){Resources.bad("Work",e);if(Panel.rendered===Panel.what)return;}
     body = `<div class="banner bad">${esc(e.status === 404 ? "This is gone: it was deleted, or it is not yours." : e.message)}</div>`;
@@ -2837,6 +2844,7 @@ async function updateRequiredScreen(info) {
 window.addEventListener("magnus-update-required", e => updateRequiredScreen(e.detail));
 
 async function boot() {
+  App.sessionGeneration++;
   Resources.reset();
   Theme.scope(App.appliance, App.me.id);
   shell();
@@ -2857,6 +2865,7 @@ async function boot() {
 }
 
 function stop() {
+  App.sessionGeneration++;
   Resources.reset();
   background.forEach(clearInterval); background = [];
   App.timers.forEach(clearInterval); App.timers = [];
