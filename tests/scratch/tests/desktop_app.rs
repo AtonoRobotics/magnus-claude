@@ -480,7 +480,7 @@ async fn composed_answers_stream_text_first_and_reach_no_network_in_the_installe
                         ] })),
                     ]),
                     HOSTILE => tools(vec![magnus_scratch::say("Here is what you asked for."), ("show", json!({ "components": hostile }))]),
-                    text if text.starts_with("Show local chart ") => Reply::Text(format!("![Local chart]({})",text.trim_start_matches("Show local chart "))),
+                    text if text.starts_with("Show local chart ") => Reply::Text(format!("![Local chart]({})\n\n[Supplier reference](https://example.com/reference)",text.trim_start_matches("Show local chart "))),
                     _ => Reply::Text(format!("Answer to: {said}")),
                 };
             }

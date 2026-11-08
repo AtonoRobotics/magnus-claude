@@ -78,6 +78,10 @@ export async function open(wd, app, shots, prefix) {
     }
   };
   d.click = el => on(el, async id => {
+    // WebKit's automatic click scroll can miss clipping by nested scroll
+    // regions for absolute frame actions. Scroll the actual target into
+    // its container first, then measure and perform the real native click.
+    await d.run("arguments[0].scrollIntoView({block:'nearest',inline:'nearest'})",{[E]:id});
     await settled(id);
     try{return await call("POST",s(`/element/${id}/click`),{});}catch(error){
       if(/element click intercepted|element not interactable/.test(error.message)){

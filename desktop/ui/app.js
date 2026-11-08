@@ -1814,7 +1814,7 @@ function frameActions(frame,doc) {
       control.className=copy?'frame-code-copy':'frame-prose-link';
       if(copy){control.type='button';control.dataset.codeCopy='';control.textContent='Copy code';control.setAttribute('aria-label','Copy code');control.dataset.tooltip='Copy code';
         const text=marker.closest('.code-block').querySelector('code').textContent;
-        control.onclick=async e=>{e.preventDefault();e.stopPropagation();try{await copyText(text);toast('Code copied.');}catch(err){toast(err.message);}};
+        control.onclick=async e=>{e.preventDefault();e.stopPropagation();Tooltips.dismiss();try{await copyText(text);toast('Code copied.');}catch(err){toast(err.message);}};
       }else{control.textContent=marker.textContent;control.href=marker.dataset.proseUrl;control.rel='noopener noreferrer';control.onclick=e=>{e.preventDefault();Magnus.openExternal(control.href).catch(err=>toast(err.message));};}
       layer.append(control);control._marker=marker;
     }
@@ -1828,7 +1828,7 @@ function frameActions(frame,doc) {
 function sizeComposedFrame(frame) {
   try {
     const doc=frame.contentDocument;
-    if(!frame.isConnected || !doc?.body || (frame.hasAttribute("srcdoc") && doc.URL==="about:blank"))return;
+    if(!frame.isConnected || !frame.hasAttribute("srcdoc") || !doc?.body || doc.URL==="about:blank")return;
     let sizing=frameSizing.get(frame);
     if(sizing?.doc!==doc) {
       sizing?.observer.disconnect();

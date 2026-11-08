@@ -57,5 +57,13 @@ try {
     if(voice.entry!==null)throw Error('Stop did not cancel queued startup');
     Magnus.stopSpeaking=stop;
   });
+  // File previews remain bounded and their real bytes do not change with presentation.
+  const fileText='```js\nconst original = 42;\n```\n\n| Row | Value |\n| --- | --- |\n'+Array.from({length:1000},(_,n)=>`| ${n} | original |`).join('\n');
+  const previewFile=await page.evaluate(body=>Magnus.api('POST','/v1/files',body),{name:'bounded-preview.md',media_type:'text/markdown',data_b64:Buffer.from(fileText).toString('base64')});
+  await page.evaluate(id=>openPanel(`file:${id}`),previewFile.id);
+  const preview=page.frameLocator('#fview');await preview.getByText('The first 200 of 1000 rows; the rest are in the file.',{exact:true}).waitFor();assert.equal(await preview.locator('tbody tr').count(),200);
+  const frameCopy=page.locator('#detail .frame-actions button[data-code-copy]');await frameCopy.focus();await page.getByRole('tooltip').waitFor();await frameCopy.click();await page.getByRole('tooltip').waitFor({state:'hidden'});assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'const original = 42;');
+  const bytes=await context.request.get(`${process.env.MAGNUS_URL}/v1/files/${previewFile.id}`);assert.equal(await bytes.text(),fileText);
+  await page.evaluate(()=>closePanel());
   assert.deepEqual(errors,[]);console.log('browser: safe Markdown/copy, compact actions, feedback, menu keyboard/focus/outside click and tooltip timing/suppression/removal passed');
 } finally {await browser.close();}

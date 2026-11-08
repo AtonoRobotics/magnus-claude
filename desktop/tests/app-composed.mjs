@@ -60,6 +60,7 @@ await d.step("local Markdown images hydrate through the real appliance bridge",a
   const image=await d.until("actual image upload",()=>d.run("return window.__imageUpload"));if(image.error)throw Error(image.error);
   await send(`Show local chart /v1/files/${image.id}`);
   await d.until("image decoded from the bridge",()=>d.run("const img=document.querySelector('#thread img[alt=\"Local chart\"]');return img && img.complete && img.naturalWidth===32 && img.naturalHeight===16 && img.src.startsWith('data:image/png')"));
+  await d.xpath("//div[@id='thread']//a[@data-prose-link and @href='https://example.com/reference' and normalize-space()='Supplier reference']");
 });
 
 await d.step("composed content makes no request, runs nothing and only permits code copying", async () => {

@@ -235,9 +235,9 @@ svg.chev { width: 16px; height: 16px; color: var(--chev); stroke-width: 1.8; }
 .result > a { display: inline-block; margin-top: 6px; }
 /* A result that shows its deliverable: the full column, its line above the
    deliverable's own cards, as on the outcome page. */
-.result:has(> iframe.composed) { align-self: stretch; width: 100%; border: 0; background: none; padding: 0; display: flex; flex-direction: column; gap: 12px; }
-.result:has(> iframe.composed) > a { margin-top: 0; }
-.entry:has(> .result > iframe.composed) { align-self: stretch; max-width: 100%; }
+.result:has(> iframe.composed, > .composed-wrap) { align-self: stretch; width: 100%; border: 0; background: none; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.result:has(> iframe.composed, > .composed-wrap) > a { margin-top: 0; }
+.entry:has(> .result > iframe.composed, > .result > .composed-wrap) { align-self: stretch; max-width: 100%; }
 /* A task in its conversation, with the decision it waits on right under it. */
 .tcard { list-style: none; }
 /* Files where they are mentioned: a glimpse, the name, Download. */

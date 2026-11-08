@@ -16,7 +16,17 @@ console.log('shared Markdown: required structures, raw HTML/URL rejection, incom
 
 for(const origin of ['https://magnus.example','tauri://localhost','null']) {
  const native={URL,location:{origin}};vm.runInNewContext(readFileSync(new URL('../ui/compose.js',import.meta.url),'utf8')+';globalThis.renderer=Compose;',native);
+ assert.equal(native.renderer.safeUrl('https://example.com/reference'),'https://example.com/reference',origin);
+ assert.ok(native.renderer.markdown('[Supplier reference](https://example.com/reference)').includes('data-prose-link'),origin);
+ for(const scheme of ['javascript:evil','data:text/html,evil','file:///etc/passwd'])assert.equal(native.renderer.safeUrl(scheme),null,origin);
  const rendered=native.renderer.markdown('![Revenue chart](/v1/files/file_chart)');assert.ok(rendered.includes('data-prose-image="/v1/files/file_chart"'),origin);assert.ok(rendered.includes('alt="Revenue chart"'));
  for(const url of ['/v1/files/../../outside','//evil.example/v1/files/chart','javascript:evil','data:image/svg+xml,evil'])assert.ok(!native.renderer.markdown(`![unsafe](${url})`).includes('data-prose-image'),`${origin}/${url}`);
 }
 console.log('local image hydration paths work for HTTP, Tauri and opaque origins without widening URL/sandbox permissions');
+
+const largeTable='| Row | Value |\n| --- | --- |\n'+Array.from({length:1000},(_,n)=>`| ${n} | safe |`).join('\n');
+const limited=documentFor([{type:'file',file:'large.md'}],{'large.md':{text:largeTable,media_type:'text/markdown'}},'',{chars:160000,rows:200});
+assert.equal((limited.match(/<tr>/g)||[]).length,201,'preview must keep its configured row bound');
+assert.ok(limited.includes('The first 200 of 1000 rows; the rest are in the file.'));
+assert.equal((markdown(largeTable).match(/<tr>/g)||[]).length,1001,'ordinary answers do not acquire a file preview cap');
+console.log('Markdown file table previews preserve the row bound and remainder notice');

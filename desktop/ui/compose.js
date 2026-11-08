@@ -87,7 +87,11 @@ const Compose = (() => {
   // A conservative Markdown renderer shared by conversation and file previews.
   // Only our generated tags enter the DOM; source HTML is always escaped.
   function safeUrl(value) {
-    try { const u = new URL(value, location.origin); return ["http:", "https:"].includes(u.protocol) ? u.href : null; } catch { return null; }
+    try {
+      let u;
+      try { u=new URL(value); } catch { u=new URL(value,location.origin); }
+      return ["http:","https:"].includes(u.protocol) ? u.href : null;
+    } catch { return null; }
   }
   function localImagePath(raw) {
     try {
@@ -117,7 +121,8 @@ const Compose = (() => {
     }
     return out + esc(text.slice(at));
   }
-  function markdown(source) {
+  function markdown(source, limit) {
+    const maxRows=Number.isFinite(limit?.rows) ? Math.max(0,Math.floor(limit.rows)) : Infinity;
     const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n"), out = [];
     const cells = line => line.trim().replace(/^\|/, "").replace(/\|$/, "").split(/(?<!\\)\|/).map(c => markdownInline(c.trim().replace(/\\\|/g, "|")));
     const tableRule = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/;
@@ -133,9 +138,9 @@ const Compose = (() => {
       } else if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/))) { out.push(`<h${m[1].length}>${markdownInline(m[2])}</h${m[1].length}>`); i++; }
       else if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) { out.push("<hr>"); i++; }
       else if (line.includes("|") && tableRule.test(lines[i + 1] || "")) {
-        const head = cells(line), rows = []; i += 2;
-        while (i < lines.length && lines[i].trim() && lines[i].includes("|")) { rows.push(cells(lines[i])); i++; }
-        out.push(`<div class="markdown-table" tabindex="0" role="region" aria-label="Table"><table><thead><tr>${head.map(c => `<th scope="col">${c}</th>`).join("")}</tr></thead><tbody>${rows.map(row => `<tr>${head.map((_, n) => `<td>${row[n] || ""}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+        const head = cells(line), rows = []; let total=0; i += 2;
+        while (i < lines.length && lines[i].trim() && lines[i].includes("|")) { if(rows.length<maxRows)rows.push(cells(lines[i]));total++;i++; }
+        out.push(`<div class="markdown-table" tabindex="0" role="region" aria-label="Table"><table><thead><tr>${head.map(c => `<th scope="col">${c}</th>`).join("")}</tr></thead><tbody>${rows.map(row => `<tr>${head.map((_, n) => `<td>${row[n] || ""}</td>`).join("")}</tr>`).join("")}</tbody></table>${total>rows.length ? `<p class="cap">The first ${rows.length} of ${total} rows; the rest are in the file.</p>` : ""}</div>`);
       } else if (/^\s{0,3}>/.test(line)) {
         const quote = []; while (i < lines.length && /^\s{0,3}>/.test(lines[i])) quote.push(lines[i++].replace(/^\s{0,3}>\s?/, ""));
         // Quotes need no recursive block parser to remain readable and safe.
@@ -196,7 +201,7 @@ const Compose = (() => {
   function part(c, files, limit) {
     switch (c.type) {
       case "heading": return c.level > 2 ? `<h4>${esc(c.text)}</h4>` : `<h2>${esc(c.text)}</h2>`;
-      case "markdown": return markdown(c.text);
+      case "markdown": return markdown(c.text,limit);
       case "text": return `<p${c.muted ? ` class="cap"` : ""}>${esc(c.text)}</p>`;
       case "list": return frame(c, c.ordered ? `<ol>${c.items.map(i => `<li>${esc(i)}</li>`).join("")}</ol>` : `<ul>${c.items.map(i => `<li>${esc(i)}</li>`).join("")}</ul>`);
       case "table": {
