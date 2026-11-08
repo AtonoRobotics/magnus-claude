@@ -365,22 +365,39 @@ async fn admin_delete(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axu
     if k.person(&id).is_none() {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
     }
-    let erased = match k.erase_person(&actor, &id).await {
+    // The account first: its removal (or disabling) holds the
+    // last-admin guard, so a refused deletion erases nothing, and a
+    // refusal is never discarded (#527).
+    let local = k.accounts.is_local(&id);
+    let ended = if local {
+        match k.accounts.remove_person(&id).await {
+            Ok(ended) => ended,
+            Err(e) if last_admin_refused(&e) => return last_admin(),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+        }
+    } else {
+        match k.accounts.set_status(&id, crate::accounts::Status::Disabled).await {
+            Ok(ended) => ended,
+            Err(e) if last_admin_refused(&e) => return last_admin(),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+        }
+    };
+    // Sessions the removal ended are signed out on the record, as a
+    // disable signs its own.
+    if !ended.is_empty() {
+        let evs: Vec<(&str, Ev)> = ended.iter().map(|session| (actor.as_str(), Ev::SignedOut { person: id.clone(), session: session.clone() })).collect();
+        if let Err(e) = k.emit_all(evs).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
+        }
+    }
+    let mut erased = match k.erase_person(&actor, &id).await {
         Ok(v) => v,
         Err(r) => return person_refused(r),
     };
-    if k.accounts.is_local(&id) {
-        if let Err(e) = k.accounts.remove_person(&id).await {
-            if last_admin_refused(&e) {
-                return last_admin();
-            }
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
-        }
-        Json(json!({ "erased": erased, "account_removed": true })).into_response()
-    } else {
-        let _ = k.accounts.set_status(&id, crate::accounts::Status::Disabled).await;
-        Json(json!({ "erased": erased, "account_removed": false })).into_response()
-    }
+    // The removal already ended their sessions; the erasure counts its
+    // own. The answer counts every session the deletion ended.
+    erased["sessions_ended"] = json!(ended.len() as u64 + erased["sessions_ended"].as_u64().unwrap_or(0));
+    Json(json!({ "erased": erased, "account_removed": local })).into_response()
 }
 
 /// Withdraw an invitation sent from here: the local account goes, never
@@ -427,18 +444,14 @@ async fn admin_invite(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Res
     if k.person(&id).is_some() {
         return (StatusCode::CONFLICT, Json(json!({ "error": "taken", "message": format!("{id} is already a person here.") }))).into_response();
     }
-    if let Err(e) = k.accounts.add_person(&id, name, Some(&email)).await {
-        return (StatusCode::CONFLICT, Json(json!({ "error": "taken", "message": format!("{e:#}") }))).into_response();
-    }
-    if let Err(e) = k.accounts.set_role(&id, role).await {
-        let _ = k.accounts.remove_person(&id).await;
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
-    }
-    match k.accounts.invite(&id, Some(&email)).await {
+    match k.accounts.invite_person(&id, name, Some(&email), role).await {
         Ok(token) => (StatusCode::CREATED, Json(json!({ "id": id, "email": email, "invite_token": token, "invite_expires": chrono::Utc::now() + chrono::Duration::days(crate::accounts::INVITE_DAYS) }))).into_response(),
         Err(e) => {
-            let _ = k.accounts.remove_person(&id).await;
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response()
+            let message = format!("{e:#}");
+            if message.contains("already a person") {
+                return (StatusCode::CONFLICT, Json(json!({ "error": "taken", "message": message }))).into_response();
+            }
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": message }))).into_response()
         }
     }
 }

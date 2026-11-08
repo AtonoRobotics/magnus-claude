@@ -740,6 +740,9 @@ impl Accounts {
         tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('magnus-accounts'))").await?;
         tx.execute("INSERT INTO public.account_passwords (person, phc, temporary) VALUES ($1, $2, false) ON CONFLICT (person) DO UPDATE SET phc = EXCLUDED.phc, temporary = false", &[&person, &phc]).await?;
         tx.execute("UPDATE public.account_statuses SET status = 'active' WHERE person = $1 AND status = 'invited'", &[&person]).await?;
+        // A finished invitation spends its token: accepting afterwards
+        // must not reset the new password (#527).
+        tx.execute("DELETE FROM public.account_invites WHERE person = $1", &[&person]).await?;
         tx.commit().await?;
         self.refresh_local(c).await?;
         Ok(())
@@ -796,6 +799,7 @@ impl Accounts {
             return Ok(Err(SignInError::Rejected));
         }
         tx.execute("UPDATE public.account_statuses SET status = 'active' WHERE person = $1 AND status = 'invited'", &[&person]).await?;
+        tx.execute("DELETE FROM public.account_invites WHERE person = $1", &[&person]).await?;
         tx.commit().await?;
         self.succeeded(&counter);
         self.refresh_local(c).await?;
@@ -866,6 +870,33 @@ impl Accounts {
         Ok(token)
     }
 
+    /// Invite someone new in one transaction: the person, their invited
+    /// status, their role and a single-use token. One call, so an
+    /// unfinished invitation — a role committed before its invited
+    /// status — never counts as an enabled admin (#527). Refuses a held
+    /// id; the caller refuses config ids, which this store cannot see.
+    pub async fn invite_person(&self, id: &str, name: &str, email: Option<&str>, role: Role) -> Result<String> {
+        let id = key(id);
+        anyhow::ensure!(valid_person_id(&id), "a person id is 1 to 64 letters, digits, dots, dashes and underscores");
+        let mut g = self.client().await?;
+        let c = g.as_mut().context("accounts connection")?;
+        let tx = c.transaction().await?;
+        tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('magnus-accounts'))").await?;
+        let n = tx.execute("INSERT INTO public.account_people (person, name, email) VALUES ($1, $2, $3) ON CONFLICT (person) DO NOTHING", &[&id, &name, &email]).await?;
+        anyhow::ensure!(n == 1, "{id} is already a person here");
+        tx.execute("INSERT INTO public.account_statuses (person, status) VALUES ($1, 'invited') ON CONFLICT (person) DO NOTHING", &[&id]).await?;
+        tx.execute("INSERT INTO public.account_roles (person, role) VALUES ($1, $2) ON CONFLICT (person) DO UPDATE SET role = EXCLUDED.role", &[&id, &role.as_str()]).await?;
+        let now = Utc::now();
+        tx.execute("DELETE FROM public.account_invites WHERE expires <= $1", &[&now]).await?;
+        let mut raw = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut raw);
+        let token = hex::encode(raw);
+        tx.execute("INSERT INTO public.account_invites (hash, person, email, expires) VALUES ($1, $2, $3, $4)", &[&token_hash(&token), &id, &email, &(now + Duration::days(INVITE_DAYS))]).await?;
+        tx.commit().await?;
+        self.refresh_local(c).await?;
+        Ok(token)
+    }
+
     /// Accept an invitation: the token with the new password activates the
     /// person. The person it activated, or None for a bad, used or expired
     /// token (all answered alike).
@@ -903,7 +934,9 @@ impl Accounts {
         };
         let salt = SaltString::generate(&mut OsRng);
         let phc = Argon2::default().hash_password(password.as_bytes(), &salt).map_err(|e| anyhow::anyhow!("hash: {e}"))?.to_string();
-        tx.execute("INSERT INTO public.account_passwords (person, phc) VALUES ($1, $2) ON CONFLICT (person) DO UPDATE SET phc = EXCLUDED.phc", &[&person, &phc]).await?;
+        // Permanent: accepting after a temporary password was set must
+        // not leave the account choosing forever (#527).
+        tx.execute("INSERT INTO public.account_passwords (person, phc, temporary) VALUES ($1, $2, false) ON CONFLICT (person) DO UPDATE SET phc = EXCLUDED.phc, temporary = false", &[&person, &phc]).await?;
         tx.execute("INSERT INTO public.account_statuses (person, status) VALUES ($1, 'active') ON CONFLICT (person) DO UPDATE SET status = 'active'", &[&person]).await?;
         tx.commit().await?;
         self.refresh_local(c).await?;
@@ -1887,6 +1920,54 @@ mod tests {
             let _ = accounts.sign_in_counted("ada", "wrong-password", &counter).await;
         }
         assert!(accounts.locked(&counter).is_none(), "failures locked with the lockout off");
+    }
+
+    /// Choosing with a temporary password spends the invitation: the
+    /// shown token cannot reset the new password afterwards — and neither
+    /// can one after a set password completes the invitation (#527).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finishing_an_invitation_spends_its_token() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        accounts.add_person("ada", "Ada", None).await.unwrap();
+        let token = accounts.invite("ada", None).await.unwrap();
+        accounts.set_temporary_password("ada", "a-temporary-password").await.unwrap();
+        assert!(matches!(accounts.choose_password("ada", "a-temporary-password", "a-long-password", "net:ada").await.unwrap(), Ok(())), "choosing failed");
+        assert!(accounts.accept("deadbeef-dead-beef-dead-beefdeadbeef", "another-long-password").await.unwrap().is_none(), "a made-up token accepts");
+        assert!(accounts.accept(&token, "a-reset-password").await.unwrap().is_none(), "the spent invitation still resets the password");
+        assert!(matches!(accounts.sign_in("ada", "a-long-password").await.unwrap(), Ok(())), "the password is not the chosen one");
+        // The same through a set password, which completes invitations too.
+        accounts.add_person("bea", "Bea", None).await.unwrap();
+        let token = accounts.invite("bea", None).await.unwrap();
+        accounts.set_password("bea", "bea-long-password").await.unwrap();
+        assert!(accounts.accept(&token, "a-reset-password").await.unwrap().is_none(), "the invitation outlived the set password");
+    }
+
+    /// Accepting installs a permanent password even when a temporary one
+    /// came first: the chosen password signs in, never MustChoose (#527).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accepting_clears_a_temporary_password() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        accounts.add_person("ada", "Ada", None).await.unwrap();
+        let token = accounts.invite("ada", None).await.unwrap();
+        accounts.set_temporary_password("ada", "a-temporary-password").await.unwrap();
+        assert_eq!(accounts.accept(&token, "a-long-password").await.unwrap().as_deref(), Some("ada"), "accepting failed");
+        assert!(matches!(accounts.sign_in("ada", "a-long-password").await.unwrap(), Ok(())), "the accepted password does not sign in");
+    }
+
+    /// One call makes an invited admin with a token: person, invited
+    /// status, role and token commit together, so an unfinished
+    /// invitation never counts as an enabled admin (#527).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invited_admin_is_made_in_one_call() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        let token = accounts.invite_person("dee", "Dee Ray", Some("dee@acme.test"), Role::Admin).await.unwrap();
+        assert_eq!(accounts.status("dee").await, Status::Invited, "not invited");
+        assert_eq!(accounts.role("dee").await, Role::Admin, "not an admin");
+        assert_eq!(accounts.accept(&token, "dee-long-password").await.unwrap().as_deref(), Some("dee"), "the token does not accept");
+        assert!(accounts.invite_person("dee", "Dee Two", None, Role::Member).await.is_err(), "a held id invites twice");
     }
 
     /// Sessions last the rules' longest session, and end when idle past
