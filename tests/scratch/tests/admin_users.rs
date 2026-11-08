@@ -1,17 +1,21 @@
 //! Users in the admin console (admin console spec, Users; invariant "Removing,
 //! disabling or demoting the last admin is refused"), against the local
 //! store through the kernel's own endpoints: an admin invites someone, the
-//! console shows the single-use token to pass on (the appliance sends no
-//! mail), they set their password with it and are active; a role changes
-//! only with a fresh password; the last admin can be neither demoted nor
-//! turned off; a person turned off loses every session here, and their
-//! schedules pause; each change is in the audit log.
+//! invitation is emailed when the appliance can send mail, else the console
+//! shows the single-use token to pass on; they set their password behind
+//! the link and are active; a role changes only with a fresh password; the
+//! last admin can be neither demoted nor turned off; a person turned off
+//! loses every session here, and their schedules pause; each change is in
+//! the audit log.
 
 use magnus_invariants::*;
 use magnus_scratch::admin::*;
+use magnus_scratch::mail;
 use magnus_scratch::*;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
+
+const LINK_BASE: &str = "https://recovery.example";
 
 struct Setup {
     app: Appliance,
@@ -27,8 +31,17 @@ impl Setup {
 
     /// With more of the console's settings (`refresh_seconds`, say).
     async fn start_with(step_up_seconds: i64, more: &[(&str, toml::Value)]) -> Setup {
+        Setup::start_full(step_up_seconds, more, Spec::default()).await
+    }
+
+    /// With the appliance sending mail through `mail_cfg` ([mail] settings).
+    async fn start_mail(step_up_seconds: i64, mail_cfg: Value) -> Setup {
+        Setup::start_full(step_up_seconds, &[], Spec::default().mail(mail_cfg)).await
+    }
+
+    async fn start_full(step_up_seconds: i64, more: &[(&str, toml::Value)], spec: Spec) -> Setup {
         let m = FakeModel::start(steps(vec![])).await;
-        let app = Appliance::start(Spec::default(), &m).await;
+        let app = Appliance::start(spec, &m).await;
         local_user(&app, "Alice", PASSWORD, true);
         let mine = format!("{}/32", lan_ip());
         let mut settings = vec![("step_up_seconds", step_up_seconds.into())];
@@ -102,8 +115,8 @@ async fn an_admin_invites_someone_who_sets_their_password_with_the_shown_token()
     assert_eq!((me["role"].as_str(), me["status"].as_str()), (Some("admin"), Some("active")), "{me}");
 
     // A member is invited without a step-up: the account waits for its
-    // password, and the console shows the single-use token to pass on —
-    // the appliance sends no mail, so no email is ever sent.
+    // password, and with no mail configured the console shows the
+    // single-use token to pass on instead of emailing it.
     let (st, v) = s.send(reqwest::Method::POST, "/users", &alice, Some(json!({ "email": "Dee@Acme.test", "name": "Dee Ray", "role": "member" }))).await;
     assert_eq!(st, StatusCode::CREATED, "{v}");
     assert_eq!((v["id"].as_str(), v["email"].as_str(), v["email_sent"].as_bool()), (Some("dee"), Some("dee@acme.test"), Some(false)), "{v}");
@@ -397,4 +410,55 @@ async fn two_changes_at_once_never_take_away_the_last_admin() {
         let done = [&r1, &r2].iter().filter(|(st, _)| st.is_success()).count();
         assert_eq!((done, refused), (1, 1), "round {round} ({what}): one change goes through and the other is refused: {r1:?} {r2:?}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invite_is_emailed_and_accepted_behind_its_link() {
+    let sink = mail::Inbox::start_local().await;
+    let s = Setup::start_mail(60, json!({ "host": "127.0.0.1", "port": sink.addr.port(), "tls": "none", "from": "magnus@example.com", "link_base": LINK_BASE })).await;
+    let alice = s.alice(false).await;
+
+    // Inviting emails the link and still shows the token beside it.
+    let (st, v) = s.send(reqwest::Method::POST, "/users", &alice, Some(json!({ "email": "dee@acme.test", "name": "Dee Ray", "role": "member" }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    assert_eq!(v["email_sent"], true, "{v}");
+    let first_token = v["invite_token"].as_str().unwrap().to_string();
+    let mailed = sink.wait_for("dee@acme.test").await;
+    let link = mail::text_of(&mailed.data).split_whitespace().find(|w| w.contains("/invite?token=")).expect("the mail holds no link").to_string();
+    assert!(link.starts_with(LINK_BASE), "the link ignores the configured base: {link}");
+    assert!(link.ends_with(&first_token), "the mailed link carries another token: {link}");
+
+    // Resending emails a fresh token and kills the old one.
+    let (st, v) = s.send(reqwest::Method::POST, "/users/dee/invite", &alice, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["email_sent"], true, "{v}");
+    let token = v["invite_token"].as_str().unwrap().to_string();
+    assert_ne!(token, first_token, "resending showed the same token");
+    for _ in 0..300 {
+        if sink.count_for("dee@acme.test") >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(sink.count_for("dee@acme.test"), 2, "resending emailed nothing");
+
+    // The old token is dead behind the page; the fresh one shows the form,
+    // and a mismatch re-renders without burning it.
+    let http = reqwest::Client::new();
+    let r = http.get(format!("{}/invite?token={first_token}", s.app.base)).send().await.unwrap();
+    assert!(r.text().await.unwrap().contains("used or expired"), "the replaced token still shows the form");
+    let page = format!("{}/invite?token={token}", s.app.base);
+    let r = http.get(&page).send().await.unwrap();
+    assert!(r.text().await.unwrap().contains("Accept your invitation"), "no form behind the link");
+    let r = http.post(format!("{}/invite", s.app.base)).form(&[("token", token.as_str()), ("password", "dee-long-password"), ("confirm", "something else")]).send().await.unwrap();
+    assert!(r.text().await.unwrap().contains("do not match"), "a mismatch was taken");
+
+    // Accepting behind the page activates: Dee signs in, and the token
+    // works once.
+    let r = http.post(format!("{}/invite", s.app.base)).form(&[("token", token.as_str()), ("password", "dee-long-password"), ("confirm", "dee-long-password")]).send().await.unwrap();
+    assert!(r.text().await.unwrap().contains("invitation is accepted"), "accepting did not take");
+    let (st, v) = s.app_sign_in("dee", "dee-long-password").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let r = http.get(&page).send().await.unwrap();
+    assert!(r.text().await.unwrap().contains("used or expired"), "the used token still shows the form");
 }

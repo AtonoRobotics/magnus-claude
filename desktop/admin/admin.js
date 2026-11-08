@@ -929,14 +929,20 @@ function drawUsers(view) {
   };
 }
 
-// An invitation's single-use token, shown once for the admin to pass on:
-// the appliance sends no email. The old token dies when a new one shows.
+// An invitation's single-use token: emailed when the appliance can send
+// mail, else shown once for the admin to pass on. The old token dies
+// when a new one shows.
 function showInviteToken(u, v) {
   const d = document.createElement("dialog");
   d.className = "ad-sheet";
   d.setAttribute("aria-labelledby", "invite-token-title");
-  d.innerHTML = `<h2 id="invite-token-title">Pass on the invitation</h2>
-    <p class="small muted">Pass this token on to ${esc(u?.name || "them")}. They set their password with it, within seven days. It is shown only now.</p>
+  const emailed = v.email_sent === true;
+  const title = emailed ? "Invitation emailed" : "Pass on the invitation";
+  const note = emailed
+    ? `Emailed to ${esc(v.email || u?.email || "them")}. They set their password behind its link, within seven days; the token below still works if the mail never arrives. It is shown only now.`
+    : `Pass this token on to ${esc(u?.name || "them")}. They set their password with it, within seven days. It is shown only now.`;
+  d.innerHTML = `<h2 id="invite-token-title">${title}</h2>
+    <p class="small muted">${note}</p>
     <label>Username <input readonly value="${esc(u?.id || v.id || "")}"></label>
     <label>Invitation token <input readonly id="invite-token-value" value="${esc(v.invite_token)}"></label>
     <div class="row ad-sheet-actions"><button type="button" id="invite-token-copy">Copy token</button><button type="button" class="primary" id="invite-token-done">Done</button></div>`;
@@ -977,7 +983,7 @@ function invite(view) {
   d.setAttribute("aria-labelledby", "invite-title");
   d.innerHTML = `<form id="invite-form">
     <h2 id="invite-title">Invite someone</h2>
-    <p class="small muted">The appliance makes their account and shows a token to pass on, which they set their password with. The appliance sends no email.</p>
+    <p class="small muted">The appliance makes their account and emails them a link to set their password with, or shows a token to pass on when it cannot send mail.</p>
     <label>Email <input name="email" type="email" required autocomplete="off"></label>
     <label>Name <input name="name" required autocomplete="off"></label>
     <label>Role <select name="role"><option value="member">Member</option><option value="admin">Admin (asks for your password again)</option></select></label>

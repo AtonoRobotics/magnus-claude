@@ -49,6 +49,7 @@ pub async fn serve(k: Arc<Kernel>, l: tokio::net::UnixListener) -> Result<()> {
         .route("/v1/admin/people/{id}/cancel-invite", post(admin_cancel_invite))
         .route("/v1/admin/people/{id}/invite", post(admin_resend_invite))
         .route("/v1/admin/people/{id}/invite/password", post(admin_invite_password))
+        .route("/v1/admin/mail", post(admin_mail))
         .route("/v1/admin/sign-in-policy", axum::routing::get(sign_in_policy).put(set_sign_in_policy))
         .route("/v1/people/{person}/schedules", axum::routing::get(person_schedules))
         .route("/v1/people/{person}/schedules/{id}/{change}", post(person_schedule))
@@ -447,7 +448,10 @@ async fn admin_invite(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Res
         return (StatusCode::CONFLICT, Json(json!({ "error": "taken", "message": format!("{id} is already a person here.") }))).into_response();
     }
     match k.accounts.invite_person(&id, name, Some(&email), role).await {
-        Ok(token) => (StatusCode::CREATED, Json(json!({ "id": id, "email": email, "invite_token": token, "invite_expires": chrono::Utc::now() + chrono::Duration::days(crate::accounts::INVITE_DAYS) }))).into_response(),
+        Ok(token) => {
+            let link = crate::api::link_base(&k).map(|base| format!("{base}/invite?token={token}"));
+            (StatusCode::CREATED, Json(json!({ "id": id, "email": email, "invite_token": token, "invite_link": link, "invite_expires": chrono::Utc::now() + chrono::Duration::days(crate::accounts::INVITE_DAYS) }))).into_response()
+        }
         Err(e) => {
             let message = format!("{e:#}");
             if message.contains("already a person") {
@@ -474,8 +478,34 @@ async fn admin_resend_invite(State(k): State<Arc<Kernel>>, axum::extract::Path(i
         return (StatusCode::CONFLICT, Json(json!({ "error": "not_invited", "message": "They have already chosen their password: this is an account, not an invitation." }))).into_response();
     }
     match k.accounts.invite(&id, None).await {
-        Ok(token) => Json(json!({ "id": id, "invite_token": token, "invite_expires": chrono::Utc::now() + chrono::Duration::days(crate::accounts::INVITE_DAYS) })).into_response(),
+        Ok(token) => {
+            let link = crate::api::link_base(&k).map(|base| format!("{base}/invite?token={token}"));
+            Json(json!({ "id": id, "invite_token": token, "invite_link": link, "invite_expires": chrono::Utc::now() + chrono::Duration::days(crate::accounts::INVITE_DAYS) })).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
+    }
+}
+
+/// Send mail for the console, which alone reaches this socket: invite
+/// links today, approval answers next (#535, #534). Answers whether it
+/// went out — false when no `[mail]` is set — so the console falls back
+/// to showing the link. A hung mail server must not hang the admin, so
+/// delivery gets thirty seconds.
+async fn admin_mail(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response {
+    let (Some(to), Some(subject), Some(text)) = (text(&b, "to"), text(&b, "subject"), text(&b, "text")) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "an email names its recipient, subject and text" }))).into_response();
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(30), crate::mailer::send(&k, &to, &subject, text)).await {
+        Ok(Ok(true)) => Json(json!({ "sent": true })).into_response(),
+        Ok(Ok(false)) => Json(json!({ "sent": false })).into_response(),
+        Ok(Err(e)) => {
+            tracing::error!("console mail to {to} failed: {e:#}");
+            Json(json!({ "sent": false })).into_response()
+        }
+        Err(_) => {
+            tracing::error!("console mail to {to} timed out");
+            Json(json!({ "sent": false })).into_response()
+        }
     }
 }
 
