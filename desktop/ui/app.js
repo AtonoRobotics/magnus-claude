@@ -98,76 +98,25 @@ const App = {
   sessionGeneration: 0,
 };
 
-// One atomic journal per signed-in person/appliance. Only message text,
-// selection and uploaded references enter it; File objects stay in memory.
+// Unsent messages, kept in memory for this session: what was typed and the
+// files attached survive redraws and moving between views. One per
+// conversation, and one for a new conversation in each project. Nothing is
+// written to the device; signing out forgets them (#544).
 const MessageDrafts = (() => {
-  let scope = null, rows = {}, timer = null, saved = true, epoch = 0;
-  const listeners = new Set(), originals = new Map(), retained = new Map();
-  const uid = () => crypto.randomUUID();
+  let person = null, rows = {}, epoch = 0;
+  const listeners = new Set(), originals = new Map();
   const emit = () => { for (const f of listeners) f(); };
-  const clone = value => JSON.parse(JSON.stringify(value));
-  function flush() {
-    clearTimeout(timer); timer = null;
-    if (!scope) return false;
-    try { localStorage.setItem(scope, JSON.stringify({version:2, rows})); saved = true; }
-    catch { saved = false; }
-    emit(); return saved;
+  const key = (thread, project) => thread ? `thread:${thread}` : `new:${project || ""}`;
+  function forThread(thread, project = null) {
+    const id = key(thread, project);
+    return rows[id] ||= {id, thread, project, text:"", files:[], selection:[0,0], anchor:null};
   }
-  function changed(immediate = false) {
-    saved = null; clearTimeout(timer);
-    if (immediate) flush(); else { timer = setTimeout(flush, 300); emit(); }
-  }
-  function open(appliance, person) {
-    if (scope) flush();
-    scope = `magnus.message-drafts.v2.${appliance}.${person}`; epoch++; originals.clear(); rows = {}; saved = true;
-    try {
-      const memory = retained.get(scope);
-      const raw = memory ? {version:2,rows:memory.rows} : JSON.parse(localStorage.getItem(scope) || "null");
-      if (memory) saved = memory.saved;
-      if (raw?.version === 2 && raw.rows && typeof raw.rows === "object") for (const [id,r] of Object.entries(raw.rows)) {
-        if (!r || typeof r.text !== "string" || !Array.isArray(r.files) || !Array.isArray(r.pending)) continue;
-        rows[id] = {...r,id};
-        for (const f of r.files) if (f.state === "uploading") { f.state = "failed"; f.error = "Upload interrupted. Select the file again to retry."; }
-        for (const p of r.pending) if (p.state === "dispatching") p.state = "unconfirmed";
-      }
-    } catch { saved = false; }
-    emit();
-  }
-  function leave() { flush(); if (scope) retained.set(scope,{rows,saved}); scope = null; rows = {}; epoch++; originals.clear(); }
-  function clear() {
-    clearTimeout(timer); timer = null;
-    if (scope) { try { localStorage.removeItem(scope); } catch { /* retain empty in-memory scope; report below */ saved = false; } }
-    rows = {}; if (scope) retained.set(scope,{rows,saved}); epoch++; originals.clear(); emit();
-  }
-  function create(project = null, thread = null) {
-    const r = {id:uid(), thread, project, text:"", files:[], pending:[], selection:[0,0], anchor:null};
-    rows[r.id] = r; changed(true); return r;
-  }
-  function forThread(thread, project = null) { return Object.values(rows).find(r => r.thread === thread && !r.localEntry) || create(project,thread); }
-  function discard(id) { if (!rows[id]) return; for (const f of rows[id].files) originals.delete(f.uid); delete rows[id]; changed(true); }
-  function acknowledge(record, submission, response) {
-    if (!rows[record.id] || !record.pending.some(p => p.id === submission.id)) return;
-    const secondary=!!(record.localEntry && record.thread);
-    record.thread = response.thread;
-    record.pending = record.pending.filter(p => p.id !== submission.id);
-    record.localEntry=secondary;
-    // Secondary thread drafts keep their independent navigation identity,
-    // including when the person edits only after this acknowledgement.
-    // The current editable draft was separated at dispatch. Never clear it
-    // on an acknowledgement arriving after the person continued typing.
-    changed(true);
-  }
-  function submit(record, body) {
-    const submission = {id:uid(),state:"dispatching",body:clone(body),editRevision:record.editRevision||0,draftText:record.text,selection:clone(record.selection),files:clone(record.files),at:new Date().toISOString()};
-    record.pending.push(submission); record.text = ""; record.files = []; record.selection = [0,0]; changed(true); return submission;
-  }
-  function reject(record, submission, message) {
-    submission.state = "rejected"; submission.error = message;
-    if (!record.text && !record.files.length && (record.editRevision||0)===(submission.editRevision||0)) { record.text = submission.draftText ?? submission.body.text; record.files = clone(submission.files); record.pending = record.pending.filter(p => p.id !== submission.id); record.selection=clone(submission.selection || [record.text.length,record.text.length]); }
-    changed(true);
-  }
-  return {open,leave,clear,create,forThread,discard,acknowledge,submit,reject,changed,flush,uid,
-    get:id=>rows[id], all:()=>Object.values(rows), originals, epoch:()=>epoch, saved:()=>saved,
+  function clear() { rows = {}; originals.clear(); epoch++; emit(); }
+  // Another person signing in on this computer starts with nothing.
+  function open(appliance, who) { const next = `${appliance}/${who}`; if (next !== person) { person = next; clear(); } }
+  function discard(id) { if (!rows[id]) return; for (const f of rows[id].files) originals.delete(f.uid); delete rows[id]; emit(); }
+  return {forThread, open, clear, discard, changed:emit, uid:()=>crypto.randomUUID(),
+    get:id=>rows[id], all:()=>Object.values(rows), originals, epoch:()=>epoch,
     subscribe:f=>{listeners.add(f);return()=>listeners.delete(f);}};
 })();
 
@@ -220,7 +169,7 @@ const ReadingAnchors = (() => {
       if(restoredTop!==null && Math.abs(root.scrollTop-restoredTop)<1){restoredTop=null;return;}
       restoredTop=null;
       if (!root.clientHeight) return;
-      const a = remember(root); if (!persist) a.follow=false; if (a.follow) root.parentElement?.querySelector("[data-jump-latest]")?.setAttribute("hidden", ""); if (record) { record.anchor = a; if (persist) MessageDrafts.changed(); }
+      const a = remember(root); if (!persist) a.follow=false; if (a.follow) root.parentElement?.querySelector("[data-jump-latest]")?.setAttribute("hidden", ""); if (record) record.anchor = a;
     };
     root.addEventListener("scroll",onScroll,{passive:true});
     const resize = new ResizeObserver(() => {
@@ -228,7 +177,7 @@ const ReadingAnchors = (() => {
     });
     const observe = () => { resize.disconnect(); resize.observe(root); for (const n of root.children) resize.observe(n); };
     const content = new MutationObserver(observe); content.observe(root,{childList:true}); observe();
-    return () => { if (record) { record.anchor = capture(root) || record.anchor; if (!persist && record.anchor) record.anchor.follow=false; } if (persist) MessageDrafts.flush(); root.removeEventListener("scroll",onScroll); content.disconnect(); resize.disconnect(); };
+    return () => { if (record) { record.anchor = capture(root) || record.anchor; if (!persist && record.anchor) record.anchor.follow=false; } root.removeEventListener("scroll",onScroll); content.disconnect(); resize.disconnect(); };
   }
   return {capture,restore,remember,hold,watch};
 })();
@@ -432,7 +381,6 @@ function navigationTree() {
   return `<div class="sect" role="group" aria-label="Projects"><div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more">All</a></div>
     ${App.projects.map(p=>`<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" title="${esc(p.name)}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>${App.threads.filter(t=>t.project?.id===p.id).map(conv).join("")}`).join("") || '<p class="small muted pad">No projects yet.</p>'}</div>
     <div class="sect" role="group" aria-label="Conversations"><div class="group"><span>Conversations</span></div>${loose.map(conv).join("") || '<p class="small muted pad">No conversations yet.</p>'}</div>
-    ${MessageDrafts.all().filter(r=>!r.thread || r.localEntry).length ? `<div class="sect" role="group" aria-label="Drafts"><div class="group"><span>Drafts</span></div>${MessageDrafts.all().filter(r=>!r.thread || r.localEntry).map(r=>{const href=`#/draft/${enc(r.id)}`,title=`Draft: ${(firstLine(r.text) || firstLine(r.pending[0]?.draftText || r.pending[0]?.body.text) || "New conversation").slice(0,80)}`;return `<a href="${href}" ${current(href)} title="${esc(title)}"><span class="ttl">${esc(title)}</span></a>`;}).join("")}</div>` : ""}
     <div class="sect"><a href="#/trash" ${current("#/trash")}>${icon("trash")}<span>Trash</span></a>${isDev() ? `<details class="developer-nav"><summary>Developer</summary>${[["runs","Runs"],["experiments","Experiments"],["system","System"],["policy","Policy"],["playbook","Playbook"]].map(([k,l])=>`<a href="#/dev/${k}" ${current(`#/dev/${k}`)}>${l}</a>`).join("")}</details>` : ""}</div>`;
 }
 function nav() {
@@ -699,8 +647,6 @@ function wireDocument() {
     if (history.state?.work) openPanel(history.state.work,{focus:true}); else closePanel(false);
   });
   document.addEventListener("click", e => { const b=e.target.closest("[data-attach-open]"); if (b) b.closest(".attachment-picker").querySelector("input").click(); });
-  window.addEventListener("pagehide", () => MessageDrafts.flush());
-  document.addEventListener("visibilitychange", () => { if (document.hidden) MessageDrafts.flush(); });
   Menus.install(); Tooltips.install(); wireMarkdown(document);
   const style = document.createElement("style"); style.textContent = Compose.markdownStyles; document.head.append(style);
   document.addEventListener("load", e => { if (e.target.matches?.("iframe.composed")) { try { wireMarkdown(e.target.contentDocument); sizeComposedFrame(e.target); } catch { /* frame unavailable */ } } }, true);
@@ -849,7 +795,6 @@ async function loadGlimpses(root) {
 }
 
 async function go() {
-  MessageDrafts.flush();
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   const h = location.hash || "#/home", routeFocus=App.routeFocus;App.routeFocus=null;
@@ -1290,11 +1235,12 @@ function chosenModel(root) {
 // cards as under Needs you), schedules, results and their files.
 function composer(placeholder, picker) {
   return `<form id="say" class="say"><label for="msg" class="sr">Message</label><textarea id="msg" rows="1" placeholder="${esc(placeholder)}" required></textarea>
-    <div id="submitted"></div><div class="row small" id="pending"></div>
-    <div class="draft-status"><span id="draft-state" class="small muted" tabindex="0"></span><button type="button" class="link small" data-discard-draft>Discard local draft</button></div>
+    <div class="row small" id="pending"></div>
     <div class="say-bar">${picker}<span class="grow"></span>${attachButton("Attach files", true)}<button class="send" id="send" aria-label="Send message" title="Send message">${icon("send")}<span class="sr">Send message</span></button></div></form>`;
 }
-// Files added to the next message: uploaded at once, sent with it.
+// Files added to the next message: uploaded at once, sent with it. What is
+// typed and attached stays with this conversation while the person moves
+// around the app (#544).
 function wireComposer(thread, project, record) {
   const form = $("#say"), box = $("#msg",form), pending = $("#pending",form), input = $("[data-attach]",form), epoch = MessageDrafts.epoch();
   let replacing = null, active = true;
@@ -1303,37 +1249,33 @@ function wireComposer(thread, project, record) {
   if (record.model && record.modelUnder === model.dataset.default && [...model.options].some(o => o.value === record.model)) model.value = record.model;
   const fit = () => { box.style.height = "auto"; box.style.height = `${Math.min(box.scrollHeight, innerHeight / 3)}px`; };
   const selected = () => { record.selection = [box.selectionStart,box.selectionEnd]; };
-  const read = (selection=true) => { if(record.text!==box.value)record.editRevision=(record.editRevision||0)+1; record.text = box.value; record.model = model?.value || ""; record.modelUnder = model?.dataset.default || ""; if(selection)selected(); MessageDrafts.changed(); };
-  const status = () => MessageDrafts.saved() === true ? "Draft saved" : MessageDrafts.saved() === false ? "Draft not saved on this device" : "Saving draft…";
+  const read = (selection=true) => { record.text = box.value; record.model = model?.value || ""; record.modelUnder = model?.dataset.default || ""; if(selection)selected(); };
   const chips = () => record.files.map(f => `<span class="attachment-chip" data-upload="${esc(f.uid)}"><span>${esc(f.name)}</span><span class="small muted">${esc(f.state === "ready" ? "Ready" : f.state === "uploading" ? "Uploading…" : f.state === "unavailable" ? "Unavailable" : "Failed")}</span>${f.error ? `<span class="small">${esc(f.error)}</span>` : ""}${["failed","unavailable"].includes(f.state) ? `<button type="button" data-retry-upload="${esc(f.uid)}">Retry</button>` : ""}<button type="button" class="icon-btn" data-remove-upload="${esc(f.uid)}" aria-label="Remove ${esc(f.name)} from message" title="Remove ${esc(f.name)} from message">${icon("close")}</button></span>`).join("");
-  const submitted = () => record.pending.map(p => `<div class="submitted-message" data-submission="${esc(p.id)}"><strong>${p.state === "dispatching" ? "Sending message…" : p.state === "rejected" ? "Message was not accepted" : "Send outcome not confirmed"}</strong><p class="small">${esc(p.state === "unconfirmed" ? "This device cannot safely retry this submission. Delivery is not confirmed; no automatic resend will occur. Discarding the local draft does not cancel submitted work." : p.error || "You can continue typing.")}</p><details><summary>Submitted message</summary><p class="pre">${esc(p.draftText ?? p.body.text)}</p>${p.files.map(f => `<span class="small">${esc(f.name)}</span>`).join(" ")}</details>${p.state === "rejected" ? `<button type="button" data-recover-message="${esc(p.id)}">Edit rejected message</button>` : ""}</div>`).join("");
+  // The record is shared by every composer mounted on this conversation:
+  // a send that finishes after the person left and came back updates the
+  // one now showing, and a send in flight stays in flight there too.
   const show = () => {
     if (!active || !form.isConnected) return;
-    // Input events synchronize edits immediately. A journal transition may
-    // come from an older view's request; recover it into this mounted view.
-    if(box.value!==record.text){box.value=record.text;box.setSelectionRange(...record.selection);fit();}
-    paint(pending,chips()); paint($("#submitted",form),submitted());
-    const saved = $("#draft-state",form); saved.textContent = status();
-    saved.title = MessageDrafts.saved() === true ? "Saved on this device" : status();
-    $("#send",form).disabled = record.files.some(f => f.state !== "ready");
+    if (box.value !== record.text) { box.value = record.text; fit(); }
+    paint(pending,chips());
+    $("#send",form).disabled = !!record.sending || record.files.some(f => f.state !== "ready");
   };
   const unsubscribe = MessageDrafts.subscribe(show);
   async function startUpload(slot, file) {
     const currentEpoch = MessageDrafts.epoch(); slot.state = "uploading"; delete slot.error;
-    MessageDrafts.originals.set(slot.uid,file); MessageDrafts.changed(true);
+    MessageDrafts.originals.set(slot.uid,file); MessageDrafts.changed();
     try {
       const [ref] = await upload([file],record.thread ? {thread:record.thread} : record.project ? {project:record.project} : {});
-      if (currentEpoch !== MessageDrafts.epoch() || !MessageDrafts.get(record.id) || !record.files.includes(slot)) return;
+      if (currentEpoch !== MessageDrafts.epoch() || !record.files.includes(slot)) return;
       Object.assign(slot,{id:ref.id,name:ref.name,media_type:ref.media_type,size:ref.size,state:"ready"});
     } catch (err) {
       if (currentEpoch !== MessageDrafts.epoch() || !record.files.includes(slot)) return;
       slot.state = "failed"; slot.error = err.message || "Upload failed. Retry or remove this file.";
     }
-    MessageDrafts.changed(true);
+    MessageDrafts.changed();
   }
   input.onchange = e => {
     const files = [...e.target.files]; e.target.value = "";
-    if(files.length)record.editRevision=(record.editRevision||0)+1;
     for (const [i,file] of files.entries()) {
       const slot = i === 0 && replacing ? record.files.find(f => f.uid === replacing) : null;
       const item = slot || {uid:MessageDrafts.uid(),name:file.name,media_type:file.type,size:file.size,state:"uploading"};
@@ -1344,74 +1286,58 @@ function wireComposer(thread, project, record) {
   };
   pending.onclick = e => {
     const remove = e.target.closest("[data-remove-upload]"), retry = e.target.closest("[data-retry-upload]");
-    if (remove) { record.editRevision=(record.editRevision||0)+1; const uid=remove.dataset.removeUpload; record.files=record.files.filter(f=>f.uid!==uid); MessageDrafts.originals.delete(uid); MessageDrafts.changed(true); }
+    // Removing a file takes it off this message; the shared file stays in Files.
+    if (remove) { const uid=remove.dataset.removeUpload; record.files=record.files.filter(f=>f.uid!==uid); MessageDrafts.originals.delete(uid); MessageDrafts.changed(); }
     if (retry) {
       const uid=retry.dataset.retryUpload, slot=record.files.find(f=>f.uid===uid), original=MessageDrafts.originals.get(uid);
       if (original) startUpload(slot,original); else { replacing=uid; input.click(); }
     }
   };
-  $("#submitted",form).onclick = e => {
-    const b=e.target.closest("[data-recover-message]"); if (!b) return;
-    const p=record.pending.find(p=>p.id===b.dataset.recoverMessage); if (!p) return;
-    // Recovery is another locally named draft so the current newer edits
-    // remain separate, rather than being concatenated or overwritten.
-    const recovered=MessageDrafts.create(record.project,record.thread);
-    recovered.localEntry=true; recovered.text=p.draftText ?? p.body.text; recovered.selection=[...(p.selection || [recovered.text.length,recovered.text.length])]; recovered.files=p.files; recovered.model=record.model; recovered.modelUnder=record.modelUnder;
-    record.pending=record.pending.filter(x=>x.id!==p.id); MessageDrafts.changed(true);
-    location.hash=`#/draft/${enc(recovered.id)}`;
-  };
-  form.querySelector("[data-discard-draft]").onclick = () => {
-    MessageDrafts.discard(record.id); location.hash=thread ? `#/chat/${enc(thread)}` : "#/chat/new";
-    if (thread && location.hash === `#/chat/${enc(thread)}`) go();
-  };
   box.oninput = () => { read(); fit(); };
-  box.onselect = () => { selected(); MessageDrafts.changed(); };
+  box.onselect = selected;
   model?.addEventListener("change",read);
+  // Enter sends; Shift+Enter and an input method's Enter do not.
   box.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); form.requestSubmit(); } };
   form.onsubmit = async e => {
     e.preventDefault(); read();
-    const text=record.text.trim(); if (!text) return;
+    const text=record.text.trim(); if (!text || record.sending) return;
     if (record.files.some(f=>f.state!=="ready")) { toast("Wait for uploads, or retry/remove unavailable files before sending."); return; }
-    // Do not dispatch a second first-thread request while the first is in
-    // flight; later text remains editable and is never silently queued.
-    if (!record.thread && record.pending.some(p=>p.state==="dispatching")) { toast("The first message is still sending. Your new draft is kept."); return; }
-    if (!record.thread && record.pending.some(p=>p.state==="unconfirmed")) { toast("The first message outcome is unconfirmed. Start a separately named conversation to send another message."); return; }
-    const body={text, model:chosenModel(form),files:record.files.map(f=>f.id)};
+    const files=[...record.files], body={text, model:chosenModel(form), files:files.map(f=>f.id)};
     if (record.thread) body.thread=record.thread; else if (record.project) body.project=record.project;
-    const submission=MessageDrafts.submit(record,body);
-    box.value=record.text; fit(); show();
+    record.sending=true; MessageDrafts.changed();
     try {
       const response=await api("POST","/v1/chat",body);
-      if (epoch !== MessageDrafts.epoch() || !MessageDrafts.get(record.id)) return;
-      if (!response || typeof response.thread !== "string" || typeof response.task_id !== "string") throw new Error("The server response did not confirm the message identity.");
-      const first=!record.thread;
-      MessageDrafts.acknowledge(record,submission,response);
-      // Do not navigate a newer view because an older send completed.
-      if (first && App.workspace && App.draftRecord?.id === record.id) { history.replaceState({...history.state,draft:record.id},"",`#/chat/${enc(response.thread)}`); await go(); }
+      if (epoch !== MessageDrafts.epoch()) return;
+      // Clear what was sent; anything typed or attached meanwhile stays.
+      if (record.text.trim()===text) { record.text=""; record.selection=[0,0]; }
+      record.files=record.files.filter(f=>!files.includes(f));
+      if (!record.thread && response?.thread) {
+        MessageDrafts.discard(record.id);
+        const next=MessageDrafts.forThread(response.thread); next.text=record.text; next.files=record.files; next.model=record.model; next.modelUnder=record.modelUnder;
+        if (App.workspace && App.draftRecord === record) { history.replaceState(history.state,"",`#/chat/${enc(response.thread)}`); record.sending=false; await go(); return; }
+      }
       await refresh();
     } catch (err) {
-      if (epoch !== MessageDrafts.epoch() || !MessageDrafts.get(record.id)) return;
-      const rejection=err.status>=400 && err.status<500 && typeof err.body?.error === "string";
-      if (rejection) { MessageDrafts.reject(record,submission,err.message); if (active && form.isConnected && !box.value) { box.value=record.text; fit(); } }
-      else { submission.state="unconfirmed"; MessageDrafts.changed(true); }
-      toast(rejection ? err.message : "Send outcome not confirmed. Your submitted message is kept on this device.");
-    }
-    show(); sidebar();
+      if (epoch !== MessageDrafts.epoch()) return;
+      // The message stays in the box. A lost response may still have been
+      // accepted, so say so and never send it again by itself (UX-08).
+      const rejected=err.status>=400 && err.status<500 && typeof err.body?.error === "string";
+      toast(rejected ? err.message : "Send outcome not confirmed. Your message is still here; check the conversation before sending it again.");
+      if (!rejected) refresh().catch(()=>{});
+    } finally { record.sending=false; MessageDrafts.changed(); }
   };
-  // Input/select events already preserve the last editable caret. A browser
-  // may collapse an unfocused textarea selection during link navigation.
-  onLeave(() => { if (active) { read(false); MessageDrafts.flush(); active=false; unsubscribe(); } });
+  onLeave(() => { if (active) { read(false); active=false; unsubscribe(); } });
   // Only a missing/expired reference is marked unavailable. A connection
   // failure does not silently turn a valid attachment into a missing one.
   for (const f of record.files.filter(f=>f.state==="ready")) api("GET",`/v1/files/${enc(f.id)}/info`).catch(err=>{
-    if ([404,410].includes(err.status) && epoch===MessageDrafts.epoch() && record.files.includes(f)) { f.state="unavailable"; f.error="Select the file again or remove it."; MessageDrafts.changed(true); }
+    if ([404,410].includes(err.status) && epoch===MessageDrafts.epoch() && record.files.includes(f)) { f.state="unavailable"; f.error="Select the file again or remove it."; MessageDrafts.changed(); }
   });
   fit(); show();
   box.setSelectionRange(...(record.selection || [box.value.length,box.value.length]));
 }
 
 // Lays out a conversation; false when the person moved on while it loaded.
-async function chatLayout(main, thread, project, draftRecord) {
+async function chatLayout(main, thread, project) {
   const seq = App.seq;
   App.thread = thread;
   sidebar();
@@ -1422,12 +1348,12 @@ async function chatLayout(main, thread, project, draftRecord) {
   const picker = await modelPicker();
   if (seq !== App.seq) return false;
   paint($("#composer", main), composer(thread ? "Reply, or give Magnus more to do" : "Ask anything, or give Magnus work to do", picker));
-  const record = draftRecord || MessageDrafts.forThread(thread,project);
+  const record = MessageDrafts.forThread(thread,project);
   App.draftRecord = record;
   wireComposer(thread, project,record);
   $("[data-jump-latest]",main).onclick = () => {
     const root=$("#thread",main); root.scrollTop=root.scrollHeight; ReadingAnchors.remember(root);
-    record.anchor={follow:true}; MessageDrafts.changed(); $("[data-jump-latest]",main).hidden=true;
+    record.anchor={follow:true}; $("[data-jump-latest]",main).hidden=true;
   };
   onLeave(ReadingAnchors.watch($("#thread",main),record));
   return true;
@@ -1445,17 +1371,16 @@ function convHead(thread, project) {
     ${thread ? `<div class="row">${moveControl(thread, here?.project, App.projects, true)}<button class="icon-btn" data-trash="${esc(thread)}" data-then="#/home" title="Delete conversation">${icon("trash")}<span class="sr">Delete conversation</span></button></div>` : ""}`);
 }
 
-async function showNewChat(main, project, draftRecord) {
-  const record = draftRecord || MessageDrafts.create(project);
-  if (!draftRecord) history.replaceState({...history.state,draft:record.id},"",`#/draft/${enc(record.id)}`);
-  if (!await chatLayout(main,null,project,record)) return;
+async function showNewChat(main, project) {
+  if (!await chatLayout(main,null,project)) return;
+  const record = App.draftRecord;
   paint($("#thread",main), `<p class="muted hello">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm. What it starts shows here as it goes.</p>`);
-  if (App.appSearch) { record.text=App.appSearch;record.selection=[record.text.length,record.text.length];App.appSearch=null;MessageDrafts.changed(true); }
+  if (App.appSearch) { record.text=App.appSearch;record.selection=[record.text.length,record.text.length];App.appSearch=null;const box=$("#msg",main);if(box){box.value=record.text;box.setSelectionRange(...record.selection);} }
   sidebar();
 }
 
-async function showThread(main, thread, draftRecord) {
-  if (!await chatLayout(main, thread, null, draftRecord)) return;
+async function showThread(main, thread) {
+  if (!await chatLayout(main, thread, null)) return;
   // An answer being written shows as it streams; `live` holds its text so far.
   const ui = { editing: null, sharing: null, declining: null, people: [], live: {} };
   const listening = {};
@@ -1642,11 +1567,8 @@ async function home(main, panel = App.openAfter) {
 }
 
 route(/^#\/(?:home|chat)?$/, main => home(main), true);
-route(/^#\/draft\/([^/]+)$/, (main,id) => {
-  const record=MessageDrafts.get(id);
-  if (!record) { location.hash="#/chat/new"; return; }
-  return record.thread ? showThread(main,record.thread,record) : showNewChat(main,record.project,record);
-},true);
+// Draft links from the earlier durable-draft build open a new conversation.
+route(/^#\/draft\/([^/]+)$/, () => { location.replace("#/chat/new"); }, true);
 route(/^#\/chat\/new$/, m => showNewChat(m), true);
 route(/^#\/chat\/new\/([^/]+)$/, (m, project) => showNewChat(m, project), true);
 // Where the views over tasks, schedules, files and decisions used to be
@@ -3510,9 +3432,7 @@ async function boot() {
   Resources.reset();
   App.me = await api("GET", "/v1/me");
   Theme.scope(App.appliance, App.me.id);
-  App.unsubscribeDrafts?.();
   MessageDrafts.open(App.appliance, App.me.id);
-  App.unsubscribeDrafts=MessageDrafts.subscribe(()=>{ if ($("#side")) sidebar(); });
   const host = await Magnus.systemLook().catch(() => ({}));
   const canRead = () => { App.canReadAloud = !!App.me?.read_aloud || !!host.native_speech || ("speechSynthesis" in window && speechSynthesis.getVoices().length > 0); };
   canRead();
@@ -3537,8 +3457,6 @@ async function boot() {
 }
 
 function stop() {
-  App.unsubscribeDrafts?.(); App.unsubscribeDrafts=null;
-  MessageDrafts.leave();
   App.sessionGeneration++;
   Resources.reset();
   background.forEach(clearInterval); background = [];
