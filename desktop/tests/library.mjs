@@ -116,7 +116,8 @@ await step("open files from the library", async () => {
 });
 
 await step("the task is listed in Tasks", async () => {
-  await page.getByRole("link", { name: /^Tasks/ }).click();
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
+  await page.getByRole("navigation", { name: "Activity views" }).getByRole("link", { name: "Tasks", exact: true }).click();
   // Under the request that started it, a conversation; done work is folded.
   const group = page.locator("#detail .tgroup", { hasText: "Total the prices" });
   await group.locator("summary").click();

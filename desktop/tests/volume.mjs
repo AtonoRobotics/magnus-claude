@@ -51,7 +51,8 @@ await step("sign in", async () => {
 
 await step("everything that needs you fits one screen", async () => {
   // Tasks opens beside the conversation.
-  await page.getByRole("link", { name: /^Tasks/ }).click();
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
+  await page.getByRole("navigation", { name: "Activity views" }).getByRole("link", { name: "Tasks", exact: true }).click();
   const rows = page.locator('#detail [data-section="needs"] .trow[data-state="needs"]');
   await until(`${needs} tasks needing you`, async () => await rows.count() === Number(needs));
   const order = await page.locator("section.tsec").evaluateAll(els => els.map(e => e.dataset.section));

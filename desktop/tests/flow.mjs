@@ -188,7 +188,8 @@ if (question) await step("ask in a new conversation and see the answer", async (
   await page.waitForFunction(n => document.querySelectorAll('#side a[href^="#/chat/"]').length === n, before + 1, { timeout: T });
   await shot("chat thread");
   // A chat turn is a conversation, not a task.
-  await page.getByRole("link", { name: /^Tasks/ }).click();
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
+  await page.getByRole("navigation", { name: "Activity views" }).getByRole("link", { name: "Tasks", exact: true }).click();
   await panel.locator("section.tsec").first().waitFor({ timeout: T });
   if (await panel.getByText(question).count()) throw new Error("the chat message is listed as a task");
   // Opening Magnus again returns to the latest conversation, not a blank one.
