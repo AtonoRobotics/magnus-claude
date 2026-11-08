@@ -1,7 +1,7 @@
 // One workspace, in the installed app: research is started in a
 // conversation, approved there, its result read and its file downloaded
-// there, and a schedule created and checked there, without leaving the
-// conversation: no page loads, no change of address, no navigation at all.
+// there, and a schedule created and checked there. Deliberately opened work
+// creates Back/Forward history while the conversation stays mounted.
 // The decisions are the same cards under Needs you, and acting on one in the
 // thread updates Needs you.
 //
@@ -59,7 +59,8 @@ let address;
 await step("start research in a conversation", async () => {
   await run(`window.__workspace = "kept"; window.__navigations = [];
     addEventListener("hashchange", e => __navigations.push("hashchange " + e.newURL));
-    addEventListener("popstate", () => __navigations.push("popstate " + location.href));`);
+    addEventListener("popstate", () => __navigations.push("popstate " + location.href));
+    const push=history.pushState.bind(history);history.pushState=(state,...args)=>{__navigations.push({kind:'work',work:state?.work});return push(state,...args);};`);
   await measure("start work", async () => {
     await say(research);
     await xpath(`${thread}//div[@data-kind='message']//div[normalize-space()='${research}']`);
@@ -118,6 +119,8 @@ await step("read the result beside the conversation", async () => {
   await xpath(`${panel}//div[contains(@class,'detail-head')]//h2[normalize-space()='Q3 revenue summary']`);
   await xpath(`${panel}//div[contains(@class,'detail-head')]//span[contains(@class,'checks')]`);
   await xpath(`${panel}//div[contains(@class,'seg')]//button[@aria-selected='true' and normalize-space()='Result']`);
+  const verification=await run("return !!document.querySelector('#detail details.verification-detail:not([open])')");
+  if(verification)await click(css('#detail details.verification-detail > summary'));
   await xpath(`${panel}//div[contains(@class,'evidence') and contains(@class,'pass')]//span[normalize-space()='holds']`);
   await xpath(`${panel}//div[contains(@class,'evidence') and contains(@class,'pass')]//span[normalize-space()='confirmed by ${person}']`);
 });
@@ -156,10 +159,11 @@ await step("check the schedule's status in the conversation and beside it", asyn
   await xpath(`${panel}//button[normalize-space()='Stop this schedule']`);
 });
 
-await step("no navigation happened", async () => {
+await step("work history preserves the conversation and page", async () => {
   const [kept, navigations, now] = await run("return [window.__workspace, window.__navigations, location.hash]");
   if (kept !== "kept") throw new Error("the page was loaded again");
-  if (navigations.length) throw new Error(`the app navigated: ${navigations.join("; ")}`);
+  if(navigations.some(n=>typeof n!=='object' || n.kind!=='work' || !n.work))throw new Error(`The conversation navigated: ${JSON.stringify(navigations)}`);
+  if(navigations.length<4)throw new Error('Deliberately opened work did not create navigable history');
   if (now !== address) throw new Error(`the address changed from ${address} to ${now}`);
   await xpath(`${thread}//div[@data-kind='message']//div[normalize-space()='${research}']`);
 });

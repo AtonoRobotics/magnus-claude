@@ -20,7 +20,7 @@ const { step, css, xpath, button, click, type, text, seen, run, until } = d;
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await step("connect Claude", async () => {
-  await click(xpath("//nav//a[normalize-space()='Settings']"));
+  await click(xpath("//nav//a[@aria-label='Settings']"));
   await click(xpath("//nav[@aria-label='Settings']//a[normalize-space()='Models']"));
   const card = "//div[@data-adapter='anthropic']";
   await click(button("Connect", card));
@@ -40,7 +40,7 @@ await step("ask for the work in a conversation", async () => {
 });
 
 await step("approve under Needs you", async () => {
-  await click(xpath("//nav//button[starts-with(normalize-space(),'Needs you')]"));
+  await click(xpath("//nav//*[self::a or self::button][@aria-label='Needs you' or starts-with(@aria-label,'Needs you,') or starts-with(normalize-space(),'Needs you')]"));
   const card = "//aside[@id='detail']//article[contains(@class,'approval')]";
   await xpath(`${card}//*[contains(., 'A task is waiting')]`);
   // The panel fades in; its text is read once it is shown.
@@ -55,6 +55,8 @@ await step("approve under Needs you", async () => {
 await step("see the outcome with its evidence, beside the conversation", async () => {
   await click(xpath("//div[@id='thread']//li[@data-chat-task][@data-status='completed']//a"));
   await xpath("//aside[@id='detail']//div[contains(@class,'detail-head')]//span[contains(@class,'chip') and normalize-space()='Done']");
+  const verification=await run("return !!document.querySelector('#detail details.verification-detail:not([open])')");
+  if(verification)await click(css('#detail details.verification-detail > summary'));
   await xpath("//div[contains(@class,'evidence') and contains(@class,'pass')]//span[normalize-space()='holds']");
   await xpath(`//div[contains(@class,'evidence') and contains(@class,'pass')]//span[normalize-space()='confirmed by ${person}']`);
   const sandbox = await run("return document.querySelector('iframe.composed')?.getAttribute('sandbox')");

@@ -132,6 +132,7 @@ await step("see the outcome with its evidence", async () => {
   await page.locator("#thread [data-chat-task][data-status=completed]").waitFor({ timeout: T });
   await page.locator("#thread [data-chat-task] a.rg-row").click();
   await panel.locator(".detail-head .chip", { hasText: "Done" }).waitFor({ timeout: T });
+  await panel.locator(".verification-detail > summary").click();
   await panel.locator(".evidence.pass").first().waitFor({ timeout: T });
   const holds = await panel.locator(".evidence.pass .chip.ok", { hasText: "holds" }).count();
   if (!holds) throw new Error("no criterion shows that it holds in the world");
