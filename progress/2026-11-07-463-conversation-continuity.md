@@ -1,2 +1,0 @@
-
-Read CI 42432202208 before correcting its failures: all four failures were ambiguous existing browser selectors, with no continuity product failure established by that run. Exact Message targeting landed as #480, and exact New conversation targeting landed as #488. This progress update starts a new merged-checkout run with both independent fixes, without merging master merely to update the branch. Review findings about late rejection/recovered drafts remain #482 and must be corrected before full continuity acceptance.
