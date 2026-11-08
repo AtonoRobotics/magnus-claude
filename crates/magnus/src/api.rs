@@ -462,7 +462,12 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         )
             .into_response()
     };
-    if let Some(id) = k.identity() {
+    // A person only the appliance itself keeps signs in against the local
+    // store below, not the provider: Keycloak never heard of them (#429).
+    // A person the config knows keeps the provider path, even with a local
+    // namesake, as `resolve_person` resolves the config first.
+    let provider = k.identity().filter(|_| k.cfg.person(&person).is_some() || !k.accounts.is_local(&person));
+    if let Some(id) = provider {
         // The owner's backup: their password set on the appliance and a
         // one-time code printed on its machine (`magnus sign-in-code`),
         // which no relay or tunnel can carry. Counted apart, so wrong
@@ -544,7 +549,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
             }
         };
     }
-    if k.cfg.person(&person).is_none() {
+    if k.cfg.person(&person).is_none() && !k.accounts.is_local(&person) {
         // Same answer and the same work as a wrong password.
         let _ = k.accounts.sign_in(&person, password);
         return err(StatusCode::UNAUTHORIZED, "The name or password is wrong.");
@@ -704,7 +709,7 @@ async fn accept_invite(State(k): K, Extension(t): Extension<Transport>, ConnectI
         return err(StatusCode::BAD_REQUEST, format!("a password needs at least {} characters", k.cfg.sign_in.min_password_length));
     }
     match k.accounts.accept(&k.cfg.sign_in, token, password) {
-        Ok(Some(person)) if k.cfg.person(&person).is_some() => Json(json!({ "person": person })).into_response(),
+        Ok(Some(person)) if k.cfg.person(&person).is_some() || k.accounts.is_local(&person) => Json(json!({ "person": person })).into_response(),
         Ok(_) => err(StatusCode::UNAUTHORIZED, "The invitation is wrong or expired."),
         Err(e) => internal(e),
     }
@@ -1442,7 +1447,7 @@ async fn put_policy(State(k): K, h: HeaderMap, Path(layer): Path<String>, Json(b
     // may set it as well as the owner (DECISIONS, Layering).
     let task_of = layer.strip_prefix("task/").and_then(|t| k.read(|s| s.tasks.get(t).map(|t| t.person.clone())));
     let valid = layer == "org"
-        || layer.strip_prefix("user/").is_some_and(|u| k.cfg.person(u).is_some())
+        || layer.strip_prefix("user/").is_some_and(|u| k.cfg.person(u).is_some() || k.accounts.is_local(u))
         || layer.strip_prefix("group/").is_some_and(|g| !g.is_empty() && !g.contains('/'))
         || task_of.is_some();
     if !valid {
