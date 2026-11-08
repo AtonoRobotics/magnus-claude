@@ -41,12 +41,12 @@ await step("sign in", async () => {
   await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
 const card = page.locator(`#detail [data-needs="${item}"] .conncard[data-connector="${app}"]`);
 await step(decides ? "the approval carries the app's card, saying the person needs to sign in again" : "the approval in Needs you carries the app's card, asking to sign in again", async () => {
-  await page.locator("nav button.needs").click();
+  await page.locator("nav a.needs").click();
   await card.waitFor({ timeout: T });
   if ((await card.getAttribute("data-state")) !== "needs_attention") throw new Error(`the card is ${await card.getAttribute("data-state")}, not needs_attention`);
   await card.locator(".ctile").waitFor({ timeout: T });

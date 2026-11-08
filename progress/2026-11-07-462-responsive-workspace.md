@@ -1,3 +1,5 @@
 # Responsive workspace implementation in progress
 
 Added fit-based shell/navigation, resizable separator, work expansion and region selectors, mobile drawer, rail named navigation flyout, Activity views, and Apps display-name/search copy. Syntax checks pass. Still integrating the theme and continuity foundations, then real browser/native reference-viewport checks and full CI. This is not acceptance evidence yet.
+
+Real rebuilt-appliance Chromium regression passed: 1920×1080, 1440×900, 1280×720, 1024×768, 390×844 and 320px reflow; available-width 936/995/996 clamps; keyboard resize/Home/End; stored width restoration; rail/flyout; work expansion/selection/restore; drawer focus restoration; composer reachability; no page-wide overflow; Activity/Schedules and immediate Apps discovery route. Inspected 1440px and 390px screenshots. Fixed discovery to read current input, independent of the catalog's debounce. Integrated the landed theme foundation through an actual CSS conflict; theme checks pass. Continuity integration and full native/CI checks remain before this PR can ship.

@@ -2131,7 +2131,7 @@ async function showLibrary(main, name) {
     <div class="lchips" role="group" aria-label="Category">${CATEGORIES.map(([k, l]) => `<button data-lib-cat="${k}" aria-pressed="${Lib.cat === k}">${esc(l)}</button>`).join("")}</div>
     <p><a href="#/chat/new" data-ask-app>Ask Magnus to find an app</a></p><div id="lib-sections">${librarySections(connectors)}</div></div>`;
   bindConnectorActs(main);
-  $("[data-ask-app]",main).onclick=()=>{App.appSearch=Lib.q ? `Find an app for: ${Lib.q}` : "Help me find an app for ";};
+  $("[data-ask-app]",main).onclick=()=>{const query=$("#libq",main).value.trim(); App.appSearch=query ? `Find an app for: ${query}` : "Help me find an app for ";};
   let t;
   $("#libq", main).addEventListener("input", e => { clearTimeout(t); t = setTimeout(() => { Lib.q = e.target.value.trim(); $("#lib-sections", main).innerHTML = librarySections(Lib.all); }, 150); });
 }

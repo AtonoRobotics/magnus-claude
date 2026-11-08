@@ -50,7 +50,7 @@ await step("sign in and open the conversation", async () => {
   await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
   await page.locator(`nav.side a[href="#/chat/${thread}"]`).first().click();
   await page.locator(`#thread [data-chat-task="${memo}"]`).waitFor({ timeout: T });
 });

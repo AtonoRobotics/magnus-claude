@@ -42,7 +42,7 @@ const step = async (name, f) => {
 };
 const T = 60_000;
 // Signed in: the workspace, with Needs you in the sidebar.
-const home = () => page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+const home = () => page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
 const panel = page.locator("#detail");
 const conversations = () => page.locator('#side a[href^="#/chat/"]').count();
 
@@ -110,7 +110,7 @@ await step("ask for the work in a conversation", async () => {
 });
 
 await step("approve under Needs you", async () => {
-  await page.getByRole("button", { name: /^Needs you/ }).click();
+  await page.getByRole("link", { name: /^Needs you/ }).click();
   const card = panel.locator("article.item.approval").first();
   await card.waitFor({ timeout: T });
   // The card says exactly what will happen, and that a task waits on it.

@@ -66,7 +66,7 @@ await step("a conversation to look at, with Needs you open beside it", async () 
   await type(css("#msg"), "Hello");
   await click(css("#send"));
   await xpath("//div[@id='thread']//div[@data-answer]");
-  await click(xpath("//nav//button[contains(@class,'needs')]"));
+  await click(xpath("//nav//a[contains(@class,'needs')]"));
   await xpath("//aside[@id='detail']//h2[normalize-space()='Needs you']");
 });
 
@@ -86,7 +86,7 @@ for (const [theme, material] of ["light", "dark", "ember", "corporate"].flatMap(
     await choose("theme", theme);
     await choose("material", material);
     await click(xpath("//nav//a[contains(@title,'Hello')]"));
-    await click(xpath("//nav//button[contains(@class,'needs')]"));
+    await click(xpath("//nav//a[contains(@class,'needs')]"));
     await xpath("//aside[@id='detail']//h2[normalize-space()='Needs you']");
     // Let the panel settle before measuring what is under each text.
     await until("the panel to settle", () => run("return document.getElementById('detail').getAnimations().length === 0"));
@@ -113,13 +113,13 @@ await step("the accent colors what acts", async () => {
 
 await step("motion: full glides the panel in, off moves nothing", async () => {
   // The panel is closed (Settings has the page to itself); it opens now.
-  await click(xpath("//nav//button[contains(@class,'needs')]"));
+  await click(xpath("//nav//a[contains(@class,'needs')]"));
   const moving = await run("return document.getElementById('detail').getAnimations().length");
   if (!moving) throw new Error("the panel did not glide in with motion on Full");
   await appearance();
   await choose("motion", "off");
   await click(xpath("//nav//a[contains(@title,'Hello')]"));
-  await click(xpath("//nav//button[contains(@class,'needs')]"));
+  await click(xpath("//nav//a[contains(@class,'needs')]"));
   await xpath("//aside[@id='detail']//h2[normalize-space()='Needs you']");
   const still = await run("return document.getAnimations().length");
   if (still) throw new Error(`${still} animations ran with motion Off`);

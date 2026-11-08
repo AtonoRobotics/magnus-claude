@@ -57,7 +57,7 @@ async function open(look) {
   await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
   return page;
 }
 
@@ -81,8 +81,8 @@ for (const [name, look] of LOOKS) {
       main: cs("main", "backgroundColor"),
       search: cs("#find input", "backgroundColor"),
       searchHeight: cs("#find input", "height"),
-      needsHeight: cs("nav.side button.needs", "height"),
-      needsRadius: cs("nav.side button.needs", "borderTopLeftRadius"),
+      needsHeight: cs("nav.side a.needs", "height"),
+      needsRadius: cs("nav.side a.needs", "borderTopLeftRadius"),
       seg: cs("aside.detail .seg.layers", "backgroundColor"),
       segOn: cs("aside.detail .seg.layers button.on", "backgroundColor"),
       tabHeight: cs("aside.detail .seg.layers button", "height"),

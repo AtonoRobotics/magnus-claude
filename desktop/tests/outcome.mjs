@@ -36,7 +36,7 @@ await step("sign in", async () => {
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   // Signed in: the workspace, with Needs you in the sidebar.
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
 await step("the itinerary is on the page in full", async () => {

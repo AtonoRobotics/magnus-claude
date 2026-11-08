@@ -82,7 +82,7 @@ await step("the task's row shows its live status, and the approval it waits on f
 
 await step("Needs you counts it and holds the same card", async () => {
   await until("Needs you to count 1", async () => (await count()) === "1" || null);
-  await click(xpath("//nav//button[contains(@class,'needs')]"));
+  await click(xpath("//nav//a[contains(@class,'needs')]"));
   await xpath(`${panel}//article[@data-id='${approval}']`);
 });
 

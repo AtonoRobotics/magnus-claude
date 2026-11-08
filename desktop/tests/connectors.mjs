@@ -65,12 +65,12 @@ await step("sign in", async () => {
   await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
 await step("the Library is the catalog: Google's apps under Popular, each a card with a plus to connect", async () => {
-  await page.getByRole("link", { name: "Library", exact: true }).click();
-  await page.getByRole("heading", { name: "Library", level: 1 }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: "Apps", exact: true }).click();
+  await page.getByRole("heading", { name: "Apps", level: 1 }).waitFor({ timeout: T });
   const popular = page.locator(".lsect[data-section=popular]");
   for (const name of ["google-gmail", "google-calendar", "google-drive", "google-chat"]) await popular.locator(`[data-connector=${name}]`).getByRole("button", { name: /^Connect / }).waitFor({ timeout: T });
   const gmail = popular.locator("[data-connector=google-gmail]");
@@ -87,17 +87,17 @@ await step("the Library is the catalog: Google's apps under Popular, each a card
 });
 
 await step("search and the category chips narrow the catalog", async () => {
-  await page.getByLabel("Search connectors").fill("drive");
+  await page.getByLabel("Search apps and capabilities").fill("drive");
   await page.locator("[data-connector=google-gmail]").waitFor({ state: "detached", timeout: T });
   await page.locator("[data-connector=google-drive]").waitFor({ timeout: T });
   // What the person wants done finds it too.
-  await page.getByLabel("Search connectors").fill("free or busy");
+  await page.getByLabel("Search apps and capabilities").fill("free or busy");
   await page.locator("[data-connector=google-drive]").waitFor({ state: "detached", timeout: T });
-  await page.getByLabel("Search connectors").fill("find a time");
+  await page.getByLabel("Search apps and capabilities").fill("find a time");
   await page.locator("[data-connector=google-calendar]").waitFor({ timeout: T });
-  await page.getByLabel("Search connectors").fill("no-such-app-anywhere");
+  await page.getByLabel("Search apps and capabilities").fill("no-such-app-anywhere");
   await page.getByText("No connectors match.", { exact: false }).waitFor({ timeout: T });
-  await page.getByLabel("Search connectors").fill("");
+  await page.getByLabel("Search apps and capabilities").fill("");
   await page.getByRole("button", { name: "Files", exact: true }).click();
   await page.locator("[data-connector=google-drive]").waitFor({ timeout: T });
   await page.locator("[data-connector=google-gmail]").waitFor({ state: "detached", timeout: T });
@@ -143,7 +143,7 @@ await step("a connector opens to what Magnus can do with it and what it asks for
   if (PROTOCOL.test(text)) throw new Error(`the connector's page shows a protocol word: ${text}`);
   if (await d.getByRole("button", { name: /Disconnect/ }).count()) throw new Error("Disconnect is offered for an app the person has not connected");
   if (await typed("main")) throw new Error("the connector's page asks for something to be typed");
-  await page.getByRole("link", { name: "Library", exact: true }).first().click();
+  await page.getByRole("link", { name: "Apps", exact: true }).first().click();
   await page.locator("[data-connector=google-gmail]").waitFor({ timeout: T });
 });
 

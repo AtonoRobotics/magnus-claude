@@ -882,7 +882,7 @@ fn the_update_script_waits_two_minutes_to_accept_the_task_that_waited() {
 #[test]
 fn the_apps_script_reaches_the_library_through_the_sidebar() {
     let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests/app-apps.mjs")).unwrap();
-    assert!(src.contains("//nav//a[normalize-space()='Library']"), "{src}");
+    assert!(src.contains("//nav//a[normalize-space()='Apps']"), "{src}");
     assert!(!src.contains("location.hash"), "hash navigation is back:\n{src}");
 }
 
