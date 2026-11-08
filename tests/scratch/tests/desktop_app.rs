@@ -932,3 +932,23 @@ import("node:http").then(async ({{ createServer }}) => {{
     let out = std::process::Command::new("node").args(["--input-type=module", "-e", &check]).output().expect("run node");
     assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
 }
+
+/// Real native scrolling and click behavior; fixed responses are UI fixtures.
+#[tokio::test(flavor="multi_thread")]
+#[ignore="needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn completed_work_links_remain_operable_while_native_content_resizes() {
+    use magnus_invariants::{script,tool,contract_unchecked,FakeWeb,Reply};
+    let model=script(|c|async move{
+        if c.body["system"].to_string().contains("in a chat") {
+            let first=c.messages().first().cloned().unwrap_or_default();
+            let text=first["content"].as_array().and_then(|b|b.last()).and_then(|b|b["text"].as_str()).unwrap_or_default();
+            if text=="Create anchor work" && c.turn()==0 {return tool("create_task",json!({"title":"Anchor work","text":"Show a readable result"}));}
+            return Reply::Text("Recorded in the actual conversation.".into());
+        }
+        match c.turn(){0=>contract_unchecked("Readable work","A useful result"),_=>tool("task_complete",json!({"summary":"Anchor work finished","deliverable":[{"type":"text","text":"Actual stored anchor deliverable"},{"type":"bar_chart","title":"Comparison","labels":["A","B"],"values":[1,2]}]}))}
+    });
+    let mut f=Flow::start_with(FakeWeb::start(&[]).await,model).await;
+    let _kc=keycloak(&mut f.app).await;let (url,fingerprint)=f.with_tls().await;
+    let d=Driver::start().await;let (ok,log)=d.script("app-continuity.mjs",&url,&fingerprint,&[]).await;
+    assert!(ok,"Native work link failed:\n{log}");
+}

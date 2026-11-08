@@ -84,6 +84,138 @@ const App = {
   seq: 0,
 };
 
+// One atomic journal per signed-in person/appliance. Only message text,
+// selection and uploaded references enter it; File objects stay in memory.
+const MessageDrafts = (() => {
+  let scope = null, rows = {}, timer = null, saved = true, epoch = 0;
+  const listeners = new Set(), originals = new Map(), retained = new Map();
+  const uid = () => crypto.randomUUID();
+  const emit = () => { for (const f of listeners) f(); };
+  const clone = value => JSON.parse(JSON.stringify(value));
+  function flush() {
+    clearTimeout(timer); timer = null;
+    if (!scope) return false;
+    try { localStorage.setItem(scope, JSON.stringify({version:2, rows})); saved = true; }
+    catch { saved = false; }
+    emit(); return saved;
+  }
+  function changed(immediate = false) {
+    saved = null; clearTimeout(timer);
+    if (immediate) flush(); else { timer = setTimeout(flush, 300); emit(); }
+  }
+  function open(appliance, person) {
+    if (scope) flush();
+    scope = `magnus.message-drafts.v2.${appliance}.${person}`; epoch++; originals.clear(); rows = {}; saved = true;
+    try {
+      const memory = retained.get(scope);
+      const raw = memory ? {version:2,rows:memory.rows} : JSON.parse(localStorage.getItem(scope) || "null");
+      if (memory) saved = memory.saved;
+      if (raw?.version === 2 && raw.rows && typeof raw.rows === "object") for (const [id,r] of Object.entries(raw.rows)) {
+        if (!r || typeof r.text !== "string" || !Array.isArray(r.files) || !Array.isArray(r.pending)) continue;
+        rows[id] = {...r,id};
+        for (const f of r.files) if (f.state === "uploading") { f.state = "failed"; f.error = "Upload interrupted. Select the file again to retry."; }
+        for (const p of r.pending) if (p.state === "dispatching") p.state = "unconfirmed";
+      }
+    } catch { saved = false; }
+    emit();
+  }
+  function leave() { flush(); if (scope) retained.set(scope,{rows,saved}); scope = null; rows = {}; epoch++; originals.clear(); }
+  function clear() {
+    clearTimeout(timer); timer = null;
+    if (scope) { try { localStorage.removeItem(scope); } catch { /* retain empty in-memory scope; report below */ saved = false; } }
+    rows = {}; if (scope) retained.set(scope,{rows,saved}); epoch++; originals.clear(); emit();
+  }
+  function create(project = null, thread = null) {
+    const r = {id:uid(), thread, project, text:"", files:[], pending:[], selection:[0,0], anchor:null};
+    rows[r.id] = r; changed(true); return r;
+  }
+  function forThread(thread, project = null) { return Object.values(rows).find(r => r.thread === thread) || create(project,thread); }
+  function discard(id) { if (!rows[id]) return; for (const f of rows[id].files) originals.delete(f.uid); delete rows[id]; changed(true); }
+  function acknowledge(record, submission, response) {
+    if (!rows[record.id] || !record.pending.some(p => p.id === submission.id)) return;
+    record.thread = response.thread;
+    record.pending = record.pending.filter(p => p.id !== submission.id);
+    record.localEntry = !!(record.localEntry && (record.text || record.files.length || record.pending.length));
+    // The current editable draft was separated at dispatch. Never clear it
+    // on an acknowledgement arriving after the person continued typing.
+    changed(true);
+  }
+  function submit(record, body) {
+    const submission = {id:uid(),state:"dispatching",body:clone(body),files:clone(record.files),at:new Date().toISOString()};
+    record.pending.push(submission); record.text = ""; record.files = []; record.selection = [0,0]; changed(true); return submission;
+  }
+  function reject(record, submission, message) {
+    submission.state = "rejected"; submission.error = message;
+    if (!record.text && !record.files.length) { record.text = submission.body.text; record.files = clone(submission.files); record.pending = record.pending.filter(p => p.id !== submission.id); record.selection=[record.text.length,record.text.length]; }
+    changed(true);
+  }
+  return {open,leave,clear,create,forThread,discard,acknowledge,submit,reject,changed,flush,uid,
+    get:id=>rows[id], all:()=>Object.values(rows), originals, epoch:()=>epoch, saved:()=>saved,
+    subscribe:f=>{listeners.add(f);return()=>listeners.delete(f);}};
+})();
+
+// Capture an entry and its relative offset before content/layout changes.
+const ReadingAnchors = (() => {
+  const state = new WeakMap();
+  function capture(root) {
+    if (!root) return null;
+    if (!root.clientHeight) return state.get(root) || null;
+    const bounds = root.getBoundingClientRect();
+    const frames=[...root.querySelectorAll("iframe.composed")];
+    for (const [frameIndex,frame] of frames.entries()) {
+      const rect=frame.getBoundingClientRect();
+      if (rect.top>bounds.top || rect.bottom<=bounds.top) continue;
+      try {
+        const nodes=[...frame.contentDocument.querySelectorAll("h1,h2,h3,h4,p,li,tr,pre")];
+        const index=nodes.findIndex(n=>rect.top+n.getBoundingClientRect().bottom>bounds.top);
+        if (index>=0) return {follow:root.scrollHeight-root.scrollTop-root.clientHeight<=80,top:root.scrollTop,frameIndex,nodeIndex:index,offset:rect.top+nodes[index].getBoundingClientRect().top-bounds.top};
+      } catch { /* frame not loaded */ }
+    }
+    const node = [...root.querySelectorAll("[data-entry], [data-shown], [data-key], h2, h3, p")].find(n => n.getBoundingClientRect().bottom > bounds.top);
+    return {follow:root.scrollHeight-root.scrollTop-root.clientHeight<=80, top:root.scrollTop,
+      entry:node?.dataset.entry, shown:node?.dataset.shown, key:node?.dataset.key,
+      index:node ? [...root.querySelectorAll("h2,h3,p")].indexOf(node) : -1,
+      offset:node ? node.getBoundingClientRect().top-bounds.top : 0};
+  }
+  function restore(root, anchor) {
+    if (!root || !anchor || !root.clientHeight) return;
+    if (anchor.follow) root.scrollTop = root.scrollHeight;
+    else if (anchor.frameIndex!==undefined) {
+      try {
+        const frame=root.querySelectorAll("iframe.composed")[anchor.frameIndex];
+        const node=frame?.contentDocument.querySelectorAll("h1,h2,h3,h4,p,li,tr,pre")[anchor.nodeIndex];
+        root.scrollTop=node ? root.scrollTop+frame.getBoundingClientRect().top+node.getBoundingClientRect().top-root.getBoundingClientRect().top-anchor.offset : anchor.top;
+      } catch { root.scrollTop=anchor.top; }
+    } else {
+      const node = anchor.entry ? root.querySelector(`[data-entry="${CSS.escape(anchor.entry)}"]`) : anchor.shown ? root.querySelector(`[data-shown="${CSS.escape(anchor.shown)}"]`) : anchor.key ? root.querySelector(`[data-key="${CSS.escape(anchor.key)}"]`) : root.querySelectorAll("h2,h3,p")[anchor.index];
+      root.scrollTop = node ? root.scrollTop + node.getBoundingClientRect().top-root.getBoundingClientRect().top-anchor.offset : anchor.top;
+    }
+  }
+  function remember(root, preferred) { const a = preferred || capture(root); if (root) state.set(root,a); return a; }
+  function hold(root, change) { const a = capture(root); const result = change(); restore(root,a); if (root) state.set(root,a); return result; }
+  function watch(root, record, persist=true) {
+    let restoredTop = null;
+    if (record?.anchor) restore(root,record.anchor); else restore(root,{follow:true});
+    state.set(root,record?.anchor || capture(root));
+    const onScroll = () => {
+      // Ignore only our own restored offset. Deliberate scrolling can
+      // arrive before the next animation frame and must update the anchor.
+      if(restoredTop!==null && Math.abs(root.scrollTop-restoredTop)<1){restoredTop=null;return;}
+      restoredTop=null;
+      if (!root.clientHeight) return;
+      const a = remember(root); if (!persist) a.follow=false; if (a.follow) root.parentElement?.querySelector("[data-jump-latest]")?.setAttribute("hidden", ""); if (record) { record.anchor = a; if (persist) MessageDrafts.changed(); }
+    };
+    root.addEventListener("scroll",onScroll,{passive:true});
+    const resize = new ResizeObserver(() => {
+      restore(root,state.get(root));restoredTop=root.scrollTop;
+    });
+    const observe = () => { resize.disconnect(); resize.observe(root); for (const n of root.children) resize.observe(n); };
+    const content = new MutationObserver(observe); content.observe(root,{childList:true}); observe();
+    return () => { if (record) { record.anchor = capture(root) || record.anchor; if (!persist && record.anchor) record.anchor.follow=false; } if (persist) MessageDrafts.flush(); root.removeEventListener("scroll",onScroll); content.disconnect(); resize.disconnect(); };
+  }
+  return {capture,restore,remember,hold,watch};
+})();
+
 // A question before an action, asked in the app itself: a webview may
 // ignore window.confirm and answer no without showing it, so a button
 // behind one did nothing at all (the Windows app, owner 2026-11-03:
@@ -148,12 +280,22 @@ function paint(el, html) {
   $$("[data-draft]", el).forEach(i => { if (!(active !== i && active?.dataset?.draft === i.dataset.draft)) drafts[i.dataset.draft] = i.type === "checkbox" ? i.checked : i.value; });
   const opened = new Set($$("details[data-key]", el).filter(d => d.open).map(d => d.dataset.key));
   const focused = el.contains(active) ? active?.dataset?.draft : undefined;
+  const control = el.contains(active) && !focused ? {
+    id:active.id, entry:active.closest("[data-entry]")?.dataset.entry,
+    act:active.dataset?.msgAct, label:active.getAttribute("aria-label"), open:active.dataset?.open,
+    tag:active.tagName.toLowerCase(),
+  } : null;
   el.innerHTML = html;
   el._html = html;
   loadMarkdownImages(el);
   $$("details[data-key]", el).forEach(d => { if (opened.has(d.dataset.key)) d.open = true; });
   $$("[data-draft]", el).forEach(i => { const v = drafts[i.dataset.draft]; if (v === undefined) return; if (i.type === "checkbox") i.checked = !!v; else i.value = v; });
-  if (focused) $(`[data-draft="${CSS.escape(focused)}"]`, el)?.focus();
+  if (focused) $(`[data-draft="${CSS.escape(focused)}"]`, el)?.focus({preventScroll:true});
+  if (control) {
+    const within=control.entry ? $(`[data-entry="${CSS.escape(control.entry)}"]`,el) : el;
+    const target=control.id ? $(`#${CSS.escape(control.id)}`,el) : within && (control.act ? $(`[data-msg-act="${CSS.escape(control.act)}"]`,within) : control.open ? $(`[data-open="${CSS.escape(control.open)}"]`,within) : control.label ? $(`${control.tag}[aria-label="${CSS.escape(control.label)}"]`,within) : null);
+    target?.focus({preventScroll:true});
+  }
   Menus.restore(menuState);
   return true;
 }
@@ -217,6 +359,7 @@ function navigationTree() {
   return `<div class="sect" role="group" aria-label="Projects"><div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more">All</a></div>
     ${App.projects.map(p=>`<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" title="${esc(p.name)}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>${App.threads.filter(t=>t.project?.id===p.id).map(conv).join("")}`).join("") || '<p class="small muted pad">No projects yet.</p>'}</div>
     <div class="sect" role="group" aria-label="Conversations"><div class="group"><span>Conversations</span></div>${loose.map(conv).join("") || '<p class="small muted pad">No conversations yet.</p>'}</div>
+    ${MessageDrafts.all().filter(r=>!r.thread || r.localEntry).length ? `<div class="sect" role="group" aria-label="Drafts"><div class="group"><span>Drafts</span></div>${MessageDrafts.all().filter(r=>!r.thread || r.localEntry).map(r=>{const href=`#/draft/${enc(r.id)}`,title=`Draft: ${(firstLine(r.text) || firstLine(r.pending[0]?.draftText || r.pending[0]?.body.text) || "New conversation").slice(0,80)}`;return `<a href="${href}" ${current(href)} title="${esc(title)}"><span class="ttl">${esc(title)}</span></a>`;}).join("")}</div>` : ""}
     <div class="sect"><a href="#/trash" ${current("#/trash")}>${icon("trash")}<span>Trash</span></a>${isDev() ? `<details class="developer-nav"><summary>Developer</summary>${[["runs","Runs"],["experiments","Experiments"],["system","System"],["policy","Policy"],["playbook","Playbook"]].map(([k,l])=>`<a href="#/dev/${k}" ${current(`#/dev/${k}`)}>${l}</a>`).join("")}</details>` : ""}</div>`;
 }
 function nav() {
@@ -286,7 +429,7 @@ const Workspace = (() => {
   function install() {
     expanded=false;region="conversation";forceExpanded=false;
     const d=$("#navigation-drawer");d.addEventListener("click",e=>{if(e.target===d){const r=d.getBoundingClientRect();if(e.clientX<r.left || e.clientX>r.right || e.clientY<r.top || e.clientY>r.bottom)closeDrawer();}});d.addEventListener("close",()=>{const nav=$("nav.side",d);if(nav)$(".shell").prepend(nav);if(restoreDrawer)$("[data-open-drawer]")?.focus({preventScroll:true});});
-    $("#workspace-bar").onclick=e=>{const b=e.target.closest("button");if(!b)return;if(b.matches("[data-open-drawer]"))openDrawer();if(b.dataset.region)choose(b.dataset.region);if(b.matches("[data-expand-work]")){expanded=!expanded;if(expanded)region="work";remember();update();}if(b.matches("[data-close-work]"))closePanel();};
+    $("#workspace-bar").onclick=e=>{const b=e.target.closest("button");if(!b)return;if(b.matches("[data-open-drawer]"))openDrawer();if(b.dataset.region)choose(b.dataset.region);if(b.matches("[data-expand-work]")){expanded=!expanded;if(expanded)region="work";remember();update();}if(b.matches("[data-close-work]"))closePanel(true);};
     $("[data-nav-toggle]").onclick=()=>{const m=update(),navigation=m.nav==="compact" ? "expanded" : "compact";forceExpanded=navigation==="expanded";Theme.set({navigation});update();};
     $("[data-close-drawer]").onclick=()=>closeDrawer();
     $("[data-rail-search]").onclick=()=>{const dialog=$("#workspace-search");dialog.showModal();$("input",dialog).focus();};
@@ -322,13 +465,14 @@ function shell() {
   $("nav.side").addEventListener("click", async e => {
     if (e.target.closest("[data-act=restart-update]")) return restartToUpdate();
     if (e.target.closest("[data-act=sign-out]")) {
+      MessageDrafts.clear();
       stop();
       await Magnus.signOut();
       location.hash = "";
       start();
     }
   });
-  $("#find").onsubmit = e => { e.preventDefault(); const q = $("#q").value.trim(); if (q) openPanel(`search:${q}`); };
+  $("#find").onsubmit = e => { e.preventDefault(); const q = $("#q").value.trim(); if (q) openPanel(`search:${q}`,{history:true,focus:true,opener:$("#q")}); };
   sidebar();
   wirePanel();
   if (!App.wired) { App.wired = true; wireDocument(); }
@@ -473,6 +617,13 @@ function wireMarkdown(root) {
 
 // What works wherever it is shown, set once for the page.
 function wireDocument() {
+  window.addEventListener("popstate",()=>{
+    if (App.currentHash!==location.hash || !App.workspace) return;
+    if (history.state?.work) openPanel(history.state.work,{focus:true}); else closePanel(false);
+  });
+  document.addEventListener("click", e => { const b=e.target.closest("[data-attach-open]"); if (b) b.closest(".attachment-picker").querySelector("input").click(); });
+  window.addEventListener("pagehide", () => MessageDrafts.flush());
+  document.addEventListener("visibilitychange", () => { if (document.hidden) MessageDrafts.flush(); });
   Menus.install(); Tooltips.install(); wireMarkdown(document);
   const style = document.createElement("style"); style.textContent = Compose.markdownStyles; document.head.append(style);
   document.addEventListener("load", e => { if (e.target.matches?.("iframe.composed")) { try { wireMarkdown(e.target.contentDocument); sizeComposedFrame(e.target); } catch { /* frame unavailable */ } } }, true);
@@ -485,8 +636,9 @@ function wireDocument() {
     e.preventDefault();
     // From Settings, Trash or a developer view: back to the conversation,
     // with it open beside.
+    Panel.opener=o; Panel.focusNext=true;
     if (!App.workspace) { App.openAfter = o.dataset.open; location.hash = "#/home"; return; }
-    openPanel(o.dataset.open);
+    openPanel(o.dataset.open,{history:true,focus:true,opener:o});
   });
   // A decision is made from its card wherever the card is shown: in its
   // conversation, beside it, or under Needs you.
@@ -591,8 +743,7 @@ function moveControl(item, current, projects, compact = false) {
 }
 // A file input behind a button; `onFiles` gets the chosen files.
 function attachButton(label = "Add files", iconOnly = false) {
-  return iconOnly ? `<label class="icon-btn attach" title="${esc(label)}">${icon("attach")}<span class="sr">${esc(label)}</span><input type="file" multiple hidden data-attach></label>`
-    : `<label class="button attach">${esc(label)}<input type="file" multiple hidden data-attach></label>`;
+  return `<span class="attachment-picker"><button type="button" class="${iconOnly ? "icon-btn" : "button"} attach" data-attach-open aria-label="${esc(label)}" title="${esc(label)}">${iconOnly ? icon("attach") + `<span class="sr">${esc(label)}</span>` : esc(label)}</button><input type="file" multiple hidden data-attach></span>`;
 }
 
 // A file shown where it is mentioned: a glimpse of it (an image, or the
@@ -621,10 +772,12 @@ async function loadGlimpses(root) {
 }
 
 async function go() {
+  MessageDrafts.flush();
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   const h = location.hash || "#/home", routeFocus=App.routeFocus;App.routeFocus=null;
   queueMicrotask(()=>Workspace.update());
+  App.currentHash=location.hash;
   // A view still loading when the person moves on stops where it is: only
   // the latest navigation draws. Each view gets a main of its own, so one
   // still loading (and its handlers) only ever touches the main it left,
@@ -640,6 +793,10 @@ async function go() {
       sidebar();
       try {
         await view(main, ...m.slice(1).map(x => x === undefined ? x : decodeURIComponent(x)));
+        if (seq===App.seq) App.currentHash=location.hash;
+        if (seq===App.seq && workspace && history.state && "work" in history.state) {
+          if (history.state.work) await openPanel(history.state.work); else closePanel();
+        }
         if(seq===App.seq && routeFocus && [document.body,routeFocus.opener,$("[data-open-drawer]")].includes(document.activeElement)) {
           const target=routeFocus.composer ? $("#msg",main) : $("h1,h2",main) || main;
           if(target){if(!target.matches("input,textarea"))target.tabIndex=-1;target.focus({preventScroll:true});}
@@ -1050,62 +1207,144 @@ function chosenModel(root) {
 // as it goes: tasks with their status, the decisions they wait on (the same
 // cards as under Needs you), schedules, results and their files.
 function composer(placeholder, picker) {
-  return `<form id="say" class="say"><label for="msg" class="sr">Message</label><textarea id="msg" rows="1" data-draft="chat-${esc(location.hash)}" placeholder="${esc(placeholder)}" required></textarea>
-    <div class="row small" id="pending"></div>
+  return `<form id="say" class="say"><label for="msg" class="sr">Message</label><textarea id="msg" rows="1" placeholder="${esc(placeholder)}" required></textarea>
+    <div id="submitted"></div><div class="row small" id="pending"></div>
+    <div class="draft-status"><span id="draft-state" class="small muted" tabindex="0"></span><button type="button" class="link small" data-discard-draft>Discard local draft</button></div>
     <div class="say-bar">${picker}<span class="grow"></span>${attachButton("Attach files", true)}<button class="send" id="send" title="Send">${icon("send")}<span class="sr">Send</span></button></div></form>`;
 }
 // Files added to the next message: uploaded at once, sent with it.
-function wireComposer(thread, project) {
-  let files = [];
-  const shown = () => { $("#pending").innerHTML = files.map(fileChip).join(" "); };
-  $("#say [data-attach]").onchange = async e => {
-    try { files.push(...await upload(e.target.files, thread ? { thread } : project ? { project } : {})); } catch (err) { toast(err.message); }
-    e.target.value = "";
-    shown();
-  };
-  const box = $("#msg");
-  box.focus();
-  box.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#say").requestSubmit(); } };
-  // The box grows with the message, up to a third of the window.
+function wireComposer(thread, project, record) {
+  const form = $("#say"), box = $("#msg",form), pending = $("#pending",form), input = $("[data-attach]",form), epoch = MessageDrafts.epoch();
+  let replacing = null, active = true;
+  box.value = record.text;
+  const model = $("[data-model]",form);
+  if (record.model && [...model.options].some(o => o.value === record.model)) model.value = record.model;
   const fit = () => { box.style.height = "auto"; box.style.height = `${Math.min(box.scrollHeight, innerHeight / 3)}px`; };
-  box.oninput = fit;
-  fit();
-  $("#say").onsubmit = async e => {
-    e.preventDefault();
-    const text = box.value.trim();
-    if (!text) return;
-    $("#send").disabled = true;
-    try {
-      const body = { text, model: chosenModel($("#say")), files: files.map(f => f.id) };
-      if (thread) body.thread = thread;
-      else if (project) body.project = project;
-      const r = await api("POST", "/v1/chat", body);
-      delete drafts[`chat-${location.hash}`];
-      box.value = "";
-      fit();
-      files = [];
-      shown();
-      // A new conversation becomes the one shown, in place.
-      if (!thread) { history.replaceState(null, "", `#/chat/${enc(r.thread)}`); go(); }
-      else await refresh();
-    } catch (err) { toast(err.message); }
-    if ($("#send")) $("#send").disabled = false;
+  const selected = () => { record.selection = [box.selectionStart,box.selectionEnd]; };
+  const read = () => { record.text = box.value; record.model = model?.value || ""; selected(); MessageDrafts.changed(); };
+  const status = () => MessageDrafts.saved() === true ? "Draft saved" : MessageDrafts.saved() === false ? "Draft not saved on this device" : "Saving draft…";
+  const chips = () => record.files.map(f => `<span class="attachment-chip" data-upload="${esc(f.uid)}"><span>${esc(f.name)}</span><span class="small muted">${esc(f.state === "ready" ? "Ready" : f.state === "uploading" ? "Uploading…" : f.state === "unavailable" ? "Unavailable" : "Failed")}</span>${f.error ? `<span class="small">${esc(f.error)}</span>` : ""}${["failed","unavailable"].includes(f.state) ? `<button type="button" data-retry-upload="${esc(f.uid)}">Retry</button>` : ""}<button type="button" class="icon-btn" data-remove-upload="${esc(f.uid)}" aria-label="Remove ${esc(f.name)} from message" title="Remove ${esc(f.name)} from message">${icon("close")}</button></span>`).join("");
+  const submitted = () => record.pending.map(p => `<div class="submitted-message" data-submission="${esc(p.id)}"><strong>${p.state === "dispatching" ? "Sending message…" : p.state === "rejected" ? "Message was not accepted" : "Send outcome not confirmed"}</strong><p class="small">${esc(p.state === "unconfirmed" ? "This device cannot safely retry this submission. Delivery is not confirmed; no automatic resend will occur. Discarding the local draft does not cancel submitted work." : p.error || "You can continue typing.")}</p><details><summary>Submitted message</summary><p class="pre">${esc(p.body.text)}</p>${p.files.map(f => `<span class="small">${esc(f.name)}</span>`).join(" ")}</details>${p.state === "rejected" ? `<button type="button" data-recover-message="${esc(p.id)}">Edit rejected message</button>` : ""}</div>`).join("");
+  const show = () => {
+    if (!active || !form.isConnected) return;
+    // Input events synchronize edits immediately. A journal transition may
+    // come from an older view's request; recover it into this mounted view.
+    if(box.value!==record.text){box.value=record.text;box.setSelectionRange(...record.selection);fit();}
+    paint(pending,chips()); paint($("#submitted",form),submitted());
+    const saved = $("#draft-state",form); saved.textContent = status();
+    saved.title = MessageDrafts.saved() === true ? "Saved on this device" : status();
+    $("#send",form).disabled = record.files.some(f => f.state !== "ready");
   };
+  const unsubscribe = MessageDrafts.subscribe(show);
+  async function startUpload(slot, file) {
+    const currentEpoch = MessageDrafts.epoch(); slot.state = "uploading"; delete slot.error;
+    MessageDrafts.originals.set(slot.uid,file); MessageDrafts.changed(true);
+    try {
+      const [ref] = await upload([file],record.thread ? {thread:record.thread} : record.project ? {project:record.project} : {});
+      if (currentEpoch !== MessageDrafts.epoch() || !MessageDrafts.get(record.id) || !record.files.includes(slot)) return;
+      Object.assign(slot,{id:ref.id,name:ref.name,media_type:ref.media_type,size:ref.size,state:"ready"});
+    } catch (err) {
+      if (currentEpoch !== MessageDrafts.epoch() || !record.files.includes(slot)) return;
+      slot.state = "failed"; slot.error = err.message || "Upload failed. Retry or remove this file.";
+    }
+    MessageDrafts.changed(true);
+  }
+  input.onchange = e => {
+    const files = [...e.target.files]; e.target.value = "";
+    for (const [i,file] of files.entries()) {
+      const slot = i === 0 && replacing ? record.files.find(f => f.uid === replacing) : null;
+      const item = slot || {uid:MessageDrafts.uid(),name:file.name,media_type:file.type,size:file.size,state:"uploading"};
+      if (!slot) record.files.push(item);
+      item.name = file.name; startUpload(item,file);
+    }
+    replacing = null;
+  };
+  pending.onclick = e => {
+    const remove = e.target.closest("[data-remove-upload]"), retry = e.target.closest("[data-retry-upload]");
+    if (remove) { const uid=remove.dataset.removeUpload; record.files=record.files.filter(f=>f.uid!==uid); MessageDrafts.originals.delete(uid); MessageDrafts.changed(true); }
+    if (retry) {
+      const uid=retry.dataset.retryUpload, slot=record.files.find(f=>f.uid===uid), original=MessageDrafts.originals.get(uid);
+      if (original) startUpload(slot,original); else { replacing=uid; input.click(); }
+    }
+  };
+  $("#submitted",form).onclick = e => {
+    const b=e.target.closest("[data-recover-message]"); if (!b) return;
+    const p=record.pending.find(p=>p.id===b.dataset.recoverMessage); if (!p) return;
+    // Recovery is another locally named draft so the current newer edits
+    // remain separate, rather than being concatenated or overwritten.
+    const recovered=MessageDrafts.create(record.project,record.thread);
+    recovered.localEntry=true; recovered.text=p.body.text; recovered.files=p.files; recovered.model=record.model;
+    record.pending=record.pending.filter(x=>x.id!==p.id); MessageDrafts.changed(true);
+    location.hash=`#/draft/${enc(recovered.id)}`;
+  };
+  form.querySelector("[data-discard-draft]").onclick = () => {
+    MessageDrafts.discard(record.id); location.hash=thread ? `#/chat/${enc(thread)}` : "#/chat/new";
+    if (thread && location.hash === `#/chat/${enc(thread)}`) go();
+  };
+  box.oninput = () => { read(); fit(); };
+  box.onselect = () => { selected(); MessageDrafts.changed(); };
+  model?.addEventListener("change",read);
+  box.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); form.requestSubmit(); } };
+  form.onsubmit = async e => {
+    e.preventDefault(); read();
+    const text=record.text.trim(); if (!text) return;
+    if (record.files.some(f=>f.state!=="ready")) { toast("Wait for uploads, or retry/remove unavailable files before sending."); return; }
+    // Do not dispatch a second first-thread request while the first is in
+    // flight; later text remains editable and is never silently queued.
+    if (!record.thread && record.pending.some(p=>p.state==="dispatching")) { toast("The first message is still sending. Your new draft is kept."); return; }
+    if (!record.thread && record.pending.some(p=>p.state==="unconfirmed")) { toast("The first message outcome is unconfirmed. Start a separately named conversation to send another message."); return; }
+    const body={text, model:chosenModel(form),files:record.files.map(f=>f.id)};
+    if (record.thread) body.thread=record.thread; else if (record.project) body.project=record.project;
+    const submission=MessageDrafts.submit(record,body);
+    box.value=record.text; fit(); show();
+    try {
+      const response=await api("POST","/v1/chat",body);
+      if (epoch !== MessageDrafts.epoch() || !MessageDrafts.get(record.id)) return;
+      if (!response || typeof response.thread !== "string" || typeof response.task_id !== "string") throw new Error("The server response did not confirm the message identity.");
+      const first=!record.thread;
+      MessageDrafts.acknowledge(record,submission,response);
+      // Do not navigate a newer view because an older send completed.
+      if (first && App.workspace && App.draftRecord?.id === record.id) { history.replaceState({...history.state,draft:record.id},"",`#/chat/${enc(response.thread)}`); await go(); }
+      await refresh();
+    } catch (err) {
+      if (epoch !== MessageDrafts.epoch() || !MessageDrafts.get(record.id)) return;
+      const rejection=err.status>=400 && err.status<500 && typeof err.body?.error === "string";
+      if (rejection) { MessageDrafts.reject(record,submission,err.message); if (active && form.isConnected && !box.value) { box.value=record.text; fit(); } }
+      else { submission.state="unconfirmed"; MessageDrafts.changed(true); }
+      toast(rejection ? err.message : "Send outcome not confirmed. Your submitted message is kept on this device.");
+    }
+    show(); sidebar();
+  };
+  onLeave(() => { if (active) { read(); MessageDrafts.flush(); active=false; unsubscribe(); } });
+  // Only a missing/expired reference is marked unavailable. A connection
+  // failure does not silently turn a valid attachment into a missing one.
+  for (const f of record.files.filter(f=>f.state==="ready")) api("GET",`/v1/files/${enc(f.id)}/info`).catch(err=>{
+    if ([404,410].includes(err.status) && epoch===MessageDrafts.epoch() && record.files.includes(f)) { f.state="unavailable"; f.error="Select the file again or remove it."; MessageDrafts.changed(true); }
+  });
+  fit(); show();
+  box.setSelectionRange(...(record.selection || [box.value.length,box.value.length]));
 }
 
 // Lays out a conversation; false when the person moved on while it loaded.
-async function chatLayout(main, thread, project) {
+async function chatLayout(main, thread, project, draftRecord) {
   const seq = App.seq;
   App.thread = thread;
   sidebar();
-  paint(main, `<section class="conv"><header class="conv-head" id="conv-head"></header><div id="banners"></div><div id="thread" class="thread" aria-live="polite"></div><div id="composer"></div></section>`);
+  paint(main, `<section class="conv"><header class="conv-head" id="conv-head"></header><div id="banners"></div><div id="thread" class="thread" aria-live="off"></div><button type="button" class="jump-latest" data-jump-latest hidden>New activity · Jump to latest</button><div id="composer"></div></section>`);
   convHead(thread, project);
   banners();
   $("#banners", main).onclick = e => { if (e.target.closest("[data-act=seen-versions]")) { save("version", App.versions?.latest_seq ?? 0); banners(); } };
   const picker = await modelPicker();
   if (seq !== App.seq) return false;
   paint($("#composer", main), composer(thread ? "Reply, or give Magnus more to do" : "Ask anything, or give Magnus work to do", picker));
-  wireComposer(thread, project);
+  const record = draftRecord || MessageDrafts.forThread(thread,project);
+  App.draftRecord = record;
+  wireComposer(thread, project,record);
+  $("[data-jump-latest]",main).onclick = () => {
+    const root=$("#thread",main); root.scrollTop=root.scrollHeight; ReadingAnchors.remember(root);
+    record.anchor={follow:true}; MessageDrafts.changed(); $("[data-jump-latest]",main).hidden=true;
+  };
+  onLeave(ReadingAnchors.watch($("#thread",main),record));
   return true;
 }
 
@@ -1121,14 +1360,17 @@ function convHead(thread, project) {
     ${thread ? `<div class="row">${moveControl(thread, here?.project, App.projects, true)}<button class="icon-btn" data-trash="${esc(thread)}" data-then="#/home" title="Delete conversation">${icon("trash")}<span class="sr">Delete conversation</span></button></div>` : ""}`);
 }
 
-async function showNewChat(main, project) {
-  if (!await chatLayout(main, null, project)) return;
-  if (App.appSearch) { $("#msg",main).value=App.appSearch; App.appSearch=null; }
-  paint($("#thread", main), `<p class="muted hello">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm. What it starts shows here as it goes.</p>`);
+async function showNewChat(main, project, draftRecord) {
+  const record = draftRecord || MessageDrafts.create(project);
+  if (!draftRecord) history.replaceState({...history.state,draft:record.id},"",`#/draft/${enc(record.id)}`);
+  if (!await chatLayout(main,null,project,record)) return;
+  paint($("#thread",main), `<p class="muted hello">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm. What it starts shows here as it goes.</p>`);
+  if (App.appSearch) { record.text=App.appSearch;record.selection=[record.text.length,record.text.length];App.appSearch=null;MessageDrafts.changed(true); }
+  sidebar();
 }
 
-async function showThread(main, thread) {
-  if (!await chatLayout(main, thread)) return;
+async function showThread(main, thread, draftRecord) {
+  if (!await chatLayout(main, thread, null, draftRecord)) return;
   // An answer being written shows as it streams; `live` holds its text so far.
   const ui = { editing: null, sharing: null, declining: null, people: [], live: {} };
   const listening = {};
@@ -1137,7 +1379,11 @@ async function showThread(main, thread) {
     for (const id of running) if (!listening[id]) listening[id] = Magnus.live(id, t => {
       ui.live[id] = (ui.live[id] || "") + t;
       const el = $(`[data-live="${CSS.escape(id)}"]`, main);
-      if (el) { el.innerHTML = Compose.markdown(ui.live[id]); loadMarkdownImages(el); }
+      if(el){
+        const root=$("#thread",main), followed=ReadingAnchors.capture(root)?.follow;
+        ReadingAnchors.hold(root,()=>{el.innerHTML=Compose.markdown(ui.live[id]);loadMarkdownImages(el);});
+        if(!followed)$("[data-jump-latest]",main).hidden=false;
+      }
     });
     for (const id of Object.keys(listening)) if (!running.has(id)) { listening[id](); delete listening[id]; delete ui.live[id]; }
   };
@@ -1164,7 +1410,12 @@ async function showThread(main, thread) {
     const body = entries.map(e => `<div class="entry ${e.kind === "message" ? "me" : "them"}" data-entry="${esc(e.id || "")}" data-kind="${esc(e.kind)}">${entry(e, ui)}${msgActions(e, ui)}</div>`).join("");
     const el = $("#thread", main);
     if (!el) return;
+    const anchor = ui.drawn ? ReadingAnchors.capture(el) : App.draftRecord?.anchor || {follow:true};
+    const newActivity = ui.entryIds && entries.some(e=>e.id && !ui.entryIds.has(e.id));
+    ui.entryIds=new Set(entries.map(e=>e.id)); ui.drawn=true;
     const grew = paint(el, body);
+    ReadingAnchors.restore(el,anchor); ReadingAnchors.remember(el,anchor);
+    if (newActivity && !anchor.follow) $("[data-jump-latest]",main).hidden=false;
     bindConnectorActs(el);
     keepHeights(el);
     motion(el, ui);
@@ -1172,7 +1423,7 @@ async function showThread(main, thread) {
     for (const [id, view, , task] of ui.composed) fill($(`iframe[data-view="${CSS.escape(id)}"]`, el), view, task);
     listen(entries);
     loadGlimpses(el);
-    if (grew && !ui.editing && !ui.sharing && !el.contains(document.activeElement)) el.lastElementChild?.scrollIntoView({ block: "end" });
+
   };
   const path = (id, act) => `/v1/chat/${enc(thread)}/entries/${enc(id)}/${act}`;
   const msgAct = async (b, el) => {
@@ -1282,7 +1533,7 @@ async function showThread(main, thread) {
 // Open a conversation in place, with `panel` beside it. Replacing the
 // window address reloads this app on every entry.
 function showChat(main, hash, view, panel) {
-  if (location.hash !== hash) history.replaceState(null, "", hash);
+  if (location.hash !== hash) history.replaceState({...history.state}, "", hash);
   if (panel) openPanel(panel);
   return view(main);
 }
@@ -1303,6 +1554,11 @@ async function home(main, panel = App.openAfter) {
 }
 
 route(/^#\/(?:home|chat)?$/, main => home(main), true);
+route(/^#\/draft\/([^/]+)$/, (main,id) => {
+  const record=MessageDrafts.get(id);
+  if (!record) { location.hash="#/chat/new"; return; }
+  return record.thread ? showThread(main,record.thread,record) : showNewChat(main,record.project,record);
+},true);
 route(/^#\/chat\/new$/, m => showNewChat(m), true);
 route(/^#\/chat\/new\/([^/]+)$/, (m, project) => showNewChat(m, project), true);
 // Where the views over tasks, schedules, files and decisions used to be
@@ -2075,10 +2331,20 @@ function deliverable(t) {
 // Whatever the person opens (a task, a file, a schedule, a decision, or a
 // view over them) shows here, beside the conversation, never instead of it.
 // `what` is "kind:id" or a view's name.
-const Panel = { what: null, layer: "outcome", seq: 0, live: null, liveFor: null, liveText: "", lib: { q: "", project: "" } };
+const Panel = { anchors:{}, layers:{}, unwatch:null, opener:null, focusNext:false, drawn:null, what: null, layer: "outcome", seq: 0, live: null, liveFor: null, liveText: "", lib: { q: "", project: "" } };
 
-function openPanel(what) {
-  if (Panel.what !== what) { Panel.layer = "outcome"; stopPanelLive(); }
+function openPanel(what, options={}) {
+  if (options.history && Panel.what!==what) {
+    history.replaceState({...history.state,work:Panel.what},"",location.href);
+    history.pushState({...history.state,work:what},"",location.href);
+  }
+  if (options.opener) Panel.opener=options.opener;
+  if (options.focus) Panel.focusNext=true;
+  if (Panel.what !== what) {
+    if (Panel.what) Panel.layers[Panel.what]=Panel.layer;
+    Panel.unwatch?.(); Panel.unwatch=null;
+    Panel.layer=Panel.layers[what] || "outcome"; stopPanelLive();
+  }
   Panel.what = what;
   const el = $("#detail");
   if (!el) return;
@@ -2096,10 +2362,13 @@ function openPanel(what) {
 function markOpen() {
   for (const r of document.querySelectorAll(".rg-row[data-open]")) r.classList.toggle("open", r.dataset.open === Panel.what);
 }
-function closePanel() {
+function closePanel(restoreFocus=false) {
+  Panel.unwatch?.(); Panel.unwatch=null;
+  if (Panel.what) Panel.layers[Panel.what]=Panel.layer;
+  if (restoreFocus && Panel.what) history.pushState({...history.state,work:null},"",location.href);
   stopPanelLive();
   hush();
-  Panel.what = null;
+  Panel.what = null; Panel.drawn=null;
   const el = $("#detail");
   if (!el) return;
   el.hidden = true;
@@ -2108,6 +2377,11 @@ function closePanel() {
   markOpen();
   if ($("#side")) sidebar();
   Workspace.closed();
+  if (restoreFocus) {
+    const target=Panel.opener?.isConnected ? Panel.opener : $("#conv-head h1");
+    if (target) { target.tabIndex=target.tabIndex<0?-1:target.tabIndex; target.focus({preventScroll:true}); }
+  }
+  Panel.focusNext=false;
 }
 function stopPanelLive() {
   if (Panel.live) Panel.live();
@@ -2134,11 +2408,21 @@ async function drawPanel() {
   const title = kind === "search" ? `Search: ${id}` : PANEL_TITLES[kind] || kind;
   // A view names itself in the head (a task: its title and where it
   // stands); the others are named by what they are.
+  const entry=Panel.anchors[Panel.what] ||= {anchor:{follow:false,top:0}};
+  if (Panel.drawn===Panel.what) { const current=ReadingAnchors.capture($(".detail-body",el)); if(current){entry.anchor=current;entry.anchor.follow=false;} }
+  const prior=entry.anchor;
   const changed = paint(el, `<div class="detail-head"><div class="dh-main">${head || `<h2>${esc(title)}</h2>`}</div></div><div class="detail-body" data-panel="${esc(kind)}">${body}</div>`);
-  if (!changed) return;
+  if (!changed) {
+    if (Panel.focusNext) { const heading=$("h2",el); if (heading) { heading.tabIndex=-1; heading.focus({preventScroll:true}); } Panel.focusNext=false; }
+    return;
+  }
+  Panel.unwatch?.(); Panel.drawn=Panel.what;
+  ReadingAnchors.restore($(".detail-body",el),prior);
+  entry.anchor=prior; Panel.unwatch=ReadingAnchors.watch($(".detail-body",el),entry,false);
   for (const [iid, view, , task] of composed) fill($(`iframe[data-view="${CSS.escape(iid)}"]`, el), view, task);
   if (after) await after(el);
   loadGlimpses(el);
+  if (Panel.focusNext && n===Panel.seq) { const heading=$("h2",el); if (heading) { heading.tabIndex=-1; heading.focus({preventScroll:true}); } Panel.focusNext=false; }
 }
 
 // A view whose content is already read (App's objects) or read here.
@@ -2512,7 +2796,7 @@ async function searchView(q) {
 function wirePanel() {
   const el = $("#detail");
   el.addEventListener("click", async e => {
-    if (e.target.closest("[data-act=close-panel]")) return closePanel();
+    if (e.target.closest("[data-act=close-panel]")) return closePanel(true);
     const l = e.target.closest("[data-layer]");
     if (l) { Panel.layer = l.dataset.layer; return drawPanel(); }
     const m = e.target.closest("[data-more]");
@@ -3086,6 +3370,9 @@ window.addEventListener("magnus-update-required", e => updateRequiredScreen(e.de
 async function boot() {
   App.me = await api("GET", "/v1/me");
   Theme.scope(App.appliance, App.me.id);
+  App.unsubscribeDrafts?.();
+  MessageDrafts.open(App.appliance, App.me.id);
+  App.unsubscribeDrafts=MessageDrafts.subscribe(()=>{ if ($("#side")) sidebar(); });
   const host = await Magnus.systemLook().catch(() => ({}));
   const canRead = () => { App.canReadAloud = !!App.me?.read_aloud || !!host.native_speech || ("speechSynthesis" in window && speechSynthesis.getVoices().length > 0); };
   canRead();
@@ -3110,12 +3397,15 @@ async function boot() {
 }
 
 function stop() {
+  App.unsubscribeDrafts?.(); App.unsubscribeDrafts=null;
+  MessageDrafts.leave();
   background.forEach(clearInterval); background = [];
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   window.onhashchange = null;
   Panel.what = null;
   Theme.scope(null, null);
+  Panel.unwatch?.(); Panel.unwatch=null; Panel.anchors={}; Panel.layers={}; Panel.opener=null; Panel.drawn=null; Panel.what=null; App.draftRecord=null;
   App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null; App.feed = null; App.reported = new Set(); App.reporting = new Set();
   // What one person was typing or filtering by is not the next one's here.
   Panel.lib = { q: "", project: "" };
