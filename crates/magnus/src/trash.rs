@@ -146,7 +146,7 @@ pub fn schedule(k: Arc<Kernel>) {
 
 macro_rules! person {
     ($k:expr, $h:expr) => {
-        match who(&$k, &$h) {
+        match who(&$k, &$h).await {
             Ok(p) => p,
             Err(r) => return r,
         }

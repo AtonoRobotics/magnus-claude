@@ -410,7 +410,7 @@ pub fn router() -> Router<Arc<Kernel>> {
 
 /// The person's own commitments: no one else's, whoever asks, the owner too.
 async fn list(State(k): State<Arc<Kernel>>, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -421,7 +421,7 @@ async fn list(State(k): State<Arc<Kernel>>, h: HeaderMap) -> Response {
 }
 
 async fn edit(State(k): State<Arc<Kernel>>, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -429,7 +429,7 @@ async fn edit(State(k): State<Arc<Kernel>>, h: HeaderMap, Path(id): Path<String>
 }
 
 async fn remove(State(k): State<Arc<Kernel>>, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };

@@ -262,7 +262,7 @@ pub fn router() -> Router<Arc<Kernel>> {
 
 /// The person's own notes: no one else's, whoever asks.
 async fn notes(State(k): State<Arc<Kernel>>, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -274,7 +274,7 @@ async fn notes(State(k): State<Arc<Kernel>>, h: HeaderMap) -> Response {
 
 /// The person adds, corrects or removes one of their notes.
 async fn change(State(k): State<Arc<Kernel>>, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };

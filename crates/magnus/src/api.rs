@@ -68,19 +68,20 @@ pub(crate) fn credential(h: &HeaderMap) -> Option<&str> {
     bearer(h).or_else(|| cookie(h, SESSION_COOKIE))
 }
 
-pub(crate) fn who(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
+pub(crate) async fn who(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
     let token = credential(h).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "sign in"))?;
     if let Some(p) = k.cfg.person_by_token(token) {
         return k.person(&p.id).ok_or_else(|| err(StatusCode::UNAUTHORIZED, "sign in again"));
     }
     k.accounts
         .session(token)
+        .await
         .and_then(|s| k.person(&s.person))
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "sign in again"))
 }
 
-pub(crate) fn developer(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
-    let p = who(k, h)?;
+pub(crate) async fn developer(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
+    let p = who(k, h).await?;
     if !p.is_developer() {
         return Err(err(StatusCode::FORBIDDEN, "this needs the developer role"));
     }
@@ -98,8 +99,8 @@ async fn cookie_guard(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-pub(crate) fn owner(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
-    let p = who(k, h)?;
+pub(crate) async fn owner(k: &Kernel, h: &HeaderMap) -> Result<Person, Response> {
+    let p = who(k, h).await?;
     if !p.is_owner() {
         return Err(err(StatusCode::FORBIDDEN, "this needs the owner role"));
     }
@@ -233,9 +234,12 @@ fn over_tls(k: &Kernel, t: Transport, peer: SocketAddr) -> Result<(), Response> 
 /// Open a session for a person and hand it over: to the app as a token,
 /// to a browser as an HttpOnly cookie the page cannot read.
 async fn issue(k: &Arc<Kernel>, t: Transport, person: &str, app: bool, device: Option<&str>) -> Response {
+    if let Err(e) = k.accounts.refresh_people().await {
+        return internal(e);
+    }
     let Some(p) = k.person(person) else { return err(StatusCode::FORBIDDEN, format!("{person} is not a person on this appliance.")) };
     let client = if app { "app" } else { "browser" };
-    let (session, token) = match k.accounts.open_session(person, client, device) {
+    let (session, token) = match k.accounts.open_session(person, client, device).await {
         Ok(s) => s,
         Err(e) => return internal(e),
     };
@@ -322,7 +326,7 @@ async fn enroll_device(State(k): K, ConnectInfo(peer): ConnectInfo<SocketAddr>, 
     if let Some(r) = refused_by_kill_switch(&k) {
         return r;
     }
-    let person = match who(&k, &h) {
+    let person = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -335,7 +339,7 @@ async fn enroll_device(State(k): K, ConnectInfo(peer): ConnectInfo<SocketAddr>, 
         Err(e) => return device_error(e),
     };
     if let Some(token) = credential(&h) {
-        if let Err(e) = k.accounts.bind_session_device(token, &issued.device) {
+        if let Err(e) = k.accounts.bind_session_device(token, &issued.device).await {
             tracing::error!("pair: the session was not bound to {}: {e:#}", issued.device);
         }
     }
@@ -355,7 +359,7 @@ async fn enroll_device(State(k): K, ConnectInfo(peer): ConnectInfo<SocketAddr>, 
 }
 
 async fn list_devices(State(k): K, h: HeaderMap) -> Response {
-    let person = match who(&k, &h) {
+    let person = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -370,7 +374,7 @@ async fn list_devices(State(k): K, h: HeaderMap) -> Response {
 }
 
 async fn revoke_device(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let person = match who(&k, &h) {
+    let person = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -385,7 +389,7 @@ async fn revoke_device(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Res
     if let Err(e) = k.devices.revoke(&cf, &id).await {
         return device_error(e);
     }
-    match k.accounts.end_device(&id) {
+    match k.accounts.end_device(&id).await {
         Ok(ended) => {
             for s in ended {
                 if let Err(e) = k.emit(&format!("person:{}", s.person), Ev::SignedOut { person: s.person.clone(), session: s.id }).await {
@@ -466,7 +470,10 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
     // store below, not the provider: Keycloak never heard of them (#429).
     // A person the config knows keeps the provider path, even with a local
     // namesake, as `resolve_person` resolves the config first.
-    let provider = k.identity().filter(|_| k.cfg.person(&person).is_some() || !k.accounts.is_local(&person));
+    let mut provider = k.identity();
+    if provider.is_some() && k.cfg.person(&person).is_none() && k.accounts.is_local_fresh(&person).await {
+        provider = None;
+    }
     if let Some(id) = provider {
         // The owner's backup: their password set on the appliance and a
         // one-time code printed on its machine (`magnus sign-in-code`),
@@ -474,13 +481,13 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
         // passwords sent to the provider cannot lock the owner out of it.
         if let Some(machine) = b["machine_code"].as_str().map(str::trim).filter(|c| !c.is_empty()) {
             let counter = crate::accounts::Accounts::backup_counter(&person);
-            if !(k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h)) {
+            if !(k.cfg.may_use_password(&person) && k.accounts.has_password(&person).await && on_this_machine(peer, &h)) {
                 return err(StatusCode::UNAUTHORIZED, "The name, password or code is wrong.");
             }
             if let Some(until) = k.accounts.locked(&counter) {
                 return locked(until);
             }
-            match k.accounts.take_machine_code(machine) {
+            match k.accounts.take_machine_code(machine).await {
                 Ok(true) => {}
                 Ok(false) => {
                     k.accounts.failed(&counter);
@@ -488,7 +495,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
                 }
                 Err(e) => return internal(e),
             }
-            return match k.accounts.sign_in_counted(&person, password, &counter) {
+            return match k.accounts.sign_in_counted(&person, password, &counter).await {
                 Ok(Ok(_)) => issue(&k, t, &person, app, device.as_deref()).await,
                 // Unreachable: the password-only check never asks for the
                 // authenticator code (the machine code is already the second
@@ -537,7 +544,7 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
                 if ours {
                     k.accounts.forgive(&counter);
                 }
-                let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person) && on_this_machine(peer, &h);
+                let backup = k.cfg.may_use_password(&person) && k.accounts.has_password(&person).await && on_this_machine(peer, &h);
                 if backup {
                     return (
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -549,12 +556,12 @@ async fn sign_in(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(pe
             }
         };
     }
-    if k.cfg.person(&person).is_none() && !k.accounts.is_local(&person) {
+    if k.cfg.person(&person).is_none() && !k.accounts.is_local_fresh(&person).await {
         // Same answer and the same work as a wrong password.
-        let _ = k.accounts.sign_in(&person, password);
+        let _ = k.accounts.sign_in(&person, password).await;
         return err(StatusCode::UNAUTHORIZED, "The name or password is wrong.");
     }
-    match k.accounts.sign_in_counted_with_code(&person, password, code, &counter) {
+    match k.accounts.sign_in_counted_with_code(&person, password, code, &counter).await {
         Ok(Ok(_)) => issue(&k, t, &person, app, device.as_deref()).await,
         Ok(Err(crate::accounts::SignInError::NeedsCode)) => code_needed(),
         Ok(Err(crate::accounts::SignInError::Rejected)) => err(StatusCode::UNAUTHORIZED, "The name or password is wrong."),
@@ -708,7 +715,7 @@ async fn accept_invite(State(k): K, Extension(t): Extension<Transport>, ConnectI
     if password.chars().count() < k.cfg.sign_in.min_password_length {
         return err(StatusCode::BAD_REQUEST, format!("a password needs at least {} characters", k.cfg.sign_in.min_password_length));
     }
-    match k.accounts.accept(&k.cfg.sign_in, token, password) {
+    match k.accounts.accept(token, password).await {
         Ok(Some(person)) if k.cfg.person(&person).is_some() || k.accounts.is_local(&person) => Json(json!({ "person": person })).into_response(),
         Ok(_) => err(StatusCode::UNAUTHORIZED, "The invitation is wrong or expired."),
         Err(e) => internal(e),
@@ -717,7 +724,7 @@ async fn accept_invite(State(k): K, Extension(t): Extension<Transport>, ConnectI
 
 async fn sign_out(State(k): K, h: HeaderMap) -> Response {
     let Some(token) = credential(&h) else { return err(StatusCode::UNAUTHORIZED, "not signed in") };
-    match k.accounts.sign_out(token) {
+    match k.accounts.sign_out(token).await {
         Ok(Some(s)) => {
             if let Err(e) = k.emit(&format!("person:{}", s.person), Ev::SignedOut { person: s.person.clone(), session: s.id }).await {
                 return internal(e);
@@ -734,7 +741,7 @@ async fn sign_out(State(k): K, h: HeaderMap) -> Response {
 }
 
 async fn me(State(k): K, h: HeaderMap) -> Response {
-    match who(&k, &h) {
+    match who(&k, &h).await {
         Ok(p) => Json(json!({ "id": p.id, "name": p.name, "groups": p.groups, "roles": p.roles, "voice": k.cfg.speech.is_some(), "read_aloud": k.cfg.read_aloud.is_some() })).into_response(),
         Err(r) => r,
     }
@@ -743,7 +750,7 @@ async fn me(State(k): K, h: HeaderMap) -> Response {
 /// What the appliance is running now, and every change to it, so apps can
 /// tell people when the agent they work with has changed (U5).
 async fn versions(State(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = who(&k, &h) {
+    if let Err(r) = who(&k, &h).await {
         return r;
     }
     let v = k.read(|s| {
@@ -937,7 +944,7 @@ fn task_json(k: &Kernel, task: &crate::state::Task, run: &Run, full: bool, words
 }
 
 async fn submit(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -996,7 +1003,7 @@ fn visible_task(p: &Person, t: &crate::state::Task) -> bool {
 }
 
 async fn list_tasks(State(k): K, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1026,7 +1033,7 @@ pub(crate) fn terms(q: &str) -> Vec<String> {
 /// matches them). A conversation comes with the first thing said in it that
 /// matches.
 async fn search(State(k): K, h: HeaderMap, Query(q): Query<std::collections::HashMap<String, String>>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1076,7 +1083,7 @@ async fn search(State(k): K, h: HeaderMap, Query(q): Query<std::collections::Has
 
 /// The person writes in chat: a new thread, or one of theirs.
 async fn chat_post(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1104,7 +1111,7 @@ async fn chat_post(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response 
 }
 
 async fn chat_threads(State(k): K, h: HeaderMap) -> Response {
-    match who(&k, &h) {
+    match who(&k, &h).await {
         Ok(p) => match k.threads(&p.id).await {
             Ok(t) => Json(json!({ "threads": t })).into_response(),
             Err(e) => internal(e),
@@ -1115,7 +1122,7 @@ async fn chat_threads(State(k): K, h: HeaderMap) -> Response {
 
 /// A thread is its starter's alone.
 async fn chat_thread(State(k): K, h: HeaderMap, Path(thread): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1131,7 +1138,7 @@ async fn chat_thread(State(k): K, h: HeaderMap, Path(thread): Path<String>) -> R
 /// Confirm or decline a schedule card; only the person it was proposed to.
 async fn chat_card(State(k): K, h: HeaderMap, Path(card): Path<String>, Json(b): Json<Value>) -> Response {
     use crate::chat::CardRefusal;
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1155,7 +1162,7 @@ fn find(k: &Kernel, p: &Person, id: &str) -> Option<(crate::state::Task, Run)> {
 }
 
 async fn task(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1181,7 +1188,7 @@ async fn task(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
 /// The task view's evidence: each step's tool calls, boundary decisions and
 /// results, as derived from the log (K45).
 async fn timeline(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1227,7 +1234,7 @@ pub(crate) fn timeline_of(run: &Run, redact_private: bool) -> Value {
 }
 
 async fn resume(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1246,7 +1253,7 @@ async fn resume(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
 }
 
 async fn cancel(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1269,7 +1276,7 @@ fn controlled(r: Result<Value, crate::controls::Refused>) -> Response {
 /// The person's verdict on an outcome that has ended: right, partly or
 /// wrong, with an optional note. A later verdict replaces it.
 async fn verdict(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1302,7 +1309,7 @@ async fn verdict(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Jso
 /// observations, newest first; the open itself is recorded so the next
 /// one starts here (#367). A first open looks back a day.
 async fn home_opened(State(k): K, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1360,7 +1367,7 @@ async fn home_opened(State(k): K, h: HeaderMap) -> Response {
 /// one opened, first presentation standing (#367). Unknown ids, and
 /// another person's, are ignored, so a stale app never fails the open.
 async fn inbox_opened(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1388,7 +1395,7 @@ async fn inbox_opened(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respon
 }
 
 async fn inbox_list(State(k): K, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1407,7 +1414,7 @@ async fn inbox_list(State(k): K, h: HeaderMap) -> Response {
 }
 
 async fn respond(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1422,7 +1429,7 @@ async fn respond(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Jso
 }
 
 async fn policies(State(k): K, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1438,7 +1445,7 @@ async fn policies(State(k): K, h: HeaderMap) -> Response {
 }
 
 async fn put_policy(State(k): K, h: HeaderMap, Path(layer): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1467,7 +1474,7 @@ async fn put_policy(State(k): K, h: HeaderMap, Path(layer): Path<String>, Json(b
 }
 
 async fn secret_names(State(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = owner(&k, &h) {
+    if let Err(r) = owner(&k, &h).await {
         return r;
     }
     match k.vault.names() {
@@ -1477,7 +1484,7 @@ async fn secret_names(State(k): K, h: HeaderMap) -> Response {
 }
 
 async fn put_secret(State(k): K, h: HeaderMap, Path(name): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match owner(&k, &h) {
+    let p = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1498,7 +1505,7 @@ async fn put_secret(State(k): K, h: HeaderMap, Path(name): Path<String>, Json(b)
 /// in to or enter again, and whether each provider revoked it.
 /// The backups on disk and whether the latest one restored (K10).
 async fn backups(State(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = owner(&k, &h) {
+    if let Err(r) = owner(&k, &h).await {
         return r;
     }
     let dir = k.cfg.backup_dir();
@@ -1512,7 +1519,7 @@ async fn backups(State(k): K, h: HeaderMap) -> Response {
 }
 
 async fn back_up(State(k): K, h: HeaderMap) -> Response {
-    let p = match owner(&k, &h) {
+    let p = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1523,7 +1530,7 @@ async fn back_up(State(k): K, h: HeaderMap) -> Response {
 }
 
 async fn kill_switch_state(State(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = owner(&k, &h) {
+    if let Err(r) = owner(&k, &h).await {
         return r;
     }
     let (engaged, revoked, sealed) = k.read(|s| (s.kill_switch, s.revoked.clone(), s.sealed.clone()));
@@ -1700,7 +1707,7 @@ impl Kernel {
 }
 
 async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match owner(&k, &h) {
+    let p = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1711,7 +1718,7 @@ async fn kill_switch(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
 }
 
 async fn adapters(State(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = owner(&k, &h) {
+    if let Err(r) = owner(&k, &h).await {
         return r;
     }
     let list: Vec<Value> = k
@@ -1735,7 +1742,7 @@ async fn adapters(State(k): K, h: HeaderMap) -> Response {
 /// the conformance suite against the live provider before it takes requests,
 /// unless the owner explicitly skips the gate.
 async fn put_adapter(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match owner(&k, &h) {
+    let p = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1796,7 +1803,7 @@ async fn conformance_model(k: &Kernel, id: &str, asked: &Value) -> Result<String
 }
 
 async fn conformance(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match owner(&k, &h) {
+    let p = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1818,7 +1825,7 @@ async fn conformance(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b):
 }
 
 async fn catalog(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    if let Err(r) = owner(&k, &h) {
+    if let Err(r) = owner(&k, &h).await {
         return r;
     }
     match k.adapters.catalog(&id).await {
@@ -1828,7 +1835,7 @@ async fn catalog(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response 
 }
 
 async fn sign_in_begin(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    if let Err(r) = owner(&k, &h) {
+    if let Err(r) = owner(&k, &h).await {
         return r;
     }
     match k.adapters.auth_begin(&id).await {
@@ -1838,7 +1845,7 @@ async fn sign_in_begin(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Res
 }
 
 async fn sign_in_complete(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match owner(&k, &h) {
+    let p = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1854,7 +1861,7 @@ async fn sign_in_complete(State(k): K, h: HeaderMap, Path(id): Path<String>, Jso
 }
 
 async fn memory(State(k): K, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1874,7 +1881,7 @@ async fn memory(State(k): K, h: HeaderMap) -> Response {
 
 /// Forget one of the person's own memories.
 async fn forget(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1894,7 +1901,7 @@ async fn health(State(k): K) -> Response {
 /// Model text for a task as it streams (server-sent events), before the
 /// turn is appended to the log (K6).
 async fn live(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1936,7 +1943,7 @@ where
 
 /// Speech to text on the appliance. The person reviews the text before sending it.
 async fn transcribe(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    if let Err(r) = who(&k, &h) {
+    if let Err(r) = who(&k, &h).await {
         return r;
     }
     let Some(data) = b["data_b64"].as_str() else { return err(StatusCode::BAD_REQUEST, "no audio") };
@@ -1949,7 +1956,7 @@ async fn transcribe(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response
 /// Text to speech on the appliance, so every app and browser hears the same
 /// voice. 503 when no voice is installed: the app then uses its system's own.
 async fn speak(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    if let Err(r) = who(&k, &h) {
+    if let Err(r) = who(&k, &h).await {
         return r;
     }
     let Some(cfg) = &k.cfg.read_aloud else { return err(StatusCode::SERVICE_UNAVAILABLE, "no read-aloud voice is installed on this appliance") };
@@ -1968,7 +1975,7 @@ async fn speak(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
 }
 
 async fn get_model(State(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = who(&k, &h) {
+    if let Err(r) = who(&k, &h).await {
         return r;
     }
     let (adapter, model) = k.read(|s| s.model.clone()).unwrap_or_else(|| (k.cfg.model.adapter.clone(), k.cfg.model.name.clone()));
@@ -1978,7 +1985,7 @@ async fn get_model(State(k): K, h: HeaderMap) -> Response {
 /// The models anyone signed in may choose for a task or a chat message,
 /// and the one used when they choose none.
 async fn models(State(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = who(&k, &h) {
+    if let Err(r) = who(&k, &h).await {
         return r;
     }
     let (adapter, model) = k.default_model();
@@ -1988,7 +1995,7 @@ async fn models(State(k): K, h: HeaderMap) -> Response {
 
 /// Choose the model new tasks run on. Running tasks keep their pinned model (K9).
 async fn put_model(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match owner(&k, &h) {
+    let p = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -2005,7 +2012,7 @@ async fn put_model(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response 
 }
 
 async fn schedules(State(k): K, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -2056,7 +2063,7 @@ fn schedule_rule(b: &Value, min: u32) -> Result<(Option<u32>, Option<String>), S
 }
 
 async fn add_schedule(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -2092,7 +2099,7 @@ async fn add_schedule(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respon
 /// Start a paused schedule again: failures count afresh, and the next run
 /// is due one interval from now.
 async fn resume_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -2104,7 +2111,7 @@ async fn resume_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> R
 
 /// Pause: no more runs until it is resumed.
 async fn pause_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -2116,7 +2123,7 @@ async fn pause_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Re
 
 /// Change when it runs and when it ends.
 async fn edit_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -2125,7 +2132,7 @@ async fn edit_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b
 
 /// Cancel: no more runs, and one still going stops.
 async fn remove_schedule(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -2155,7 +2162,7 @@ pub(crate) fn end_for(b: &Value) -> Result<(Option<chrono::DateTime<chrono::Utc>
 
 /// Download a delivered file. Read from the log, the source of truth.
 async fn output(State(k): K, h: HeaderMap, Path((id, out)): Path<(String, String)>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };

@@ -85,7 +85,7 @@ pub(crate) fn file_json(s: &St, f: &LibFile, w: &crate::recall::Words) -> Value 
 /// name, where it came from, its project and a text file's content;
 /// `project` keeps one project's files (`none`: those in no project).
 async fn list(State(k): K, h: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -130,7 +130,7 @@ pub(crate) fn files_matching(s: &St, p: &Person, terms: &[String], texts: &HashM
 /// Add a file: to the library, into a project of the person's, or in a
 /// chat thread of theirs (then it is in that thread's project).
 async fn upload(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -206,7 +206,7 @@ pub(crate) fn chosen_project(k: &Kernel, p: &Person, b: &Value) -> Result<Option
 
 /// One file's entry, as the library lists it, for its own page.
 async fn info(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -224,7 +224,7 @@ async fn info(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
 }
 
 async fn download(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -271,7 +271,7 @@ fn project_json(s: &St, p: &crate::state::Project) -> Value {
 }
 
 async fn projects(State(k): K, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -284,7 +284,7 @@ fn instructions_of(b: &Value) -> Option<String> {
 }
 
 async fn new_project(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -298,7 +298,7 @@ async fn new_project(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Respons
 
 /// A project with everything in it: chats, tasks, schedules and files.
 async fn project(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -339,7 +339,7 @@ async fn project(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response 
 /// The person renames a project or changes its instructions. Tasks already
 /// running keep the instructions they started with.
 async fn set_project(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -361,7 +361,7 @@ async fn set_project(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b):
 /// Move a task, chat thread, schedule or file of the person's into one of
 /// their projects, or out (`project` null).
 async fn move_item(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };

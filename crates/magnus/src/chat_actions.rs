@@ -65,7 +65,7 @@ async fn hide(k: &Kernel, person: &str, thread: &str, entries: Vec<String>) -> a
 
 macro_rules! person {
     ($k:expr, $h:expr) => {
-        match who(&$k, &$h) {
+        match who(&$k, &$h).await {
             Ok(p) => p,
             Err(r) => return r,
         }

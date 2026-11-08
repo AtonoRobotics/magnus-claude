@@ -165,7 +165,7 @@ async fn switch(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> Response 
 async fn overview(State(k): State<Arc<Kernel>>) -> Response {
     use crate::state::Status;
     let log_up = k.log.up().await;
-    let signed_in = k.accounts.signed_in().len();
+    let signed_in = k.accounts.signed_in().await.len();
     let vms = k.sandboxes.running().await;
     let day = chrono::Utc::now() - chrono::Duration::hours(24);
     let v = k.read(|s| {
@@ -201,13 +201,20 @@ fn person_of(k: &Kernel, sub: &str) -> Option<String> {
 /// people themselves are the identity provider's).
 async fn people(State(k): State<Arc<Kernel>>) -> Response {
     let bound: Vec<(String, String, Option<chrono::DateTime<chrono::Utc>>)> = k.read(|s| s.subjects.iter().map(|(p, sub)| (p.clone(), sub.clone(), s.last_sign_in.get(p).copied())).collect());
-    let out: serde_json::Map<String, Value> = bound.into_iter().map(|(p, sub, at)| (sub, json!({ "last_sign_in": at, "sessions": k.accounts.sessions_of(&p, "").len() }))).collect();
+    let mut out = serde_json::Map::new();
+    for (p, sub, at) in bound {
+        out.insert(sub, json!({ "last_sign_in": at, "sessions": k.accounts.sessions_of(&p, "").await.len() }));
+    }
     Json(json!({ "people": out })).into_response()
 }
 
 /// A person's open sessions here, newest first: each a device signed in.
 async fn sessions(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): axum::extract::Path<String>) -> Response {
-    let list: Vec<Value> = person_of(&k, &sub).map(|p| k.accounts.sessions_of(&p, "")).unwrap_or_default().into_iter().map(|(s, _)| json!({ "id": s.id, "client": s.client, "created": s.created, "expires": s.expires })).collect();
+    let sessions = match person_of(&k, &sub) {
+        Some(p) => k.accounts.sessions_of(&p, "").await,
+        None => vec![],
+    };
+    let list: Vec<Value> = sessions.into_iter().map(|(s, _)| json!({ "id": s.id, "client": s.client, "created": s.created, "expires": s.expires })).collect();
     Json(json!({ "sessions": list })).into_response()
 }
 
@@ -229,13 +236,13 @@ async fn console_sign_in(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> 
             }
         }
         None => {
-            let _ = k.accounts.sign_in(&person, password);
+            let _ = k.accounts.sign_in(&person, password).await;
             return Json(json!({ "result": "refused" })).into_response();
         }
     };
     let counter = crate::accounts::Accounts::console_counter(&person);
-    let admin = k.accounts.role(&person) == crate::accounts::Role::Admin;
-    match k.accounts.sign_in_counted_with_code(&person, password, code, &counter) {
+    let admin = k.accounts.role(&person).await == crate::accounts::Role::Admin;
+    match k.accounts.sign_in_counted_with_code(&person, password, code, &counter).await {
         Ok(Ok(_)) if admin => Json(json!({ "result": "ok", "name": name })).into_response(),
         Ok(Err(crate::accounts::SignInError::NeedsCode)) if admin => Json(json!({ "result": "needs_code" })).into_response(),
         Ok(Err(crate::accounts::SignInError::Locked(until))) => Json(json!({ "result": "locked", "retry_at": until })).into_response(),
@@ -247,7 +254,7 @@ async fn console_sign_in(State(k): State<Arc<Kernel>>, Json(b): Json<Value>) -> 
 /// Whether `person` still holds the console: here, active and an admin.
 /// The guard asks on its refresh round (#429).
 async fn console_standing(State(k): State<Arc<Kernel>>, axum::extract::Path(person): axum::extract::Path<String>) -> Response {
-    let ok = k.person(&person).is_some() && k.accounts.status(&person) == crate::accounts::Status::Active && k.accounts.role(&person) == crate::accounts::Role::Admin;
+    let ok = k.person(&person).is_some() && k.accounts.status(&person).await == crate::accounts::Status::Active && k.accounts.role(&person).await == crate::accounts::Role::Admin;
     Json(json!({ "ok": ok })).into_response()
 }
 
@@ -270,7 +277,7 @@ async fn signed_out(k: &Kernel, actor: &str, person: &str, ended: Vec<String>) -
 async fn end_sessions(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): axum::extract::Path<String>, Json(b): Json<Value>) -> Response {
     let Some(actor) = actor(&b) else { return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who ends them" }))).into_response() };
     let Some(person) = person_of(&k, &sub) else { return Json(json!({ "ended": 0 })).into_response() };
-    match k.accounts.end_all(&person) {
+    match k.accounts.end_all(&person).await {
         Ok(ended) => signed_out(&k, &actor, &person, ended).await,
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
     }
@@ -280,7 +287,7 @@ async fn end_sessions(State(k): State<Arc<Kernel>>, axum::extract::Path(sub): ax
 async fn end_session(State(k): State<Arc<Kernel>>, axum::extract::Path((sub, id)): axum::extract::Path<(String, String)>, Json(b): Json<Value>) -> Response {
     let Some(actor) = actor(&b) else { return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name who ends it" }))).into_response() };
     let gone = match person_of(&k, &sub) {
-        Some(person) => k.accounts.end(&person, &id).map(|s| s.map(|s| (person, s))),
+        Some(person) => k.accounts.end(&person, &id).await.map(|s| s.map(|s| (person, s))),
         None => Ok(None),
     };
     match gone {

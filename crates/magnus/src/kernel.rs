@@ -144,7 +144,7 @@ impl Kernel {
         if state.kill_switch {
             vault.seal();
         }
-        let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+        let accounts = crate::accounts::Accounts::open(&cfg.database.url, cfg.sign_in.clone()).await?;
         let devices = crate::devices::Devices::open(&cfg.appliance.state_dir)?;
         let oidc = cfg.sign_in.oidc.clone().map(|o| crate::oidc::Provider::new(o, vault.clone())).transpose()?;
         let adapters = Adapters::new(&cfg.appliance.state_dir, vault.clone(), &cfg.adapters);
@@ -362,7 +362,7 @@ impl Kernel {
 
     pub async fn end_turned_off(&self) -> usize {
         let Some(id) = self.identity() else { return 0 };
-        let mut people = self.accounts.signed_in();
+        let mut people = self.accounts.signed_in().await;
         people.extend(self.read(|s| s.schedules.values().filter(|x| x.next_due().is_some()).map(|x| x.person.clone()).collect::<Vec<_>>()));
         let mut ended = 0;
         for person in people {
@@ -390,7 +390,7 @@ impl Kernel {
         if !self.read(|s| s.turned_off.contains(person)) {
             self.tell(vec![("kernel", Ev::PersonTurnedOff { person: person.to_string(), why: why.to_string() })]).await;
         }
-        match self.accounts.end_all(person) {
+        match self.accounts.end_all(person).await {
             Ok(sessions) => {
                 if !sessions.is_empty() {
                     tracing::warn!("{why}: their {} sessions here are ended", sessions.len());
@@ -970,21 +970,36 @@ mod tests {
     /// Sign-ins resolve the config first and the appliance's own directory
     /// after: a config person keeps their record even with a local namesake,
     /// a local person arrives as a plain member, and nobody else resolves.
-    #[test]
-    fn sign_ins_resolve_config_first_then_local() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sign_ins_resolve_config_first_then_local() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("magnus.toml");
         std::fs::write(&p, "[appliance]\nstate_dir = \"/s\"\nlisten = \"127.0.0.1:0\"\n[database]\nurl = \"postgres://x\"\n[model]\nname = \"m\"\nadapter = \"a\"\nmax_tokens = 1\n[[people]]\nid = \"sam\"\nname = \"Sam\"\nroles = [\"owner\"]\n").unwrap();
         let cfg = super::Config::load(&p).unwrap();
-        let state = tempfile::tempdir().unwrap();
-        let accounts = crate::accounts::Accounts::open(state.path(), cfg.sign_in.clone()).unwrap();
-        accounts.add_person("sam", "Intruder", None).unwrap();
-        accounts.add_person("ada", "Ada", None).unwrap();
+        let server = std::env::var("MAGNUS_TEST_PG").unwrap_or_else(|_| "postgres://postgres:magnus_dev@127.0.0.1:54340/postgres".into());
+        let name = format!("k_{}", uuid::Uuid::new_v4().simple());
+        let (server_client, conn) = tokio_postgres::connect(&server, tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        server_client.batch_execute(&format!("CREATE DATABASE {name}")).await.unwrap();
+        let mut u = url::Url::parse(&server).unwrap();
+        u.set_path(&format!("/{name}"));
+        let url = u.to_string();
+        let (client, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        client.batch_execute(&crate::accounts::migrate_sql("postgres")).await.unwrap();
+        let accounts = crate::accounts::Accounts::open(&url, cfg.sign_in.clone()).await.unwrap();
+        accounts.add_person("sam", "Intruder", None).await.unwrap();
+        accounts.add_person("ada", "Ada", None).await.unwrap();
         let sam = super::resolve_person(&cfg, &accounts, "sam").unwrap();
         assert_eq!((sam.name.as_str(), sam.is_owner()), ("Sam", true), "the config lost to a local namesake");
         let ada = super::resolve_person(&cfg, &accounts, "ada").unwrap();
         assert_eq!(ada.name.as_str(), "Ada", "the local record came back wrong");
         assert!(!ada.is_owner() && !ada.is_developer() && ada.token.is_none() && ada.groups.is_empty(), "a local person arrived with powers");
         assert!(super::resolve_person(&cfg, &accounts, "ghost").is_none(), "nobody resolved");
+        server_client.batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")).await.unwrap();
     }
 }

@@ -465,10 +465,10 @@ pub fn desktop_manifest(cfg: &Config, origin: &str, channel: &str) -> Option<Val
 /// me should have a choice"), and production need not hold its build's work.
 /// A pre-release older than `MIN_APP` cannot sign in at all, so it gets
 /// production: everyone's builds, and its only way forward.
-pub fn assigned_channel(k: &Kernel, h: &HeaderMap) -> Option<&'static str> {
+pub async fn assigned_channel(k: &Kernel, h: &HeaderMap) -> Option<&'static str> {
     // Everyone else's, as an admin set it (Operations › Updates).
     let everyone = k.read(|s| s.desktop_channel.clone()).and_then(|c| CHANNELS.iter().copied().find(|x| *x == c)).unwrap_or("production");
-    if let Ok(p) = crate::api::who(k, h) {
+    if let Ok(p) = crate::api::who(k, h).await {
         return Some(if p.is_owner() {
             "development"
         } else if p.has_role("tester") {
@@ -549,7 +549,7 @@ pub fn unversioned_app(h: &HeaderMap) -> Option<Response> {
 }
 
 async fn status(AxState(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = owner(&k, &h) {
+    if let Err(r) = owner(&k, &h).await {
         return r;
     }
     let latest = k.latest_release().map(|m| json!({ "version": m["version"], "notes": m["notes"] }));
@@ -570,7 +570,7 @@ async fn status(AxState(k): K, h: HeaderMap) -> Response {
 
 /// Install the latest release now. The switch happens after the answer.
 async fn check_now(AxState(k): K, h: HeaderMap) -> Response {
-    let p = match owner(&k, &h) {
+    let p = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -591,7 +591,7 @@ async fn check_now(AxState(k): K, h: HeaderMap) -> Response {
 }
 
 async fn roll_back(AxState(k): K, h: HeaderMap) -> Response {
-    let p = match owner(&k, &h) {
+    let p = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -610,7 +610,7 @@ async fn roll_back(AxState(k): K, h: HeaderMap) -> Response {
 /// The apps ask with their session if they have one; without, an app too old
 /// to sign in can still update. The appliance decides the channel.
 async fn desktop_latest(AxState(k): K, Extension(t): Extension<Transport>, h: HeaderMap) -> Response {
-    let Some(channel) = assigned_channel(&k, &h) else {
+    let Some(channel) = assigned_channel(&k, &h).await else {
         return StatusCode::NO_CONTENT.into_response();
     };
     let Some(host) = h.get("host").and_then(|v| v.to_str().ok()) else {
@@ -635,7 +635,7 @@ async fn desktop_file(AxState(k): K, h: HeaderMap, UrlPath((channel, name)): Url
     if !CHANNELS.contains(&channel.as_str()) || name.contains('/') || name.contains("..") || name == "latest.json" {
         return err(StatusCode::NOT_FOUND, "no such file");
     }
-    if channel != "production" && assigned_channel(&k, &h) != Some(channel.as_str()) {
+    if channel != "production" && assigned_channel(&k, &h).await != Some(channel.as_str()) {
         return err(StatusCode::NOT_FOUND, "no such file");
     }
     match tokio::fs::read(channel_dir(&k.cfg, &channel).join(&name)).await {

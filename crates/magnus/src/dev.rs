@@ -36,7 +36,7 @@ pub fn router() -> Router<Arc<Kernel>> {
 
 macro_rules! dev {
     ($k:expr, $h:expr) => {
-        match developer(&$k, &$h) {
+        match developer(&$k, &$h).await {
             Ok(p) => p,
             Err(r) => return r,
         }

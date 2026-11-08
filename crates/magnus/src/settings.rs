@@ -58,7 +58,7 @@ pub fn router() -> Router<Arc<Kernel>> {
 
 /// The devices signed in as the person, newest first.
 async fn sessions(State(k): K, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -66,6 +66,7 @@ async fn sessions(State(k): K, h: HeaderMap) -> Response {
     let list: Vec<Value> = k
         .accounts
         .sessions_of(&p.id, token)
+        .await
         .into_iter()
         .map(|(s, current)| json!({ "id": s.id, "client": s.client, "created": s.created, "expires": s.expires, "current": current }))
         .collect();
@@ -74,11 +75,11 @@ async fn sessions(State(k): K, h: HeaderMap) -> Response {
 
 /// Sign one of the person's devices out.
 async fn end_session(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
-    match k.accounts.end(&p.id, &id) {
+    match k.accounts.end(&p.id, &id).await {
         Ok(Some(s)) => match k.emit(&format!("person:{}", p.id), Ev::SignedOut { person: p.id.clone(), session: s.id }).await {
             Ok(_) => StatusCode::NO_CONTENT.into_response(),
             Err(e) => internal(e),
@@ -90,7 +91,7 @@ async fn end_session(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Respo
 
 /// Everyone on the appliance with their rights and where the rights come from.
 async fn people(State(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = owner(&k, &h) {
+    if let Err(r) = owner(&k, &h).await {
         return r;
     }
     let list: Vec<Value> = k
@@ -118,7 +119,7 @@ async fn people(State(k): K, h: HeaderMap) -> Response {
 /// The owner sets a person's roles. Roles the identity provider names win,
 /// so those cannot be set here; and someone must stay owner.
 async fn set_roles(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let me = match owner(&k, &h) {
+    let me = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -148,14 +149,14 @@ async fn set_roles(State(k): K, h: HeaderMap, Path(id): Path<String>, Json(b): J
 /// data is the organisation's, and the owner can make it private (owner's
 /// ruling 14, 2026-11-01).
 async fn get_data_access(State(k): K, h: HeaderMap) -> Response {
-    if let Err(r) = who(&k, &h) {
+    if let Err(r) = who(&k, &h).await {
         return r;
     }
     Json(json!({ "private": k.read(|s| s.data_private) })).into_response()
 }
 
 async fn put_data_access(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let me = match owner(&k, &h) {
+    let me = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -171,7 +172,7 @@ async fn put_data_access(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Res
 /// and the next account to sign in as them becomes theirs (for an account
 /// made again, or a person moved to a new one).
 async fn clear_account(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let me = match owner(&k, &h) {
+    let me = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -192,7 +193,7 @@ async fn clear_account(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Res
 /// the organisation's policy makes people's data private. Each read is in
 /// the log and in the person's inbox.
 async fn person_data(State(k): K, h: HeaderMap, Path((id, what)): Path<(String, String)>) -> Response {
-    let me = match owner(&k, &h) {
+    let me = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -204,7 +205,7 @@ async fn person_data(State(k): K, h: HeaderMap, Path((id, what)): Path<(String, 
 }
 
 async fn get_preferences(State(k): K, h: HeaderMap) -> Response {
-    match who(&k, &h) {
+    match who(&k, &h).await {
         Ok(p) => Json(preferences(&k, &p.id)).into_response(),
         Err(r) => r,
     }
@@ -213,7 +214,7 @@ async fn get_preferences(State(k): K, h: HeaderMap) -> Response {
 /// Change some of the person's own settings; each must be a known one,
 /// a yes or no or, for the proactive loop's, what the loop can use.
 async fn put_preferences(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -236,7 +237,7 @@ async fn put_preferences(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Res
 /// A person asks the owner to delete their data. The request is an inbox
 /// item for the owner, with the date it must be acted on by.
 async fn request_deletion(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -261,7 +262,7 @@ async fn request_deletion(State(k): K, h: HeaderMap, Json(b): Json<Value>) -> Re
 /// The person's own deletion requests and what became of them; the owner
 /// sees everyone's.
 async fn deletion_requests(State(k): K, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };

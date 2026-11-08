@@ -605,7 +605,7 @@ struct Q {
 
 /// What the person may read: matches for `q`, or the latest entries.
 async fn list(State(k): State<Arc<Kernel>>, h: HeaderMap, Query(q): Query<Q>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -619,7 +619,7 @@ async fn list(State(k): State<Arc<Kernel>>, h: HeaderMap, Query(q): Query<Q>) ->
 /// fact; from anyone else it is untrusted until endorsed. It is readable by
 /// the author, by the groups named, or by everyone.
 async fn add(State(k): State<Arc<Kernel>>, h: HeaderMap, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -669,7 +669,7 @@ async fn add(State(k): State<Arc<Kernel>>, h: HeaderMap, Json(b): Json<Value>) -
 /// Ask the people with the role to make an entry a company fact. Anyone who
 /// may read it may ask.
 async fn request_endorsement(State(k): State<Arc<Kernel>>, h: HeaderMap, Path(id): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -689,7 +689,7 @@ async fn request_endorsement(State(k): State<Arc<Kernel>>, h: HeaderMap, Path(id
 /// recorded as theirs. Anyone who may read it may share it, after seeing
 /// its text.
 async fn share(State(k): State<Arc<Kernel>>, h: HeaderMap, Path(id): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
