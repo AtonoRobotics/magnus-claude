@@ -12,6 +12,7 @@ try {
   await page.getByLabel('Username').fill(process.env.MAGNUS_PERSON);await page.getByLabel('Password').fill(process.env.MAGNUS_PASSWORD);
   await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.locator('#msg').fill('Show the Markdown fixture');await page.locator('#send').click();
   const entry=page.locator('.entry[data-kind=answer]').last();await entry.getByRole('heading',{name:'Readable answer'}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).count(),1,'the send icon names the message operation independently');
   assert.equal(await entry.locator('.markdown strong').textContent(),'Bold');assert.equal(await entry.locator('table td').count(),2);
   assert.equal(await entry.locator('script, a[href^="javascript:"]').count(),0);assert.equal(await page.evaluate(()=>window.pwned),undefined);
   await entry.getByRole('button',{name:'Copy code'}).click();assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'const answer = 42;');
@@ -73,6 +74,7 @@ try {
   const previewFile=await page.evaluate(body=>Magnus.api('POST','/v1/files',body),{name:'bounded-preview.md',media_type:'text/markdown',data_b64:Buffer.from(fileText).toString('base64')});
   await page.evaluate(id=>openPanel(`file:${id}`),previewFile.id);
   const preview=page.frameLocator('#fview');await preview.getByText('The first 200 of 1000 rows; the rest are in the file.',{exact:true}).waitFor();assert.equal(await preview.locator('tbody tr').count(),200);
+  assert.equal(await page.locator('#detail').getByRole('button',{name:'Download bounded-preview.md',exact:true}).count(),1,'the file-view download names the actual document');
   const frameCopy=page.locator('#detail .frame-actions button[data-code-copy]');await frameCopy.focus();await page.getByRole('tooltip').waitFor();await frameCopy.click();await page.getByRole('tooltip').waitFor({state:'hidden'});assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'const original = 42;');
   const bytes=await context.request.get(`${process.env.MAGNUS_URL}/v1/files/${previewFile.id}`);assert.equal(await bytes.text(),fileText);
   await page.evaluate(()=>closePanel());

@@ -1,0 +1,7 @@
+# Complete the native acceptance control names
+
+Claimed #524 before changes. The two names were observed on the real Windows client, initially test.1037.pr.517 and then test.1039 after its update; the desktop UI files are unchanged between those builds.
+
+The composer now independently names “Send message”, and the file view names its download with the actual filename. The shared browser regression checks both controls by their accessible names. Before the fix it failed with zero “Send message” buttons; after rebuilding the appliance's embedded UI, both workspace-controls tests pass (6.42s), including the filename-specific download assertion and the existing Markdown, menu, tooltip, feedback, copy and original-byte checks.
+
+Native acceptance in #514 has confirmed the corrected composer geometry, real text entry and draft restoration, upload/navigation/removal without deleting the shared file, byte-exact native download, actual response delivery, speech start/stop, keyboard-menu focus, and all eight appearance/material combinations. The current window changed during resize testing, so that inconclusive test is being repeated in a separate UI profile. Remaining native acceptance and temporary-debug cleanup stay explicit in #514; this record does not claim those remaining checks passed. Full PR CI and publication are required before the new names can be rechecked on the published Windows client.
