@@ -192,53 +192,111 @@ const UI = {
 };
 const icon = (k, cls = "") => `<svg class="ic${cls ? ` ${cls}` : ""}" viewBox="0 0 24 24" aria-hidden="true">${UI[k]}</svg>`;
 
-function nav() {
-  const route = location.hash || "#/home";
-  const link = (href, label, ic) => `<a href="${href}" class="${route === href || route.startsWith(href + "/") ? "on" : ""}">${ic ? icon(ic) : ""}<span class="ttl">${label}</span></a>`;
-  const on = what => Panel.what === what ? " on" : "";
-  const waiting = needsMe(), blocking = waiting.filter(i => i.blocking).length;
-  const ready = App.update?.ready;
-  // A project's conversations sit under it; the rest, each with its icon.
-  const conv = (t, nested = true) => `<a href="#/chat/${enc(t.thread)}" class="${nested ? "conv" : ""}${t.thread === App.thread ? " on" : ""}"${t.thread === App.thread ? ` aria-current="page"` : ""} title="${esc(t.title)}">${nested ? "" : icon("chat")}<span class="ttl">${esc(t.title)}</span></a>`;
-  const loose = App.threads.filter(t => !t.project);
-  const here = App.threads.find(t => t.thread === App.thread);
-  const running = App.tasks.filter(t => t.status === "running").length;
-  const count = n => n ? `<span class="count">${n}</span>` : "";
-  return `
-    ${ready ? `<div class="update-ready" title="${esc(ready.notes || "")}"><div class="small">Magnus ${esc(ready.version)} is ready.</div>
-      <button class="primary small" data-act="restart-update">Restart to update</button></div>` : ""}
-    <button class="needs${waiting.length ? " some" : ""}${on("needs")}" data-open="needs" title="${blocking ? `${blocking} waiting on you now` : "Approvals, questions and reviews"}">${icon("bell")}<span class="ttl">Needs you</span><span class="pill${blocking ? "" : " quiet"}" data-needs-count>${waiting.length}</span></button>
-    <div class="sect"><div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more${on("projects")}" title="All projects, and a new one">All</a></div>
-    ${App.projects.map(p => `<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" class="${[on(`project:${p.id}`).trim(), here?.project?.id === p.id ? "cur" : ""].filter(Boolean).join(" ")}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>
-      ${App.threads.filter(t => t.project?.id === p.id).map(t => conv(t)).join("")}`).join("") || `<p class="small faint pad">None yet.</p>`}</div>
-    ${loose.length ? `<div class="sect"><div class="group"><span>Conversations</span></div>${loose.map(t => conv(t, false)).join("")}</div>` : ""}
-    <div class="sect"><div class="group"><span>Across everything</span></div>
-    <div class="views">
-      <a href="#/tasks" data-open="tasks" class="${on("tasks").trim()}">${icon("tasks")}<span class="ttl">Tasks</span>${running ? `<span class="count">${running} running</span>` : ""}</a>
-      <a href="#/schedules" data-open="schedules" class="${on("schedules").trim()}">${icon("calendar")}<span class="ttl">Schedules</span>${count(App.schedules.length)}</a>
-      <a href="#/files" data-open="files" class="${on("files").trim()}">${icon("file")}<span class="ttl">Files</span></a>
-      <a href="#/library" class="${route.startsWith("#/library") ? "on" : ""}">${icon("grid")}<span class="ttl">Library</span></a>
-      ${link("#/trash", "Trash", "trash")}</div></div>
-    <div class="foot">
-    ${isDev() ? `<div class="group"><span>Developer</span></div>
-      ${link("#/dev/runs", "Runs")}
-      ${link("#/dev/experiments", "Experiments")}
-      ${link("#/dev/system", "System")}
-      ${link("#/dev/policy", "Policy")}
-      ${link("#/dev/playbook", "Playbook")}` : ""}
-    <div class="who"><span class="avatar" aria-hidden="true">${esc((App.me?.name || "?").trim().charAt(0).toUpperCase())}</span>
-      <div class="whoami" data-appliance="${esc(App.appliance)}"><div class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</div>
-      <button class="link" data-act="sign-out">Sign out</button></div>
-      <a href="#/settings" class="icon-btn${route.startsWith("#/settings") ? " on" : ""}" title="Settings">${icon("gear")}<span class="sr">Settings</span></a></div></div>`;
+function navigationTree() {
+  const conv=t=>`<a class="conv${t.thread===App.thread ? " on" : ""}" href="#/chat/${enc(t.thread)}" ${t.thread===App.thread ? 'aria-current="page"' : ""} title="${esc(t.title)}"><span class="ttl">${esc(t.title)}</span></a>`;
+  const loose=App.threads.filter(t=>!t.project);
+  return `<div class="sect"><div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more">All</a></div>
+    ${App.projects.map(p=>`<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}">${icon("folder")}<span class="ttl" title="${esc(p.name)}">${esc(p.name)}</span></a>${App.threads.filter(t=>t.project?.id===p.id).map(conv).join("")}`).join("") || '<p class="small muted pad">No projects yet.</p>'}</div>
+    <div class="sect"><div class="group"><span>Conversations</span></div>${loose.map(conv).join("") || '<p class="small muted pad">No conversations yet.</p>'}</div>
+    <div class="sect"><a href="#/trash">${icon("trash")}<span>Trash</span></a>${isDev() ? `<details class="developer-nav"><summary>Developer</summary>${[["runs","Runs"],["experiments","Experiments"],["system","System"],["policy","Policy"],["playbook","Playbook"]].map(([k,l])=>`<a href="#/dev/${k}">${l}</a>`).join("")}</details>` : ""}</div>`;
 }
-const sidebar = () => paint($("#side"), nav());
+function nav() {
+  const route=location.hash || "#/home", waiting=needsMe();
+  const active=k=>k==="activity" ? ["activity","tasks","schedules"].includes(Panel.what) || /^(task|schedule):/.test(Panel.what || "") : k==="files" ? Panel.what==="files" || Panel.what?.startsWith("file:") : k==="needs" ? Panel.what==="needs" || Panel.what?.startsWith("item:") : route.startsWith("#/library");
+  const primary=(k,label,ic,href)=>`<a class="primary-nav${k==="needs" ? " needs" : ""}${active(k) ? " on" : ""}" href="${href}" ${k!=="apps" ? `data-open="${k}"` : ""} ${active(k) ? 'aria-current="page"' : ""} aria-label="${label}${k==="needs" && waiting.length ? `, ${waiting.length} decisions` : ""}" title="${label}">${icon(ic)}<span class="nav-label">${label}</span>${k==="needs" ? `<span class="pill${waiting.length ? "" : " quiet"}" data-needs-count aria-hidden="true">${waiting.length}</span>` : ""}</a>`;
+  return `${App.update?.ready ? `<div class="update-ready"><span class="small">Magnus ${esc(App.update.ready.version)} is ready.</span><button data-act="restart-update">Restart to update</button></div>` : ""}
+    <a href="#/chat/new" class="new-chat primary-nav" aria-label="New conversation" title="New conversation">${icon("plus")}<span class="nav-label">New conversation</span></a>
+    <div class="primary-destinations">${primary("activity","Activity","tasks","#/activity")}${primary("needs","Needs you","bell","#/inbox")}${primary("files","Files","file","#/files")}${primary("apps","Apps","grid","#/library")}</div>
+    <button type="button" class="rail-tree icon-btn" data-nav-tree aria-label="Projects and conversations" title="Projects and conversations" aria-expanded="false" aria-controls="navigation-flyout">${icon("folder")}</button>
+    <div class="nav-tree">${navigationTree()}</div>
+    <div class="foot"><div class="who"><span class="avatar" aria-hidden="true">${esc((App.me?.name || "?").trim().charAt(0).toUpperCase())}</span><div class="whoami" data-appliance="${esc(App.appliance)}"><span class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</span><button class="link" data-act="sign-out">Sign out</button></div><a href="#/settings" class="icon-btn" aria-label="Settings" title="Settings">${icon("gear")}</a></div></div>`;
+}
+function sidebar() {
+  paint($("#side"),nav());
+  if (!$("#navigation-flyout")?.hidden) paint($("#navigation-flyout"),`<h2>Projects and conversations</h2>${navigationTree()}<button data-act="sign-out">Sign out</button><button data-close-tree>Close navigation list</button>`);
+}
+
+// Fit is based on usable content width, independently of stored preferences.
+const Workspace = (() => {
+  let expanded=false, region="conversation", forceExpanded=false, installed=false, restoreDrawer=true;
+  function fit(width, preferred="expanded", conversation=420, work=false) {
+    const mobile=width<760;
+    const temporary=work && !expanded && !forceExpanded && preferred==="expanded" && width-228<936;
+    const nav=mobile ? "drawer" : preferred==="compact" || temporary ? "compact" : "expanded";
+    const navWidth=mobile ? 0 : nav==="compact" ? 64 : 228, available=width-navWidth;
+    const eligible=work && available>=936;
+    const max=Math.min(560,available-576), actual=Math.max(360,Math.min(560,Number(conversation)||420));
+    return {nav,navWidth,available,eligible,split:eligible && !expanded,min:360,max:Math.max(360,max),conversation:eligible ? Math.min(actual,max) : actual,temporary};
+  }
+  function update() {
+    const shell=$(".shell"); if (!shell) return;
+    const prefs=Theme.prefs(), work=!!Panel.what && !!App.workspace;
+    const m=fit(shell.clientWidth,prefs.navigation || "expanded",prefs.conversationWidthPx || 420,work);
+    const prior=[...document.querySelectorAll("#thread, #detail .detail-body")].filter(el=>el.clientHeight).map(root=>{
+      const rect=root.getBoundingClientRect(), nodes=[...root.querySelectorAll("[data-entry], iframe, h2, h3, p")], node=nodes.find(n=>n.getBoundingClientRect().bottom>rect.top);
+      return {root,node,top:root.scrollTop,offset:node ? node.getBoundingClientRect().top-rect.top : 0,follow:root.id==="thread" && root.scrollHeight-root.scrollTop-root.clientHeight<=80};
+    });
+    shell.style.setProperty("--nav-width",`${m.navWidth}px`);shell.style.setProperty("--conversation-width",`${m.conversation}px`);
+    document.body.dataset.navigation=m.nav;document.body.dataset.workspace=!work ? "conversation" : m.split ? "split" : "single";document.body.dataset.region=region;
+    const height=Math.min(innerHeight,window.visualViewport?.height || innerHeight);shell.style.setProperty("--workspace-height",`${height}px`);document.body.classList.toggle("short-viewport",height<520);
+    const toggle=$("[data-nav-toggle]");if(toggle){toggle.setAttribute("aria-label",m.nav==="expanded" ? "Collapse navigation" : "Expand navigation");toggle.title=toggle.getAttribute("aria-label");toggle.setAttribute("aria-expanded",String(m.nav==="expanded"));}
+    $("[data-open-drawer]").hidden=m.nav!=="drawer";
+    const selectors=$(".workspace-selectors");selectors.hidden=!work || m.split;
+    for(const b of $$("[data-region]",selectors)){const on=b.dataset.region===region;b.setAttribute("aria-pressed",String(on));}
+    const grow=$("[data-expand-work]");grow.hidden=!work || (!m.eligible && !expanded);grow.setAttribute("aria-label",expanded ? "Restore split view" : "Expand work");grow.title=grow.getAttribute("aria-label");grow.setAttribute("aria-pressed",String(expanded));
+    $("[data-close-work]").hidden=!work;
+    $(".workspace-heading").textContent=App.workspace ? "Conversation" : location.hash.startsWith("#/library") ? "Apps" : location.hash.startsWith("#/settings") ? "Settings" : location.hash.startsWith("#/dev") ? "Developer" : "Magnus";
+    $(".workspace-heading").hidden=work;
+    const separator=$("#workspace-splitter");separator.hidden=!m.split;separator.setAttribute("aria-valuenow",String(Math.round(m.conversation)));separator.setAttribute("aria-valuemin",String(m.min));separator.setAttribute("aria-valuemax",String(m.max));separator.setAttribute("aria-valuetext",`${Math.round(m.conversation)} pixels`);
+    if (m.nav!=="drawer" && $("#navigation-drawer").open) closeDrawer(false);
+    for(const a of prior){if(!a.root.clientHeight)continue;a.root.scrollTop=a.follow ? a.root.scrollHeight : a.node?.isConnected ? a.root.scrollTop+a.node.getBoundingClientRect().top-a.root.getBoundingClientRect().top-a.offset : a.top;}
+    return m;
+  }
+  function choose(which) {region=which;update();if(which==="work") $("#detail h2")?.focus({preventScroll:true});else $("#msg")?.focus({preventScroll:true});}
+  function opened() {region="work";forceExpanded=false;update();}
+  function closed() {expanded=false;region="conversation";update();}
+  function openDrawer() {
+    const dialog=$("#navigation-drawer"),nav=$("nav.side");if(dialog.open)return;
+    dialog.append(nav);restoreDrawer=true;dialog.showModal();$("[data-close-drawer]",nav).focus();
+  }
+  function closeDrawer(restore=true) {const d=$("#navigation-drawer");if(!d?.open)return;restoreDrawer=restore;d.close();}
+  function closeTree(restore=true) {const fly=$("#navigation-flyout");if(!fly)return;fly.hidden=true;const b=$("[data-nav-tree]");b?.setAttribute("aria-expanded","false");if(restore)b?.focus({preventScroll:true});}
+  function resize(value) {const m=update();Theme.set({conversationWidthPx:Math.max(m.min,Math.min(m.max,value))});update();}
+  function install() {
+    expanded=false;region="conversation";forceExpanded=false;
+    const d=$("#navigation-drawer");d.addEventListener("click",e=>{if(e.target===d){const r=d.getBoundingClientRect();if(e.clientX<r.left || e.clientX>r.right || e.clientY<r.top || e.clientY>r.bottom)closeDrawer();}});d.addEventListener("close",()=>{const nav=$("nav.side",d);if(nav)$(".shell").prepend(nav);if(restoreDrawer)$("[data-open-drawer]")?.focus({preventScroll:true});});
+    $("#workspace-bar").onclick=e=>{const b=e.target.closest("button");if(!b)return;if(b.matches("[data-open-drawer]"))openDrawer();if(b.dataset.region)choose(b.dataset.region);if(b.matches("[data-expand-work]")){expanded=!expanded;if(expanded)region="work";update();}if(b.matches("[data-close-work]"))closePanel();};
+    $("[data-nav-toggle]").onclick=()=>{const m=update(),navigation=m.nav==="compact" ? "expanded" : "compact";forceExpanded=navigation==="expanded";Theme.set({navigation});update();};
+    $("[data-close-drawer]").onclick=()=>closeDrawer();
+    $("[data-rail-search]").onclick=()=>{const dialog=$("#workspace-search");dialog.showModal();$("input",dialog).focus();};
+    $("#workspace-search form").onsubmit=e=>{e.preventDefault();const q=$("#workspace-search input").value.trim();$("#workspace-search").close();if(q){if(App.workspace)openPanel(`search:${q}`);else{App.openAfter=`search:${q}`;location.hash="#/home";}}};
+    $("[data-close-search]").onclick=()=>$("#workspace-search").close();
+    const separator=$("#workspace-splitter");separator.onkeydown=e=>{const m=update();let width=m.conversation;if(e.key==="Home")width=m.min;else if(e.key==="End")width=m.max;else if(["ArrowLeft","ArrowRight"].includes(e.key))width+=(e.key==="ArrowLeft" ? 1 : -1)*(e.shiftKey ? 48 : 16);else return;e.preventDefault();resize(width);};
+    separator.onpointerdown=e=>{if(e.button!==0)return;const m=update(),x=e.clientX,width=m.conversation;separator.setPointerCapture(e.pointerId);separator.onpointermove=move=>resize(width+x-move.clientX);separator.onpointerup=()=>{separator.onpointermove=null;separator.onpointerup=null;separator.releasePointerCapture(e.pointerId);};};
+    if(!installed){installed=true;
+      window.addEventListener("resize",()=>{forceExpanded=false;update();closeTree(false);});window.visualViewport?.addEventListener("resize",update);window.addEventListener("magnus-theme",update);
+      document.addEventListener("click",e=>{
+        const tree=e.target.closest("[data-nav-tree]");if(tree){const fly=$("#navigation-flyout");if(fly.hidden){fly.hidden=false;sidebar();tree.setAttribute("aria-expanded","true");$("a,button",fly)?.focus({preventScroll:true});}else closeTree();return;}
+        if(e.target.closest("[data-close-tree]"))closeTree();else if(!e.target.closest("#navigation-flyout"))closeTree(false);
+        if(e.target.closest("nav.side a, #navigation-flyout a")){closeTree(false);closeDrawer(false);}
+        if(e.target.closest("#navigation-flyout [data-act=sign-out]"))$("nav.side [data-act=sign-out]")?.click();
+      });
+      document.addEventListener("keydown",e=>{if(e.key==="Escape" && !$("#navigation-flyout")?.hidden){e.preventDefault();closeTree();}});
+    }
+    update();
+  }
+  return {fit,update,install,opened,closed,choose};
+})();
 
 function shell() {
-  document.body.innerHTML = `<div class="shell"><nav class="side" aria-label="Sections"><div class="brand"><span class="logo" aria-hidden="true">M</span><span>Magnus</span>
-    <a href="#/chat/new" class="icon-btn new-chat" title="New conversation">${icon("plus")}<span class="sr">New conversation</span></a></div>
-    <form id="find" role="search">${icon("search")}<label class="sr" for="q">Search conversations, tasks and files</label><input id="q" type="search" placeholder="Search chats, tasks, files" autocomplete="off"></form>
-    <div id="side"></div></nav>
-    <main id="main" tabindex="-1"></main><aside id="detail" class="detail" aria-label="Details" hidden></aside></div>`;
+  document.body.innerHTML = `<div class="shell"><nav class="side" aria-label="Sections"><div class="brand"><span class="logo" aria-hidden="true">M</span><span class="brand-name">Magnus</span><button class="icon-btn" data-nav-toggle aria-label="Collapse navigation" title="Collapse navigation">${icon("chev")}</button><button class="icon-btn" data-close-drawer aria-label="Close navigation">${icon("close")}</button></div>
+    <button class="icon-btn rail-search" data-rail-search aria-label="Search conversations, tasks and files" title="Search conversations, tasks and files">${icon("search")}</button>
+    <form id="find" role="search">${icon("search")}<label class="sr" for="q">Search conversations, tasks and files</label><input id="q" type="search" placeholder="Search conversations, tasks and files" autocomplete="off"></form><div id="side"></div></nav>
+    <header id="workspace-bar" class="workspace-bar"><button class="icon-btn" data-open-drawer aria-label="Open navigation">${icon("tasks")}</button><span class="workspace-heading">Conversation</span><div class="workspace-selectors" aria-label="Workspace region"><button data-region="work" aria-pressed="false">Work</button><button data-region="conversation" aria-pressed="true">Conversation</button></div><span class="grow"></span><button class="icon-btn" data-expand-work aria-label="Expand work">${icon("grid")}</button><button class="icon-btn" data-close-work data-act="close-panel" aria-label="Close work">${icon("close")}</button></header>
+    <main id="main" tabindex="-1"></main><div id="workspace-splitter" role="separator" tabindex="0" aria-label="Conversation width" aria-orientation="vertical" hidden></div><aside id="detail" class="detail" aria-label="Work" hidden></aside></div>
+    <dialog id="navigation-drawer" class="navigation-drawer" aria-label="Navigation"></dialog><div id="navigation-flyout" class="navigation-flyout" role="dialog" aria-label="Projects and conversations" hidden></div>
+    <dialog id="workspace-search" class="workspace-search" aria-label="Search conversations, tasks and files"><form><label for="workspace-query">Search conversations, tasks and files</label><input id="workspace-query" type="search" required><div class="row"><button type="submit">Search</button><button type="button" data-close-search>Close search</button></div></form></dialog>`;
+  Workspace.install();
   $("nav.side").addEventListener("click", async e => {
     if (e.target.closest("[data-act=restart-update]")) return restartToUpdate();
     if (e.target.closest("[data-act=sign-out]")) {
@@ -403,6 +461,7 @@ async function go() {
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   const h = location.hash || "#/home";
+  queueMicrotask(()=>Workspace.update());
   // A view still loading when the person moves on stops where it is: only
   // the latest navigation draws. Each view gets a main of its own, so one
   // still loading (and its handlers) only ever touches the main it left,
@@ -894,6 +953,7 @@ function convHead(thread, project) {
 
 async function showNewChat(main, project) {
   if (!await chatLayout(main, null, project)) return;
+  if (App.appSearch) { $("#msg",main).value=App.appSearch; App.appSearch=null; }
   paint($("#thread", main), `<p class="muted hello">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm. What it starts shows here as it goes.</p>`);
 }
 
@@ -1070,7 +1130,7 @@ route(/^#\/chat\/new\/([^/]+)$/, (m, project) => showNewChat(m, project), true);
 // Where the views over tasks, schedules, files and decisions used to be
 // pages: each opens beside the latest conversation.
 route(/^#\/inbox$/, main => home(main, "needs"), true);
-route(/^#\/(tasks|schedules|files|projects)$/, (main, k) => home(main, k), true);
+route(/^#\/(activity|tasks|schedules|files|projects)$/, (main, k) => home(main, k), true);
 // The Library is the connector catalog, a page of its own (connectors spec,
 // Library); a connector's page is under it.
 route(/^#\/library(?:\/([^/]+))?$/, (main, name) => showLibrary(main, name));
@@ -1680,38 +1740,31 @@ function feedRows(feed) {
   return rows.join("");
 }
 
+function activityLinks(selected="activity") {
+  return `<nav class="activity-views" aria-label="Activity views">${[["activity","Overview"],["tasks","Tasks"],["schedules","Schedules"]].map(([k,l])=>`<a href="#/${k}" data-open="${k}" ${selected===k ? 'aria-current="page"' : ""}>${l}</a>`).join("")}</nav>`;
+}
+function activityView(composed) {
+  const feed=App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) ? `<section><h3>Since you were last here</h3>${feedRows(App.feed)}</section>` : "";
+  const other=App.inbox.filter(i=>i.status==="open" && !i.can_respond);
+  const decided=App.inbox.filter(i=>i.status!=="open").sort((a,b)=>(b.created_at || "").localeCompare(a.created_at || "")).slice(0,15);
+  return `${activityLinks()}${feed}<section><h3>Work</h3>${tasksView()}</section><section><h3>Schedules</h3>${schedulesView()}</section>
+    ${other.length ? `<details data-key="other"><summary>Updates and work waiting on others (${other.length})</summary>${other.map(i=>card(i,composed)).join("")}</details>` : ""}
+    ${decided.length ? `<details data-key="decided"><summary>Resolved decisions (${decided.length})</summary>${decided.map(i=>card(i,composed)).join("")}</details>` : ""}`;
+}
+
 function needsView(composed) {
-  const mine = App.inbox, open = mine.filter(i => i.status === "open");
-  // Presented observations and interruptions are recorded opened, once
-  // each: the panel draws again on every refresh (#367). An id counts
-  // as reported only after the request succeeds, so a transient
-  // failure is retried on the next refresh instead of losing first
-  // presentation for the session (#399); in-flight ids are held aside
-  // so overlapping refreshes do not report twice.
-  App.reported ??= new Set();
-  App.reporting ??= new Set();
-  const present = open.filter(i => (i.kind === "observation" || i.kind === "interrupt") && !App.reported.has(i.id) && !App.reporting.has(i.id));
-  if (present.length) {
-    for (const i of present) App.reporting.add(i.id);
-    api("POST", "/v1/inbox/opened", { ids: present.map(i => i.id) }).then(
-      () => { for (const i of present) { App.reporting.delete(i.id); App.reported.add(i.id); } },
-      () => { for (const i of present) App.reporting.delete(i.id); },
-    );
-  }
-  const now = open.filter(i => i.can_respond && i.blocking), later = open.filter(i => i.can_respond && !i.blocking), others = open.filter(i => !i.can_respond);
-  const done = mine.filter(i => i.status !== "open").sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, 15);
-  const feed = App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) ? `<h3>Since you were last here</h3>${feedRows(App.feed)}` : "";
+  const open=needsMe();
+  const now=open.filter(i=>i.blocking), later=open.filter(i=>!i.blocking);
   const where = i => {
     const t = i.thread && App.threads.find(x => x.thread === i.thread);
     return t ? `<div class="small where">In <a href="#/chat/${enc(t.thread)}">${esc(t.title)}</a></div>` : "";
   };
   const list = items => items.map(i => `<div class="needs-item" data-needs="${esc(i.id)}">${where(i)}${card(i, composed)}</div>`).join("");
-  return `${feed}<h3>A task is waiting ${now.length ? `<span class="badge">${now.length}</span>` : ""}</h3>
+  return `<h3>A task is waiting ${now.length ? `<span class="badge">${now.length}</span>` : ""}</h3>
     ${now.length ? list(now) : `<p class="empty">No task is waiting on you.</p>`}
     <h3>When you have a moment</h3>
     ${later.length ? list(later) : `<p class="empty">Nothing else.</p>`}
-    ${others.length ? `<h3>Waiting on someone else</h3>${list(others)}` : ""}
-    ${done.length ? `<details data-key="decided"><summary class="small muted">Decided (${done.length})</summary>${done.map(i => card(i, [])).join("")}</details>` : ""}`;
+    `;
 }
 
 // ---------- Task detail ----------
@@ -1812,6 +1865,7 @@ function openPanel(what) {
   document.body.classList.add("with-detail");
   sidebar();
   markOpen();
+  Workspace.opened();
   return drawPanel();
 }
 // The conversation's row for what the panel shows is marked, without
@@ -1830,6 +1884,7 @@ function closePanel() {
   paint(el, "");
   markOpen();
   if ($("#side")) sidebar();
+  Workspace.closed();
 }
 function stopPanelLive() {
   if (Panel.live) Panel.live();
@@ -1837,7 +1892,7 @@ function stopPanelLive() {
   Panel.liveText = "";
 }
 
-const PANEL_TITLES = { needs: "Needs you", tasks: "Tasks", schedules: "Schedules", files: "Files", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Decision", search: "Search", connector: "Connector" };
+const PANEL_TITLES = { activity: "Activity", needs: "Needs you", tasks: "Tasks", schedules: "Schedules", files: "Files", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Decision", search: "Search", connector: "Connector" };
 
 async function drawPanel() {
   const el = $("#detail");
@@ -1856,7 +1911,7 @@ async function drawPanel() {
   const title = kind === "search" ? `Search: ${id}` : PANEL_TITLES[kind] || kind;
   // A view names itself in the head (a task: its title and where it
   // stands); the others are named by what they are.
-  const changed = paint(el, `<div class="detail-head"><div class="dh-main">${head || `<h2>${esc(title)}</h2>`}</div><button class="icon-btn close" data-act="close-panel" title="Close">${icon("close")}<span class="sr">Close</span></button></div><div class="detail-body" data-panel="${esc(kind)}">${body}</div>`);
+  const changed = paint(el, `<div class="detail-head"><div class="dh-main">${head || `<h2>${esc(title)}</h2>`}</div></div><div class="detail-body" data-panel="${esc(kind)}">${body}</div>`);
   if (!changed) return;
   for (const [iid, view, , task] of composed) fill($(`iframe[data-view="${CSS.escape(iid)}"]`, el), view, task);
   if (after) await after(el);
@@ -1866,9 +1921,10 @@ async function drawPanel() {
 // A view whose content is already read (App's objects) or read here.
 const plain = body => ({ body });
 const PANELS = {
+  activity: (_, composed) => plain(activityView(composed)),
   needs: (_, composed) => plain(needsView(composed)),
-  tasks: () => plain(tasksView()),
-  schedules: () => plain(schedulesView()),
+  tasks: () => plain(activityLinks("tasks") + tasksView()),
+  schedules: () => plain(activityLinks("schedules") + schedulesView()),
   schedule: id => plain(scheduleView(id)),
   item: (id, composed) => {
     const i = App.inbox.find(x => x.id === id);
@@ -2068,13 +2124,14 @@ async function showLibrary(main, name) {
   // manages it in Settings.
   Lib.all = connectors.filter(c => c.for_you !== false);
   const seg = (k, label) => `<button data-lib-tab="${k}" aria-pressed="${Lib.tab === k}">${label}</button>`;
-  main.innerHTML = `<div class="libpage"><header class="lhead"><div><h1>Library</h1><p>Connect the apps and programs you want Magnus to work in. You only ever sign in.</p></div>
-    <a class="icon-btn lclose" href="#/home" aria-label="Close Library">${icon("close")}</a></header>
+  main.innerHTML = `<div class="libpage"><header class="lhead"><div><h1>Apps</h1><p>Connect the apps and programs you want Magnus to work in. You only ever sign in.</p></div>
+    <a class="icon-btn lclose" href="#/home" aria-label="Close Apps">${icon("close")}</a></header>
     <div class="lbar"><div class="lseg" role="group" aria-label="Show">${seg("yours", "Yours")}${seg("discover", "Discover")}</div>
-    <div class="lsearch">${SVG.search}<label class="sr" for="libq">Search connectors</label><input id="libq" type="search" value="${esc(Lib.q)}" placeholder="Search connectors, or describe what you want done" autocomplete="off"></div></div>
+    <div class="lsearch">${SVG.search}<label class="sr" for="libq">Search apps and capabilities</label><input id="libq" type="search" value="${esc(Lib.q)}" placeholder="Search apps and capabilities" autocomplete="off"></div></div>
     <div class="lchips" role="group" aria-label="Category">${CATEGORIES.map(([k, l]) => `<button data-lib-cat="${k}" aria-pressed="${Lib.cat === k}">${esc(l)}</button>`).join("")}</div>
-    <div id="lib-sections">${librarySections(connectors)}</div></div>`;
+    <p><a href="#/chat/new" data-ask-app>Ask Magnus to find an app</a></p><div id="lib-sections">${librarySections(connectors)}</div></div>`;
   bindConnectorActs(main);
+  $("[data-ask-app]",main).onclick=()=>{App.appSearch=Lib.q ? `Find an app for: ${Lib.q}` : "Help me find an app for ";};
   let t;
   $("#libq", main).addEventListener("input", e => { clearTimeout(t); t = setTimeout(() => { Lib.q = e.target.value.trim(); $("#lib-sections", main).innerHTML = librarySections(Lib.all); }, 150); });
 }
@@ -2105,7 +2162,7 @@ function connectorBody(c) {
 
 async function showConnectorPage(main, name) {
   const c = await api("GET", `/v1/connectors/${enc(name)}`);
-  main.innerHTML = `<div class="libpage cpage"><p class="small"><a href="#/library">Library</a></p><section class="cp" aria-label="${esc(c.title)}">${connectorBody(c)}</section></div>`;
+  main.innerHTML = `<div class="libpage cpage"><p class="small"><a href="#/library">Apps</a></p><section class="cp" aria-label="${esc(c.title)}">${connectorBody(c)}</section></div>`;
   bindConnectorActs(main);
 }
 
@@ -2799,7 +2856,7 @@ async function boot() {
   App.reported = new Set();
   App.reporting = new Set();
   App.feed = await api("POST", "/v1/home/opened", {}).catch(() => null);
-  if (App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) && (!location.hash || location.hash === "#/home")) App.openAfter = "needs";
+  if (App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) && (!location.hash || location.hash === "#/home")) App.openAfter = "activity";
   background = [setInterval(refresh, 3000), setInterval(pollVersions, 30000)];
   go();
 }
