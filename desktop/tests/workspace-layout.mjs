@@ -66,7 +66,7 @@ try {
  await page.getByRole('link',{name:'Activity',exact:true}).click();await page.getByRole('navigation',{name:'Activity views'}).waitFor();await page.getByRole('link',{name:'Schedules',exact:true}).click();await page.locator('[data-panel=schedules]').waitFor();
  await page.getByRole('link',{name:'Apps',exact:true}).click();await page.getByRole('heading',{name:'Apps',exact:true}).waitFor();await page.getByPlaceholder('Search apps and capabilities').fill('calendar');await page.getByRole('link',{name:'Ask Magnus to find an app'}).click();await until(()=>document.querySelector('#msg')?.value.includes('calendar'));assert.equal(await page.locator('#thread [data-entry]').count(),0);
  // Real host media emulation exercises forced colors, motion and transparency fallbacks.
- await page.evaluate(()=>Theme.set({theme:'ember',material:'glass',motion:'full'}));
+ await page.evaluate(()=>Theme.set({mode:'dark',material:'glass',motion:'full'}));
  await page.emulateMedia({forcedColors:'active',reducedMotion:'reduce'});await until(()=>Theme.look.material==='solid' && Theme.look.motion==='reduced');
  assert.equal(await page.evaluate(()=>Theme.prefs().material),'glass');assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('nav.side')).backdropFilter),'none');assert.ok(await page.locator('#msg').isVisible());
  await page.getByRole('button',{name:/navigation$/,exact:false}).first().focus();await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>getComputedStyle(document.activeElement).outlineStyle),'solid');

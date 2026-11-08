@@ -3188,43 +3188,37 @@ route(/^#\/apps$/, () => { location.hash = "#/settings/connectors"; });
 // transparency still apply on top.
 function appearanceSection(el) {
   const radio = (look, value, label, inner = label, cls = "", style = "") => {
-    const on = (look === "theme" && Theme.prefs().theme !== "custom" ? Theme.look.theme : Theme.prefs()[look]) === value;
+    const on = Theme.prefs()[look] === value;
     return `<button class="${cls}${on ? " on" : ""}" role="radio" aria-checked="${on}" data-look="${look}" data-value="${value}" title="${esc(label)}"${style ? ` style="${style}"` : ""}>${inner}</button>`;
   };
   const draw = () => {
     const p = Theme.prefs(), os = Theme.os(), look = Theme.look;
     paint(el, `<h2>Appearance</h2><div class="appearance">
-      <h3 id="theme-h">Theme</h3><div class="theme-presets" role="radiogroup" aria-labelledby="theme-h">${Theme.THEMES.map(([k, label]) => radio("theme", k, label, `<span class="preset-preview" aria-hidden="true" style="--preview-chrome:#${Theme.PRESETS[k][1]};--preview-canvas:#${Theme.PRESETS[k][2]};--preview-text:#${Theme.PRESETS[k][4]}"><span></span><span></span><span></span></span>${esc(label)}`)).join("")}</div>
-      <label class="follow-computer"><input type="checkbox" data-follow-computer ${p.followComputer ? "checked" : ""}>Follow computer</label>
-      ${p.theme === "custom" ? `<p class="small muted">Custom appearance${Theme.tokens(look)["contrast-adjusted"] === "true" ? " — contrast adjustments are active" : ""}.</p>` : ""}
       ${Theme.saved === false ? `<p class="small" role="status">Appearance changed for this session but was not saved on this device.</p>` : ""}
-      <h3 id="mode-h">Custom mode</h3><div class="seg" role="radiogroup" aria-labelledby="mode-h">${Theme.MODES.map(([k, l]) => radio("mode", k, l)).join("")}</div>
+      <h3 id="mode-h">Mode</h3><div class="seg" role="radiogroup" aria-labelledby="mode-h">${Theme.MODES.map(([k, l]) => radio("mode", k, l)).join("")}</div>
       <h3 id="mat-h">Material</h3><div class="materials" role="radiogroup" aria-labelledby="mat-h">${Theme.MATERIALS.map(([k, l, hint]) => radio("material", k, l,
         `<span class="mprev ${k}" aria-hidden="true"><span class="ms"></span><span class="mm"></span></span><span class="mt"><span class="ml">${esc(l)}</span><span class="small muted">${esc(hint)}</span></span>`, "material")).join("")}</div>
-      ${p.material === "glass" && os.reduceTransparency ? `<p class="small muted" data-look-note>Your computer asks for less transparency, so Magnus stays solid.</p>` : ""}
+      ${p.material === "glass" && look.material !== "glass" ? `<p class="small muted" data-look-note>Your computer asks for less transparency, so Magnus stays solid.</p>` : ""}
       <h3 id="acc-h">Accent color</h3><div class="swatches" role="radiogroup" aria-labelledby="acc-h">${Theme.ACCENTS.map(a => radio("accent", a.id, a.label, `<span class="sr">${esc(a.label)}</span>`, "swatch", `--swatch:${a.swatch};background:${a.swatch}`)).join("")}</div>
       <h3 id="mot-h">Motion</h3><div class="seg" role="radiogroup" aria-labelledby="mot-h">${Theme.MOTIONS.map(([k, l]) => radio("motion", k, l)).join("")}</div>
       <p class="small muted" data-motion-hint>${esc(Theme.MOTION_HINTS[p.motion])}${look.motion !== p.motion ? " Your computer asks for reduced motion, so Magnus uses quick fades." : ""}</p>
       <p class="small faint">Magnus also follows your computer's settings for reduced motion and reduced transparency.</p></div>`);
   };
+  // Redraw keeps keyboard focus on the choice that had it.
+  const redraw = () => {
+    const a = document.activeElement?.dataset;
+    draw();
+    if (a?.look) $(`[data-look="${a.look}"][data-value="${a.value}"]`, el)?.focus({ preventScroll: true });
+  };
   el.onclick = e => {
     const b = e.target.closest("[data-look]");
     if (!b) return;
-    const field = b.dataset.look, value = b.dataset.value;
-    Theme.set({ [field]: value });
-    draw();
-    $(`[data-look="${field}"][data-value="${value}"]`, el)?.focus({ preventScroll: true });
+    b.focus({ preventScroll: true });
+    Theme.set({ [b.dataset.look]: b.dataset.value });
   };
-  const changed = () => {
-    if (!el.isConnected) return;
-    const active = document.activeElement;
-    const selector = active?.dataset?.look ? `[data-look="${active.dataset.look}"][data-value="${active.dataset.value}"]` : active?.matches("[data-follow-computer]") ? "[data-follow-computer]" : null;
-    draw();
-    if (selector) $(selector, el)?.focus({ preventScroll: true });
-  };
+  const changed = () => { if (el.isConnected) redraw(); };
   window.addEventListener("magnus-theme", changed);
   onLeave(() => window.removeEventListener("magnus-theme", changed));
-  el.onchange = e => { if (e.target.matches("[data-follow-computer]")) { Theme.set({ followComputer: e.target.checked }); draw(); $("[data-follow-computer]", el)?.focus({ preventScroll: true }); } };
   draw();
 }
 

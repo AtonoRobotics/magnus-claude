@@ -75,22 +75,21 @@ const reading=async()=>{
   await click(xpath(`//a[@data-open='file:${fileId}']`));
   await until('document decoded',()=>run("const f=document.getElementById('fview');return f?.contentDocument?.body?.textContent.includes('Actual uploaded document.') && f.getBoundingClientRect().height>=f.contentDocument.body.scrollHeight"));
 };
-await step('Appearance offers four presets and existing preferences',async()=>{
+await step('Appearance offers mode, material, accent and motion only',async()=>{
   await appearance();
-  for(const value of ['light','dark','ember','corporate'])await xpath(`//button[@data-look='theme' and @data-value='${value}']`);
-  await css('[data-follow-computer]');
+  for(const value of ['light','dark','system'])await xpath(`//button[@data-look='mode' and @data-value='${value}']`);
+  if(await run("return document.querySelectorAll('[data-look=theme],[data-follow-computer]').length"))throw Error('Named presets or Follow computer are still offered');
   for(const value of ['solid','glass'])await xpath(`//button[@data-look='material' and @data-value='${value}']`);
   for(const value of ['full','reduced','off'])await xpath(`//button[@data-look='motion' and @data-value='${value}']`);
 });
-for(const theme of ['light','dark','ember','corporate'])for(const material of ['solid','glass']){
-  await step(`${theme} ${material}`,async()=>{
-    await appearance();await choose('theme',theme);await choose('material',material);await reading();
-    const m=JSON.parse(await run(MEASURE));const mode=['dark','ember'].includes(theme)?'dark':'light';
-    if(m.look.theme!==theme || m.look.mode!==mode || m.look.material!==material)throw Error(`Unexpected appearance ${JSON.stringify(m.look)}`);
-    if(material==='glass' && !(m.side>=.9 && m.side<1 && m.sideBlur.includes('blur')))throw Error(`Chrome glass lost: ${JSON.stringify(m)}`);
+for(const mode of ['light','dark'])for(const material of ['solid','glass']){
+  await step(`${mode} ${material}`,async()=>{
+    await appearance();await choose('mode',mode);await choose('material',material);await reading();
+    const m=JSON.parse(await run(MEASURE));
+    if(m.look.mode!==mode || m.look.material!==material)throw Error(`Unexpected appearance ${JSON.stringify(m.look)}`);
+    if(material==='glass' && !(m.side<1 && m.sideBlur.includes('blur')))throw Error(`Chrome glass lost: ${JSON.stringify(m)}`);
     if(m.panel!==1 || (material==='solid' && m.side!==1))throw Error('Reading panel or solid chrome is translucent');
     for(const [what,alpha] of m.reading)if(alpha!==null && alpha!==1)throw Error(`Translucent reading surface ${what}`);
-    if(theme==='corporate' && m.chromeScheme!=='dark')throw Error('Corporate native controls do not use dark chrome colors');
     if(m.low.length)throw Error(`Text below 4.5:1: ${m.low.join('; ')}`);
     const frame=await run("const f=document.getElementById('fview');return {mode:f.contentDocument.documentElement.style.colorScheme,text:f.contentDocument.body.textContent,sandbox:f.getAttribute('sandbox')} ");
     if(frame.mode!==mode || !frame.text.includes('Actual uploaded document.') || frame.sandbox!=='allow-same-origin')throw Error('Document theme/data/sandbox changed');

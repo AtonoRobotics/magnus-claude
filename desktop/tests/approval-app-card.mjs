@@ -70,16 +70,16 @@ await step(decides ? "the approval carries the app's card, saying the person nee
 });
 
 await step("in every look and at phone width", async () => {
-  for (const [theme, material] of ["light","dark","ember","corporate"].flatMap(theme=>["solid","glass"].map(material=>[theme,material]))) {
+  for (const [mode, material] of ["light","dark"].flatMap(mode=>["solid","glass"].map(material=>[mode,material]))) {
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 800 });
-      await page.evaluate(([theme, material]) => Theme.set({ theme, material }), [theme, material]);
+      await page.evaluate(([mode, material]) => Theme.set({ mode, material }), [mode, material]);
       await card.waitFor({ timeout: T });
       const over = await page.evaluate(() => Math.max(document.documentElement.scrollWidth - document.documentElement.clientWidth, ...[...document.querySelectorAll("main")].map(m => m.scrollWidth - m.clientWidth)));
-      if (over > 0) throw new Error(`${theme} ${material} at ${width}px scrolls sideways by ${over}px`);
+      if (over > 0) throw new Error(`${mode} ${material} at ${width}px scrolls sideways by ${over}px`);
     }
   }
-  await page.evaluate(() => Theme.set({ followComputer: true, material: "solid" }));
+  await page.evaluate(() => Theme.set({ mode: "system", material: "solid" }));
 });
 
 if (errors.length) { console.error(`FAIL page errors: ${errors.join("; ")}`); process.exit(1); }
