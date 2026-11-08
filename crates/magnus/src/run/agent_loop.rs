@@ -288,10 +288,13 @@ impl Kernel {
                                 ErrorClass::AuthExpired => ("auth", "The model provider needs you to sign in again"),
                                 _ => ("invalid_request", "The model provider rejected the request"),
                             };
+                            // A rejection has many causes (billing, context
+                            // too long): the person needs the provider's.
+                            let why = if class == ErrorClass::InvalidRequest { format!(": {}", e.message.trim_end_matches('.')) } else { String::new() };
                             self.suspend_with_notice(
                                 run_id,
                                 reason,
-                                format!("{what}. The task is paused; resume it when this is fixed."),
+                                format!("{what}{why}. The task is paused; resume it when this is fixed."),
                                 json!({ "class": class, "message": e.message, "attempts": attempt + 1, "retry_after_s": e.retry_after_s }),
                             )
                             .await?;

@@ -79,8 +79,17 @@ pub(crate) fn request(http: &reqwest::Client, settings: &Value, path: &str, toke
     r
 }
 
+/// Refusals that last until the account changes, so asking again cannot
+/// help, whatever HTTP status they arrive with. Z.ai sends all of its with
+/// 429 (https://docs.z.ai/api-reference/api-code): 1113 no balance, 1309 plan
+/// expired, 1311 plan lacks the model, 1314 enterprise plan expired, 1315 key
+/// of another product type. Its other 429s are limits that reset. Meta names
+/// the type.
+const BILLING_REFUSALS: [&str; 6] = ["1113", "1309", "1311", "1314", "1315", "billing_error"];
+
 pub(crate) fn classify(status: u16, body: &str) -> (ErrorClass, String) {
     let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let billing = [&v["error"]["type"], &v["error"]["code"]].iter().any(|k| k.as_str().is_some_and(|k| BILLING_REFUSALS.contains(&k)));
     let detail = v["error"]["message"]
         .as_str()
         .or_else(|| v["message"].as_str())
@@ -88,6 +97,12 @@ pub(crate) fn classify(status: u16, body: &str) -> (ErrorClass, String) {
         .map(String::from)
         .unwrap_or_else(|| body.chars().take(300).collect());
     let kind = v["error"]["type"].as_str().or_else(|| v["error"]["code"].as_str()).unwrap_or_default().to_string();
+    if billing {
+        // InvalidRequest stops at once. A new error class would be logged
+        // with each failure, and a kernel rolled back to a release without
+        // it could no longer read its log.
+        return (ErrorClass::InvalidRequest, format!("billing refused this request, provider returned {status} ({kind}): {detail}"));
+    }
     let class = match status {
         401 | 403 => ErrorClass::AuthExpired,
         402 | 429 => ErrorClass::UsageLimit,
@@ -318,4 +333,25 @@ pub(crate) fn tool_specs(tools: &[proto::ToolSpec], responses: bool) -> Vec<Valu
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod billing_tests {
+    use super::*;
+
+    #[test]
+    fn a_billing_refusal_is_not_a_limit_that_passes() {
+        let (class, message) = classify(429, r#"{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}"#);
+        assert_eq!(class, ErrorClass::InvalidRequest);
+        assert!(message.contains("billing") && message.contains("Insufficient balance"), "{message}");
+        assert_eq!(classify(402, r#"{"error":{"type":"billing_error","message":"Add a payment method."}}"#).0, ErrorClass::InvalidRequest);
+    }
+
+    #[test]
+    fn a_limit_that_resets_is_still_a_usage_limit() {
+        for code in ["1302", "1308", "1310", "1316"] {
+            let body = format!(r#"{{"error":{{"code":"{code}","message":"Limit reached."}}}}"#);
+            assert_eq!(classify(429, &body).0, ErrorClass::UsageLimit, "{code}");
+        }
+    }
 }

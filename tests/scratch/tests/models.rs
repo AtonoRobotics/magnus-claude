@@ -97,3 +97,48 @@ async fn a_rate_limit_is_retried_rather_than_pausing_the_task() {
     assert_eq!(t["status"], "failed", "a single 429 paused the task instead of being retried: {t}");
     assert!(alice.inbox().await.iter().all(|i| i["details"]["reason"] != "usage_limit"), "a person was asked to resume after one 429");
 }
+
+/// A billing refusal does not pass by itself: the task pauses on the first
+/// answer and tells the person why, instead of asking again as for a rate
+/// limit and reporting a usage limit (#539).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_billing_refusal_pauses_at_once_and_says_why() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Router::new()
+        .route("/models", get(|| async { Json(json!({ "data": [{ "id": "m" }] })) }))
+        .route(
+            "/chat/completions",
+            post(|State(n): State<Arc<AtomicUsize>>| async move {
+                n.fetch_add(1, Ordering::SeqCst);
+                (axum::http::StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": { "code": "1113", "message": "Insufficient balance or no resource package. Please recharge." } })))
+            }),
+        )
+        .with_state(calls.clone());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, provider).await.unwrap() });
+
+    let m = FakeModel::start(script(|_| async { Reply::Text("ok".into()) })).await;
+    let mut app = Appliance::start(Spec::default().model_retries(3), &m).await;
+    let alice = app.api("alice");
+    assert!(alice.put_secret("oa_key", "test-key").await.is_success());
+    let path = app.dir.path().join("magnus.toml");
+    let mut cfg: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    let oa = json!({
+        "id": "oa",
+        "command": [bin("magnus-adapter-openai")],
+        "settings": { "api": "chat", "base_url": url, "credential": "oa_key", "auth": { "kind": "api_key" } }
+    });
+    cfg["adapters"].as_array_mut().unwrap().push(toml::Value::try_from(oa).unwrap());
+    std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+    app.restart().await;
+    let alice = app.api("alice");
+    let (st, v) = alice.put("/v1/model", json!({ "adapter": "oa", "model": "m" })).await;
+    assert!(st.is_success(), "{v}");
+
+    let id = alice.submit("Say hello.").await;
+    let item = alice.wait_item(&id, "notice").await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "a billing refusal was asked again");
+    assert_eq!(item["details"]["reason"], "invalid_request", "{item}");
+    assert!(item.to_string().contains("Insufficient balance") && item.to_string().contains("billing"), "the person is not told the cause: {item}");
+}
