@@ -83,6 +83,27 @@ fn away_from_now() -> Value {
     json!({ "start": format!("{h:02}:00"), "end": format!("{:02}:01", (h + 1).rem_euclid(24)) })
 }
 
+/// At least five hours of headroom, even if an hour boundary or midnight
+/// passes while the real model/worker processes the triggered review.
+fn quiet_around(minute: u32) -> Value {
+    let hhmm = |m: u32| format!("{:02}:{:02}", m / 60, m % 60);
+    json!({ "start": hhmm((minute + 1440 - 360) % 1440), "end": hhmm((minute + 360) % 1440) })
+}
+
+#[test]
+fn all_day_and_quiet_fixtures_cover_every_minute_and_a_delayed_review() {
+    let cfg = magnus::config::Proactive::default();
+    for minute in 0..1440 {
+        let prefs = json!({"working_hours":{"start":"00:00","end":"00:00"},"quiet_hours":quiet_around(minute)});
+        let settings = magnus::proactive::settings(&cfg, &prefs);
+        for delay in [0, 1, 2, 5, 59] {
+            let later = (minute + delay) % 1440;
+            assert!(magnus::proactive::in_window(later, settings.working), "work {minute}+{delay}");
+            assert!(magnus::proactive::in_window(later, settings.quiet), "quiet {minute}+{delay}");
+        }
+    }
+}
+
 async fn wait_open(api: &Api, kind: &str) -> Value {
     let me = api.clone();
     eventually(
@@ -117,7 +138,7 @@ async fn review_observes_and_the_person_sees_it() {
     let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
     let bob = app.api("bob");
     // Working all day, never quiet now: the observation pings at once.
-    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "00:00" }, "quiet_hours": away_from_now() })).await;
 
     let item = wait_open(&bob, "observation").await;
     assert_eq!(item["summary"], "The backup finished late");
@@ -189,13 +210,10 @@ async fn interrupt_in_quiet_hours_posts_now_and_pings_later() {
     let m = FakeModel::start(model(calls)).await;
     let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
     let bob = app.api("bob");
-    // Working all day, quiet a two-hour span around now.
-    let h = chrono::Utc::now().hour() as i64;
-    let (s, e) = (
-        format!("{:02}:00", (h - 1).rem_euclid(24)),
-        format!("{:02}:00", (h + 1).rem_euclid(24)),
-    );
-    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": { "start": s, "end": e } })).await;
+    // Equal working endpoints cover the complete day, including 23:59.
+    let now = chrono::Utc::now();
+    let quiet = quiet_around(now.hour() * 60 + now.minute());
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "00:00" }, "quiet_hours": quiet })).await;
 
     let item = wait_open(&bob, "interrupt").await;
     assert_eq!(item["summary"], "The deploy failed");
@@ -224,7 +242,7 @@ async fn second_interrupt_same_day_queues_when_budget_spent() {
     )
     .await;
     let bob = app.api("bob");
-    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "00:00" }, "quiet_hours": away_from_now() })).await;
 
     let me = bob.clone();
     let both = eventually(
@@ -277,7 +295,7 @@ async fn cadence_and_event_due_together_start_one_review() {
     // enabling has cadence (never reviewed) and the event due together.
     let mut app = Appliance::start(Spec::default(), &m).await;
     let bob = app.api("bob");
-    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" } })).await;
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "00:00" } })).await;
     reconfigure(&mut app, |cfg| {
         cfg["proactive"].as_table_mut().unwrap().insert("on".into(), toml::Value::Boolean(true));
     })
@@ -491,7 +509,7 @@ async fn a_review_that_decides_nothing_needs_no_review_whatever_its_contract() {
     let m = FakeModel::start(model(calls)).await;
     let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
     let bob = app.api("bob");
-    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "00:00" }, "quiet_hours": away_from_now() })).await;
 
     // The triggered review records its contract, decides nothing, and
     // completes without waiting on the person.
@@ -527,7 +545,7 @@ async fn a_review_that_would_need_approval_is_refused_and_asks_no_one() {
     let m = FakeModel::start(model(calls)).await;
     let app = Appliance::start(Spec::default().proactive(json!({ "on": true })).app("mail", &mail, "public", "private", &[("send", "irreversible")]), &m).await;
     let bob = app.api("bob");
-    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "00:00" }, "quiet_hours": away_from_now() })).await;
 
     let me = bob.clone();
     eventually("the coming-up review completed", Duration::from_secs(60), || {
@@ -581,7 +599,7 @@ async fn a_review_stopped_by_its_budget_ends_quietly_and_reviews_go_on() {
     .await;
     let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
     let bob = app.api("bob");
-    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "00:00" }, "quiet_hours": away_from_now() })).await;
     let coming_up = |status: &'static str| {
         let me = bob.clone();
         move || {
@@ -620,7 +638,7 @@ async fn a_review_interruption_stays_open_after_the_sweep() {
     let m = FakeModel::start(model(calls)).await;
     let app = Appliance::start(Spec::default().proactive(json!({ "on": true })), &m).await;
     let bob = app.api("bob");
-    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() })).await;
+    trigger_review(&bob, json!({ "working_hours": { "start": "00:00", "end": "00:00" }, "quiet_hours": away_from_now() })).await;
 
     let item = wait_open(&bob, "interrupt").await;
     let id = item["id"].clone();
@@ -685,7 +703,7 @@ async fn a_review_proposes_a_task_the_person_approves() {
     *prior.lock().unwrap() = bob.submit("Check the backups.").await;
     trigger_review(
         &bob,
-        json!({ "working_hours": { "start": "00:00", "end": "23:59" }, "quiet_hours": away_from_now() }),
+        json!({ "working_hours": { "start": "00:00", "end": "00:00" }, "quiet_hours": away_from_now() }),
     )
     .await;
 
