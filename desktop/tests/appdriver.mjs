@@ -67,7 +67,7 @@ export async function open(wd, app, shots, prefix) {
   // tenth of a second before. A stale element goes back to `on` to be found
   // again.
   const settled = async id => {
-    const at = () => d.run("const c = arguments[0].closest('article'); if (c && c.querySelector('iframe.composed:not([data-sized])')) return null; const r = arguments[0].getBoundingClientRect(); return [r.x, r.y, r.width, r.height].join()", { [E]: id });
+    const at = () => d.run("const c = arguments[0].closest('article, [data-entry], #detail'); if (c && c.querySelector('iframe.composed:not([data-sized])')) return null; const r = arguments[0].getBoundingClientRect(); return [r.x, r.y, r.width, r.height].join()", { [E]: id });
     const end = Date.now() + T;
     for (let last = await at(); ; ) {
       await new Promise(r => setTimeout(r, 100));
@@ -77,7 +77,19 @@ export async function open(wd, app, shots, prefix) {
       last = now;
     }
   };
-  d.click = el => on(el, async id => { await settled(id); return call("POST", s(`/element/${id}/click`), {}); });
+  d.click = el => on(el, async id => {
+    // WebKit's automatic click scroll can miss clipping by nested scroll
+    // regions for absolute frame actions. Scroll the actual target into
+    // its container first, then measure and perform the real native click.
+    await d.run("arguments[0].scrollIntoView({block:'nearest',inline:'nearest'})",{[E]:id});
+    await settled(id);
+    try{return await call("POST",s(`/element/${id}/click`),{});}catch(error){
+      if(/element click intercepted|element not interactable/.test(error.message)){
+        try{const evidence=await d.run("const e=arguments[0],r=e.getBoundingClientRect(),x=Math.max(0,Math.min(innerWidth-1,r.left+r.width/2)),y=Math.max(0,Math.min(innerHeight-1,r.top+r.height/2));return {target:{tag:e.tagName,role:e.getAttribute('role'),label:e.getAttribute('aria-label'),text:e.textContent.slice(0,100),rect:r.toJSON()},hit:document.elementsFromPoint(x,y).slice(0,5).map(n=>({tag:n.tagName,id:n.id,class:n.className,role:n.getAttribute('role')})),viewport:[innerWidth,innerHeight]}",{[E]:id});throw new Error(`${error.message}; visible hit-test evidence: ${JSON.stringify(evidence)}`);}catch(evidenceError){if(evidenceError.message.includes('visible hit-test evidence'))throw evidenceError;}
+      }
+      throw error;
+    }
+  });
   d.type = (el, text) => on(el, id => call("POST", s(`/element/${id}/value`), { text }));
   d.clear = el => on(el, id => call("POST", s(`/element/${id}/clear`), {}));
   d.text = el => on(el, id => call("GET", s(`/element/${id}/text`)));

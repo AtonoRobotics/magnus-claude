@@ -184,7 +184,23 @@
     if (look.material === "glass") { t.side = tint(t["chrome-surface"]); t.blur = "blur(20px)"; }
     return t;
   }
-  root.Theme = { LIGHT, DARK, GLASS, ACCENTS, MODES, MATERIALS, MOTIONS, MOTION_HINTS, DEFAULTS, V2_DEFAULTS, PRESETS, THEMES, GLASS_SURFACES, preferences, contrast, effective: effectiveV2, tokens: tokensV2 };
+  // Preference transitions start from the rendered mode, never stale legacy fields.
+  function transition(prefs, change, os={}) {
+    const before=preferences(prefs), shown=effectiveV2(before,os), next={...before,...change};
+    if (change.theme && change.theme!=="custom") next.followComputer=false;
+    if (change.followComputer===true) next.theme=os.dark ? "dark" : "light";
+    if (change.followComputer===false && before.followComputer) {
+      if (before.theme==="custom") next.mode=shown.mode;
+      else if (!change.theme) next.theme=shown.theme;
+    }
+    if (change.accent) {
+      next.theme="custom";
+      next.mode=next.followComputer ? "system" : shown.mode;
+    }
+    if (change.mode) { next.theme="custom"; next.followComputer=change.mode==="system"; }
+    return preferences(next);
+  }
+  root.Theme = { LIGHT, DARK, GLASS, ACCENTS, MODES, MATERIALS, MOTIONS, MOTION_HINTS, DEFAULTS, V2_DEFAULTS, PRESETS, THEMES, GLASS_SURFACES, preferences, transition, contrast, effective: effectiveV2, tokens: tokensV2 };
   if (typeof document === "undefined") return;
 
   // In the page: the person's choices are kept on this device (the look
@@ -193,7 +209,27 @@
   const LEGACY_KEY = "magnus.appearance";
   const media = q => typeof matchMedia === "function" ? matchMedia(q) : null;
   const darkQ = media("(prefers-color-scheme: dark)"), motionQ = media("(prefers-reduced-motion: reduce)"), clearQ = media("(prefers-reduced-transparency: reduce)"), forcedQ = media("(forced-colors: active)");
-  let system = {}, key = null, current = preferences(), revision = 0;
+  let system = {}, key = null, current = preferences();
+  let pendingMaterial=null, changingMaterial=false, desiredMaterial=null;
+  async function changeMaterial(request) {
+    request.key=JSON.stringify(request.args);
+    if(request.key===desiredMaterial)return;
+    desiredMaterial=request.key;pendingMaterial=request;
+    if(changingMaterial)return;
+    changingMaterial=true;
+    try {
+      while(pendingMaterial) {
+        const next=pendingMaterial;pendingMaterial=null;
+        try {
+          const result=await root.Magnus.setMaterial(...next.args);
+          if(next.key===desiredMaterial) document.documentElement.dataset.backdrop=next.glass && result?.native ? "native" : "drawn";
+          if(pendingMaterial?.key===next.key)pendingMaterial=null;
+        } catch {
+          if(next.key===desiredMaterial) document.documentElement.dataset.backdrop="drawn";
+        }
+      }
+    } finally { changingMaterial=false; }
+  }
   const parse = k => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } };
   Theme.prefs = () => ({ ...current });
   Theme.scope = (appliance, person) => {
@@ -207,7 +243,7 @@
   Theme.os = () => ({ dark: !!darkQ?.matches, reduceMotion: !!motionQ?.matches, reduceTransparency: !!clearQ?.matches || !!system.reduce_transparency,
     forcedColors: !!forcedQ?.matches, blur: !root.CSS?.supports || CSS.supports("backdrop-filter", "blur(20px)") || CSS.supports("-webkit-backdrop-filter", "blur(20px)") });
   Theme.apply = () => {
-    const rev = ++revision, look = effectiveV2(current, Theme.os()), el = document.documentElement, t = tokensV2(look);
+    const look = effectiveV2(current, Theme.os()), el = document.documentElement, t = tokensV2(look);
     for (const [k, v] of Object.entries(t)) el.style.setProperty(`--${k}`, v);
     el.style.colorScheme = look.mode;
     Object.assign(el.dataset, { mode: look.mode, theme: look.theme, material: look.material, motion: look.motion, accent: look.accent });
@@ -218,19 +254,13 @@
       try { const r = f.contentDocument?.documentElement; if (r) { for (const [k, v] of Object.entries(t)) r.style.setProperty(`--${k}`, v); r.style.colorScheme = look.mode; } } catch { /* frame still loading */ }
     }
     const glass = look.material === "glass", color = t["chrome-surface"];
-    if (root.Magnus?.setMaterial) root.Magnus.setMaterial(glass, look.mode === "dark", [...[1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16)), 235])
-      .then(m => { if (rev === revision) el.dataset.backdrop = glass && m.native ? "native" : "drawn"; }).catch(() => { if (rev === revision) el.dataset.backdrop = "drawn"; });
+    if (root.Magnus?.setMaterial) changeMaterial({glass,args:[glass,look.mode==="dark",[...[1,3,5].map(i=>parseInt(color.slice(i,i+2),16)),235]]});
     else el.dataset.backdrop = "drawn";
     root.dispatchEvent(new CustomEvent("magnus-theme", { detail: { look, saved: Theme.saved } }));
     return look;
   };
   Theme.set = change => {
-    const next = { ...current, ...change };
-    if (change.theme && change.theme !== "custom") next.followComputer = false;
-    if (change.followComputer === true) next.theme = Theme.os().dark ? "dark" : "light";
-    if (change.followComputer === false && next.theme === "custom" && next.mode === "system") next.mode = Theme.look.mode;
-    if (change.mode || change.accent) { next.theme = "custom"; next.followComputer = change.mode === "system"; }
-    current = preferences(next);
+    current = transition(current, change, Theme.os());
     Theme.saved = true;
     if (key) { try { localStorage.setItem(key, JSON.stringify(current)); } catch { Theme.saved = false; } }
     return Theme.apply();

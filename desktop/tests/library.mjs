@@ -63,7 +63,7 @@ await step("upload a file into the project", async () => {
 await step("ask for work in the project and see its output in full", async () => {
   await page.getByRole("link", { name: "New conversation in this project" }).click();
   await page.locator(".conv-head").getByRole("link", { name: "Kitchen remodel" }).waitFor({ timeout: T });
-  await page.getByLabel("Message").fill("Total the prices in prices.csv.");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("Total the prices in prices.csv.");
   await page.getByRole("button", { name: "Send" }).click();
   await page.locator("#thread [data-chat-task][data-status=completed]").waitFor({ timeout: T });
   await page.locator("#thread [data-chat-task] a.rg-row").click();
@@ -132,7 +132,7 @@ await step("chat in the project with a file attached", async () => {
   await page.locator(".conv-head").getByRole("link", { name: "Kitchen remodel" }).waitFor({ timeout: T });
   await page.locator("#say input[data-attach]").setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("Bathroom tiles next.") });
   await page.locator("#pending").getByText("notes.txt").waitFor({ timeout: T });
-  await page.getByLabel("Message").fill("Keep these notes for later.");
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("Keep these notes for later.");
   await page.getByRole("button", { name: "Send" }).click();
   await page.waitForURL(/#\/chat\/thread_/, { timeout: T });
   await page.locator(".msg.me").getByRole("link", { name: "notes.txt" }).waitFor({ timeout: T });

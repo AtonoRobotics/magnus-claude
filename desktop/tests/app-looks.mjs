@@ -105,6 +105,7 @@ await step('explicit expansion and restore keep conversation reachable',async()=
 });
 await step('custom accent and no-motion preferences persist',async()=>{
   await appearance();await choose('mode','dark');await choose('accent','teal');await choose('motion','off');await reading();
+  if(await run("return getComputedStyle(document.getElementById('send')).backgroundColor")!=='rgb(31, 122, 109)')throw Error('The chosen Teal accent is not rendered on Send');
   if(await run('return document.getAnimations().length'))throw Error('Motion Off still animates');
   await run('location.reload()');await css('#msg');
   const look=await run('return {...document.documentElement.dataset}');

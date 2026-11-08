@@ -54,7 +54,7 @@ const appBridge = tauri && {
   // App sign-ins come back to a loopback address on this computer.
   async loopbackOpen(redirect) { return this.invoke("loopback_open", { redirect: redirect || null }); },
   async loopbackWait() { return this.invoke("loopback_wait"); },
-  async dataUrl(path, mediaType) { const b64 = await this.invoke("fetch_bytes", { path }); return `data:${mediaType};base64,${b64}`; },
+  async dataUrl(path, mediaType) { const file = await this.invoke("fetch_bytes", { path }); return `data:${mediaType || file.media_type};base64,${file.data_b64}`; },
   // The app's own updates, served by the appliance and signed with the release key.
   async updateState() { return this.invoke("update_state"); },
   async updateLook() { return this.invoke("update_look"); },
@@ -116,10 +116,16 @@ const webBridge = {
   },
   async speak(text) {
     if (!("speechSynthesis" in window)) throw new Error("This browser cannot read aloud.");
-    speechSynthesis.cancel();
-    speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+    await this.stopSpeaking();
+    await new Promise((resolve, reject) => {
+      this._speakingDone = resolve;
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.onend = resolve;
+      utterance.onerror = e => ["canceled", "interrupted"].includes(e.error) ? resolve() : reject(new Error(`Read aloud: ${e.error}`));
+      speechSynthesis.speak(utterance);
+    });
   },
-  async stopSpeaking() { if ("speechSynthesis" in window) speechSynthesis.cancel(); },
+  async stopSpeaking() { if ("speechSynthesis" in window) speechSynthesis.cancel(); this._speakingDone?.(); this._speakingDone = null; },
   async download(path, name) {
     const a = document.createElement("a");
     a.href = path; a.download = name; document.body.append(a); a.click(); a.remove();

@@ -45,7 +45,7 @@ await d.step("sign out; the next person keeps the pinned appliance", async () =>
 await signIn(d, { provider, person, as: other });
 
 await d.step("the colleague has only their own rights", async () => {
-  const who = await d.attr(d.css("nav .who .whoami [title]"), "title");
+  const who = await d.attr(d.css("nav .who .whoami [data-tooltip]"), "data-tooltip");
   if (who !== other) throw new Error(`signed in as ${who}`);
   if (await d.run("return !!document.querySelector('[data-kill-switch]')")) throw new Error("a colleague sees the kill switch");
   await d.click(d.xpath("//nav//a[@aria-label='Settings']"));

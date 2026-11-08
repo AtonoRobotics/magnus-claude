@@ -5,7 +5,7 @@
 //! `desktop/tests/chat-results.mjs` finds it drawn there, in the
 //! conversation, not only behind "See the outcome".
 
-use magnus_invariants::appliance::workspace_root;
+fn workspace_root() -> std::path::PathBuf { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap() }
 use magnus_invariants::*;
 use magnus_scratch::*;
 use serde_json::json;
