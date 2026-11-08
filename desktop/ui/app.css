@@ -714,3 +714,16 @@ aside.detail { -webkit-backdrop-filter: none; backdrop-filter: none; }
 
 /* Responsive work surfaces remain opaque; no panel entrance animation shifts anchors. */
 html[data-motion] aside.detail.opening { animation: none; }
+/* Small heights keep all navigation actions reachable by scrolling. */
+body.short-viewport nav.side { overflow-y: auto; }
+body.short-viewport nav.side #side { overflow: visible; flex: none; min-height: auto; }
+body.short-viewport nav.side .nav-tree { overflow: visible; flex: none; }
+nav.side #find, .primary-destinations { flex: none; }
+body[data-navigation=compact] .update-ready > span { display: none; }
+body[data-navigation=compact] .update-ready button { min-width: 44px; min-height: 44px; padding: 4px; font-size: 12px; overflow-wrap: anywhere; }
+nav.side a svg.ic { width: 20px; height: 20px; }
+svg.ic { stroke-width: 1.8; }
+.detail-body h3 { font-size: 16px; }
+nav.side .group a.more, .whoami .link, .frow .sub, table.t th, .item .kind { font-size: 13px; }
+.ftype { font-size: 12px; }
+.fprev .glimpse pre { font-size: 13px; line-height: 1.45; }

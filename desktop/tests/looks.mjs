@@ -75,6 +75,7 @@ for (const [name, look] of LOOKS) {
     const frame = document.querySelector("aside.detail iframe.composed")?.contentDocument;
     return {
       body: cs("body", "color"),
+      documentFont: frame ? cs("body", "fontSize", frame) : null,
       side: cs("nav.side", "backgroundColor"),
       panel: cs("aside.detail", "backgroundColor"),
       panelWidth: cs("aside.detail", "width"),
@@ -112,6 +113,7 @@ for (const [name, look] of LOOKS) {
   for (const [what,key,want] of [['content text','body',r.text],['conversation','main',r.main],['result text','cardText',r.text]]) expect(name,what,got[key],want);
   const chrome = await page.locator('nav.side').evaluate(el => getComputedStyle(el).color);
   expect(name,'chrome text',chrome,r.chromeText);
+  if (parseFloat(got.documentFont)<15 || !got.documentFont) failures.push(`${name}: document typography is ${got.documentFont}, expected at least 15px`);
   const avatarContrast = await page.locator('nav.side .avatar').evaluate(el => {
     const hex = value => '#' + value.match(/\d+/g).slice(0,3).map(v => Number(v).toString(16).padStart(2,'0')).join('');
     const css = getComputedStyle(el); return Theme.contrast(hex(css.color), hex(css.backgroundColor));
