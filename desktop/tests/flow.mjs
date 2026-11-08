@@ -174,10 +174,7 @@ if (question) await step("ask in a new conversation and see the answer", async (
   const answers = n => page.locator("#thread [data-answer]", { hasText: answer }).nth(n - 1).waitFor({ timeout: T });
   const before = await conversations();
   await page.getByRole("link", { name: "New conversation", exact: true }).click();
-  // New conversation immediately becomes a durable local draft. Wait for
-  // that stable identity, rather than the transient entry route it replaces.
-  await page.waitForURL(/#\/draft\/[^/]+$/, { timeout: T });
-  await page.locator(`#side a[href="${new URL(page.url()).hash}"]`).waitFor({state:"attached",timeout:T});
+  await page.waitForURL(/#\/chat\/new$/, { timeout: T });
   await page.locator('.conv-head').getByRole('heading',{name:'New conversation',exact:true}).waitFor({timeout:T});
   await page.getByText("Magnus answers, starts a task, or proposes a schedule").waitFor({ timeout: T });
   if (await page.locator("#thread [data-answer]").count()) throw new Error("a new conversation shows the old one's answers");

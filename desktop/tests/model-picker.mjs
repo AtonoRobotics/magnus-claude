@@ -37,13 +37,14 @@ try {
   assert.equal(await send('On the new default'),nextDefault,'the message goes to the new default');
 
   // A draft keeps its pick under the same default and gives it up when that changes.
-  const before=await page.evaluate(()=>App.draftRecord.id);
-  await page.getByRole('link',{name:'New conversation',exact:true}).click();await until(old=>App.draftRecord?.id!==old,before);
-  await picker.selectOption(picked);await page.locator('#msg').fill('A draft on the picked model');await page.evaluate(()=>MessageDrafts.flush());
-  await reopen();
+  // Drafts live for the session, so going elsewhere and back stands in for reopening.
+  const away=async()=>{await page.getByRole('link',{name:'Settings',exact:true}).click();await page.getByRole('link',{name:'New conversation',exact:true}).click();await page.locator('#msg').waitFor();};
+  await page.getByRole('link',{name:'New conversation',exact:true}).click();await page.locator('#msg').waitFor();
+  await picker.selectOption(picked);await page.locator('#msg').fill('A draft on the picked model');
+  await away();
   assert.equal(await page.locator('#msg').inputValue(),'A draft on the picked model');
   assert.equal(await picker.inputValue(),picked,'a draft keeps its pick while the default stays');
-  await setDefault(firstDefault);await reopen();
+  await setDefault(firstDefault);await away();
   assert.equal(await page.locator('#msg').inputValue(),'A draft on the picked model','the words stay');
   assert.equal(await picker.inputValue(),firstDefault,'a draft from under an older default uses the current one');
 
