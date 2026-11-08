@@ -59,7 +59,9 @@ await d.step("local Markdown images hydrate through the real appliance bridge",a
   await d.run(`window.__imageUpload=null;const canvas=document.createElement('canvas');canvas.width=32;canvas.height=16;const c=canvas.getContext('2d');c.fillStyle='#3459D4';c.fillRect(0,0,32,16);Magnus.api('POST','/v1/files',{name:'chart.png',media_type:'image/png',data_b64:canvas.toDataURL('image/png').split(',')[1]}).then(r=>window.__imageUpload={id:r.id},e=>window.__imageUpload={error:e.message});`);
   const image=await d.until("actual image upload",()=>d.run("return window.__imageUpload"));if(image.error)throw Error(image.error);
   await send(`Show local chart /v1/files/${image.id}`);
-  await d.until("image decoded from the bridge",()=>d.run("const img=document.querySelector('#thread img[alt=\"Local chart\"]');return img && img.complete && img.naturalWidth===32 && img.naturalHeight===16 && img.src.startsWith('data:image/png')"));
+  await d.until("the local image is rendered",()=>d.run("return !!document.querySelector('#thread img[alt=\"Local chart\"]')"));
+  await d.run("document.querySelector('#thread img[alt=\"Local chart\"]').scrollIntoView({block:'center'})");
+  await d.until("image decoded from the bridge",()=>d.run("const img=document.querySelector('#thread img[alt=\"Local chart\"]');return img && img.complete && img.naturalWidth===32 && img.naturalHeight===16 && img.src.startsWith('data:image/png')")).catch(async error=>{const state=await d.run("return {images:[...document.querySelectorAll('#thread img')].map(i=>({alt:i.alt,source:i.src.slice(0,60),complete:i.complete,width:i.naturalWidth,path:i.dataset.proseImage})),answers:[...document.querySelectorAll('#thread [data-kind=answer],#thread [data-kind=turn]')].map(e=>e.textContent.slice(0,240)),draft:document.querySelector('#msg')?.value}");throw Error(`${error.message}; image state ${JSON.stringify(state)}`);});
   await d.xpath("//div[@id='thread']//a[@data-prose-link and @href='https://example.com/reference' and normalize-space()='Supplier reference']");
 });
 
