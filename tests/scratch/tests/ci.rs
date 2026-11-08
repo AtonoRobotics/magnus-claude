@@ -330,6 +330,30 @@ exit 1
     assert!(workflow.contains("release/ensure-windows-target.sh"), "release-checks installs the Windows target before it builds");
 }
 
+#[test]
+fn corrupt_appimage_runtime_downloads_never_become_packaging_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let cache = dir.path().join("cache");
+    std::fs::create_dir_all(&bin).unwrap();
+    let curl = bin.join("curl");
+    // A successful HTTP response with invalid bytes must still fail closed.
+    std::fs::write(&curl, "#!/bin/sh\nwhile [ \"$1\" != --output ]; do shift; done\nprintf corrupt > \"$2\"\n").unwrap();
+    std::fs::set_permissions(&curl, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let run = || Command::new(repo().join("release/ensure-appimage-runtime.sh"))
+        .arg(&cache).env("PATH", format!("{}:/usr/bin:/bin", bin.display())).output().unwrap();
+    let out = run();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty(), "never return an unverified runtime path");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("checksum mismatch"));
+    assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0, "failed download leaves no cached or temporary runtime");
+    let cached = cache.join("appimage-runtime-x86_64-fedfad51");
+    std::fs::write(&cached, "damaged cached runtime").unwrap();
+    assert!(!run().status.success(), "a corrupt cached runtime is not trusted either");
+    assert_eq!(std::fs::read(&cached).unwrap(), b"damaged cached runtime");
+    assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+}
+
 /// The release key is a file on the build box. A runner without it gets a
 /// throwaway key and must not publish. Requiring `magnus-light` as well
 /// matched no runner.
