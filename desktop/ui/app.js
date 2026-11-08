@@ -193,12 +193,13 @@ const UI = {
 const icon = (k, cls = "") => `<svg class="ic${cls ? ` ${cls}` : ""}" viewBox="0 0 24 24" aria-hidden="true">${UI[k]}</svg>`;
 
 function navigationTree() {
+  const current=href=>(location.hash || "#/home")===href ? 'class="on" aria-current="page"' : "";
   const conv=t=>`<a class="conv${t.thread===App.thread ? " on" : ""}" href="#/chat/${enc(t.thread)}" ${t.thread===App.thread ? 'aria-current="page"' : ""} title="${esc(t.title)}"><span class="ttl">${esc(t.title)}</span></a>`;
   const loose=App.threads.filter(t=>!t.project);
-  return `<div class="sect"><div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more">All</a></div>
+  return `<div class="sect" role="group" aria-label="Projects"><div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more">All</a></div>
     ${App.projects.map(p=>`<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" title="${esc(p.name)}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>${App.threads.filter(t=>t.project?.id===p.id).map(conv).join("")}`).join("") || '<p class="small muted pad">No projects yet.</p>'}</div>
-    <div class="sect"><div class="group"><span>Conversations</span></div>${loose.map(conv).join("") || '<p class="small muted pad">No conversations yet.</p>'}</div>
-    <div class="sect"><a href="#/trash">${icon("trash")}<span>Trash</span></a>${isDev() ? `<details class="developer-nav"><summary>Developer</summary>${[["runs","Runs"],["experiments","Experiments"],["system","System"],["policy","Policy"],["playbook","Playbook"]].map(([k,l])=>`<a href="#/dev/${k}">${l}</a>`).join("")}</details>` : ""}</div>`;
+    <div class="sect" role="group" aria-label="Conversations"><div class="group"><span>Conversations</span></div>${loose.map(conv).join("") || '<p class="small muted pad">No conversations yet.</p>'}</div>
+    <div class="sect"><a href="#/trash" ${current("#/trash")}>${icon("trash")}<span>Trash</span></a>${isDev() ? `<details class="developer-nav"><summary>Developer</summary>${[["runs","Runs"],["experiments","Experiments"],["system","System"],["policy","Policy"],["playbook","Playbook"]].map(([k,l])=>`<a href="#/dev/${k}" ${current(`#/dev/${k}`)}>${l}</a>`).join("")}</details>` : ""}</div>`;
 }
 function nav() {
   const route=location.hash || "#/home", waiting=needsMe();
@@ -209,7 +210,7 @@ function nav() {
     <div class="primary-destinations">${primary("activity","Activity","tasks","#/activity")}${primary("needs","Needs you","bell","#/inbox")}${primary("files","Files","file","#/files")}${primary("apps","Apps","grid","#/library")}</div>
     <button type="button" class="rail-tree icon-btn" data-nav-tree aria-label="Projects and conversations" title="Projects and conversations" aria-expanded="false" aria-controls="navigation-flyout">${icon("folder")}</button>
     <div class="nav-tree">${navigationTree()}</div>
-    <div class="foot"><div class="who"><span class="avatar" aria-hidden="true">${esc((App.me?.name || "?").trim().charAt(0).toUpperCase())}</span><div class="whoami" data-appliance="${esc(App.appliance)}"><span class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</span><button class="link" data-act="sign-out">Sign out</button></div><a href="#/settings" class="icon-btn" aria-label="Settings" title="Settings">${icon("gear")}</a></div></div>`;
+    <div class="foot"><div class="who"><span class="avatar" aria-hidden="true">${esc((App.me?.name || "?").trim().charAt(0).toUpperCase())}</span><div class="whoami" data-appliance="${esc(App.appliance)}"><span class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</span><button class="link" data-act="sign-out">Sign out</button></div><a href="#/settings" class="icon-btn${route.startsWith("#/settings") ? " on" : ""}" ${route.startsWith("#/settings") ? 'aria-current="page"' : ""} aria-label="Settings" title="Settings">${icon("gear")}</a></div></div>`;
 }
 function sidebar() {
   paint($("#side"),nav());
