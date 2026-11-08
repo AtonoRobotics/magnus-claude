@@ -700,9 +700,11 @@ impl Accounts {
     }
 
     /// Remove a local person and every local trace: the record, password,
-    /// authenticator, used codes, status, role, invites and sessions.
-    /// Refuses an unknown id, and the organisation's last enabled admin.
-    /// The sessions die in the store, so no handle keeps them (#469).
+    /// authenticator, used codes, status, role, invites, recovery tokens
+    /// and sessions. Refuses an unknown id, and the organisation's last
+    /// enabled admin. The sessions die in the store, so no handle keeps
+    /// them (#469); the recovery token dies too, so a link mailed before
+    /// the removal cannot take over a recreated id (#541).
     pub async fn remove_person(&self, person: &str) -> Result<Vec<String>> {
         let person = key(person);
         let mut g = self.client().await?;
@@ -714,7 +716,7 @@ impl Accounts {
         if Self::sole_enabled_admin_tx(&tx, &person).await? {
             anyhow::bail!("This is the organisation's last admin: make someone else an admin first.");
         }
-        for table in ["account_passwords", "account_totp", "account_totp_steps", "account_statuses", "account_roles"] {
+        for table in ["account_passwords", "account_totp", "account_totp_steps", "account_statuses", "account_roles", "account_reset_tokens"] {
             tx.execute(&format!("DELETE FROM public.{table} WHERE person = $1"), &[&person]).await?;
         }
         tx.execute("DELETE FROM public.account_invites WHERE person = $1", &[&person]).await?;
@@ -1041,8 +1043,15 @@ impl Accounts {
         tx.execute("DELETE FROM public.account_reset_tokens WHERE expires <= $1", &[&at]).await?;
         let held: Option<String> = tx.query_opt("SELECT person FROM public.account_reset_tokens WHERE hash = $1", &[&token_hash(token.trim())]).await?.map(|r| r.get(0));
         if let Some(person) = &held {
+            // A token for nobody here confirms nothing: people made on the
+            // command line carry no status row, so the record, not the
+            // status, decides (#541).
+            let known: bool = tx.query_opt("SELECT 1 FROM public.account_people WHERE person = $1", &[person]).await?.is_some();
             let status: Option<String> = tx.query_opt("SELECT status FROM public.account_statuses WHERE person = $1", &[person]).await?.map(|r| r.get(0));
-            if status.as_deref().is_some_and(|s| s != "active") {
+            if !known || status.as_deref().is_some_and(|s| s != "active") {
+                if !known {
+                    tx.execute("DELETE FROM public.account_reset_tokens WHERE hash = $1", &[&token_hash(token.trim())]).await?;
+                }
                 tx.commit().await?;
                 return Ok(None);
             }
@@ -2130,6 +2139,24 @@ mod tests {
         assert!(stale.send, "the later request did not mint");
         let past = chrono::Utc::now() + chrono::Duration::hours(2);
         assert_eq!(accounts.confirm_reset_at(&stale.token, "ada-newer-password", past).await.unwrap(), None, "an expired token confirmed");
+    }
+
+    /// Removing a person spends their recovery: the token row dies with
+    /// them, and if the id is recreated within the hour the old link
+    /// confirms nothing (#541).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removing_a_person_spends_their_recovery() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        let invite = accounts.invite_person("ada", "Ada", Some("ada@example.com"), Role::Member).await.unwrap();
+        accounts.accept(&invite, "ada-old-password").await.unwrap();
+        let first = accounts.request_reset("ada@example.com").await.unwrap().expect("no token for the holder");
+        assert!(first.send, "the request did not mint");
+        accounts.remove_person("ada").await.unwrap();
+        assert!(!accounts.reset_live(&first.token).await, "the token survived the removal");
+        assert_eq!(accounts.confirm_reset(&first.token, "ada-newer-password").await.unwrap(), None, "the removed token confirmed");
+        accounts.add_person("ada", "Ada", Some("ada@example.com")).await.unwrap();
+        assert_eq!(accounts.confirm_reset(&first.token, "ada-newest-password").await.unwrap(), None, "the old token took over the recreated account");
     }
 
     /// One call makes an invited admin with a token: person, invited
