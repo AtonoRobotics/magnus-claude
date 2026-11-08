@@ -128,8 +128,18 @@ const INVITE_DAYS: i64 = 7;
 const LOCAL_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The accounts tables, for the backup's table-scoped dump.
-pub const TABLES: &[&str] =
-    &["account_people", "account_passwords", "account_totp", "account_totp_steps", "account_statuses", "account_roles", "account_invites", "account_sessions", "account_machine_codes"];
+pub const TABLES: &[&str] = &[
+    "account_people",
+    "account_passwords",
+    "account_totp",
+    "account_totp_steps",
+    "account_statuses",
+    "account_roles",
+    "account_invites",
+    "account_sessions",
+    "account_machine_codes",
+    "account_json_import",
+];
 
 /// The accounts tables, beside the log. The kernel reads and writes them;
 /// no other role reaches them.
@@ -181,8 +191,11 @@ pub fn migrate_sql(role: &str) -> String {
              hash  text PRIMARY KEY,
              until timestamptz NOT NULL
          );
-         REVOKE ALL ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes FROM PUBLIC;
-         GRANT SELECT, INSERT, UPDATE, DELETE ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes TO {role};"
+         CREATE TABLE IF NOT EXISTS public.account_json_import (
+             imported_at timestamptz PRIMARY KEY
+         );
+         REVOKE ALL ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes, public.account_json_import FROM PUBLIC;
+         GRANT SELECT, INSERT, UPDATE, DELETE ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes, public.account_json_import TO {role};"
     )
 }
 
@@ -196,57 +209,68 @@ fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> Result<T> {
 
 /// Bring the JSON files' contents into the tables, once: `magnus migrate`
 /// runs this after creating them, so the cutover keeps everyone signing
-/// in. Every write keeps the row already there, so a rerun changes
-/// nothing; expired sessions, invites and codes are left behind. Returns
-/// how many rows it wrote.
-pub async fn import_json(client: &Client, state_dir: &Path) -> Result<usize> {
+/// in. Completion is recorded in the database itself, so later migrates
+/// (every deploy runs one) never resurrect a removed person or an ended
+/// session from the untouched files; expired sessions, invites and codes
+/// are left behind. Returns how many rows it wrote.
+pub async fn import_json(client: &mut Client, state_dir: &Path) -> Result<usize> {
+    let tx = client.transaction().await?;
+    tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('magnus-accounts-import'))").await?;
+    if tx.query_opt("SELECT 1 FROM public.account_json_import LIMIT 1", &[]).await?.is_some() {
+        tx.commit().await?;
+        return Ok(0);
+    }
     let d = state_dir.join("accounts");
     let mut n = 0usize;
     let now = Utc::now();
     let people: BTreeMap<String, LocalPerson> = read_json(&d.join("people.json"))?;
     for (person, p) in &people {
-        n += client.execute("INSERT INTO public.account_people (person, name, email) VALUES ($1, $2, $3) ON CONFLICT (person) DO NOTHING", &[person, &p.name, &p.email]).await? as usize;
+        n += tx.execute("INSERT INTO public.account_people (person, name, email) VALUES ($1, $2, $3) ON CONFLICT (person) DO NOTHING", &[person, &p.name, &p.email]).await? as usize;
     }
     let passwords: BTreeMap<String, String> = read_json(&d.join("passwords.json"))?;
     for (person, phc) in &passwords {
-        n += client.execute("INSERT INTO public.account_passwords (person, phc) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, phc]).await? as usize;
+        n += tx.execute("INSERT INTO public.account_passwords (person, phc) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, phc]).await? as usize;
     }
     let totp: BTreeMap<String, String> = read_json(&d.join("totp.json"))?;
     for (person, secret) in &totp {
-        n += client.execute("INSERT INTO public.account_totp (person, secret) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, secret]).await? as usize;
+        n += tx.execute("INSERT INTO public.account_totp (person, secret) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, secret]).await? as usize;
     }
     let steps: BTreeMap<String, i64> = read_json(&d.join("totp-steps.json"))?;
     for (person, step) in &steps {
-        n += client.execute("INSERT INTO public.account_totp_steps (person, step) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, step]).await? as usize;
+        n += tx.execute("INSERT INTO public.account_totp_steps (person, step) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, step]).await? as usize;
     }
     let statuses: BTreeMap<String, Status> = read_json(&d.join("status.json"))?;
     for (person, status) in &statuses {
-        n += client.execute("INSERT INTO public.account_statuses (person, status) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, &status.as_str()]).await? as usize;
+        n += tx.execute("INSERT INTO public.account_statuses (person, status) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, &status.as_str()]).await? as usize;
     }
     let roles: BTreeMap<String, Role> = read_json(&d.join("roles.json"))?;
     for (person, role) in &roles {
-        n += client.execute("INSERT INTO public.account_roles (person, role) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, &role.as_str()]).await? as usize;
+        n += tx.execute("INSERT INTO public.account_roles (person, role) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, &role.as_str()]).await? as usize;
     }
     let invites: BTreeMap<String, Invite> = read_json(&d.join("invites.json"))?;
     for (hash, inv) in invites.iter().filter(|(_, inv)| inv.expires > now) {
-        n += client.execute(
-            "INSERT INTO public.account_invites (hash, person, email, expires) VALUES ($1, $2, $3, $4) ON CONFLICT (hash) DO NOTHING",
-            &[hash, &inv.person, &inv.email, &inv.expires],
-        )
-        .await? as usize;
+        n += tx
+            .execute(
+                "INSERT INTO public.account_invites (hash, person, email, expires) VALUES ($1, $2, $3, $4) ON CONFLICT (hash) DO NOTHING",
+                &[hash, &inv.person, &inv.email, &inv.expires],
+            )
+            .await? as usize;
     }
     let sessions: BTreeMap<String, Session> = read_json(&d.join("sessions.json"))?;
     for (hash, s) in sessions.iter().filter(|(_, s)| s.expires > now) {
-        n += client.execute(
-            "INSERT INTO public.account_sessions (hash, id, person, created, expires, client, device) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (hash) DO NOTHING",
-            &[hash, &s.id, &s.person, &s.created, &s.expires, &s.client, &s.device],
-        )
-        .await? as usize;
+        n += tx
+            .execute(
+                "INSERT INTO public.account_sessions (hash, id, person, created, expires, client, device) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (hash) DO NOTHING",
+                &[hash, &s.id, &s.person, &s.created, &s.expires, &s.client, &s.device],
+            )
+            .await? as usize;
     }
     let codes: BTreeMap<String, DateTime<Utc>> = read_json(&d.join("machine-codes.json"))?;
     for (hash, until) in codes.iter().filter(|(_, until)| **until > now) {
-        n += client.execute("INSERT INTO public.account_machine_codes (hash, until) VALUES ($1, $2) ON CONFLICT (hash) DO NOTHING", &[hash, until]).await? as usize;
+        n += tx.execute("INSERT INTO public.account_machine_codes (hash, until) VALUES ($1, $2) ON CONFLICT (hash) DO NOTHING", &[hash, until]).await? as usize;
     }
+    tx.execute("INSERT INTO public.account_json_import (imported_at) VALUES ($1)", &[&now]).await?;
+    tx.commit().await?;
     Ok(n)
 }
 
@@ -1387,16 +1411,25 @@ mod tests {
         std::fs::write(d.join("status.json"), r#"{"ada":"active"}"#).unwrap();
         std::fs::write(d.join("roles.json"), r#"{"ada":"admin"}"#).unwrap();
         let (_db, url) = db().await;
-        let (client, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+        let (mut client, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
         tokio::spawn(async move {
             let _ = conn.await;
         });
-        let n = import_json(&client, dir.path()).await.unwrap();
+        let n = import_json(&mut client, dir.path()).await.unwrap();
         assert_eq!(n, 4, "the import wrote {n} rows, not the person, password, status and role");
         let accounts = Accounts::open(&url, cfg()).await.unwrap();
         assert!(accounts.is_local("ada"), "the person did not survive the import");
         assert_eq!(accounts.role("ada").await, Role::Admin, "the role did not survive the import");
         assert!(matches!(accounts.sign_in("ada", "a-long-password").await.unwrap(), Ok(())), "the password did not survive the import");
-        assert_eq!(import_json(&client, dir.path()).await.unwrap(), 0, "a rerun changed rows");
+        assert_eq!(import_json(&mut client, dir.path()).await.unwrap(), 0, "a rerun changed rows");
+        // A removal after the import stays removed: the next migrate never
+        // resurrects the person from the untouched files (review P1: every
+        // deploy runs migrate).
+        accounts.add_person("bea", "Bea", None).await.unwrap();
+        accounts.set_role("bea", Role::Admin).await.unwrap();
+        accounts.remove_person("ada").await.unwrap();
+        assert_eq!(import_json(&mut client, dir.path()).await.unwrap(), 0, "a migrate after a removal changed rows");
+        assert!(!accounts.is_local("ada"), "the migrate resurrected the removed person");
+        assert!(matches!(accounts.sign_in("ada", "a-long-password").await.unwrap(), Err(_)), "the resurrected password signs in");
     }
 }

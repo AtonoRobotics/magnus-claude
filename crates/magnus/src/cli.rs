@@ -78,8 +78,8 @@ async fn migrate(args: &[String]) -> Result<()> {
     crate::log::migrate(&admin, &cfg.database.url, cfg.admin.as_ref().and_then(|a| a.database_url.as_deref())).await?;
     // Once: the JSON accounts files into the new tables, so the cutover
     // keeps everyone signing in; a rerun changes nothing (#466).
-    let kernel = crate::log::connect(&cfg.database.url).await?;
-    let n = crate::accounts::import_json(&kernel, &cfg.appliance.state_dir).await?;
+    let mut kernel = crate::log::connect(&cfg.database.url).await?;
+    let n = crate::accounts::import_json(&mut kernel, &cfg.appliance.state_dir).await?;
     if n > 0 {
         eprintln!("migrated {n} account rows from the JSON files");
     }
