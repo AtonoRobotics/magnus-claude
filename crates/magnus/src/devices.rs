@@ -147,7 +147,7 @@ pub fn admit(on: bool, peer: SocketAddr, headers: &axum::http::HeaderMap, method
 
 impl Devices {
     pub fn open(state_dir: &Path) -> Result<Devices> {
-        let dir = crate::accounts::dir(state_dir);
+        let dir = state_dir.join("accounts");
         std::fs::create_dir_all(&dir)?;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         let path = dir.join("devices.json");

@@ -238,7 +238,7 @@ pub fn router() -> Router<Arc<Kernel>> {
 /// The person reacts to one of Magnus's messages in their thread
 /// (`reaction`: `great` or `annoying`), or takes their reaction back (null).
 async fn react(State(k): State<Arc<Kernel>>, h: HeaderMap, Path((thread, entry)): Path<(String, String)>, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -264,7 +264,7 @@ async fn react(State(k): State<Arc<Kernel>>, h: HeaderMap, Path((thread, entry))
 
 /// The person's own disagreement log, newest first: no one else's, whoever asks.
 async fn disagreements(State(k): State<Arc<Kernel>>, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };

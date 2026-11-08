@@ -121,6 +121,81 @@ async fn a_database_the_appliance_depends_on_comes_back_from_the_backup() {
     assert_eq!(name, "magnus", "the identity provider's data did not come back");
 }
 
+/// The appliance's own accounts ride the backup too: after the log, the
+/// vault and the accounts tables are lost, `magnus restore` brings back
+/// everyone's sign-in (#466).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_appliances_accounts_come_back_from_the_backup() {
+    let m = FakeModel::start(script(|_| async move { complete("done") })).await;
+    let mut app = Appliance::start(Spec::default(), &m).await;
+    let config = app.dir.path().join("magnus.toml");
+    let cli = |args: &[&str], stdin: Option<&str>| {
+        let mut c = std::process::Command::new(bin("magnus-appliance"));
+        c.args(args).arg("--config").arg(&config);
+        if stdin.is_some() {
+            c.stdin(std::process::Stdio::piped());
+        }
+        let mut c = c.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        if let Some(text) = stdin {
+            use std::io::Write;
+            writeln!(c.stdin.take().unwrap(), "{text}").unwrap();
+        }
+        c.wait_with_output().unwrap()
+    };
+    let out = cli(&["person-add", "--person", "ada", "--name", "Ada"], None);
+    assert!(out.status.success(), "magnus person-add: {}", String::from_utf8_lossy(&out.stderr));
+    let out = cli(&["person-role", "--person", "ada", "--role", "admin"], None);
+    assert!(out.status.success(), "magnus person-role: {}", String::from_utf8_lossy(&out.stderr));
+    let out = cli(&["password", "--person", "ada"], Some("ada-long-password"));
+    assert!(out.status.success(), "magnus password: {}", String::from_utf8_lossy(&out.stderr));
+    async fn sign_in(base: &str) -> (reqwest::StatusCode, Value) {
+        let r = reqwest::Client::new()
+            .post(format!("{base}/v1/sign-in"))
+            .header("x-magnus-app", "0.5.0")
+            .json(&json!({ "person": "ada", "password": "ada-long-password", "client": "app" }))
+            .send()
+            .await
+            .unwrap();
+        let st = r.status();
+        (st, r.json().await.unwrap_or(Value::Null))
+    }
+    // No restart: the sign-in routing sees the CLI-added person straight
+    // from the store, not the boot-time cache (#466).
+    let (st, v) = sign_in(&app.base).await;
+    assert_eq!(st, 200, "ada cannot sign in before the backup: {v}");
+
+    let alice = app.api("alice");
+    let (st, b) = alice.post("/v1/backups", json!({})).await;
+    assert_eq!(st, 201, "{b}");
+    assert_eq!(b["restored"], true, "{b}");
+    assert!(b["detail"].as_str().unwrap_or_default().contains("the accounts tables read back"), "{b}");
+
+    // The disaster takes the log, the vault and the accounts tables.
+    app.kill().await;
+    app.db.admin().await.batch_execute("DROP TABLE public.content, public.events, public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes").await.unwrap();
+    std::fs::remove_dir_all(app.state_dir.join("vault")).unwrap();
+
+    let file = app.state_dir.join("backups").join(b["file"].as_str().unwrap());
+    let out = std::process::Command::new(bin("magnus-appliance"))
+        .args(["restore", "--config"])
+        .arg(&config)
+        .args(["--admin-url", &app.db.admin_url(), "--from"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "restore failed: {}", String::from_utf8_lossy(&out.stderr));
+    app.restart().await;
+
+    // Her password signs her in again, and she is still an admin.
+    let (st, v) = sign_in(&app.base).await;
+    assert_eq!(st, 200, "ada cannot sign in after the restore: {v}");
+    let admin = app.db.admin().await;
+    let rows: i64 = admin.query_one("SELECT COUNT(*) FROM public.account_people WHERE person = 'ada'", &[]).await.unwrap().get(0);
+    assert_eq!(rows, 1, "her record did not come back");
+    let role: String = admin.query_one("SELECT role FROM public.account_roles WHERE person = 'ada'", &[]).await.unwrap().get(0);
+    assert_eq!(role, "admin", "her role did not come back");
+}
+
 /// After each backup and prune the backups directory is mirrored to the
 /// configured off-host destination (#297): new files arrive, pruned ones
 /// leave; a failed copy is recorded, not a failed backup.

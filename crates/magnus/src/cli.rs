@@ -24,14 +24,14 @@ pub fn main() {
             Some("migrate") => migrate(&args).await,
             Some("serve") => serve(&args).await,
             Some("conformance") => conformance(&args).await,
-            Some("password") => password(&args),
-            Some("totp-enroll") => totp_enroll(&args),
-            Some("invite") => invite(&args),
-            Some("person-status") => person_status(&args),
-            Some("person-role") => person_role(&args),
-            Some("person-add") => person_add(&args),
-            Some("person-remove") => person_remove(&args),
-            Some("sign-in-code") => sign_in_code(&args),
+            Some("password") => password(&args).await,
+            Some("totp-enroll") => totp_enroll(&args).await,
+            Some("invite") => invite(&args).await,
+            Some("person-status") => person_status(&args).await,
+            Some("person-role") => person_role(&args).await,
+            Some("person-add") => person_add(&args).await,
+            Some("person-remove") => person_remove(&args).await,
+            Some("sign-in-code") => sign_in_code(&args).await,
             Some("restore") => restore(&args).await,
             Some("check") => check(&args).await,
             Some("version") => {
@@ -75,7 +75,15 @@ async fn check(args: &[String]) -> Result<()> {
 async fn migrate(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let admin = arg(args, "--admin-url").context("--admin-url is required")?;
-    crate::log::migrate(&admin, &cfg.database.url, cfg.admin.as_ref().and_then(|a| a.database_url.as_deref())).await
+    crate::log::migrate(&admin, &cfg.database.url, cfg.admin.as_ref().and_then(|a| a.database_url.as_deref())).await?;
+    // Once: the JSON accounts files into the new tables, so the cutover
+    // keeps everyone signing in; a rerun changes nothing (#466).
+    let kernel = crate::log::connect(&cfg.database.url).await?;
+    let n = crate::accounts::import_json(&kernel, &cfg.appliance.state_dir).await?;
+    if n > 0 {
+        eprintln!("migrated {n} account rows from the JSON files");
+    }
+    Ok(())
 }
 
 async fn serve(args: &[String]) -> Result<()> {
@@ -227,8 +235,8 @@ mod tests {
 
 /// Open the accounts store for a person managed here: in the config, or
 /// kept by the appliance itself (#429).
-fn managed_accounts(cfg: &crate::config::Config, person: &str) -> Result<crate::accounts::Accounts> {
-    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
+async fn managed_accounts(cfg: &crate::config::Config, person: &str) -> Result<crate::accounts::Accounts> {
+    let accounts = crate::accounts::Accounts::open(&cfg.database.url, cfg.sign_in.clone()).await?;
     anyhow::ensure!(cfg.person(person).is_some() || accounts.is_local(person), "{person} is not a person here");
     Ok(accounts)
 }
@@ -242,13 +250,13 @@ fn local_password(cfg: &crate::config::Config, accounts: &crate::accounts::Accou
 /// Add a person to the appliance's own directory: they sign in with a
 /// local password once invited or given one (#429). Refuses an id the
 /// config already has, which would never resolve to them.
-fn person_add(args: &[String]) -> Result<()> {
+async fn person_add(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
     let name = arg(args, "--name").unwrap_or_else(|| person.clone());
     anyhow::ensure!(cfg.person(&person).is_none(), "{person} is already a person in the config");
-    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
-    accounts.add_person(&person, &name, arg(args, "--email").as_deref())?;
+    let accounts = crate::accounts::Accounts::open(&cfg.database.url, cfg.sign_in.clone()).await?;
+    accounts.add_person(&person, &name, arg(args, "--email").as_deref()).await?;
     eprintln!("added {person}");
     Ok(())
 }
@@ -256,11 +264,11 @@ fn person_add(args: &[String]) -> Result<()> {
 /// Remove a person from the appliance's own directory, with every local
 /// trace: password, authenticator, status, role, invites, sessions.
 /// Refuses the organisation's last enabled admin.
-fn person_remove(args: &[String]) -> Result<()> {
+async fn person_remove(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    let accounts = crate::accounts::Accounts::open(&cfg.appliance.state_dir, cfg.sign_in.clone())?;
-    let ended = accounts.remove_person(&person)?;
+    let accounts = crate::accounts::Accounts::open(&cfg.database.url, cfg.sign_in.clone()).await?;
+    let ended = accounts.remove_person(&person).await?;
     if ended.is_empty() {
         eprintln!("removed {person}");
     } else {
@@ -270,15 +278,15 @@ fn person_remove(args: &[String]) -> Result<()> {
 }
 
 /// Set a person's password from standard input (one line).
-fn password(args: &[String]) -> Result<()> {
+async fn password(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    let accounts = managed_accounts(&cfg, &person)?;
+    let accounts = managed_accounts(&cfg, &person).await?;
     anyhow::ensure!(local_password(&cfg, &accounts, &person), "{person} signs in through the identity provider; only the owner keeps a password on the appliance, as a backup");
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let pw = line.trim_end_matches(['\r', '\n']);
-    crate::accounts::set_password(&cfg.appliance.state_dir, &cfg.sign_in, &person, pw)?;
+    accounts.set_password(&person, pw).await?;
     eprintln!("password set for {person}");
     Ok(())
 }
@@ -287,12 +295,12 @@ fn password(args: &[String]) -> Result<()> {
 /// the enrollment URI (scan it or type its secret into the app). Only
 /// someone with a shell on the appliance's machine can run this, so the
 /// secret it prints never crosses the network.
-fn totp_enroll(args: &[String]) -> Result<()> {
+async fn totp_enroll(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    let accounts = managed_accounts(&cfg, &person)?;
+    let accounts = managed_accounts(&cfg, &person).await?;
     anyhow::ensure!(local_password(&cfg, &accounts, &person), "{person} signs in through the identity provider; only local passwords take a second factor");
-    println!("{}", crate::accounts::enroll_totp(&cfg.appliance.state_dir, &person)?);
+    println!("{}", accounts.enroll_totp(&person).await?);
     eprintln!("enrolled {person}: add the URI above to an authenticator app");
     Ok(())
 }
@@ -300,29 +308,29 @@ fn totp_enroll(args: &[String]) -> Result<()> {
 /// Invite a person to local password sign-in: print the single-use token
 /// (good for 7 days) to pass on; they accept it with their new password
 /// at `/v1/invites/accept`.
-fn invite(args: &[String]) -> Result<()> {
+async fn invite(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    let accounts = managed_accounts(&cfg, &person)?;
+    let accounts = managed_accounts(&cfg, &person).await?;
     anyhow::ensure!(local_password(&cfg, &accounts, &person), "{person} signs in through the identity provider; only local passwords are invited");
-    println!("{}", accounts.invite(&person, arg(args, "--email").as_deref())?);
+    println!("{}", accounts.invite(&person, arg(args, "--email").as_deref()).await?);
     eprintln!("invited {person}: pass them the token above within 7 days");
     Ok(())
 }
 
 /// Turn a local-password person on or off. Disabling ends their live
 /// sessions at once; the ids of those ended are printed.
-fn person_status(args: &[String]) -> Result<()> {
+async fn person_status(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    let accounts = managed_accounts(&cfg, &person)?;
+    let accounts = managed_accounts(&cfg, &person).await?;
     anyhow::ensure!(local_password(&cfg, &accounts, &person), "{person} signs in through the identity provider; only local sign-in is switched here");
     let status = match arg(args, "--status").as_deref() {
         Some("active") => crate::accounts::Status::Active,
         Some("disabled") => crate::accounts::Status::Disabled,
         x => anyhow::bail!("--status is active or disabled, not {}", x.unwrap_or("(missing)")),
     };
-    let ended = accounts.set_status(&person, status)?;
+    let ended = accounts.set_status(&person, status).await?;
     if ended.is_empty() {
         eprintln!("{person} is now {}", if status == crate::accounts::Status::Disabled { "disabled" } else { "active" });
     } else {
@@ -334,17 +342,17 @@ fn person_status(args: &[String]) -> Result<()> {
 /// Set a local-password person's console role: admins enter the console,
 /// members do not. Refuses to demote the organisation's last enabled
 /// admin.
-fn person_role(args: &[String]) -> Result<()> {
+async fn person_role(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
-    let accounts = managed_accounts(&cfg, &person)?;
+    let accounts = managed_accounts(&cfg, &person).await?;
     anyhow::ensure!(local_password(&cfg, &accounts, &person), "{person} signs in through the identity provider; only local sign-in takes a local role");
     let role = match arg(args, "--role").as_deref() {
         Some("admin") => crate::accounts::Role::Admin,
         Some("member") => crate::accounts::Role::Member,
         x => anyhow::bail!("--role is admin or member, not {}", x.unwrap_or("(missing)")),
     };
-    accounts.set_role(&person, role)?;
+    accounts.set_role(&person, role).await?;
     eprintln!("{person} is now {}", if role == crate::accounts::Role::Admin { "an admin" } else { "a member" });
     Ok(())
 }
@@ -352,9 +360,10 @@ fn person_role(args: &[String]) -> Result<()> {
 /// A one-time code for the owner's backup password, printed on the
 /// appliance's own machine: with it, the backup works when the identity
 /// provider is down.
-fn sign_in_code(args: &[String]) -> Result<()> {
+async fn sign_in_code(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
-    println!("{}", crate::accounts::new_machine_code(&cfg.appliance.state_dir)?);
+    let accounts = crate::accounts::Accounts::open(&cfg.database.url, cfg.sign_in.clone()).await?;
+    println!("{}", accounts.new_machine_code().await?);
     eprintln!("good for one sign-in in the next 10 minutes");
     Ok(())
 }

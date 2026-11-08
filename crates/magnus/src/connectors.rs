@@ -1286,7 +1286,7 @@ pub fn router() -> Router<Arc<Kernel>> {
 /// shows it again), until the relay holds it (connectors spec rev 46). The
 /// log records only that it was provisioned.
 async fn set_registration(AxState(k): K, h: HeaderMap, Path(provider): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match owner(&k, &h) {
+    let p = match owner(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1295,7 +1295,7 @@ async fn set_registration(AxState(k): K, h: HeaderMap, Path(provider): Path<Stri
 
 macro_rules! owner {
     ($k:expr, $h:expr) => {
-        match owner(&$k, &$h) {
+        match owner(&$k, &$h).await {
             Ok(p) => p,
             Err(r) => return r,
         }
@@ -1308,7 +1308,7 @@ macro_rules! owner {
 /// classification (none: the worker is not offered it) and the
 /// classification the app's own hints suggest.
 async fn list(AxState(k): K, h: HeaderMap) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1429,7 +1429,7 @@ async fn card(k: &Kernel, c: &Connector, person: &str) -> Value {
 /// One app's card for the person asking, with the last things Magnus did
 /// through it for them (from the event log).
 async fn detail(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1480,7 +1480,7 @@ async fn classify(AxState(k): K, h: HeaderMap, Path((name, tool)): Path<(String,
 /// A person signs in to one of the organisation's apps with their own
 /// account; the sign-in is theirs alone.
 async fn sign_in(AxState(k): K, h: HeaderMap, Path(name): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1498,7 +1498,7 @@ async fn sign_in(AxState(k): K, h: HeaderMap, Path(name): Path<String>, Json(b):
 }
 
 async fn sign_in_complete(AxState(k): K, h: HeaderMap, Path(name): Path<String>, Json(b): Json<Value>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };
@@ -1515,7 +1515,7 @@ async fn sign_in_complete(AxState(k): K, h: HeaderMap, Path(name): Path<String>,
 
 /// A person ends their own sign-in to an app.
 async fn disconnect(AxState(k): K, h: HeaderMap, Path(name): Path<String>) -> Response {
-    let p = match who(&k, &h) {
+    let p = match who(&k, &h).await {
         Ok(p) => p,
         Err(r) => return r,
     };

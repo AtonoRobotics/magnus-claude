@@ -173,7 +173,7 @@ impl Kernel {
         // Their brokered connectors' microVMs.
         self.brokered.stop(None, Some(person)).await;
         // Every device signed in as them.
-        let ended = self.accounts.end_all(person).map_err(failed)?;
+        let ended = self.accounts.end_all(person).await.map_err(failed)?;
         let sessions = ended.len();
         let evs: Vec<(&str, Ev)> = ended.into_iter().map(|session| (actor, Ev::SignedOut { person: person.to_string(), session })).collect();
         if !evs.is_empty() {

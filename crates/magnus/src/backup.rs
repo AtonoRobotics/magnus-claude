@@ -85,18 +85,23 @@ pub fn check(v: &Value) -> Result<(usize, i64)> {
         let dump = B64.decode(d["dump"].as_str().unwrap_or_default()).with_context(|| format!("the dump of {name}"))?;
         pg_tool("pg_restore", &["--list"], &[], &dump).with_context(|| format!("the dump of {name} does not read back"))?;
     }
+    // The accounts tables, when the backup holds them (#466).
+    if let Some(a) = v.get("accounts") {
+        let dump = B64.decode(a["dump"].as_str().unwrap_or_default()).context("the accounts dump")?;
+        pg_tool("pg_restore", &["--list"], &[], &dump).context("the accounts dump does not read back")?;
+    }
     Ok((events.len(), last))
 }
 
 /// A database the backup holds: its name, its URL without the password (for
 /// the tools' command line, which others on the machine can read), and the
 /// password (given to them in the environment).
-fn database(url: &str) -> Result<(String, String, String)> {
-    let mut u = url::Url::parse(url).context("[backup] databases holds a URL that does not parse")?;
+fn database(label: &str, url: &str) -> Result<(String, String, String)> {
+    let mut u = url::Url::parse(url).with_context(|| format!("{label} holds a URL that does not parse"))?;
     let name = u.path().trim_start_matches('/').to_string();
-    anyhow::ensure!(!name.is_empty() && u.scheme().starts_with("postgres"), "[backup] databases: {} names no Postgres database", u.host_str().unwrap_or_default());
+    anyhow::ensure!(!name.is_empty() && u.scheme().starts_with("postgres"), "{label}: {} names no Postgres database", u.host_str().unwrap_or_default());
     let password = url::form_urlencoded::parse(format!("p={}", u.password().unwrap_or_default()).as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default();
-    u.set_password(None).map_err(|_| anyhow::anyhow!("[backup] databases: {name} has no password to take out"))?;
+    u.set_password(None).map_err(|_| anyhow::anyhow!("{label}: {name} has no password to take out"))?;
     Ok((name, u.to_string(), password))
 }
 
@@ -127,12 +132,40 @@ fn dump_databases(cfg: &Config) -> Result<Vec<Value>> {
         .databases
         .iter()
         .map(|url| {
-            let (name, dsn, password) = database(url)?;
+            let (name, dsn, password) = database("[backup] databases", url)?;
             let dump = pg_tool("pg_dump", &["--format=custom", "--no-owner", "--no-privileges", "--dbname", &dsn], &[("PGPASSWORD", &password)], &[])
                 .with_context(|| format!("back up the database {name}"))?;
             Ok(json!({ "name": name, "dump": B64.encode(dump) }))
         })
         .collect()
+}
+
+/// The accounts tables, dumped from the appliance's own database,
+/// table-scoped: the log rides the events, not a dump, and the accounts
+/// tables ride neither — they are no event's content — so they get their
+/// own (#466).
+fn dump_accounts(cfg: &Config) -> Result<Value> {
+    let (_, dsn, password) = database("[database] url", &cfg.database.url)?;
+    let mut owned: Vec<String> = vec!["--format=custom".into(), "--no-owner".into(), "--no-privileges".into()];
+    for t in crate::accounts::TABLES {
+        owned.push(format!("--table=public.{t}"));
+    }
+    owned.push("--dbname".into());
+    owned.push(dsn);
+    let args: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let dump = pg_tool("pg_dump", &args, &[("PGPASSWORD", &password)], &[]).context("back up the accounts tables")?;
+    Ok(json!({ "dump": B64.encode(dump) }))
+}
+
+/// The accounts tables back into the appliance's own database: data only,
+/// into the migrated tables, so grants stay as `migrate` left them. The
+/// caller empties the tables first, so a rerun loads clean (#466).
+fn restore_accounts(cfg: &Config, v: &Value) -> Result<bool> {
+    let Some(a) = v.get("accounts") else { return Ok(false) };
+    let (_, dsn, password) = database("[database] url", &cfg.database.url)?;
+    let dump = B64.decode(a["dump"].as_str().unwrap_or_default()).context("the accounts dump")?;
+    pg_tool("pg_restore", &["--data-only", "--single-transaction", "--no-owner", "--no-privileges", "--dbname", &dsn], &[("PGPASSWORD", &password)], &dump).context("restore the accounts tables")?;
+    Ok(true)
 }
 
 /// Put each database the backup holds back, into the one `[backup]
@@ -141,7 +174,7 @@ fn restore_databases(cfg: &Config, v: &Value) -> Result<usize> {
     let mut plan = Vec::new();
     for d in v["databases"].as_array().into_iter().flatten() {
         let name = d["name"].as_str().unwrap_or_default();
-        let target = cfg.backup.databases.iter().map(|u| database(u)).collect::<Result<Vec<_>>>()?.into_iter().find(|(n, ..)| n == name);
+        let target = cfg.backup.databases.iter().map(|u| database("[backup] databases", u)).collect::<Result<Vec<_>>>()?.into_iter().find(|(n, ..)| n == name);
         let Some((_, dsn, password)) = target else { bail!("the backup holds the database {name}, which [backup] databases does not name") };
         plan.push((name.to_string(), dsn, password, B64.decode(d["dump"].as_str().unwrap_or_default())?));
     }
@@ -171,11 +204,13 @@ impl Kernel {
         let (vault_key, secrets) = self.vault.raw()?;
         let cfg = self.cfg.clone();
         let databases = tokio::task::spawn_blocking(move || dump_databases(&cfg)).await??;
+        let cfg = self.cfg.clone();
+        let accounts = tokio::task::spawn_blocking(move || dump_accounts(&cfg)).await??;
         let made = chrono::Utc::now();
         let doc = json!({
             "format": FORMAT, "made_at": made, "through_seq": through, "scrubbed_through": scrubbed, "events": rows,
             "vault": { "key": B64.encode(vault_key), "secrets": secrets },
-            "databases": databases,
+            "databases": databases, "accounts": accounts,
         });
         let plain = serde_json::to_vec(&doc)?;
         let cipher = key(&self.cfg, true)?;
@@ -191,7 +226,8 @@ impl Kernel {
         let (ok, detail) = match &checked {
             Ok((n, last)) => {
                 let dbs = doc["databases"].as_array().map(|d| d.len()).unwrap_or(0);
-                (true, format!("restored in memory: {n} events through {last}, every secret decrypts, {dbs} databases read back"))
+                let accounts = if doc.get("accounts").is_some() { ", the accounts tables read back" } else { "" };
+                (true, format!("restored in memory: {n} events through {last}, every secret decrypts, {dbs} databases read back{accounts}"))
             }
             Err(e) => (false, format!("{e:#}")),
         };
@@ -583,6 +619,18 @@ pub async fn restore(cfg: &Config, admin_url: &str, from: &Path) -> Result<(usiz
     // restore can be run again (#296).
     let (c, w) = (cfg.clone(), v.clone());
     tokio::task::spawn_blocking(move || restore_databases(&c, &w)).await??;
+    // The accounts tables likewise (#466): emptied first on their own
+    // committed connection (a data load cannot run inside the log's
+    // transaction, and must not meet rows a run before it left), then
+    // loaded while the log's transaction is still open.
+    if v.get("accounts").is_some() {
+        let wipe = crate::log::connect(&cfg.database.url).await?;
+        for t in crate::accounts::TABLES {
+            wipe.execute(&format!("DELETE FROM public.{t}"), &[]).await?;
+        }
+        let (c, w) = (cfg.clone(), v.clone());
+        tokio::task::spawn_blocking(move || restore_accounts(&c, &w)).await??;
+    }
     let old_key = std::fs::read(vault_dir.join("key")).ok();
     let undo = || {
         let _ = std::fs::remove_file(vault_dir.join("secrets.json"));
