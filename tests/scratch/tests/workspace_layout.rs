@@ -25,10 +25,11 @@ async fn activity_updates_record_only_presented_items_and_retry_failures() {
   if c.body["system"].to_string().contains("reviewing one person's state") && c.turn()==0{return tool("observe",json!({"what":"Actual Activity observation","why":"Useful update","evidence":"Recorded fixture source"}));}
   tool("task_complete",json!({"summary":"Review complete","deliverable":[{"type":"text","text":"Reviewed actual state"}]}))
  })).await;
- let app=Appliance::start(Spec::default().proactive(json!({"on":true})),&model).await;
- // Three minutes, not one: the review starts at the first sweep, but under
- // several full suites at once on the shared runners its observation lands
- // past 60s (master red since 12c13e3, #512; green alone in under 6s).
+ // The harness installs the provider key after its first startup. Enable
+ // reviews only after that credential exists, so their auth cannot race it.
+ let mut app=Appliance::start(Spec::default(),&model).await;
+ reconfigure(&mut app,|cfg|cfg["proactive"]["on"]=true.into()).await;
+ // Keep the three-minute shared-runner budget from #512.
  let alice=app.api("alice");let observation=eventually("actual Alice observation",std::time::Duration::from_secs(180),||{let api=alice.clone();async move{api.inbox().await.into_iter().find(|i|i["kind"]=="observation" && i["status"]=="open")}}).await;
  assert!(set_password(&app,"alice",PASSWORD));
  let out=tokio::process::Command::new("node").arg(workspace_root().join("desktop/tests/workspace-opened.mjs")).env("MAGNUS_OBSERVATION",observation["id"].as_str().unwrap()).env("MAGNUS_URL",&app.base).env("MAGNUS_PASSWORD",PASSWORD).env("MAGNUS_CHROMIUM",chromium()).output().await.unwrap();
