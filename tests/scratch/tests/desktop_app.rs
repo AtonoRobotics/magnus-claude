@@ -24,7 +24,7 @@
 //! MAGNUS_DESKTOP_APP), `tauri-driver`, `WebKitWebDriver`
 //! (MAGNUS_WEBKIT_DRIVER) and `xvfb-run`. Run with `--ignored`.
 
-use magnus_invariants::appliance::workspace_root;
+fn workspace_root() -> std::path::PathBuf { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap() }
 use magnus_invariants::{canary, eventually, PATIENCE};
 use magnus_scratch::*;
 use serde_json::json;

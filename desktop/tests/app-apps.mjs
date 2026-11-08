@@ -33,7 +33,7 @@ await d.step("connect it from its card in the Library; the code comes back to th
   // may use that address first.
   await d.click(d.xpath("//*[@data-connector='calendar']//button[starts-with(@aria-label,'Connect ')]"));
   await d.css('[data-connector="calendar"][data-state="connected"]');
-  await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
+  await d.click(d.xpath("//nav//a[@aria-label='Settings']"));
   await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Connectors']"));
 });
 

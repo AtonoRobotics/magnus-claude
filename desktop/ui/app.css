@@ -326,7 +326,7 @@ table.t tr.click:hover td { background: var(--raised); }
 .step:first-child { border-top: 0; }
 .call { margin: 8px 0 8px 14px; }
 /* A composed result: its figures are cards over whatever is behind them. */
-iframe.composed { width: 100%; border: 0; display: block; background: transparent; min-height: 40px; }
+iframe.composed { width: 100%; border: 0; display: block; background: var(--surface); min-height: 40px; }
 .banner { background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 12px; padding: 10px 14px; margin: 12px 0 16px; }
 .banner.bad { background: var(--bad-soft); border-color: var(--bad); }
 /* Toasts say what happened; they never cover what can be clicked: they sit

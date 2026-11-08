@@ -149,7 +149,7 @@ export async function signIn(d, { provider, person, as, browser = true }) {
     await d.type(d.css("#pw"), passwords[who]);
     await d.click(d.button("Sign in"));
     // The conversation is home: the workspace shows, with Needs you.
-    await d.xpath("//nav//button[starts-with(normalize-space(),'Needs you')]");
+    await d.xpath("//nav//*[self::a or self::button][@aria-label='Needs you' or starts-with(@aria-label,'Needs you,') or starts-with(normalize-space(),'Needs you')]");
     const page = await d.run("return JSON.stringify(localStorage) + JSON.stringify(sessionStorage) + document.cookie");
     if (page.includes("mgs_")) throw new Error("the session token reached the page");
     if (page.includes(passwords[who])) throw new Error("the password stayed in the page's storage");

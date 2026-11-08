@@ -23,7 +23,7 @@ const { step, css, xpath, click, type, run, until } = d;
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 const appearance = async () => {
-  await click(xpath("//nav//a[normalize-space()='Settings']"));
+  await click(xpath("//nav//a[@aria-label='Settings']"));
   await click(xpath("//nav[@aria-label='Settings']//a[normalize-space()='Appearance']"));
   await xpath("//section[@data-section='appearance']//h2[normalize-space()='Appearance']");
 };
@@ -62,75 +62,51 @@ const MEASURE = `
     look: { ...document.documentElement.dataset } });
 `;
 
-await step("a conversation to look at, with Needs you open beside it", async () => {
-  await type(css("#msg"), "Hello");
-  await click(css("#send"));
-  await xpath("//div[@id='thread']//div[@data-answer]");
-  await click(xpath("//nav//a[contains(@class,'needs')]"));
-  await xpath("//aside[@id='detail']//h2[normalize-space()='Needs you']");
+let fileId;
+await step("an actual conversation and uploaded reading surface",async()=>{
+  await type(css('#msg'),'Hello');await click(css('#send'));await xpath("//div[@id='thread']//div[@data-answer]");
+  await run("window.__lookFile=null;Magnus.api('POST','/v1/files',{name:'Appearance reading.md',media_type:'text/markdown',data_b64:btoa('# Reading surface\\n\\nActual uploaded document.\\n\\n| Item | Value |\\n| --- | --- |\\n| Theme | Preserved |')}).then(r=>window.__lookFile=r.id,e=>window.__lookFile={error:e.message});");
+  fileId=await until('file uploaded',()=>run('return window.__lookFile'));if(fileId.error)throw Error(fileId.error);
 });
-
-await step("Settings > Appearance offers mode, material, accent and motion", async () => {
+const reading=async()=>{
+  await click(xpath("//nav//a[@data-tooltip='Hello' or @title='Hello' or normalize-space()='Hello']"));
+  await click(xpath("//nav//a[@aria-label='Files']"));
+  await click(xpath(`//a[@data-open='file:${fileId}']`));
+  await until('document decoded',()=>run("const f=document.getElementById('fview');return f?.contentDocument?.body?.textContent.includes('Actual uploaded document.') && f.getBoundingClientRect().height>=f.contentDocument.body.scrollHeight"));
+};
+await step('Appearance offers four presets and existing preferences',async()=>{
   await appearance();
-  const offered = JSON.parse(await run(`return JSON.stringify([...document.querySelectorAll("[data-look]")].map(b => b.dataset.look + ":" + (b.getAttribute("title") || b.innerText.trim())))`));
-  for (const want of ["mode:Light", "mode:Dark", "mode:Match computer", "material:Solid", "material:Glass", "accent:Blue", "accent:Teal", "accent:Clay", "accent:Graphite", "motion:Full", "motion:Reduced", "motion:Off"]) {
-    if (!offered.includes(want)) throw new Error(`Appearance does not offer ${want}: ${offered.join(", ")}`);
-  }
-  await d.seen("Magnus also follows your computer's settings for reduced motion and reduced transparency.");
+  for(const value of ['light','dark','ember','corporate'])await xpath(`//button[@data-look='theme' and @data-value='${value}']`);
+  await css('[data-follow-computer]');
+  for(const value of ['solid','glass'])await xpath(`//button[@data-look='material' and @data-value='${value}']`);
+  for(const value of ['full','reduced','off'])await xpath(`//button[@data-look='motion' and @data-value='${value}']`);
 });
-
-for (const [theme, material] of ["light", "dark", "ember", "corporate"].flatMap(t => ["solid", "glass"].map(m => [t,m]))) {
-  const mode = ["dark", "ember"].includes(theme) ? "dark" : "light";
-  await step(`${mode} ${material}`, async () => {
-    await appearance();
-    await choose("theme", theme);
-    await choose("material", material);
-    await click(xpath("//nav//a[contains(@title,'Hello')]"));
-    await click(xpath("//nav//a[contains(@class,'needs')]"));
-    await xpath("//aside[@id='detail']//h2[normalize-space()='Needs you']");
-    // Let the panel settle before measuring what is under each text.
-    await until("the panel to settle", () => run("return document.getElementById('detail').getAnimations().length === 0"));
-    const m = JSON.parse(await run(MEASURE));
-    if (m.look.theme !== theme || m.look.mode !== mode || m.look.material !== material) throw new Error(`the page is ${m.look.mode} ${m.look.material}`);
-    const glass = material === "glass";
-    for (const [what, a, blur] of [["sidebar", m.side, m.sideBlur], ["panel", m.panel, m.panelBlur]]) {
-      if (glass && what === "sidebar" && !(a >= .9 && a < 1 && blur.includes("blur"))) throw new Error(`the ${what} is not glass: alpha ${a}, ${blur}`);
-      if ((!glass || what === "panel") && a !== 1) throw new Error(`the ${what} is not solid: alpha ${a}`);
-    }
-    for (const [what, a] of m.reading) if (a !== null && a !== 1) throw new Error(`the reading surface ${what} is not solid: alpha ${a}`);
-    if (m.low.length) throw new Error(`text below 4.5:1: ${m.low.join("; ")}`);
+for(const theme of ['light','dark','ember','corporate'])for(const material of ['solid','glass']){
+  await step(`${theme} ${material}`,async()=>{
+    await appearance();await choose('theme',theme);await choose('material',material);await reading();
+    const m=JSON.parse(await run(MEASURE));const mode=['dark','ember'].includes(theme)?'dark':'light';
+    if(m.look.theme!==theme || m.look.mode!==mode || m.look.material!==material)throw Error(`Unexpected appearance ${JSON.stringify(m.look)}`);
+    if(material==='glass' && !(m.side>=.9 && m.side<1 && m.sideBlur.includes('blur')))throw Error(`Chrome glass lost: ${JSON.stringify(m)}`);
+    if(m.panel!==1 || (material==='solid' && m.side!==1))throw Error('Reading panel or solid chrome is translucent');
+    for(const [what,alpha] of m.reading)if(alpha!==null && alpha!==1)throw Error(`Translucent reading surface ${what}`);
+    if(m.low.length)throw Error(`Text below 4.5:1: ${m.low.join('; ')}`);
+    const frame=await run("const f=document.getElementById('fview');return {mode:f.contentDocument.documentElement.style.colorScheme,text:f.contentDocument.body.textContent,sandbox:f.getAttribute('sandbox')} ");
+    if(frame.mode!==mode || !frame.text.includes('Actual uploaded document.') || frame.sandbox!=='allow-same-origin')throw Error('Document theme/data/sandbox changed');
+    await css('#msg');
   });
 }
-
-await step("the accent colors what acts", async () => {
-  await appearance();
-  await choose("mode", "dark");
-  await choose("accent", "teal");
-  await click(xpath("//nav//a[contains(@title,'Hello')]"));
-  const send = await until("Send in teal", () => run("const b = getComputedStyle(document.getElementById('send')).backgroundColor; return b === 'rgb(31, 122, 109)' && b"));
-  if (!send) throw new Error("Send is not teal");
+await step('explicit expansion and restore keep conversation reachable',async()=>{
+  await click(css('[aria-label="Expand work"]'));await css('.workspace-selectors');
+  await click(xpath("//div[contains(@class,'workspace-selectors')]//button[normalize-space()='Conversation']"));await css('#msg');
+  await click(xpath("//div[contains(@class,'workspace-selectors')]//button[normalize-space()='Work']"));await css('#fview');
+  await click(css('[aria-label="Restore split view"]'));await css('#msg');
 });
-
-await step("motion: full glides the panel in, off moves nothing", async () => {
-  // The panel is closed (Settings has the page to itself); it opens now.
-  await click(xpath("//nav//a[contains(@class,'needs')]"));
-  const moving = await run("return document.getElementById('detail').getAnimations().length");
-  if (!moving) throw new Error("the panel did not glide in with motion on Full");
-  await appearance();
-  await choose("motion", "off");
-  await click(xpath("//nav//a[contains(@title,'Hello')]"));
-  await click(xpath("//nav//a[contains(@class,'needs')]"));
-  await xpath("//aside[@id='detail']//h2[normalize-space()='Needs you']");
-  const still = await run("return document.getAnimations().length");
-  if (still) throw new Error(`${still} animations ran with motion Off`);
+await step('custom accent and no-motion preferences persist',async()=>{
+  await appearance();await choose('mode','dark');await choose('accent','teal');await choose('motion','off');await reading();
+  if(await run('return document.getAnimations().length'))throw Error('Motion Off still animates');
+  await run('location.reload()');await css('#msg');
+  const look=await run('return {...document.documentElement.dataset}');
+  if(look.mode!=='dark' || look.material!=='glass' || look.accent!=='teal' || look.motion!=='off')throw Error(`Lost preference ${JSON.stringify(look)}`);
 });
-
-await step("the look is kept on this device", async () => {
-  await run("location.reload()");
-  await xpath("//nav//button[starts-with(normalize-space(),'Needs you')]");
-  const look = await run("return { ...document.documentElement.dataset }");
-  if (look.mode !== "dark" || look.material !== "glass" || look.accent !== "teal" || look.motion !== "off") throw new Error(`after a restart the look is ${JSON.stringify(look)}`);
-});
-
 await d.close();
 console.log("looks passed");

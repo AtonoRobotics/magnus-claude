@@ -21,7 +21,7 @@ const shows = t => d.run("return document.body.innerText.includes(arguments[0])"
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await d.step("the owner sees the owner's controls and their task", async () => {
-  await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
+  await d.click(d.xpath("//nav//a[@aria-label='Settings']"));
   await d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Models']");
   await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Kill switch']"));
   await d.css('[data-kill-switch="off"]');
@@ -48,7 +48,7 @@ await d.step("the colleague has only their own rights", async () => {
   const who = await d.attr(d.css("nav .who .whoami [title]"), "title");
   if (who !== other) throw new Error(`signed in as ${who}`);
   if (await d.run("return !!document.querySelector('[data-kill-switch]')")) throw new Error("a colleague sees the kill switch");
-  await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
+  await d.click(d.xpath("//nav//a[@aria-label='Settings']"));
   await d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Account']");
   if (await d.run("return [...document.querySelectorAll('nav a')].some(a => ['Models', 'Connectors', 'Kill switch'].includes(a.innerText.trim()))")) throw new Error("a colleague sees Models, Connectors or the kill switch");
   await d.click(d.xpath("//nav//a[starts-with(normalize-space(),'Tasks')]"));
