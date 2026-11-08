@@ -365,16 +365,16 @@ dialog.ask .row { justify-content: flex-end; gap: 8px; }
 .msg .pre { white-space: pre-wrap; }
 .chatcard { width: 100%; }
 /* The composer: one rounded box, the message across, its choices under it. */
-.say { display: flex; align-items: flex-end; gap: 8px; background: var(--surface); border: 1px solid var(--btn-border); border-radius: 20px; padding: 10px 10px 10px 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+.say { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 8px; background: var(--surface); border: 1px solid var(--btn-border); border-radius: 20px; padding: 10px 10px 10px 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
 .say:focus-within { border-color: var(--line-strong); }
-.say textarea { flex: 1; border: 0; background: none; padding: 11px 0; resize: none; min-height: 44px; font-size: 15px; line-height: 22px; }
+.say textarea { border: 0; background: none; padding: 11px 0; resize: none; min-height: 44px; font-size: 15px; line-height: 22px; }
 .say textarea::placeholder { color: var(--muted); opacity: 1; }
 .say textarea:focus { outline: none; }
-.say-bar { display: flex; gap: 8px; align-items: center; }
-.say-bar .grow { display: none; }
+.say-bar { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.say-bar .grow { display: block; flex: 1; min-width: 0; }
 .say-bar .icon-btn, .say-bar label.button { width: 44px; height: 44px; border-radius: 12px; color: var(--muted); }
-.say { flex-wrap: wrap; }
-.say #pending { order: -1; flex-basis: 100%; }
+.say > #submitted:empty { display: none; }
+.say #pending { order: -1; min-width: 0; }
 .say #pending:empty { display: none; }
 .say-bar label.icon-btn { margin: 0; }
 button.send { width: 44px; height: 44px; border-radius: 12px; padding: 0; display: grid; place-items: center; background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
@@ -382,7 +382,7 @@ button.send:hover { background: var(--accent); filter: brightness(1.08); }
 button.send svg.ic { width: 20px; height: 20px; stroke-width: 2; }
 label.model { margin: 0; }
 label.model select { max-width: 132px; height: 44px; border: 0; background: none; font-size: 13px; padding: 0 4px; color: var(--muted); text-overflow: ellipsis; }
-.say textarea { min-width: 12rem; }
+.say textarea { min-width: 0; }
 
 /* A request set: every request's table has the same columns. */
 table.req { table-layout: fixed; }
@@ -661,7 +661,9 @@ body[data-navigation=drawer] .shell > main, body[data-navigation=drawer] .shell 
 .navigation-flyout .group { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
 .workspace-search { width: min(480px, calc(100vw - 32px)); background: var(--main); color: var(--fg); }
 .workspace-search form { display: flex; flex-direction: column; gap: 16px; }
-section.conv .thread, section.conv #composer, section.conv #banners { padding-left: max(16px, calc((100% - 696px) / 2)); padding-right: max(16px, calc((100% - 696px) / 2)); }
+section.conv .thread, section.conv #banners { padding-left: max(16px, calc((100% - 696px) / 2)); padding-right: max(16px, calc((100% - 696px) / 2)); }
+/* Match the 696px reading column without applying pane-sized padding inside a capped wrapper. */
+section.conv #composer { max-width: 728px; padding-left: 16px; padding-right: 16px; }
 .conv-head { padding: 12px 16px; }
 .conv-head select { max-width: min(160px, 38vw); }
 .entry, .detail-body { font-size: 15px; line-height: 1.5; }
@@ -772,7 +774,7 @@ html[data-theme="corporate"] :is(nav.side, .conv-head, .workspace-bar) { color-s
 @media (any-pointer: coarse) {
   input:not([type="checkbox"]):not([type="radio"]), select { min-width:44px; min-height:44px; }
 }
-.draft-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
+.draft-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; padding: 4px 0; }
 .attachment-picker { display: inline-flex; }
 #composer .attachment-picker button { min-width: 44px; min-height: 44px; }
 .attachment-chip { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 12px; max-width: 100%; overflow-wrap: anywhere; }
