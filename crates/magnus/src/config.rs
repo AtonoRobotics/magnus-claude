@@ -288,9 +288,9 @@ pub struct Mail {
     pub from: String,
     /// The base account links point at, for example
     /// `https://magnus.example.com`. Unset: the public hostname when
-    /// pairing is on, else the request's own host (tests, local use).
-    /// Never the request's host in production: a recovery link built
-    /// from it would let anyone mail the holder a link elsewhere.
+    /// pairing is on, else no recovery mail goes out. The request's own
+    /// host is never used: a forged Host header would mail a live token
+    /// to the wrong domain (#541).
     #[serde(default)]
     pub link_base: Option<String>,
 }

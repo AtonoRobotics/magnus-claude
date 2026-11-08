@@ -89,11 +89,15 @@ pub(crate) async fn developer(k: &Kernel, h: &HeaderMap) -> Result<Person, Respo
 }
 
 /// A browser sends the session cookie on its own, so a change made with the
-/// cookie must also carry a header another site's page cannot set.
+/// cookie must also carry a header another site's page cannot set. The
+/// recovery form is the exception: its authorization is the emailed
+/// token, which a plain form can carry, so a stale session cookie must
+/// not block it (#541).
 async fn cookie_guard(req: Request, next: Next) -> Response {
     let h = req.headers();
     let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
-    if !safe && bearer(h).is_none() && cookie(h, SESSION_COOKIE).is_some() && h.get("x-magnus-client").is_none() {
+    let recovery = *req.method() == Method::POST && req.uri().path() == "/reset";
+    if !safe && !recovery && bearer(h).is_none() && cookie(h, SESSION_COOKIE).is_some() && h.get("x-magnus-client").is_none() {
         return err(StatusCode::FORBIDDEN, "missing x-magnus-client header");
     }
     next.run(req).await
@@ -754,24 +758,22 @@ async fn accept_invite(State(k): K, Extension(t): Extension<Transport>, ConnectI
     }
 }
 
-/// Where account links point: the mail base when set, else the public
-/// hostname when pairing is on, else the request's own host (tests and
-/// local use; never production — see `Mail::link_base`).
-fn link_base(k: &Kernel, t: Transport, h: &HeaderMap) -> String {
+/// Where account links point: the configured mail base, else the public
+/// hostname when pairing is on. Nothing else is trusted: the request's
+/// own host is attacker-controlled, so without either of these no
+/// recovery mail goes out at all (#541).
+fn link_base(k: &Kernel) -> Option<String> {
     if let Some(base) = k.cfg.mail.as_ref().and_then(|m| m.link_base.clone()) {
-        return base.trim_end_matches('/').to_string();
+        return Some(base.trim_end_matches('/').to_string());
     }
-    if let Some(host) = k.cfg.client_certs.as_ref().map(|c| c.hostname.clone()) {
-        return format!("https://{host}");
-    }
-    let scheme = if t == Transport::Tls { "https" } else { "http" };
-    let host = h.get("host").and_then(|v| v.to_str().ok()).unwrap_or("localhost");
-    format!("{scheme}://{host}")
+    k.cfg.client_certs.as_ref().map(|c| format!("https://{}", c.hostname))
 }
 
 /// Ask for a password recovery email: whoever holds the address gets a
-/// one-hour link. The answer never says whether anyone did (#533).
-async fn password_reset_request(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, h: HeaderMap, Json(b): Json<Value>) -> Response {
+/// one-hour link. The answer never says whether anyone did (#533), and
+/// never waits for the mail server: delivery runs behind the response,
+/// so active addresses answer no slower than unknown ones (#541).
+async fn password_reset_request(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Json(b): Json<Value>) -> Response {
     if let Err(r) = over_tls(&k, t, peer) {
         return r;
     }
@@ -781,13 +783,20 @@ async fn password_reset_request(State(k): K, Extension(t): Extension<Transport>,
         Err(e) => return internal(e),
     };
     if let Some(r) = req.filter(|r| r.send) {
-        let link = format!("{}/reset?token={}", link_base(&k, t, &h), r.token);
+        let Some(base) = link_base(&k) else {
+            tracing::warn!("password reset for {}: no trusted link base, nothing sent", r.person);
+            return Json(json!({ "ok": true })).into_response();
+        };
+        let link = format!("{base}/reset?token={}", r.token);
         let text = format!("Someone asked to recover the Magnus password for this address. Choose a new one in the next hour:\n\n{link}\n\nIf that was not you, ignore this email: the password stays as it is. Choosing a new password signs every device out, and any authenticator codes stop working until new ones are enrolled.");
-        match crate::mailer::send(&k, &email, "Recover your Magnus password", text).await {
-            Ok(true) => {}
-            Ok(false) => tracing::warn!("password reset for {}: no [mail] is set, nothing sent", r.person),
-            Err(e) => tracing::error!("password reset email to {email} failed: {e:#}"),
-        }
+        let (delivery, to) = (k.clone(), email.clone());
+        tokio::spawn(async move {
+            match crate::mailer::send(&delivery, &to, "Recover your Magnus password", text).await {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!("password reset for {}: no [mail] is set, nothing sent", r.person),
+                Err(e) => tracing::error!("password reset email to {to} failed: {e:#}"),
+            }
+        });
     }
     Json(json!({ "ok": true })).into_response()
 }
