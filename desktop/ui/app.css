@@ -627,6 +627,13 @@ body[data-workspace=split] .shell > main { grid-column: 4; }
 body[data-workspace=split] .shell > aside.detail { grid-column: 2; }
 #workspace-splitter { grid-column: 3; grid-row: 2; position: relative; cursor: col-resize; touch-action: none; background: var(--shell, var(--bg)); }
 #workspace-splitter::after { content: ''; position: absolute; width: 2px; top: 16px; bottom: 16px; left: 7px; background: var(--muted); border-radius: 1px; }
+@media (any-pointer: coarse) {
+  /* Keep the 16px grid track while using its empty adjacent gutters. */
+  #workspace-splitter { margin-inline: -14px; z-index: 3; background: linear-gradient(to right, transparent 14px, var(--shell, var(--bg)) 14px, var(--shell, var(--bg)) 30px, transparent 30px); }
+  #workspace-splitter::after { left: calc(50% - 1px); }
+  nav a, .trow > a, .ghead > a, .sched a.ttl, .feed-row > a, .rg-row > a, a.glimpse, a.lc-act, [data-ask-app], .t td > a:not([data-prose-link]) { min-width: 44px; min-height: 44px; }
+  .ghead > a, .sched a.ttl, .feed-row > a, a.glimpse, a.lc-act, [data-ask-app], .t td > a:not([data-prose-link]) { display: inline-flex; align-items: center; max-width: 100%; }
+}
 body[data-workspace=single][data-region=work] .shell > main, body[data-workspace=single][data-region=conversation] .shell > aside.detail { display: none; }
 body[data-navigation=compact] nav.side .brand-name, body[data-navigation=compact] nav.side #find,
 body[data-navigation=compact] nav.side .nav-label, body[data-navigation=compact] nav.side .nav-tree,
