@@ -113,6 +113,14 @@ for (const [name, look] of LOOKS) {
   for (const [what,key,want] of [['content text','body',r.text],['conversation','main',r.main],['result text','cardText',r.text]]) expect(name,what,got[key],want);
   const chrome = await page.locator('nav.side').evaluate(el => getComputedStyle(el).color);
   expect(name,'chrome text',chrome,r.chromeText);
+  // Check a real chrome control's hover/pressed fills and contrast, cancelling the pointer click.
+  const action=page.locator('[data-expand-work]');const box=await action.boundingBox();
+  const color=()=>action.evaluate(el=>{const c=document.createElement('canvas');c.width=c.height=1;const x=c.getContext('2d');const rgba=value=>{x.clearRect(0,0,1,1);x.fillStyle=value;x.fillRect(0,0,1,1);return [...x.getImageData(0,0,1,1).data];};const s=getComputedStyle(el);return {fg:rgba(s.color),bg:rgba(s.backgroundColor)};});
+  await action.hover();await page.waitForTimeout(200);const hover=await color();await page.mouse.down();await page.waitForTimeout(200);const pressed=await color();await page.mouse.move(4,4);await page.mouse.up();
+  const luminance=c=>c.slice(0,3).map(v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4;}).reduce((n,v,i)=>n+v*[.2126,.7152,.0722][i],0);
+  for(const state of [hover,pressed]){const [a,b]=[luminance(state.fg),luminance(state.bg)].sort((a,b)=>b-a);if((a+.05)/(b+.05)<4.5)failures.push(`${name}: control state contrast failed`);}
+  if(hover.bg.join(',')===pressed.bg.join(','))failures.push(`${name}: pressed fill must differ from hover`);
+
   if (parseFloat(got.documentFont)<15 || !got.documentFont) failures.push(`${name}: document typography is ${got.documentFont}, expected at least 15px`);
   const avatarContrast = await page.locator('nav.side .avatar').evaluate(el => {
     const hex = value => '#' + value.match(/\d+/g).slice(0,3).map(v => Number(v).toString(16).padStart(2,'0')).join('');
