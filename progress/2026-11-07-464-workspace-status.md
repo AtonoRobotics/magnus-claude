@@ -1,0 +1,2 @@
+
+Apps and Models now participate in resource-scoped stale feedback, scoped cached reads and periodic recovery. Apps refresh only its result section, preserving search input; provider/model selection and focus survive refresh through existing draft-aware painting. Scope reset clears cached catalog/filter state. Real-appliance browser regression passed for offline/recovery with actual configured catalog/provider data, preserved input/selection/focus, and unchanged stale-announcement behavior. The late catalog response navigation guard remains covered.

@@ -94,10 +94,11 @@ const Resources = (()=>{
  function forget(name){states.delete(name);render();}
  function good(name){const s=states.get(name)||{};states.set(name,{...s,failed:false,at:Date.now()});render();}
  function bad(name,error){if(error?.cancelled)return;const s=states.get(name)||{};states.set(name,{...s,failed:true});render();if(error?.status===401 && App.me){stop();signInScreen("Your session ended. Sign in again.");}}
- async function read(name,path,key){const scope=epoch,token=++serial,prior=states.get(name)||{};states.set(name,{...prior,token});
-  try{const value=await api("GET",path);if(scope!==epoch || states.get(name)?.token!==token)return;good(name);return key ? value[key] : value;}
-  catch(error){if(!error?.cancelled && scope===epoch && states.get(name)?.token===token)bad(name,error);}
+ async function read(name,path,key,cached=false){const scope=epoch,token=++serial,prior=states.get(name)||{};states.set(name,{...prior,token});
+  try{const response=await api("GET",path);if(scope!==epoch || states.get(name)?.token!==token)return;const value=key ? response[key] : response;states.set(name,{...states.get(name),path,value});good(name);return value;}
+  catch(error){if(cached && error?.cancelled)throw error;if(!error?.cancelled && scope===epoch && states.get(name)?.token===token){bad(name,error);if(cached && prior.path===path)return prior.value;}}
  }
+
  return {read,reset,forget,good,bad,render};
 })();
 
@@ -2104,18 +2105,25 @@ function librarySections(all) {
 async function showLibrary(main, name) {
   Lib.main = main;
   if (name) return showConnectorPage(main, name);
-  const { connectors } = await api("GET", "/v1/connectors");
+  const connectors = await Resources.read("Apps", "/v1/connectors", "connectors",true);
   // An app blocked for your groups is not in your Library; the owner still
   // manages it in Settings.
-  Lib.all = connectors.filter(c => c.for_you !== false);
+  Lib.all = (connectors || []).filter(c => c.for_you !== false);
   const seg = (k, label) => `<button data-lib-tab="${k}" aria-pressed="${Lib.tab === k}">${label}</button>`;
   main.innerHTML = `<div class="libpage"><header class="lhead"><div><h1>Library</h1><p>Connect the apps and programs you want Magnus to work in. You only ever sign in.</p></div>
     <a class="icon-btn lclose" href="#/home" aria-label="Close Library">${icon("close")}</a></header>
     <div class="lbar"><div class="lseg" role="group" aria-label="Show">${seg("yours", "Yours")}${seg("discover", "Discover")}</div>
     <div class="lsearch">${SVG.search}<label class="sr" for="libq">Search connectors</label><input id="libq" type="search" value="${esc(Lib.q)}" placeholder="Search connectors, or describe what you want done" autocomplete="off"></div></div>
     <div class="lchips" role="group" aria-label="Category">${CATEGORIES.map(([k, l]) => `<button data-lib-cat="${k}" aria-pressed="${Lib.cat === k}">${esc(l)}</button>`).join("")}</div>
-    <div id="lib-sections">${librarySections(connectors)}</div></div>`;
+    <div id="lib-sections">${connectors ? librarySections(Lib.all) : '<p class="empty">Apps are unavailable. Retrying when connected.</p>'}</div></div>`;
   bindConnectorActs(main);
+  const update=async()=>{
+    const connectors=await Resources.read("Apps","/v1/connectors","connectors",true);
+    if(!connectors || !main.querySelector('#lib-sections'))return;
+    Lib.all=connectors.filter(c=>c.for_you!==false);
+    paint($('#lib-sections',main),librarySections(Lib.all));
+  };
+  App.redraw=update;onLeave(()=>{if(App.redraw===update)App.redraw=null;});
   let t;
   $("#libq", main).addEventListener("input", e => { clearTimeout(t); t = setTimeout(() => { Lib.q = e.target.value.trim(); $("#lib-sections", main).innerHTML = librarySections(Lib.all); }, 150); });
 }
@@ -2376,17 +2384,20 @@ async function modelsSection(main) {
   let pick = null;
   const catalogs = {};
   const catalog = async a => {
-    if (!catalogs[a]) catalogs[a] = await api("GET", `/v1/adapters/${enc(a)}/catalog`).then(c => c.models ? { ids: c.models.map(m => m.id) } : { error: c.message || "the adapter sent no list" }).catch(e => ({ error: e.message }));
-    return catalogs[a];
+    const c=await Resources.read(`Models for ${a}`,`/v1/adapters/${enc(a)}/catalog`,undefined,true);
+    if(c)catalogs[a]=c.models ? {ids:c.models.map(m=>m.id)} : {error:c.message || "the adapter sent no list"};
+    return catalogs[a] || {error:"The provider is unavailable. Retrying when connected."};
   };
   const draw = async () => {
-    const [{ adapters }, cur] = await Promise.all([api("GET", "/v1/adapters"), api("GET", "/v1/model")]);
+    const [providers, cur] = await Promise.all([Resources.read("Providers", "/v1/adapters",undefined,true), Resources.read("Model", "/v1/model",undefined,true)]);
+    if(!providers || !cur){if(!main._html)paint(main,'<h2>Models</h2><p class="empty">Models are unavailable. Retrying when connected.</p>');return;}
+    const {adapters}=providers;
     const p = pick || cur.adapter, models = await catalog(p);
     const chosen = p === cur.adapter ? cur.model : null;
     paint(main, `<h2>Models</h2><p class="muted">Connect providers here. Keys and sign-ins go to the appliance's vault; this app keeps none.</p>
       <div class="card"><div class="small muted">New tasks run on</div><div class="mono" style="font-size:16px;margin:2px 0 10px">${esc(cur.adapter)} · ${esc(cur.model)}</div>
-        <div class="row"><select id="madapter" aria-label="Provider">${adapters.map(a => `<option ${a.id === p ? "selected" : ""}>${esc(a.id)}</option>`).join("")}</select>
-        ${models.ids ? `<select id="mname" aria-label="Model">${chosen && !models.ids.includes(chosen) ? `<option selected>${esc(chosen)}</option>` : ""}${models.ids.map(m => `<option ${m === chosen ? "selected" : ""}>${esc(m)}</option>`).join("")}</select><button class="primary" data-act="use">Use this model</button>` : ""}</div>
+        <div class="row"><select id="madapter" aria-label="Provider" data-draft="model-provider">${adapters.map(a => `<option ${a.id === p ? "selected" : ""}>${esc(a.id)}</option>`).join("")}</select>
+        ${models.ids ? `<select id="mname" aria-label="Model" data-draft="model-choice-${esc(p)}">${chosen && !models.ids.includes(chosen) ? `<option selected>${esc(chosen)}</option>` : ""}${models.ids.map(m => `<option ${m === chosen ? "selected" : ""}>${esc(m)}</option>`).join("")}</select><button class="primary" data-act="use">Use this model</button>` : ""}</div>
         ${models.error ? `<p class="small muted" style="margin-top:8px">No model list from ${esc(p)} yet: ${esc(models.error)}</p>` : ""}</div>
       ${adapters.map(a => `<div class="card" data-adapter="${esc(a.id)}"><div class="spread"><strong>${esc(a.id)}</strong>
           <span class="row">${a.conformance ? `<span class="chip ${a.conformance.passed ? "ok" : "bad"}">suite ${a.conformance.passed ? "passed" : "failed"} · ${esc(a.conformance.model)}</span>` : `<span class="chip warn">suite not run</span>`}</span></div>
@@ -2442,6 +2453,7 @@ async function modelsSection(main) {
       }
     } catch (err) { toast(err.message); b.disabled = false; }
   };
+  App.redraw=draw;onLeave(()=>{if(App.redraw===draw)App.redraw=null;});
   await draw();
 }
 
@@ -2877,6 +2889,7 @@ function stop() {
   App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null; App.feed = null; App.reported = new Set(); App.reporting = new Set();
   // What one person was typing or filtering by is not the next one's here.
   Panel.lib = { q: "", project: "" };
+  delete Lib.all; Lib.q=""; Lib.cat="all"; Lib.tab="discover";
   for (const k of Object.keys(drafts)) delete drafts[k];
 }
 
