@@ -11,6 +11,10 @@
 set -eu
 v=$1 t=$2
 cd "$(dirname "$0")/../src-tauri"
+# This script also runs outside the installer workflow step; its two real
+# AppImages need the same verified runtime as the published installer.
+export LDAI_RUNTIME_FILE
+LDAI_RUNTIME_FILE=$(../../release/ensure-appimage-runtime.sh)
 mkdir -p "$t"
 cargo tauri signer generate --ci -p "" -f -w "$t/test.key" >/dev/null
 export TAURI_SIGNING_PRIVATE_KEY="$t/test.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
