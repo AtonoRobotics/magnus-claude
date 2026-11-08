@@ -29,7 +29,10 @@ async fn a_forgotten_password_is_recovered_by_email() {
     assert!(set_password(&app, "dave", OLD), "magnus password for dave");
     let out = cli(&app, &["totp-enroll", "--person", "dave"]);
     assert!(out.status.success(), "magnus totp-enroll: {}", String::from_utf8_lossy(&out.stderr));
-    let secret = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let uri = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let secret = uri.split("secret=").nth(1).and_then(|s| s.split('&').next()).expect("no secret in the enroll uri").to_string();
+    let raw = magnus::totp::base32_decode(&secret).unwrap();
+    let code = || magnus::totp::generate(&raw, (chrono::Utc::now().timestamp().div_euclid(30)) as u64, 6);
     let c = reqwest::Client::new();
     let sign_in = async |password: &str, code: Option<String>| {
         let mut body = json!({ "person": "dave", "password": password, "client": "app" });
@@ -43,7 +46,7 @@ async fn a_forgotten_password_is_recovered_by_email() {
     let r = sign_in(OLD, None).await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(r.json::<Value>().await.unwrap()["code_needed"], true, "no code was asked");
-    let r = sign_in(OLD, Some(code_for(&secret))).await;
+    let r = sign_in(OLD, Some(code())).await;
     assert_eq!(r.status(), StatusCode::OK);
     let session = r.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_string();
 
