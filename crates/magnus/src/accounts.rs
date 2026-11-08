@@ -161,6 +161,22 @@ impl Policy {
 /// Days an invitation stays usable.
 pub const INVITE_DAYS: i64 = 7;
 
+/// Hours a password-reset link stays usable.
+pub const RESET_HOURS: i64 = 1;
+
+/// Seconds before a reset request sends again: re-asking inside the
+/// window answers the same and sends nothing.
+pub const RESET_RESEND_SECONDS: i64 = 60;
+
+/// A password-reset request that found its person: who, a token good for
+/// one email, and whether to send it (a recent request answers the same
+/// and sends nothing).
+pub struct ResetRequest {
+    pub person: String,
+    pub token: String,
+    pub send: bool,
+}
+
 /// How long a permanent lockout is recorded for: nobody's lock outlives
 /// the century, and an admin's enable clears it anyway.
 const PERMANENT_YEARS: i64 = 100;
@@ -177,6 +193,7 @@ pub const TABLES: &[&str] = &[
     "account_statuses",
     "account_roles",
     "account_invites",
+    "account_reset_tokens",
     "account_sessions",
     "account_machine_codes",
     "account_sign_in_policy",
@@ -220,6 +237,12 @@ pub fn migrate_sql(role: &str) -> String {
              expires timestamptz NOT NULL
          );
          CREATE INDEX IF NOT EXISTS account_invites_person ON public.account_invites (person);
+         CREATE TABLE IF NOT EXISTS public.account_reset_tokens (
+             person    text PRIMARY KEY,
+             hash      text NOT NULL,
+             expires   timestamptz NOT NULL,
+             requested timestamptz NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS public.account_sessions (
              hash    text PRIMARY KEY,
              id      text NOT NULL,
@@ -249,8 +272,8 @@ pub fn migrate_sql(role: &str) -> String {
          CREATE TABLE IF NOT EXISTS public.account_json_import (
              imported_at timestamptz PRIMARY KEY
          );
-         REVOKE ALL ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes, public.account_sign_in_policy, public.account_json_import FROM PUBLIC;
-         GRANT SELECT, INSERT, UPDATE, DELETE ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_sessions, public.account_machine_codes, public.account_sign_in_policy, public.account_json_import TO {role};"
+         REVOKE ALL ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_reset_tokens, public.account_sessions, public.account_machine_codes, public.account_sign_in_policy, public.account_json_import FROM PUBLIC;
+         GRANT SELECT, INSERT, UPDATE, DELETE ON public.account_people, public.account_passwords, public.account_totp, public.account_totp_steps, public.account_statuses, public.account_roles, public.account_invites, public.account_reset_tokens, public.account_sessions, public.account_machine_codes, public.account_sign_in_policy, public.account_json_import TO {role};"
     )
 }
 
@@ -941,6 +964,116 @@ impl Accounts {
         tx.commit().await?;
         self.refresh_local(c).await?;
         Ok(Some(person))
+    }
+
+    /// Start a password recovery for the holder of `email`: a one-hour
+    /// token, or nothing to send (unknown address, not an active person,
+    /// or asked within the minute — the answer never says which, so
+    /// addresses cannot be probed).
+    pub async fn request_reset(&self, email: &str) -> Result<Option<ResetRequest>> {
+        self.request_reset_at(email, Utc::now()).await
+    }
+
+    /// `request_reset` at `at`, for tests.
+    pub async fn request_reset_at(&self, email: &str, at: DateTime<Utc>) -> Result<Option<ResetRequest>> {
+        let email = email.trim().to_lowercase();
+        if email.is_empty() {
+            return Ok(None);
+        }
+        let mut g = self.client().await?;
+        let c = g.as_mut().context("accounts connection")?;
+        let tx = c.transaction().await?;
+        tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('magnus-accounts'))").await?;
+        tx.execute("DELETE FROM public.account_reset_tokens WHERE expires <= $1", &[&at]).await?;
+        // The first holder of the address, deterministically: people keep
+        // their own addresses, and two sharing one is a misconfiguration.
+        let person: Option<String> = tx.query_opt("SELECT person FROM public.account_people WHERE lower(email) = $1 ORDER BY person LIMIT 1", &[&email]).await?.map(|r| r.get(0));
+        let Some(person) = person else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let status: Option<String> = tx.query_opt("SELECT status FROM public.account_statuses WHERE person = $1", &[&person]).await?.map(|r| r.get(0));
+        if status.as_deref().is_some_and(|s| s != "active") {
+            // Invited people follow their invitation; disabled people stay
+            // out. Either way the token, if any, is left alone.
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let recent: bool = tx
+            .query_opt("SELECT requested FROM public.account_reset_tokens WHERE person = $1", &[&person])
+            .await?
+            .map(|r| r.get::<_, DateTime<Utc>>(0))
+            .is_some_and(|t| (at - t).num_seconds() < RESET_RESEND_SECONDS);
+        if recent {
+            tx.commit().await?;
+            return Ok(Some(ResetRequest { person, token: String::new(), send: false }));
+        }
+        let mut raw = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut raw);
+        let token = hex::encode(raw);
+        tx.execute(
+            "INSERT INTO public.account_reset_tokens (person, hash, expires, requested) VALUES ($1, $2, $3, $4) ON CONFLICT (person) DO UPDATE SET hash = EXCLUDED.hash, expires = EXCLUDED.expires, requested = EXCLUDED.requested",
+            &[&person, &token_hash(&token), &(at + Duration::hours(RESET_HOURS)), &at],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Some(ResetRequest { person, token, send: true }))
+    }
+
+    /// Finish a password recovery: the token with the new password sets it
+    /// permanently, clears any authenticator (the email is the recovery
+    /// factor), and ends every session. Single-use: the token dies here,
+    /// and racing confirms admit exactly one. Answers the person, or
+    /// nothing for a bad, spent or expired token.
+    pub async fn confirm_reset(&self, token: &str, password: &str) -> Result<Option<(String, Vec<String>)>> {
+        self.confirm_reset_at(token, password, Utc::now()).await
+    }
+
+    /// `confirm_reset` at `at`, for tests.
+    pub async fn confirm_reset_at(&self, token: &str, password: &str, at: DateTime<Utc>) -> Result<Option<(String, Vec<String>)>> {
+        // The password is judged before the token is touched, so a short
+        // one does not burn the recovery.
+        anyhow::ensure!(password.chars().count() >= self.cfg.min_password_length, "a password needs at least {} characters", self.cfg.min_password_length);
+        let mut g = self.client().await?;
+        let c = g.as_mut().context("accounts connection")?;
+        let tx = c.transaction().await?;
+        tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('magnus-accounts'))").await?;
+        tx.execute("DELETE FROM public.account_reset_tokens WHERE expires <= $1", &[&at]).await?;
+        let held: Option<String> = tx.query_opt("SELECT person FROM public.account_reset_tokens WHERE hash = $1", &[&token_hash(token.trim())]).await?.map(|r| r.get(0));
+        if let Some(person) = &held {
+            let status: Option<String> = tx.query_opt("SELECT status FROM public.account_statuses WHERE person = $1", &[person]).await?.map(|r| r.get(0));
+            if status.as_deref().is_some_and(|s| s != "active") {
+                tx.commit().await?;
+                return Ok(None);
+            }
+        }
+        let consumed: Option<String> = tx.query_opt("DELETE FROM public.account_reset_tokens WHERE hash = $1 RETURNING person", &[&token_hash(token.trim())]).await?.map(|r| r.get(0));
+        let Some(person) = consumed else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let salt = SaltString::generate(&mut OsRng);
+        let phc = Argon2::default().hash_password(password.as_bytes(), &salt).map_err(|e| anyhow::anyhow!("hash: {e}"))?.to_string();
+        tx.execute("INSERT INTO public.account_passwords (person, phc, temporary) VALUES ($1, $2, false) ON CONFLICT (person) DO UPDATE SET phc = EXCLUDED.phc, temporary = false", &[&person, &phc]).await?;
+        tx.execute("DELETE FROM public.account_totp WHERE person = $1", &[&person]).await?;
+        tx.execute("DELETE FROM public.account_totp_steps WHERE person = $1", &[&person]).await?;
+        let mut ended = vec![];
+        for r in tx.query("DELETE FROM public.account_sessions WHERE person = $1 RETURNING id", &[&person]).await? {
+            ended.push(r.get("id"));
+        }
+        tx.commit().await?;
+        self.refresh_local(c).await?;
+        Ok(Some((person, ended)))
+    }
+
+    /// Whether a recovery token is live: present and unexpired. Peeks
+    /// without consuming, for the recovery page.
+    pub async fn reset_live(&self, token: &str) -> bool {
+        let Ok(mut g) = self.client().await else { return false };
+        let Some(c) = g.as_mut() else { return false };
+        let now = Utc::now();
+        let _ = c.execute("DELETE FROM public.account_reset_tokens WHERE expires <= $1", &[&now]).await;
+        c.query_opt("SELECT person FROM public.account_reset_tokens WHERE hash = $1", &[&token_hash(token.trim())]).await.ok().flatten().is_some()
     }
 
     /// Until when a counter may not try another password, after too many
@@ -1954,6 +2087,49 @@ mod tests {
         accounts.set_temporary_password("ada", "a-temporary-password").await.unwrap();
         assert_eq!(accounts.accept(&token, "a-long-password").await.unwrap().as_deref(), Some("ada"), "accepting failed");
         assert!(matches!(accounts.sign_in("ada", "a-long-password").await.unwrap(), Ok(())), "the accepted password does not sign in");
+    }
+
+    /// A password recovery round trip: the holder's address mints a token
+    /// once a minute, unknown addresses and quiet people answer nothing,
+    /// and confirming sets the password permanently, clears the
+    /// authenticator, ends sessions, and spends the token; a bad, spent
+    /// or expired token answers nothing (#533).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reset_round_trip_sets_clears_and_consumes() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        let invite = accounts.invite_person("ada", "Ada", Some("ada@example.com"), Role::Member).await.unwrap();
+        accounts.accept(&invite, "ada-old-password").await.unwrap();
+        accounts.enroll_totp("ada").await.unwrap();
+        let counter = Accounts::network_counter("ada");
+
+        let first = accounts.request_reset("ada@example.com").await.unwrap().expect("no token for the holder");
+        assert!(first.send && !first.token.is_empty(), "the first request did not mint");
+        let again = accounts.request_reset(" ADA@example.com ").await.unwrap().expect("no answer for a repeat");
+        assert!(!again.send, "the repeat resent inside the minute");
+        assert!(accounts.request_reset("nobody@example.com").await.unwrap().is_none(), "an unknown address minted");
+        assert!(accounts.request_reset("").await.unwrap().is_none(), "an empty address minted");
+        accounts.set_status("ada", Status::Disabled).await.unwrap();
+        assert!(accounts.request_reset("ada@example.com").await.unwrap().is_none(), "a disabled person minted");
+        accounts.set_status("ada", Status::Active).await.unwrap();
+        let (session, token) = accounts.open_session("ada", "app", None).await.unwrap();
+
+        assert!(accounts.confirm_reset("deadbeef", "ada-new-password").await.unwrap().is_none(), "a bad token confirmed");
+        assert!(accounts.confirm_reset(&first.token, "short").await.is_err(), "a short password confirmed");
+        assert!(accounts.reset_live(&first.token).await, "the short password burned the token");
+        let (person, ended) = accounts.confirm_reset(&first.token, "ada-new-password").await.unwrap().expect("the token did not confirm");
+        assert_eq!(person, "ada");
+        assert_eq!(ended, vec![session.id.clone()], "confirming did not end the live session");
+        assert!(accounts.session(&token).await.is_none(), "the session survived confirming");
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "ada-new-password", None, &counter).await, Ok(Ok(()))), "the new password does not sign in without a code");
+        assert!(matches!(accounts.sign_in_counted_with_code("ada", "ada-old-password", None, &counter).await, Ok(Err(_))), "the old password still signs in");
+        assert_eq!(accounts.confirm_reset(&first.token, "ada-newer-password").await.unwrap(), None, "the token worked twice");
+
+        let minute_later = chrono::Utc::now() + chrono::Duration::seconds(61);
+        let stale = accounts.request_reset_at("ada@example.com", minute_later).await.unwrap().expect("no token after the minute");
+        assert!(stale.send, "the later request did not mint");
+        let past = chrono::Utc::now() + chrono::Duration::hours(2);
+        assert_eq!(accounts.confirm_reset_at(&stale.token, "ada-newer-password", past).await.unwrap(), None, "an expired token confirmed");
     }
 
     /// One call makes an invited admin with a token: person, invited

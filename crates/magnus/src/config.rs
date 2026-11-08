@@ -69,6 +69,10 @@ pub struct Config {
     pub client_certs: Option<ClientCerts>,
     #[serde(default)]
     pub observability: Observability,
+    /// How the appliance sends email (password recovery, invitations).
+    /// None: account emails are not sent.
+    #[serde(default)]
+    pub mail: Option<Mail>,
 }
 
 /// Developer-view settings (K51).
@@ -262,6 +266,41 @@ pub struct Oidc {
 
 fn person_claim() -> String {
     "preferred_username".into()
+}
+
+/// How the appliance sends email: host, port, encryption, and the sender.
+/// Credentials never sit here: `username` names the login and `credential`
+/// names the vault secret holding its password; both set, or neither (a
+/// sink that takes mail unauthenticated, as tests run).
+#[derive(Deserialize, Clone, Debug)]
+pub struct Mail {
+    pub host: String,
+    #[serde(default = "mail_port")]
+    pub port: u16,
+    /// `starttls` (the default), `tls` (implicit, port 465), or `none`.
+    #[serde(default = "mail_tls")]
+    pub tls: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub credential: Option<String>,
+    /// The envelope sender, for example `magnus@example.com`.
+    pub from: String,
+    /// The base account links point at, for example
+    /// `https://magnus.example.com`. Unset: the public hostname when
+    /// pairing is on, else the request's own host (tests, local use).
+    /// Never the request's host in production: a recovery link built
+    /// from it would let anyone mail the holder a link elsewhere.
+    #[serde(default)]
+    pub link_base: Option<String>,
+}
+
+fn mail_port() -> u16 {
+    587
+}
+
+fn mail_tls() -> String {
+    "starttls".into()
 }
 fn oidc_scope() -> String {
     "openid".into()
