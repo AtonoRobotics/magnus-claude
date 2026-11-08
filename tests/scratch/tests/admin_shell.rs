@@ -22,6 +22,7 @@ async fn the_consoles_screens_share_a_live_stream_a_step_up_sheet_panels_sheets_
     kc.add_person("Bob").await;
     let m = FakeModel::start(steps(vec![])).await;
     let mut app = Appliance::start(Spec::default(), &m).await;
+    local_user(&app, "Alice", PASSWORD, true);
     kc.configure(&mut app).await;
     let mine = format!("{}/32", lan_ip());
     let lapse = 20;
@@ -44,7 +45,7 @@ async fn the_consoles_screens_share_a_live_stream_a_step_up_sheet_panels_sheets_
 
     // In the browser, every pattern.
     let more = [("MAGNUS_SHELL", "1".to_string()), ("MAGNUS_OTHER", "Bob Test".to_string()), ("MAGNUS_STEP_UP_SECONDS", lapse.to_string())];
-    let sid = sign_in_with(&url, c.addr, "Alice", "admin", false, Some("#/overview"), &more).await.unwrap_or_else(|e| panic!("{e}"));
+    let sid = sign_in_with(&url, c.addr, "Alice", PASSWORD, "admin", false, Some("#/overview"), &more).await.unwrap_or_else(|e| panic!("{e}"));
 
     // What the browser did is what happened: the switch is off again, Bob
     // is turned on, and each step is in the audit log.
@@ -90,7 +91,7 @@ async fn the_consoles_screens_share_a_live_stream_a_step_up_sheet_panels_sheets_
     assert!(ended.is_ok(), "the stream outlived its session");
 
     // Overview names the console's certificate and when it ends.
-    let sid = sign_in(&url, c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
+    let sid = sign_in(&url, c.addr, "Alice", PASSWORD, "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
     let o: Value = with_cookie(b.get(api("/overview")), &sid).send().await.unwrap().json().await.unwrap();
     let cert = o["certificates"].as_array().unwrap().iter().find(|x| x["what"] == "The admin console's certificate").cloned().unwrap_or_else(|| panic!("{o}"));
     assert!(cert["days_left"].as_i64().is_some_and(|d| d > 14), "{cert}");

@@ -37,6 +37,7 @@ impl Setup {
         }
         let m = FakeModel::start(steps(vec![])).await;
         let mut app = Appliance::start(Spec::default(), &m).await;
+        local_user(&app, "Alice", PASSWORD, true);
         kc.configure(&mut app).await;
         let mine = format!("{}/32", lan_ip());
         let mut settings = vec![("issuer", kc.issuer.clone().into()), ("step_up_seconds", step_up_seconds.into())];
@@ -60,7 +61,7 @@ impl Setup {
     /// browser to hand the session back (that has taken 23 seconds after
     /// the password on a loaded machine).
     async fn alice(&self, step_up: bool) -> (String, String) {
-        let sid = sign_in(&self.url, self.c.addr, "Alice", "admin", step_up).await.unwrap_or_else(|e| panic!("{e}"));
+        let sid = sign_in(&self.url, self.c.addr, "Alice", PASSWORD, "admin", step_up).await.unwrap_or_else(|e| panic!("{e}"));
         let me: Value = with_cookie(self.b.get(self.api("/session")), &sid).send().await.unwrap().json().await.unwrap();
         (sid, me["csrf"].as_str().unwrap().to_string())
     }
@@ -159,7 +160,7 @@ async fn an_admin_invites_someone_who_chooses_their_password_from_the_providers_
     }
 
     // The list renders in every look, and at phone width with no sideways scroll.
-    sign_in_and_visit(&s.url, s.c.addr, "Alice", "admin", false, Some("#/users")).await.unwrap_or_else(|e| panic!("{e}"));
+    sign_in_and_visit(&s.url, s.c.addr, "Alice", PASSWORD, "admin", false, Some("#/users")).await.unwrap_or_else(|e| panic!("{e}"));
 
     let actions = s.audited(&fresh).await;
     for a in ["user_invited", "user_invite_resent", "user_invite_cancelled"] {
@@ -287,7 +288,7 @@ async fn the_last_admin_stays_and_a_person_turned_off_loses_every_session_and_sc
     assert_eq!(s.user(&alice, "bob@example.test").await.unwrap()["role"], "member");
 
     // A person's page renders in every look, and at phone width.
-    sign_in_and_visit(&s.url, s.c.addr, "Alice", "admin", false, Some(&format!("#/users/{b_id}/sessions"))).await.unwrap_or_else(|e| panic!("{e}"));
+    sign_in_and_visit(&s.url, s.c.addr, "Alice", PASSWORD, "admin", false, Some(&format!("#/users/{b_id}/sessions"))).await.unwrap_or_else(|e| panic!("{e}"));
 
     let actions = s.audited(&alice).await;
     for a in ["user_role_changed", "user_disabled", "user_enabled", "user_sessions_ended", "user_session_ended"] {

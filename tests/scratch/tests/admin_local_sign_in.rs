@@ -177,12 +177,10 @@ async fn an_admin_signs_in_locally_and_a_member_and_a_wrong_password_do_not() {
     let r = with_cookie(b.post(api("/session/step-up")), &sid).header("x-csrf-token", &csrf).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::NO_CONTENT, "a fresh step-up did not count");
 
-    // Step-up for a local session goes to the local form, which confirms
-    // with the password and comes back.
-    let r = with_cookie(b.get(format!("{url}/auth/step-up?then=/auth/done")), &sid).send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::SEE_OTHER);
-    let to = r.headers().get(reqwest::header::LOCATION).unwrap().to_str().unwrap().to_string();
-    assert!(to.contains("/auth/local/step-up"), "local step-up did not route locally: {to}");
+    // A step-up is the local form, which confirms with the password and
+    // comes back.
+    let r = with_cookie(b.get(format!("{url}/auth/local/step-up?then=/auth/done")), &sid).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK, "the step-up form did not answer");
     let r = submit(&b, &url, "/auth/local/step-up", Some(&sid), vec![("password".to_string(), "alice-long-password".to_string()), ("then".to_string(), "/auth/done".to_string())]).await;
     assert_eq!(r.status(), StatusCode::SEE_OTHER, "the password did not confirm the step-up");
 

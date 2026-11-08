@@ -62,6 +62,7 @@ async fn an_admin_renews_the_consoles_certificate_and_sees_why_it_could_not_be_i
     kc.set_roles("Alice", &["admin"]).await;
     let m = FakeModel::start(steps(vec![])).await;
     let mut app = Appliance::start(Spec::default(), &m).await;
+    local_user(&app, "Alice", PASSWORD, true);
     kc.configure(&mut app).await;
     let mine = format!("{}/32", lan_ip());
     let ts = FakeTailscale::new();
@@ -79,7 +80,7 @@ async fn an_admin_renews_the_consoles_certificate_and_sees_why_it_could_not_be_i
     // An admin's browser trusts the public CA, as any does, and the
     // organisation's own: the hostname gets the tailnet's certificate now.
     let b = reqwest::Client::builder().add_root_certificate(c.ca.clone()).add_root_certificate(ts.public_ca()).resolve(HOST, c.addr).no_proxy().redirect(reqwest::redirect::Policy::none()).build().unwrap();
-    let sid = sign_in(&url, c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
+    let sid = sign_in(&url, c.addr, "Alice", PASSWORD, "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
     let me: Value = with_cookie(b.get(format!("{url}/api/v1/session")), &sid).send().await.unwrap().json().await.unwrap();
     let csrf = me["csrf"].as_str().unwrap().to_string();
     let get = |path: &str| {
@@ -130,5 +131,5 @@ async fn an_admin_renews_the_consoles_certificate_and_sees_why_it_could_not_be_i
     }
 
     // The screen, in every look and at phone width.
-    sign_in_and_visit(&url, c.addr, "Alice", "admin", false, Some("#/operations/network")).await.unwrap_or_else(|e| panic!("{e}"));
+    sign_in_and_visit(&url, c.addr, "Alice", PASSWORD, "admin", false, Some("#/operations/network")).await.unwrap_or_else(|e| panic!("{e}"));
 }

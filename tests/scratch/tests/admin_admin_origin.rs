@@ -68,6 +68,9 @@ async fn the_console_manages_people_through_the_providers_own_admin_origin() {
     kc.add_person("Bob").await;
     let m = FakeModel::start(steps(vec![])).await;
     let mut app = Appliance::start(Spec::default(), &m).await;
+    // The console's sign-in is its own: Alice is a local console user, as
+    // well as a person on the realm the directory still reads (slice B).
+    local_user(&app, "Alice", PASSWORD, true);
     kc.configure(&mut app).await;
     let server = kc.issuer.split_once("/realms/").unwrap().0.to_string();
     let public = door(server.clone(), |p| !p.starts_with("/admin")).await;
@@ -94,7 +97,7 @@ async fn the_console_manages_people_through_the_providers_own_admin_origin() {
     let url = p.url();
     let c = launch(p).await;
     let b = browser(&c, false);
-    let sid = sign_in(&url, c.addr, "Alice", "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
+    let sid = sign_in(&url, c.addr, "Alice", PASSWORD, "admin", false).await.unwrap_or_else(|e| panic!("{e}"));
     let me: Value = with_cookie(b.get(format!("{url}/api/v1/session")), &sid).send().await.unwrap().json().await.unwrap();
     let csrf = me["csrf"].as_str().unwrap().to_string();
 
@@ -122,5 +125,5 @@ async fn the_console_manages_people_through_the_providers_own_admin_origin() {
     }
 
     // The screen, in every look and at phone width.
-    sign_in_and_visit(&url, c.addr, "Alice", "admin", false, Some("#/users")).await.unwrap_or_else(|e| panic!("{e}"));
+    sign_in_and_visit(&url, c.addr, "Alice", PASSWORD, "admin", false, Some("#/users")).await.unwrap_or_else(|e| panic!("{e}"));
 }

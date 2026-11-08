@@ -1,17 +1,17 @@
 // Signing in to the admin console in a real browser (admin console spec,
 // Authentication and session; no passkeys, owner's rulings 1 and 2): the
-// console's Sign in goes to the identity provider's own page, the person
-// types their password there, and comes back to the console signed in, or
-// told that only admins can enter. Then, if asked, a step-up: the provider
-// asks for the password again, and the console comes back to where it was.
+// console's Sign in opens its own form, the person types their password
+// there, and comes back to the console signed in, or told the name,
+// password or code is wrong. Then, if asked, a step-up: the console asks
+// for the password again, and comes back to where it was.
 //
 // MAGNUS_ADMIN_URL   the console (https://<hostname>:<port>)
 // MAGNUS_ADMIN_AT    the console's address (ip:port), for the browser to find its hostname
-// MAGNUS_PERSON, MAGNUS_PASSWORD  who signs in
+// MAGNUS_PERSON, MAGNUS_PASSWORD  who signs in (a local console user)
 // MAGNUS_EXPECT      "admin" (signed in) or "refused" (not an admin)
 // MAGNUS_STEP_UP     optional: "1" to step up after signing in
-// MAGNUS_AGAIN       optional: "1" to sign in again in the same browser, which
-//                    the provider lets through without asking for the password
+// MAGNUS_AGAIN       optional: "1" to sign in again in the same browser,
+//                    which asks for the password again (no silent entry)
 // MAGNUS_VISIT       optional: a screen (e.g. "#/users") to open signed in, which
 //                    must render in light, dark and glass, and at phone width
 //                    with no sideways scroll (admin console spec, invariant tests, UI)
@@ -52,29 +52,28 @@ const step = async (name, f) => {
   try { await f(); await shot(name); console.log(`ok   ${name}`); }
   catch (e) { await shot(`FAILED-${name}`); console.error(`FAIL ${name}: ${e.message}`); await browser.close(); process.exit(1); }
 };
-// A busy build box did not show "Only admins can enter" within 60s
-// (run 41960251290).
+// A busy build box was slow to answer a sign-in (run 41960251290).
 const T = 120_000;
-// On a re-authentication (a step-up), Keycloak shows who is signing in as
-// fixed text and asks only for the password.
+// The console's own form: a username box on sign-in, fixed text naming the
+// admin on a step-up, always a password box and a submit button.
 const login = async (p = page) => {
-  if (await p.locator("#username").count()) await p.locator("#username").fill(person);
-  await p.locator("#password").fill(password);
-  await Promise.all([p.waitForEvent("load"), p.locator("#kc-login").click()]);
+  if (await p.locator("input[name=person]").count()) await p.locator("input[name=person]").fill(person);
+  await p.locator("input[name=password]").fill(password);
+  await Promise.all([p.waitForEvent("load"), p.locator("button[type=submit]").click()]);
 };
 
 await step("the console asks for a sign-in", async () => {
   await goto(page, `${base}/`);
   await page.getByRole("link", { name: "Sign in" }).click();
-  await page.locator("#username").waitFor({ timeout: T });
-  if (new URL(page.url()).host === new URL(base).host) throw new Error("the password is asked on the console's page, not the provider's");
+  await page.locator("input[name=person]").waitFor({ timeout: T });
+  if (new URL(page.url()).host !== new URL(base).host) throw new Error("the sign-in left the console's page");
 });
 
-await step("the password on the provider's own page", login);
+await step("the password on the console's own form", login);
 
 if (expect === "refused") {
-  await step("only admins can enter", async () => {
-    await page.getByRole("heading", { name: "Only admins can enter" }).waitFor({ timeout: T });
+  await step("a wrong name, password or code is refused", async () => {
+    await page.getByText("The name, password or code is wrong.").waitFor({ timeout: T });
   });
 } else {
   await step("back on the console, signed in", async () => {
@@ -84,19 +83,21 @@ if (expect === "refused") {
   });
   if (process.env.MAGNUS_STEP_UP === "1") {
     await step("a step-up asks for the password again, and comes back", async () => {
-      await goto(page, `${base}/auth/step-up?then=/%23/security`);
-      await page.locator("#password").waitFor({ timeout: T });
+      await goto(page, `${base}/auth/local/step-up?then=/%23/security`);
+      await page.locator("input[name=password]").waitFor({ timeout: T });
       await login();
       await page.waitForURL(u => new URL(u).host === new URL(base).host && u.toString().endsWith("/#/security"), { timeout: T });
     });
   }
   if (process.env.MAGNUS_AGAIN === "1") {
-    await step("signed in again, the provider asking for nothing", async () => {
-      // The provider still holds this browser's sign-in, so the console's
-      // Sign in comes straight back: no password is typed.
+    await step("signing in again asks for the password", async () => {
+      // Nothing remembers this browser: without the session cookie the
+      // console shows the form again, and the password signs in anew.
       await page.waitForTimeout(2500);
       await ctx.clearCookies({ name: "__Host-magnus_admin" });
-      await goto(page, `${base}/auth/login`);
+      await goto(page, `${base}/auth/local`);
+      await page.locator("input[name=person]").waitFor({ timeout: T });
+      await login();
       await page.waitForURL(u => new URL(u).host === new URL(base).host, { timeout: T });
       await page.locator("#nav").waitFor({ state: "visible", timeout: T });
     });
@@ -132,11 +133,10 @@ if (process.env.MAGNUS_SHELL === "1" && expect === "admin") {
     await page.locator("#kill-release").click();
     await page.getByRole("heading", { name: "Confirm it's you" }).waitFor({ timeout: T });
     const [popup] = await Promise.all([page.waitForEvent("popup"), page.locator("#step-go").click()]);
-    await popup.locator("#password").waitFor({ timeout: T });
+    await popup.locator("input[name=password]").waitFor({ timeout: T });
     // The window closes itself once the console has the password: no load to wait for.
-    if (await popup.locator("#username").count()) await popup.locator("#username").fill(person);
-    await popup.locator("#password").fill(password);
-    await popup.locator("#kc-login").click();
+    await popup.locator("input[name=password]").fill(password);
+    await popup.locator("button[type=submit]").click();
     await page.locator("#kill-banner").waitFor({ state: "detached", timeout: T });
     await page.getByText("Agents may run again.").waitFor({ timeout: T });
   });

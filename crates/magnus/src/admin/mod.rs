@@ -133,7 +133,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
     }
     let tls = Arc::new(trusted::Tls::new(&a)?);
     let oidc = cfg.sign_in.oidc.as_ref();
-    let issuer = a.issuer.clone().or_else(|| oidc.map(|o| o.issuer.clone())).context("the admin console signs in through the organisation's identity provider: set sign_in.oidc or admin.issuer")?;
+    let issuer = a.issuer.clone().or_else(|| oidc.map(|o| o.issuer.clone())).context("user management still reaches the organisation's identity provider (slice B moves it to the local store): set sign_in.oidc or admin.issuer")?;
     let roles_claim = oidc.and_then(|o| o.roles_claim.clone()).unwrap_or_else(|| "/realm_access/roles".into());
     // The admin API's own origin: the console's setting, else the
     // appliance's, which reaches the same server for the same reason.
@@ -266,9 +266,6 @@ pub fn router(console: Arc<Console>) -> Router {
         .route("/", get(shell))
         .route("/assets/{file}", get(asset))
         .route("/assets/fonts/{file}", get(font))
-        .route("/auth/login", get(session::login))
-        .route("/auth/step-up", get(session::step_up))
-        .route("/auth/callback", get(session::callback))
         .route("/auth/done", get(session::done))
         .route("/auth/local", get(session::local_login).post(session::local_login_post))
         .route("/auth/local/step-up", get(session::local_step_up).post(session::local_step_up_post))

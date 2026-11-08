@@ -73,11 +73,6 @@ fn host(state_dir: &std::path::Path) -> Value {
     json!({ "cpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1), "load": load, "memory_used": mem, "disk_used": disk_used(state_dir) })
 }
 
-async fn provider_up(c: &Console) -> bool {
-    let url = c.idp.inside(&format!("{}/.well-known/openid-configuration", c.idp.issuer.trim_end_matches('/')));
-    matches!(tokio::time::timeout(std::time::Duration::from_secs(3), c.idp.http.get(&url).send()).await, Ok(Ok(r)) if r.status().is_success())
-}
-
 /// Each certificate the appliance serves: what it is for, when it expires,
 /// and how many whole days are left.
 pub fn certificates(c: &Console) -> Vec<Value> {
@@ -95,7 +90,7 @@ pub fn certificates(c: &Console) -> Vec<Value> {
 /// is fixed.
 pub async fn overview(State(c): State<Arc<Console>>) -> Response {
     let providers = async { tokio::time::timeout(std::time::Duration::from_secs(6), c.kernel.call(Method::GET, "/v1/admin/providers", None)).await.ok().and_then(Result::ok) };
-    let (k, idp, tunnel, providers) = tokio::join!(c.kernel.call(Method::GET, "/v1/overview", None), provider_up(&c), tunnel_up(&c), providers);
+    let (k, tunnel, providers) = tokio::join!(c.kernel.call(Method::GET, "/v1/overview", None), tunnel_up(&c), providers);
     let mut alerts_extra = vec![];
     if tunnel == Some(false) {
         alerts_extra.push(json!({ "what": "The tunnel is not connected: people outside the organisation's network cannot reach Magnus.", "fix": "#/operations/network" }));
@@ -111,9 +106,6 @@ pub async fn overview(State(c): State<Arc<Console>>) -> Response {
         Err(_) => alerts.push(json!({ "what": "The kernel is not answering.", "fix": "#/operations/health" })),
         Ok(v) if v["log_up"] != true => alerts.push(json!({ "what": "The event log (Postgres) is not answering.", "fix": "#/operations/health" })),
         _ => {}
-    }
-    if !idp {
-        alerts.push(json!({ "what": "The identity provider is not answering: no one can sign in.", "fix": "#/operations/health" }));
     }
     if h["disk_used"].as_f64().is_some_and(|d| d > 0.85) {
         alerts.push(json!({ "what": format!("The disk is {:.0}% full.", h["disk_used"].as_f64().unwrap_or(0.0) * 100.0), "fix": "#/operations/health" }));
@@ -142,13 +134,12 @@ pub async fn overview(State(c): State<Arc<Console>>) -> Response {
 
 /// Each service, the machine, and the latest errors.
 pub async fn health(State(c): State<Arc<Console>>) -> Response {
-    let (k, idp, tunnel) = tokio::join!(c.kernel.call(Method::GET, "/v1/overview", None), provider_up(&c), tunnel_up(&c));
+    let (k, tunnel) = tokio::join!(c.kernel.call(Method::GET, "/v1/overview", None), tunnel_up(&c));
     let kernel_up = k.is_ok();
     let k = k.unwrap_or(Value::Null);
     let mut services = vec![
         json!({ "name": "Kernel", "up": kernel_up }),
         json!({ "name": "Event log (Postgres)", "up": k["log_up"] == true }),
-        json!({ "name": "Identity provider (Keycloak)", "up": idp }),
         json!({ "name": "Admin console", "up": true }),
     ];
     match tunnel {
