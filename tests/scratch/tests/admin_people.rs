@@ -131,7 +131,9 @@ async fn root_suspends_a_persons_schedule_reads_their_data_on_the_record_and_del
     let (_, audit) = s.send(&alice, Method::GET, "/audit?action=user_data_read", None).await;
     let reads = audit["entries"].as_array().unwrap();
     let one = reads.iter().find(|e| e["after"]["item"] == fid.as_str()).unwrap_or_else(|| panic!("the file's read is not in the audit: {audit}"));
-    assert_eq!((one["target"].as_str(), one["after"]["resource"].as_str(), one["name"].as_str()), (Some(b_id.as_str()), Some("files"), Some("Alice Test")), "{one}");
+    // The name on the record is the appliance's own for the admin (the
+    // fixture person is "alice"), not the provider's "Alice Test".
+    assert_eq!((one["target"].as_str(), one["after"]["resource"].as_str(), one["name"].as_str()), (Some(b_id.as_str()), Some("files"), Some("alice")), "{one}");
     assert!(one["admin"].is_string() && one["at"].is_string(), "{one}");
     assert!(reads.len() >= 5, "a read is missing from the audit: {audit}");
     // And Bob is told.
