@@ -105,7 +105,7 @@ await step("open files from the library", async () => {
   await frame.getByText("Total: 42 EUR").waitFor({ timeout: T });
   await frame.getByRole("cell", { name: "widget", exact: true }).waitFor({ timeout: T });
   await page.locator("#detail").getByRole("link", { name: "Total the prices" }).waitFor({ timeout: T });
-  const [download] = await Promise.all([page.waitForEvent("download", { timeout: T }), page.locator("#detail").getByRole("button", { name: "Download", exact: true }).click()]);
+  const [download] = await Promise.all([page.waitForEvent("download", { timeout: T }), page.locator("#detail").getByRole("button", { name: "Download report.md", exact: true }).click()]);
   if (download.suggestedFilename() !== "report.md") throw new Error(`downloaded ${download.suggestedFilename()}`);
   // An uploaded CSV opens as a table.
   await page.getByRole("link", { name: "Files", exact: true }).first().click();

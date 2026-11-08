@@ -1289,7 +1289,7 @@ function composer(placeholder, picker) {
   return `<form id="say" class="say"><label for="msg" class="sr">Message</label><textarea id="msg" rows="1" placeholder="${esc(placeholder)}" required></textarea>
     <div id="submitted"></div><div class="row small" id="pending"></div>
     <div class="draft-status"><span id="draft-state" class="small muted" tabindex="0"></span><button type="button" class="link small" data-discard-draft>Discard local draft</button></div>
-    <div class="say-bar">${picker}<span class="grow"></span>${attachButton("Attach files", true)}<button class="send" id="send" title="Send">${icon("send")}<span class="sr">Send</span></button></div></form>`;
+    <div class="say-bar">${picker}<span class="grow"></span>${attachButton("Attach files", true)}<button class="send" id="send" aria-label="Send message" title="Send message">${icon("send")}<span class="sr">Send message</span></button></div></form>`;
 }
 // Files added to the next message: uploaded at once, sent with it.
 function wireComposer(thread, project, record) {
@@ -2656,7 +2656,7 @@ async function fileView(id) {
   const path = `/v1/files/${enc(id)}`;
   const body = `<h2 class="ptitle">${esc(f.name)}</h2>
     <p class="small muted">${f.source === "delivered" ? "Delivered by Magnus" : "Uploaded by you"} · ${fileFrom(f)} · ${esc(kb(f.size))} · ${esc(when(f.at))}</p>
-    <div class="row"><button class="primary" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}">Download</button> ${moveControl(f.id, f.project, App.projects)} ${trashButton(f.id, "Delete file")}</div>
+    <div class="row"><button class="primary" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}" aria-label="Download ${esc(f.name)}">Download</button> ${moveControl(f.id, f.project, App.projects)} ${trashButton(f.id, "Delete file")}</div>
     <iframe class="composed" sandbox="allow-same-origin" title="${esc(f.name)}" id="fview"></iframe>`;
   return {
     body,
