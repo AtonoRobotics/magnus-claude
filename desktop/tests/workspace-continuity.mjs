@@ -86,14 +86,44 @@ try {
  await page.locator('#submitted').getByText('Message was not accepted',{exact:true}).waitFor();assert.equal(await page.locator('#msg').inputValue(),'Newer edits after rejection');
  await page.unroute('**/v1/chat');await page.getByRole('button',{name:'Edit rejected message'}).click();await until(()=>document.querySelector('#msg')?.value==='Rejected submitted text');
  assert.equal(await page.evaluate(id=>MessageDrafts.get(id).text,rejectedId),'Newer edits after rejection');await page.locator('#say [data-model]').selectOption(validModel);
+ { // A rejection from an unmounted request recovers into the newly mounted composer.
+ await page.goto(`${base}/#/chat/${accepted.thread}`);await page.locator('#msg').fill('Late rejection after remount');
+ const invalid=async()=>page.locator('#say [data-model]').evaluate(select=>{const option=new Option('Removed model',JSON.stringify(['missing-adapter','removed-model']));select.append(option);select.value=option.value;});
+ await invalid();let releaseLate;const lateHeld=new Promise(resolve=>releaseLate=resolve);
+ await page.route('**/v1/chat',async route=>{if(route.request().method()!=='POST')return route.continue();const response=await route.fetch();assert.equal(response.status(),400);await lateHeld;await route.fulfill({response});});
+ await page.locator('#send').click();await until(()=>document.querySelector('#msg').value==='');
+ await page.getByRole('link',{name:'Settings',exact:true}).click();await page.locator(`nav.side a[href="#/chat/${accepted.thread}"]`).click();await page.locator('#msg').waitFor();releaseLate();
+ await until(()=>document.querySelector('#msg')?.value==='Late rejection after remount');await page.unroute('**/v1/chat');
+ await page.getByRole('link',{name:'Settings',exact:true}).click();await page.locator(`nav.side a[href="#/chat/${accepted.thread}"]`).click();assert.equal(await page.locator('#msg').inputValue(),'Late rejection after remount');
+ // A recovered secondary thread draft stays discoverable when acknowledgement leaves newer edits.
+ await invalid();let releaseSecondary;const secondaryHeld=new Promise(resolve=>releaseSecondary=resolve);
+ await page.route('**/v1/chat',async route=>{if(route.request().method()!=='POST')return route.continue();const response=await route.fetch();assert.equal(response.status(),400);await secondaryHeld;await route.fulfill({response});});
+ await page.locator('#send').click();await until(()=>document.querySelector('#msg').value==='');await page.locator('#msg').fill('Original independent thread draft');releaseSecondary();await page.getByRole('button',{name:'Edit rejected message'}).waitFor();await page.unroute('**/v1/chat');
+ await page.getByRole('button',{name:'Edit rejected message'}).click();await until(()=>location.hash.startsWith('#/draft/') && App.draftRecord?.localEntry && document.querySelector('#msg')?.value==='Late rejection after remount');const recoveredId=await page.evaluate(()=>App.draftRecord.id);await page.locator('#say [data-model]').selectOption(validModel);
+ let releaseRecovered;const recoveredHeld=new Promise(resolve=>releaseRecovered=resolve);
+ await page.route('**/v1/chat',async route=>{if(route.request().method()!=='POST')return route.continue();const response=await route.fetch();assert.equal(response.status(),201);await recoveredHeld;await route.fulfill({response});});
+ await page.locator('#send').click();await until(()=>document.querySelector('#msg').value==='');await page.locator('#msg').fill('Additional recovered draft edits');
+ await page.locator('#say [data-attach]').setInputFiles({name:'newer.txt',mimeType:'text/plain',buffer:Buffer.from('newer attachment')});await page.locator('#pending').getByText('Ready',{exact:true}).waitFor();releaseRecovered();await until(()=>!App.draftRecord.pending.length);await page.unroute('**/v1/chat');
+ assert.equal(await page.evaluate(()=>App.draftRecord.localEntry),true);await page.reload();await until(()=>document.querySelector('#msg')?.value==='Additional recovered draft edits');await page.locator('#pending').getByText('newer.txt',{exact:true}).waitFor();
+ await page.getByRole('link',{name:'Settings',exact:true}).click();await page.locator(`nav.side a[href="#/draft/${recoveredId}"]`).click();await until(()=>document.querySelector('#msg')?.value==='Additional recovered draft edits');assert.equal(await page.evaluate(thread=>MessageDrafts.forThread(thread).text,accepted.thread),'Original independent thread draft');
+ }
+ // Controlled observer delivery reproduces a deliberate scroll during resize restoration.
+ await page.evaluate(()=>{
+   const NativeObserver=window.ResizeObserver;let resize;
+   window.ResizeObserver=class{constructor(fn){resize=fn;}observe(){}disconnect(){}};
+   const root=document.createElement('div');root.style.cssText='position:fixed;left:0;top:0;width:300px;height:100px;overflow:auto';root.innerHTML=Array.from({length:30},(_,n)=>`<p data-key="race-${n}" style="height:40px">Readable row ${n}</p>`).join('');document.body.append(root);
+   let unwatch;
+   try{unwatch=ReadingAnchors.watch(root,{anchor:{follow:true}},false);resize();root.scrollTop=150;root.dispatchEvent(new Event('scroll'));resize();if(Math.abs(root.scrollTop-150)>1)throw Error('Resize restoration swallowed deliberate scrolling');}
+   finally{unwatch?.();root.remove();window.ResizeObserver=NativeObserver;}
+ });
  // Scroll anchoring uses an entry identity; new data never forces latest.
  for(let i=0;i<20;i++){const response=await page.evaluate(body=>Magnus.api('POST','/v1/chat',body),{thread:accepted.thread,text:`Anchor entry ${i}`});assert.equal(response.thread,accepted.thread);}
- await page.goto(`${base}/#/chat/${accepted.thread}`);await page.locator('.entry[data-kind=message]').nth(20).waitFor();
+ await page.goto(`${base}/#/chat/${accepted.thread}`);const expectedMessages=await page.evaluate(async thread=>(await Magnus.api('GET',`/v1/chat/${thread}`)).entries.filter(e=>e.kind==='message').length,accepted.thread);await page.locator('.entry[data-kind=message]').nth(expectedMessages-1).waitFor();
  await page.locator('#thread').evaluate(el=>{el.scrollTop=120;});await page.waitForTimeout(350);
  const anchor=()=>page.locator('#thread').evaluate(el=>{const top=el.getBoundingClientRect().top;const n=[...el.querySelectorAll('[data-entry]')].find(n=>n.getBoundingClientRect().bottom>top);return{id:n.dataset.entry,offset:n.getBoundingClientRect().top-top,bottom:el.scrollHeight-el.scrollTop-el.clientHeight};});
  const previous=await anchor();assert.ok(previous.bottom>80);
  const response=await page.evaluate(body=>Magnus.api('POST','/v1/chat',body),{thread:accepted.thread,text:'Activity while reading above'});assert.equal(response.thread,accepted.thread);
- await page.locator('.entry[data-kind=message]').nth(21).waitFor();const after=await anchor();assert.equal(after.id,previous.id);assert.ok(Math.abs(after.offset-previous.offset)<3);
+ await page.locator('.entry[data-kind=message]').nth(expectedMessages).waitFor();const after=await anchor();assert.equal(after.id,previous.id);assert.ok(Math.abs(after.offset-previous.offset)<3);
  await page.getByRole('button',{name:'New activity · Jump to latest'}).click();assert.ok((await anchor()).bottom<=80);
 
  // Unavailable storage keeps the current draft through ordinary navigation.

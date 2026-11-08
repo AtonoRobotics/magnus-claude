@@ -120,8 +120,9 @@ const MessageDrafts = (() => {
   function discard(id) { if (!rows[id]) return; for (const f of rows[id].files) originals.delete(f.uid); delete rows[id]; changed(true); }
   function acknowledge(record, submission, response) {
     if (!rows[record.id] || !record.pending.some(p => p.id === submission.id)) return;
-    record.thread = response.thread; record.localEntry = false;
+    record.thread = response.thread;
     record.pending = record.pending.filter(p => p.id !== submission.id);
+    record.localEntry = !!(record.localEntry && (record.text || record.files.length || record.pending.length));
     // The current editable draft was separated at dispatch. Never clear it
     // on an acknowledgement arriving after the person continued typing.
     changed(true);
@@ -132,7 +133,7 @@ const MessageDrafts = (() => {
   }
   function reject(record, submission, message) {
     submission.state = "rejected"; submission.error = message;
-    if (!record.text && !record.files.length) { record.text = submission.body.text; record.files = clone(submission.files); record.pending = record.pending.filter(p => p.id !== submission.id); }
+    if (!record.text && !record.files.length) { record.text = submission.body.text; record.files = clone(submission.files); record.pending = record.pending.filter(p => p.id !== submission.id); record.selection=[record.text.length,record.text.length]; }
     changed(true);
   }
   return {open,leave,clear,create,forThread,discard,acknowledge,submit,reject,changed,flush,uid,
@@ -179,16 +180,19 @@ const ReadingAnchors = (() => {
   function remember(root, preferred) { const a = preferred || capture(root); if (root) state.set(root,a); return a; }
   function hold(root, change) { const a = capture(root); const result = change(); restore(root,a); if (root) state.set(root,a); return result; }
   function watch(root, record, persist=true) {
-    let applying = false;
+    let restoredTop = null;
     if (record?.anchor) restore(root,record.anchor); else restore(root,{follow:true});
     state.set(root,record?.anchor || capture(root));
     const onScroll = () => {
-      if (applying) return;
+      // Ignore only our own restored offset. Deliberate scrolling can
+      // arrive before the next animation frame and must update the anchor.
+      if(restoredTop!==null && Math.abs(root.scrollTop-restoredTop)<1){restoredTop=null;return;}
+      restoredTop=null;
       const a = remember(root); if (!persist) a.follow=false; if (a.follow) root.parentElement?.querySelector("[data-jump-latest]")?.setAttribute("hidden", ""); if (record) { record.anchor = a; if (persist) MessageDrafts.changed(); }
     };
     root.addEventListener("scroll",onScroll,{passive:true});
     const resize = new ResizeObserver(() => {
-      applying = true; restore(root,state.get(root)); requestAnimationFrame(()=>{ applying=false; });
+      restore(root,state.get(root));restoredTop=root.scrollTop;
     });
     const observe = () => { resize.disconnect(); resize.observe(root); for (const n of root.children) resize.observe(n); };
     const content = new MutationObserver(observe); content.observe(root,{childList:true}); observe();
@@ -994,6 +998,9 @@ function wireComposer(thread, project, record) {
   const submitted = () => record.pending.map(p => `<div class="submitted-message" data-submission="${esc(p.id)}"><strong>${p.state === "dispatching" ? "Sending message…" : p.state === "rejected" ? "Message was not accepted" : "Send outcome not confirmed"}</strong><p class="small">${esc(p.state === "unconfirmed" ? "This device cannot safely retry this submission. Delivery is not confirmed; no automatic resend will occur. Discarding the local draft does not cancel submitted work." : p.error || "You can continue typing.")}</p><details><summary>Submitted message</summary><p class="pre">${esc(p.body.text)}</p>${p.files.map(f => `<span class="small">${esc(f.name)}</span>`).join(" ")}</details>${p.state === "rejected" ? `<button type="button" data-recover-message="${esc(p.id)}">Edit rejected message</button>` : ""}</div>`).join("");
   const show = () => {
     if (!active || !form.isConnected) return;
+    // Input events synchronize edits immediately. A journal transition may
+    // come from an older view's request; recover it into this mounted view.
+    if(box.value!==record.text){box.value=record.text;box.setSelectionRange(...record.selection);fit();}
     paint(pending,chips()); paint($("#submitted",form),submitted());
     const saved = $("#draft-state",form); saved.textContent = status();
     saved.title = MessageDrafts.saved() === true ? "Saved on this device" : status();
