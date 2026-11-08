@@ -735,7 +735,7 @@ async fn sign_out(State(k): K, h: HeaderMap) -> Response {
 
 async fn me(State(k): K, h: HeaderMap) -> Response {
     match who(&k, &h) {
-        Ok(p) => Json(json!({ "id": p.id, "name": p.name, "groups": p.groups, "roles": p.roles, "voice": k.cfg.speech.is_some() })).into_response(),
+        Ok(p) => Json(json!({ "id": p.id, "name": p.name, "groups": p.groups, "roles": p.roles, "voice": k.cfg.speech.is_some(), "read_aloud": k.cfg.read_aloud.is_some() })).into_response(),
         Err(r) => r,
     }
 }

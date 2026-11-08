@@ -41,6 +41,7 @@ fn apply(_window: &tauri::WebviewWindow, _glass: bool, _dark: bool, _tint: (u8, 
 pub struct System {
     /// The person turned transparency effects off in the system's settings.
     reduce_transparency: bool,
+    native_speech: bool,
 }
 
 /// The system's settings the page cannot read itself. Reduced motion
@@ -49,7 +50,7 @@ pub struct System {
 /// EnableTransparency = 0).
 #[tauri::command]
 pub fn system_look() -> System {
-    System { reduce_transparency: reduce_transparency() }
+    System { reduce_transparency: reduce_transparency(), native_speech: crate::speech::available() }
 }
 
 #[cfg(target_os = "windows")]
