@@ -25,8 +25,9 @@ await d.step("the owner sees the owner's controls and their task", async () => {
   await d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Models']");
   await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Kill switch']"));
   await d.css('[data-kill-switch="off"]');
-  // Tasks, from Settings, opens beside the conversation.
-  await d.click(d.xpath("//nav//a[starts-with(normalize-space(),'Tasks')]"));
+  // Activity exposes the labeled Tasks view beside the conversation.
+  await d.click(d.xpath("//nav//a[@aria-label='Activity']"));
+  await d.click(d.xpath("//nav[@aria-label='Activity views']//a[normalize-space()='Tasks']"));
   await d.xpath("//aside[@id='detail']//h2[normalize-space()='Tasks']");
   await d.seen(title);
 });
@@ -51,7 +52,8 @@ await d.step("the colleague has only their own rights", async () => {
   await d.click(d.xpath("//nav//a[@aria-label='Settings']"));
   await d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Account']");
   if (await d.run("return [...document.querySelectorAll('nav a')].some(a => ['Models', 'Connectors', 'Kill switch'].includes(a.innerText.trim()))")) throw new Error("a colleague sees Models, Connectors or the kill switch");
-  await d.click(d.xpath("//nav//a[starts-with(normalize-space(),'Tasks')]"));
+  await d.click(d.xpath("//nav//a[@aria-label='Activity']"));
+  await d.click(d.xpath("//nav[@aria-label='Activity views']//a[normalize-space()='Tasks']"));
   await d.xpath("//aside[@id='detail']//h2[normalize-space()='Tasks']");
   await new Promise(r => setTimeout(r, 1500));
   if (await shows(title)) throw new Error("a colleague sees the owner's task");
