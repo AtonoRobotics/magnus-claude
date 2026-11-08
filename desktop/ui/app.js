@@ -2539,13 +2539,17 @@ route(/^#\/apps$/, () => { location.hash = "#/settings/connectors"; });
 // transparency still apply on top.
 function appearanceSection(el) {
   const radio = (look, value, label, inner = label, cls = "", style = "") => {
-    const on = Theme.prefs()[look] === value;
+    const on = (look === "theme" && Theme.prefs().theme !== "custom" ? Theme.look.theme : Theme.prefs()[look]) === value;
     return `<button class="${cls}${on ? " on" : ""}" role="radio" aria-checked="${on}" data-look="${look}" data-value="${value}" title="${esc(label)}"${style ? ` style="${style}"` : ""}>${inner}</button>`;
   };
   const draw = () => {
     const p = Theme.prefs(), os = Theme.os(), look = Theme.look;
     paint(el, `<h2>Appearance</h2><div class="appearance">
-      <h3 id="mode-h">Mode</h3><div class="seg" role="radiogroup" aria-labelledby="mode-h">${Theme.MODES.map(([k, l]) => radio("mode", k, l)).join("")}</div>
+      <h3 id="theme-h">Theme</h3><div class="theme-presets" role="radiogroup" aria-labelledby="theme-h">${Theme.THEMES.map(([k, label]) => radio("theme", k, label, `<span class="preset-preview" aria-hidden="true" style="--preview-chrome:#${Theme.PRESETS[k][1]};--preview-canvas:#${Theme.PRESETS[k][2]};--preview-text:#${Theme.PRESETS[k][4]}"><span></span><span></span><span></span></span>${esc(label)}`)).join("")}</div>
+      <label class="follow-computer"><input type="checkbox" data-follow-computer ${p.followComputer ? "checked" : ""}>Follow computer</label>
+      ${p.theme === "custom" ? `<p class="small muted">Custom appearance${Theme.tokens(look)["contrast-adjusted"] === "true" ? " — contrast adjustments are active" : ""}.</p>` : ""}
+      ${Theme.saved === false ? `<p class="small" role="status">Appearance changed for this session but was not saved on this device.</p>` : ""}
+      <h3 id="mode-h">Custom mode</h3><div class="seg" role="radiogroup" aria-labelledby="mode-h">${Theme.MODES.map(([k, l]) => radio("mode", k, l)).join("")}</div>
       <h3 id="mat-h">Material</h3><div class="materials" role="radiogroup" aria-labelledby="mat-h">${Theme.MATERIALS.map(([k, l, hint]) => radio("material", k, l,
         `<span class="mprev ${k}" aria-hidden="true"><span class="ms"></span><span class="mm"></span></span><span class="mt"><span class="ml">${esc(l)}</span><span class="small muted">${esc(hint)}</span></span>`, "material")).join("")}</div>
       ${p.material === "glass" && os.reduceTransparency ? `<p class="small muted" data-look-note>Your computer asks for less transparency, so Magnus stays solid.</p>` : ""}
@@ -2557,9 +2561,21 @@ function appearanceSection(el) {
   el.onclick = e => {
     const b = e.target.closest("[data-look]");
     if (!b) return;
-    Theme.set({ [b.dataset.look]: b.dataset.value });
+    const field = b.dataset.look, value = b.dataset.value;
+    Theme.set({ [field]: value });
     draw();
+    $(`[data-look="${field}"][data-value="${value}"]`, el)?.focus({ preventScroll: true });
   };
+  const changed = () => {
+    if (!el.isConnected) return;
+    const active = document.activeElement;
+    const selector = active?.dataset?.look ? `[data-look="${active.dataset.look}"][data-value="${active.dataset.value}"]` : active?.matches("[data-follow-computer]") ? "[data-follow-computer]" : null;
+    draw();
+    if (selector) $(selector, el)?.focus({ preventScroll: true });
+  };
+  window.addEventListener("magnus-theme", changed);
+  onLeave(() => window.removeEventListener("magnus-theme", changed));
+  el.onchange = e => { if (e.target.matches("[data-follow-computer]")) { Theme.set({ followComputer: e.target.checked }); draw(); $("[data-follow-computer]", el)?.focus({ preventScroll: true }); } };
   draw();
 }
 
@@ -2844,6 +2860,7 @@ async function updateRequiredScreen(info) {
 window.addEventListener("magnus-update-required", e => updateRequiredScreen(e.detail));
 
 async function boot() {
+  Theme.scope(App.appliance, App.me.id);
   shell();
   window.onhashchange = go;
   Magnus.onUpdateReady(() => refreshUpdate());
@@ -2867,6 +2884,7 @@ function stop() {
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   window.onhashchange = null;
   Panel.what = null;
+  Theme.scope(null, null);
   App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null; App.feed = null; App.reported = new Set(); App.reporting = new Set();
   // What one person was typing or filtering by is not the next one's here.
   Panel.lib = { q: "", project: "" };
