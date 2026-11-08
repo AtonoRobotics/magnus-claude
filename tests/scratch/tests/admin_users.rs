@@ -302,6 +302,30 @@ async fn the_last_admin_stays_and_a_person_turned_off_loses_every_session_and_sc
     }
 }
 
+/// Deleting the last admin is refused before anything is erased: their
+/// account, sign-in and content are all untouched (#527).
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_the_last_admin_is_refused_and_erases_nothing() {
+    // Alice's console session outlives her losing the role, so she can
+    // still aim a delete at Bob once he is the only admin left.
+    let s = Setup::start_with(600, &[("refresh_seconds", 3600.into())]).await;
+    local_user(&s.app, "Bob", PASSWORD, true);
+    let (_, v) = s.app.api("bob").post("/v1/schedules", json!({ "text": "Water the plants.", "daily_at": "03:00" })).await;
+    assert!(v["id"].is_string(), "{v}");
+    let alice = s.alice(true).await;
+    let (st, v) = s.send(reqwest::Method::PATCH, "/users/alice", &alice, Some(json!({ "role": "member" }))).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+    // Bob has no email address, so the typed confirmation is his id.
+    let (st, v) = s.send(reqwest::Method::DELETE, "/users/bob", &alice, Some(json!({ "email": "bob" }))).await;
+    assert_eq!((st, v["error"].as_str()), (StatusCode::CONFLICT, Some("last_admin")), "{v}");
+    let bob = s.user(&alice, "bob").await.expect("Bob is gone from the list");
+    assert_eq!((bob["role"].as_str(), bob["status"].as_str()), (Some("admin"), Some("active")), "{bob}");
+    let (st, _) = s.app_sign_in("bob", PASSWORD).await;
+    assert_eq!(st, StatusCode::OK, "the last admin cannot sign in after the refused delete");
+    let (_, sc) = s.app.api("bob").get("/v1/schedules").await;
+    assert_eq!(sc["schedules"].as_array().map(Vec::len), Some(1), "the refused delete erased his schedule: {sc}");
+}
+
 /// Issue #192: two changes aimed at the last two admins, sent together,
 /// each demoting or turning off one of them. The console lets one through
 /// and refuses the other, whatever the timing: at least one admin turned on
