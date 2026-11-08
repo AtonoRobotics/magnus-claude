@@ -225,43 +225,51 @@ pub async fn import_json(client: &mut Client, state_dir: &Path) -> Result<usize>
     let now = Utc::now();
     let people: BTreeMap<String, LocalPerson> = read_json(&d.join("people.json"))?;
     for (person, p) in &people {
-        n += tx.execute("INSERT INTO public.account_people (person, name, email) VALUES ($1, $2, $3) ON CONFLICT (person) DO NOTHING", &[person, &p.name, &p.email]).await? as usize;
+        let person = key(person);
+        n += tx.execute("INSERT INTO public.account_people (person, name, email) VALUES ($1, $2, $3) ON CONFLICT (person) DO NOTHING", &[&person, &p.name, &p.email]).await? as usize;
     }
     let passwords: BTreeMap<String, String> = read_json(&d.join("passwords.json"))?;
     for (person, phc) in &passwords {
-        n += tx.execute("INSERT INTO public.account_passwords (person, phc) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, phc]).await? as usize;
+        let person = key(person);
+        n += tx.execute("INSERT INTO public.account_passwords (person, phc) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[&person, phc]).await? as usize;
     }
     let totp: BTreeMap<String, String> = read_json(&d.join("totp.json"))?;
     for (person, secret) in &totp {
-        n += tx.execute("INSERT INTO public.account_totp (person, secret) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, secret]).await? as usize;
+        let person = key(person);
+        n += tx.execute("INSERT INTO public.account_totp (person, secret) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[&person, secret]).await? as usize;
     }
     let steps: BTreeMap<String, i64> = read_json(&d.join("totp-steps.json"))?;
     for (person, step) in &steps {
-        n += tx.execute("INSERT INTO public.account_totp_steps (person, step) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, step]).await? as usize;
+        let person = key(person);
+        n += tx.execute("INSERT INTO public.account_totp_steps (person, step) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[&person, step]).await? as usize;
     }
     let statuses: BTreeMap<String, Status> = read_json(&d.join("status.json"))?;
     for (person, status) in &statuses {
-        n += tx.execute("INSERT INTO public.account_statuses (person, status) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, &status.as_str()]).await? as usize;
+        let person = key(person);
+        n += tx.execute("INSERT INTO public.account_statuses (person, status) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[&person, &status.as_str()]).await? as usize;
     }
     let roles: BTreeMap<String, Role> = read_json(&d.join("roles.json"))?;
     for (person, role) in &roles {
-        n += tx.execute("INSERT INTO public.account_roles (person, role) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[person, &role.as_str()]).await? as usize;
+        let person = key(person);
+        n += tx.execute("INSERT INTO public.account_roles (person, role) VALUES ($1, $2) ON CONFLICT (person) DO NOTHING", &[&person, &role.as_str()]).await? as usize;
     }
     let invites: BTreeMap<String, Invite> = read_json(&d.join("invites.json"))?;
     for (hash, inv) in invites.iter().filter(|(_, inv)| inv.expires > now) {
+        let who = key(&inv.person);
         n += tx
             .execute(
                 "INSERT INTO public.account_invites (hash, person, email, expires) VALUES ($1, $2, $3, $4) ON CONFLICT (hash) DO NOTHING",
-                &[hash, &inv.person, &inv.email, &inv.expires],
+                &[hash, &who, &inv.email, &inv.expires],
             )
             .await? as usize;
     }
     let sessions: BTreeMap<String, Session> = read_json(&d.join("sessions.json"))?;
     for (hash, s) in sessions.iter().filter(|(_, s)| s.expires > now) {
+        let who = key(&s.person);
         n += tx
             .execute(
                 "INSERT INTO public.account_sessions (hash, id, person, created, expires, client, device) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (hash) DO NOTHING",
-                &[hash, &s.id, &s.person, &s.created, &s.expires, &s.client, &s.device],
+                &[hash, &s.id, &who, &s.created, &s.expires, &s.client, &s.device],
             )
             .await? as usize;
     }
@@ -307,6 +315,13 @@ fn valid_person_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
+/// Person ids are lowercase-canonical: sign-in lowercases at entry, so
+/// every read and write goes through here and `Ada` never becomes a
+/// second, unreachable account beside `ada` (#470).
+fn key(person: &str) -> String {
+    person.to_lowercase()
+}
+
 impl Accounts {
     /// Open the store, connecting at once (so a dead database fails here,
     /// not at the first sign-in) and warming the directory cache.
@@ -350,6 +365,7 @@ impl Accounts {
 
     /// Whether the person has a password set.
     pub async fn has_password(&self, person: &str) -> bool {
+        let person = key(person);
         let mut g = match self.client().await {
             Ok(g) => g,
             Err(_) => return false,
@@ -363,6 +379,7 @@ impl Accounts {
 
     /// Whether the person enrolled an authenticator app.
     pub async fn has_totp(&self, person: &str) -> bool {
+        let person = key(person);
         let mut g = match self.client().await {
             Ok(g) => g,
             Err(_) => return false,
@@ -376,6 +393,7 @@ impl Accounts {
 
     /// Whether the person may sign in: active unless recorded otherwise.
     pub async fn status(&self, person: &str) -> Status {
+        let person = key(person);
         let mut g = match self.client().await {
             Ok(g) => g,
             Err(_) => return Status::Active,
@@ -392,11 +410,12 @@ impl Accounts {
     /// and returns the ids of those ended, for the caller to record.
     /// Refuses to disable the organisation's last enabled admin.
     pub async fn set_status(&self, person: &str, status: Status) -> Result<Vec<String>> {
+        let person = key(person);
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
         let tx = c.transaction().await?;
         tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('magnus-accounts'))").await?;
-        if status == Status::Disabled && Self::sole_enabled_admin_tx(&tx, person).await? {
+        if status == Status::Disabled && Self::sole_enabled_admin_tx(&tx, &person).await? {
             anyhow::bail!("This is the organisation's last admin: make someone else an admin first.");
         }
         tx.execute("INSERT INTO public.account_statuses (person, status) VALUES ($1, $2) ON CONFLICT (person) DO UPDATE SET status = EXCLUDED.status", &[&person, &status.as_str()]).await?;
@@ -413,6 +432,7 @@ impl Accounts {
 
     /// What the person may administer: member unless recorded an admin.
     pub async fn role(&self, person: &str) -> Role {
+        let person = key(person);
         let mut g = match self.client().await {
             Ok(g) => g,
             Err(_) => return Role::Member,
@@ -451,7 +471,8 @@ impl Accounts {
     /// Whether the appliance itself keeps this person (as opposed to the
     /// config or an outside directory). From the directory cache.
     pub fn is_local(&self, person: &str) -> bool {
-        self.local.lock().unwrap().1.contains_key(person)
+        let person = key(person);
+        self.local.lock().unwrap().1.contains_key(person.as_str())
     }
 
     /// `is_local`, read from the store instead of the cache: for the
@@ -473,7 +494,8 @@ impl Accounts {
     /// The appliance's record for a local person, if there is one. From
     /// the directory cache.
     pub fn local_person(&self, person: &str) -> Option<LocalPerson> {
-        self.local.lock().unwrap().1.get(person).cloned()
+        let person = key(person);
+        self.local.lock().unwrap().1.get(person.as_str()).cloned()
     }
 
     /// Every local person by id. From the directory cache.
@@ -494,7 +516,8 @@ impl Accounts {
     /// person with the id, and an id outside 1 to 64 letters, digits,
     /// dots, dashes and underscores.
     pub async fn add_person(&self, id: &str, name: &str, email: Option<&str>) -> Result<()> {
-        anyhow::ensure!(valid_person_id(id), "a person id is 1 to 64 letters, digits, dots, dashes and underscores");
+        let id = key(id);
+        anyhow::ensure!(valid_person_id(&id), "a person id is 1 to 64 letters, digits, dots, dashes and underscores");
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
         let n = c.execute("INSERT INTO public.account_people (person, name, email) VALUES ($1, $2, $3) ON CONFLICT (person) DO NOTHING", &[&id, &name, &email]).await?;
@@ -508,13 +531,14 @@ impl Accounts {
     /// Refuses an unknown id, and the organisation's last enabled admin.
     /// The sessions die in the store, so no handle keeps them (#469).
     pub async fn remove_person(&self, person: &str) -> Result<Vec<String>> {
+        let person = key(person);
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
         let tx = c.transaction().await?;
         tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('magnus-accounts'))").await?;
         let n = tx.execute("DELETE FROM public.account_people WHERE person = $1", &[&person]).await?;
         anyhow::ensure!(n == 1, "{person} is not a person here");
-        if Self::sole_enabled_admin_tx(&tx, person).await? {
+        if Self::sole_enabled_admin_tx(&tx, &person).await? {
             anyhow::bail!("This is the organisation's last admin: make someone else an admin first.");
         }
         for table in ["account_passwords", "account_totp", "account_totp_steps", "account_statuses", "account_roles"] {
@@ -526,8 +550,8 @@ impl Accounts {
             ended.push(r.get("id"));
         }
         tx.commit().await?;
-        self.failures.lock().unwrap().remove(person);
-        self.failures.lock().unwrap().remove(&Self::console_counter(person));
+        self.failures.lock().unwrap().remove(person.as_str());
+        self.failures.lock().unwrap().remove(Self::console_counter(&person).as_str());
         self.refresh_local(c).await?;
         Ok(ended)
     }
@@ -535,11 +559,12 @@ impl Accounts {
     /// Set a person's role. Refuses to demote the organisation's last
     /// enabled admin.
     pub async fn set_role(&self, person: &str, role: Role) -> Result<()> {
+        let person = key(person);
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
         let tx = c.transaction().await?;
         tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('magnus-accounts'))").await?;
-        if role == Role::Member && Self::sole_enabled_admin_tx(&tx, person).await? {
+        if role == Role::Member && Self::sole_enabled_admin_tx(&tx, &person).await? {
             anyhow::bail!("This is the organisation's last admin: make someone else an admin first.");
         }
         tx.execute("INSERT INTO public.account_roles (person, role) VALUES ($1, $2) ON CONFLICT (person) DO UPDATE SET role = EXCLUDED.role", &[&person, &role.as_str()]).await?;
@@ -552,6 +577,7 @@ impl Accounts {
     /// path, so someone invited becomes active; anyone disabled stays
     /// disabled until explicitly turned back on.
     pub async fn set_password(&self, person: &str, password: &str) -> Result<()> {
+        let person = key(person);
         anyhow::ensure!(
             password.chars().count() >= self.cfg.min_password_length,
             "a password needs at least {} characters",
@@ -574,6 +600,7 @@ impl Accounts {
     /// stored, and the `otpauth://` URI to enroll is returned.
     /// Re-enrolling replaces the secret.
     pub async fn enroll_totp(&self, person: &str) -> Result<String> {
+        let person = key(person);
         let mut raw = [0u8; 20];
         rand::rngs::OsRng.fill_bytes(&mut raw);
         let secret = crate::totp::base32_encode(&raw);
@@ -581,7 +608,7 @@ impl Accounts {
         let c = g.as_mut().context("accounts connection")?;
         c.execute("INSERT INTO public.account_totp (person, secret) VALUES ($1, $2) ON CONFLICT (person) DO UPDATE SET secret = EXCLUDED.secret", &[&person, &secret]).await?;
         self.refresh_local(c).await?;
-        let label = percent_encoding::utf8_percent_encode(person, percent_encoding::NON_ALPHANUMERIC);
+        let label = percent_encoding::utf8_percent_encode(&person, percent_encoding::NON_ALPHANUMERIC);
         Ok(format!("otpauth://totp/Magnus:{label}?secret={}&issuer=Magnus&digits=6&period=30", secret.trim_end_matches('=')))
     }
 
@@ -607,6 +634,7 @@ impl Accounts {
     /// invited, anyone else keeps their status, so an invite never
     /// revokes working access. Callers pass a real person.
     pub async fn invite(&self, person: &str, email: Option<&str>) -> Result<String> {
+        let person = key(person);
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
         let tx = c.transaction().await?;
@@ -679,12 +707,13 @@ impl Accounts {
     /// Until when a person may not try another password, after too many
     /// wrong ones: the appliance's own and the identity provider's alike.
     pub fn locked(&self, person: &str) -> Option<DateTime<Utc>> {
+        let person = key(person);
         let now = Utc::now();
         let window = Duration::minutes(self.cfg.lockout_minutes as i64);
         let mut f = self.failures.lock().unwrap();
-        let (n, first) = f.get(person).copied()?;
+        let (n, first) = f.get(person.as_str()).copied()?;
         if now - first > window {
-            f.remove(person);
+            f.remove(person.as_str());
             return None;
         }
         (n >= self.cfg.max_failures).then_some(first + window)
@@ -693,20 +722,23 @@ impl Accounts {
     /// Count a wrong password. Only for people of this appliance, so
     /// guessing names cannot grow the table.
     pub fn failed(&self, person: &str) {
+        let person = key(person);
         let mut f = self.failures.lock().unwrap();
-        let e = f.entry(person.to_string()).or_insert((0, Utc::now()));
+        let e = f.entry(person).or_insert((0, Utc::now()));
         e.0 += 1;
     }
 
     pub fn succeeded(&self, person: &str) {
-        self.failures.lock().unwrap().remove(person);
+        let person = key(person);
+        self.failures.lock().unwrap().remove(person.as_str());
     }
 
     /// Take back one counted attempt: one counted before its answer came,
     /// whose answer said nothing about the password (the provider was down).
     pub fn forgive(&self, person: &str) {
+        let person = key(person);
         let mut f = self.failures.lock().unwrap();
-        if let Some(e) = f.get_mut(person) {
+        if let Some(e) = f.get_mut(person.as_str()) {
             e.0 = e.0.saturating_sub(1);
         }
     }
@@ -741,6 +773,7 @@ impl Accounts {
 
     /// End every session of `person`; the ids of those ended.
     pub async fn end_all(&self, person: &str) -> Result<Vec<String>> {
+        let person = key(person);
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
         let mut ended = vec![];
@@ -784,7 +817,9 @@ impl Accounts {
 
     /// Check a password, counting wrong ones on `counter`.
     pub async fn sign_in_counted(&self, person: &str, password: &str, counter: &str) -> Result<std::result::Result<(), SignInError>> {
-        if let Some(until) = self.locked(counter) {
+        let person = key(person);
+        let counter = key(counter);
+        if let Some(until) = self.locked(&counter) {
             return Ok(Err(SignInError::Locked(until)));
         }
         let mut g = self.client().await?;
@@ -792,11 +827,11 @@ impl Accounts {
         let phc: Option<String> = c.query_opt("SELECT phc FROM public.account_passwords WHERE person = $1", &[&person]).await?.map(|r| r.get(0));
         if !Self::password_ok(phc.as_deref(), password) || phc.is_none() {
             if phc.is_some() {
-                self.failed(counter);
+                self.failed(&counter);
             }
             return Ok(Err(SignInError::Rejected));
         }
-        self.succeeded(counter);
+        self.succeeded(&counter);
         Ok(Ok(()))
     }
 
@@ -820,7 +855,9 @@ impl Accounts {
 
     /// `sign_in_counted_with_code` at `at`, for tests.
     pub async fn sign_in_counted_with_code_at(&self, person: &str, password: &str, code: Option<&str>, counter: &str, at: DateTime<Utc>) -> Result<std::result::Result<(), SignInError>> {
-        if let Some(until) = self.locked(counter) {
+        let person = key(person);
+        let counter = key(counter);
+        if let Some(until) = self.locked(&counter) {
             return Ok(Err(SignInError::Locked(until)));
         }
         let mut g = self.client().await?;
@@ -828,7 +865,7 @@ impl Accounts {
         let phc: Option<String> = c.query_opt("SELECT phc FROM public.account_passwords WHERE person = $1", &[&person]).await?.map(|r| r.get(0));
         if !Self::password_ok(phc.as_deref(), password) || phc.is_none() {
             if phc.is_some() {
-                self.failed(counter);
+                self.failed(&counter);
             }
             return Ok(Err(SignInError::Rejected));
         }
@@ -843,7 +880,7 @@ impl Accounts {
         // counts on their counter, as a wrong password does.
         let secret: Option<String> = c.query_opt("SELECT secret FROM public.account_totp WHERE person = $1", &[&person]).await?.map(|r| r.get(0));
         let Some(secret) = secret else {
-            self.succeeded(counter);
+            self.succeeded(&counter);
             return Ok(Ok(()));
         };
         match code.map(str::trim).filter(|c| !c.is_empty()) {
@@ -861,14 +898,14 @@ impl Accounts {
                         )
                         .await?;
                     if n != 1 {
-                        self.failed(counter);
+                        self.failed(&counter);
                         return Ok(Err(SignInError::Rejected));
                     }
-                    self.succeeded(counter);
+                    self.succeeded(&counter);
                     Ok(Ok(()))
                 }
                 None => {
-                    self.failed(counter);
+                    self.failed(&counter);
                     Ok(Err(SignInError::Rejected))
                 }
             },
@@ -878,12 +915,13 @@ impl Accounts {
     /// Open a session for a person whose identity is already established.
     /// `device` is the paired computer, when this sign-in presented one.
     pub async fn open_session(&self, person: &str, client: &str, device: Option<&str>) -> Result<(Session, String)> {
+        let person = key(person);
         let now = Utc::now();
         let mut raw = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut raw);
         let token = format!("mgs_{}", hex::encode(raw));
         let session =
-            Session { id: crate::kernel::new_id("sess"), person: person.to_string(), created: now, expires: now + Duration::days(self.cfg.session_days as i64), client: client.to_string(), device: device.map(str::to_string) };
+            Session { id: crate::kernel::new_id("sess"), person, created: now, expires: now + Duration::days(self.cfg.session_days as i64), client: client.to_string(), device: device.map(str::to_string) };
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
         c.execute(
@@ -918,6 +956,7 @@ impl Accounts {
     /// A person's live sessions, newest first, each with whether it is the
     /// one `token` belongs to.
     pub async fn sessions_of(&self, person: &str, token: &str) -> Vec<(Session, bool)> {
+        let person = key(person);
         let mut g = match self.client().await {
             Ok(g) => g,
             Err(_) => return vec![],
@@ -936,6 +975,7 @@ impl Accounts {
 
     /// End one of a person's sessions by its id: that device is signed out.
     pub async fn end(&self, person: &str, id: &str) -> Result<Option<Session>> {
+        let person = key(person);
         let mut g = self.client().await?;
         let c = g.as_mut().context("accounts connection")?;
         let gone =
@@ -1396,6 +1436,30 @@ mod tests {
         assert!(accounts.locked(&Accounts::backup_counter("carol")).is_none(), "backup:carol's network failures locked carol's backup password");
     }
 
+    /// Person ids are lowercase-canonical: sign-in lowercases at entry,
+    /// so creating `Ada` keeps `ada`, and any casing signs in, holds the
+    /// role and status, and collides on re-adding (#470).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn person_ids_are_lowercase_canonical() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        accounts.add_person("Ada", "Ada", None).await.unwrap();
+        assert!(accounts.is_local("ada"), "adding Ada did not keep ada");
+        assert!(accounts.is_local("ADA"), "the casing did not resolve");
+        assert!(accounts.add_person("ada", "ada", None).await.is_err(), "ada re-added beside Ada");
+        accounts.set_password("ADA", "a-long-password").await.unwrap();
+        accounts.set_role("aDa", Role::Admin).await.unwrap();
+        for who in ["ada", "Ada", "ADA"] {
+            assert!(matches!(accounts.sign_in(who, "a-long-password").await.unwrap(), Ok(())), "{who} cannot sign in");
+            assert_eq!(accounts.role(who).await, Role::Admin, "{who} lost the role");
+        }
+        let token = accounts.invite("Bo", None).await.unwrap();
+        assert_eq!(accounts.accept(&token, "bo-long-password").await.unwrap(), Some("bo".to_string()), "the invite did not canonicalize");
+        assert!(matches!(accounts.sign_in("BO", "bo-long-password").await.unwrap(), Ok(())), "BO cannot sign in");
+        accounts.set_status("bO", Status::Disabled).await.unwrap();
+        assert_eq!(accounts.status("bo").await, Status::Disabled, "the disabling missed");
+    }
+
     /// `magnus migrate` brings the JSON files' contents into the tables
     /// once, so the cutover keeps everyone signing in; a rerun changes
     /// nothing (#466).
@@ -1404,7 +1468,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path().join("accounts");
         std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("people.json"), r#"{"ada":{"name":"Ada","email":"ada@example.com"}}"#).unwrap();
+        std::fs::write(d.join("people.json"), r#"{"ada":{"name":"Ada","email":"ada@example.com"},"Bea":{"name":"Bea"}}"#).unwrap();
         let salt = SaltString::generate(&mut OsRng);
         let phc = Argon2::default().hash_password(b"a-long-password", &salt).unwrap().to_string();
         std::fs::write(d.join("passwords.json"), serde_json::to_string(&BTreeMap::from([("ada".to_string(), phc)])).unwrap()).unwrap();
@@ -1416,16 +1480,16 @@ mod tests {
             let _ = conn.await;
         });
         let n = import_json(&mut client, dir.path()).await.unwrap();
-        assert_eq!(n, 4, "the import wrote {n} rows, not the person, password, status and role");
+        assert_eq!(n, 5, "the import wrote {n} rows, not the two people, password, status and role");
         let accounts = Accounts::open(&url, cfg()).await.unwrap();
         assert!(accounts.is_local("ada"), "the person did not survive the import");
+        assert!(accounts.local_people().iter().all(|(id, _)| *id == id.to_lowercase()), "the import kept an uppercase key");
         assert_eq!(accounts.role("ada").await, Role::Admin, "the role did not survive the import");
         assert!(matches!(accounts.sign_in("ada", "a-long-password").await.unwrap(), Ok(())), "the password did not survive the import");
         assert_eq!(import_json(&mut client, dir.path()).await.unwrap(), 0, "a rerun changed rows");
         // A removal after the import stays removed: the next migrate never
         // resurrects the person from the untouched files (review P1: every
         // deploy runs migrate).
-        accounts.add_person("bea", "Bea", None).await.unwrap();
         accounts.set_role("bea", Role::Admin).await.unwrap();
         accounts.remove_person("ada").await.unwrap();
         assert_eq!(import_json(&mut client, dir.path()).await.unwrap(), 0, "a migrate after a removal changed rows");

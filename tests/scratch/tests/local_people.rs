@@ -62,6 +62,10 @@ async fn a_local_person_signs_in_while_keycloak_is_live() {
     // An id the config has is refused: it would never resolve to them.
     let out = person_add(&app, &["--person", "carol"]);
     assert!(!out.status.success(), "a local namesake of a config person was added");
+    // In any casing: ids canonicalize to lowercase, so CAROL would land on
+    // carol and shadow her (#470).
+    let out = person_add(&app, &["--person", "CAROL"]);
+    assert!(!out.status.success(), "a differently-cased namesake of a config person was added");
 
     // Ada is unknown to Keycloak; the appliance itself keeps her.
     let out = person_add(&app, &["--person", "ada", "--name", "Ada"]);

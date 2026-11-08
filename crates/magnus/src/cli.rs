@@ -254,7 +254,11 @@ async fn person_add(args: &[String]) -> Result<()> {
     let cfg = config(args)?;
     let person = arg(args, "--person").context("--person is required")?;
     let name = arg(args, "--name").unwrap_or_else(|| person.clone());
-    anyhow::ensure!(cfg.person(&person).is_none(), "{person} is already a person in the config");
+    // The store keeps ids lowercase, so `SAM` would land on `sam`: refuse
+    // against the config case-insensitively, or the local record shadows
+    // the config person and its later removal burns their credentials (#470).
+    let person = person.to_lowercase();
+    anyhow::ensure!(!cfg.people.iter().any(|p| p.id.to_lowercase() == person), "{person} is already a person in the config");
     let accounts = crate::accounts::Accounts::open(&cfg.database.url, cfg.sign_in.clone()).await?;
     accounts.add_person(&person, &name, arg(args, "--email").as_deref()).await?;
     eprintln!("added {person}");
