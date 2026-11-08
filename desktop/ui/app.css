@@ -640,3 +640,12 @@ aside.detail { -webkit-backdrop-filter: none; backdrop-filter: none; }
 .feedback-dialog { width: min(520px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 16px; padding: 24px; background: var(--surface); color: var(--fg); }
 .feedback-dialog h2 { margin-top: 0; }
 @media (any-pointer: coarse) { .msg-actions button.icon, .action-menu button { min-width: 44px; min-height: 44px; } }
+
+/* Interactive frame affordances stay in the trusted parent document. */
+.composed-wrap { position:relative; min-width:0; }
+.composed-wrap > iframe.composed { display:block; width:100%; }
+.frame-actions { position:absolute; inset:0; pointer-events:none; }
+.frame-actions > * { position:absolute; pointer-events:auto; margin:0; }
+.frame-code-copy { min-height:36px; border:1px solid var(--muted); border-radius:8px; color:var(--fg); background:var(--surface); padding:4px 12px; }
+.frame-prose-link { color:var(--accent-text); text-decoration:underline; background:var(--surface); }
+@media(any-pointer:coarse) { .frame-code-copy { min-width:44px;min-height:44px; } }

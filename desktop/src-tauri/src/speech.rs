@@ -4,42 +4,64 @@
 use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
 use tokio::{process::{Child, Command}, sync::oneshot};
 
+struct Playback {
+    cancel: oneshot::Sender<()>,
+    finished: oneshot::Receiver<()>,
+}
+
 #[derive(Default)]
 pub struct Speech {
-    stop: Mutex<Option<oneshot::Sender<()>>>,
+    active: Mutex<Option<Playback>>,
+    startup: tokio::sync::Mutex<()>,
     generation: AtomicU64,
 }
 
 impl Speech {
-    /// Resolve at the real end, so the page's Stop reading state matches audio.
+    /// Startup and stop are ordered; playback itself never holds the startup lock.
     pub async fn speak(&self, text: &str) -> Result<(), String> {
-        self.stop().await;
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let child = start(text).await?;
-        let (send, cancel) = oneshot::channel();
-        {
-            let mut stop = self.stop.lock().unwrap();
-            if self.generation.load(Ordering::SeqCst) == generation { *stop = Some(send); }
-            // A stop during startup drops send; cancel immediately resolves.
-        }
-        finish(child, cancel).await?;
-        { let mut stop = self.stop.lock().unwrap(); if self.generation.load(Ordering::SeqCst) == generation { stop.take(); } }
-        Ok(())
+        let generation=self.generation.fetch_add(1, Ordering::SeqCst)+1;
+        let (child,cancel,finished)={
+            let _startup=self.startup.lock().await;
+            if self.generation.load(Ordering::SeqCst)!=generation { return Ok(()); }
+            self.cancel_active().await;
+            cancel_system().await;
+            if self.generation.load(Ordering::SeqCst)!=generation { return Ok(()); }
+            let mut child=start(text).await?;
+            if self.generation.load(Ordering::SeqCst)!=generation { let _=child.kill().await;return Ok(()); }
+            let (send,cancel)=oneshot::channel();
+            let (finished,done)=oneshot::channel();
+            *self.active.lock().unwrap()=Some(Playback{cancel:send,finished:done});
+            (child,cancel,finished)
+        };
+        let result=finish(child,cancel).await;
+        {let mut active=self.active.lock().unwrap();if self.generation.load(Ordering::SeqCst)==generation {active.take();}}
+        let _=finished.send(());
+        result
+    }
+
+    async fn cancel_active(&self) {
+        let active=self.active.lock().unwrap().take();
+        if let Some(active)=active {let _=active.cancel.send(());let _=active.finished.await;}
     }
 
     pub async fn stop(&self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        let cancel = self.stop.lock().unwrap().take();
-        if let Some(cancel) = cancel { let _ = cancel.send(()); }
-        #[cfg(target_os = "linux")]
-        { let _ = Command::new("spd-say").arg("-C").status().await; }
+        let generation=self.generation.fetch_add(1,Ordering::SeqCst)+1;
+        let _startup=self.startup.lock().await;
+        if self.generation.load(Ordering::SeqCst)!=generation {return;}
+        self.cancel_active().await;
+        cancel_system().await;
     }
+}
+
+async fn cancel_system() {
+    #[cfg(target_os="linux")]
+    {let _=Command::new("spd-say").arg("-C").status().await;}
 }
 
 async fn finish(mut child: Child, cancel: oneshot::Receiver<()>) -> Result<(), String> {
     tokio::select! {
-        result = child.wait() => { result.map_err(|e| e.to_string())?; },
-        _ = cancel => { let _ = child.kill().await; },
+        result=child.wait()=>{let status=result.map_err(|e|e.to_string())?;if !status.success(){return Err("System speech could not finish reading.".into());}},
+        _=cancel=>{let _=child.kill().await;},
     }
     Ok(())
 }
@@ -119,6 +141,34 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), finish(child, receiver)).await.unwrap().unwrap();
         assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
     }
+    #[tokio::test]
+    async fn a_failed_speech_process_is_not_reported_as_completed() {
+        let child=Command::new("sh").args(["-c","exit 7"]).spawn().unwrap();
+        let (_send,cancel)=oneshot::channel();
+        assert!(finish(child,cancel).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_waits_for_the_owned_process_to_be_reaped() {
+        let speech=Speech::default();
+        let child=Command::new("sleep").arg("30").spawn().unwrap();let pid=child.id().unwrap();
+        let (send,cancel)=oneshot::channel();let (finished,done)=oneshot::channel();
+        *speech.active.lock().unwrap()=Some(Playback{cancel:send,finished:done});
+        let playback=tokio::spawn(async move{let result=finish(child,cancel).await;let _=finished.send(());result});
+        tokio::time::timeout(std::time::Duration::from_secs(5),speech.stop()).await.unwrap();
+        playback.await.unwrap().unwrap();assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());assert!(speech.active.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_overtaking_queued_startup_does_not_start_a_late_voice() {
+        let speech=std::sync::Arc::new(Speech::default());let startup=speech.startup.lock().await;
+        let pending={let speech=speech.clone();tokio::spawn(async move{speech.speak("This cancelled startup must not speak.").await})};
+        tokio::time::timeout(std::time::Duration::from_secs(1),async{while speech.generation.load(Ordering::SeqCst)<1 {tokio::task::yield_now().await;}}).await.unwrap();
+        let stop={let speech=speech.clone();tokio::spawn(async move{speech.stop().await})};
+        tokio::time::timeout(std::time::Duration::from_secs(1),async{while speech.generation.load(Ordering::SeqCst)<2 {tokio::task::yield_now().await;}}).await.unwrap();
+        drop(startup);pending.await.unwrap().unwrap();tokio::time::timeout(std::time::Duration::from_secs(5),stop).await.unwrap().unwrap();assert!(speech.active.lock().unwrap().is_none());
+    }
+
     #[test]
     fn speech_capability_requires_an_executable_file() {
         assert!(executable(std::path::Path::new("/bin/sh")));

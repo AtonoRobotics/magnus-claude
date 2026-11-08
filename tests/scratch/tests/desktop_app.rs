@@ -480,6 +480,7 @@ async fn composed_answers_stream_text_first_and_reach_no_network_in_the_installe
                         ] })),
                     ]),
                     HOSTILE => tools(vec![magnus_scratch::say("Here is what you asked for."), ("show", json!({ "components": hostile }))]),
+                    text if text.starts_with("Show local chart ") => Reply::Text(format!("![Local chart]({})",text.trim_start_matches("Show local chart "))),
                     _ => Reply::Text(format!("Answer to: {said}")),
                 };
             }
@@ -494,8 +495,9 @@ async fn composed_answers_stream_text_first_and_reach_no_network_in_the_installe
     let _kc = keycloak(&mut f.app).await;
     let (url, fingerprint) = f.with_tls().await;
     let d = Driver::start().await;
+    let (display, xauth) = d.display();
     let (ok, log) = d
-        .script("app-composed.mjs", &url, &fingerprint, &[("MAGNUS_DATA_QUESTION", QUESTION), ("MAGNUS_DATA_ANSWER", ANSWER), ("MAGNUS_HOSTILE_QUESTION", HOSTILE), ("MAGNUS_BEACON", &b)])
+        .script("app-composed.mjs", &url, &fingerprint, &[("MAGNUS_DATA_QUESTION", QUESTION), ("MAGNUS_DATA_ANSWER", ANSWER), ("MAGNUS_HOSTILE_QUESTION", HOSTILE), ("MAGNUS_BEACON", &b), ("MAGNUS_DISPLAY", &display), ("MAGNUS_XAUTHORITY", &xauth)])
         .await;
     assert!(ok, "composed answers failed:\n{log}");
     assert!(beacon.hits().is_empty(), "composed content reached the network: {:?}", beacon.hits());

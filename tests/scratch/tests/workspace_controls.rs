@@ -1,6 +1,7 @@
 //! Workspace v1.2 controls on the real appliance/browser route. The provider
 //! is a fixed UI fixture; these assertions make no agent reasoning claim.
-use magnus_invariants::{appliance::workspace_root, *};
+use magnus_invariants::*;
+fn workspace_root() -> std::path::PathBuf { std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap() }
 use magnus_scratch::*;
 
 #[test]

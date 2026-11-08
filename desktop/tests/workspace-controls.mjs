@@ -17,8 +17,9 @@ try {
   await entry.getByRole('button',{name:'Copy code'}).click();assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'const answer = 42;');
   assert.ok(await entry.locator('.msg-actions > button, .msg-actions > .message-menu-wrap > button').count()<=3);
   assert.equal(await entry.locator('[role=toolbar], .verdict').count(),0);
+  await entry.evaluate(el=>{Theme.set({motion:'full'});el.classList.add('enter');});
   const more=entry.getByRole('button',{name:'More message actions'});await more.focus();await page.keyboard.press('Enter');
-  const menu=entry.getByRole('menu');await menu.waitFor();assert.equal(await more.getAttribute('aria-expanded'),'true');
+  const menu=entry.getByRole('menu');await menu.waitFor();const bounds=await menu.boundingBox();assert.ok(bounds.y>=0 && bounds.y+bounds.height<=720,'entry animation cannot displace the menu outside the viewport');assert.equal(await more.getAttribute('aria-expanded'),'true');
   assert.equal(await page.evaluate(()=>document.activeElement.textContent.trim()),'Retry');
   await page.keyboard.press('End');assert.equal(await page.evaluate(()=>document.activeElement.textContent.trim()),'Delete message');
   await page.keyboard.press('Home');await page.keyboard.press('ArrowDown');assert.equal(await page.evaluate(()=>document.activeElement.textContent.trim()),'Branch');
@@ -42,5 +43,19 @@ try {
   await page.keyboard.press('Escape');await page.waitForTimeout(200);assert.equal(await page.getByRole('tooltip').count(),0);
   // In-place removal cannot leave an orphaned tooltip.
   await page.locator('#msg').focus();await copy.focus();await page.getByRole('tooltip').waitFor();await copy.evaluate(el=>el.remove());await page.getByRole('tooltip').waitFor({state:'hidden'});
+  // Controlled startup promises exercise UI ownership, independently of real native audio checks.
+  await page.evaluate(async()=>{
+    const stop=Magnus.stopSpeaking;const pending=[];Magnus.stopSpeaking=()=>new Promise(resolve=>pending.push(resolve));
+    let firstText,secondText;
+    const first=readAloud(new Promise(resolve=>firstText=resolve),'first');
+    if(voice.entry!=='first')throw Error('Stop is unavailable during startup');
+    const second=readAloud(new Promise(resolve=>secondText=resolve),'second');
+    pending.shift()();firstText('Old reading.');await first;
+    if(voice.entry!=='second')throw Error('Old startup cleared new reading');
+    const stopped=hush();pending.shift()();secondText('New reading.');await second;
+    pending.shift()();await stopped;
+    if(voice.entry!==null)throw Error('Stop did not cancel queued startup');
+    Magnus.stopSpeaking=stop;
+  });
   assert.deepEqual(errors,[]);console.log('browser: safe Markdown/copy, compact actions, feedback, menu keyboard/focus/outside click and tooltip timing/suppression/removal passed');
 } finally {await browser.close();}

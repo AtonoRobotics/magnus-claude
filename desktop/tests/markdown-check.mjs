@@ -13,3 +13,10 @@ assert.ok(markdown('```\n<img onerror=evil>\n').includes('&lt;img onerror=evil&g
 const frame=documentFor([{type:'file',file:'result.md'}],{'result.md':{text:source,media_type:'text/markdown'}},'',{chars:160000,rows:200});
 assert.ok(frame.includes('data-code-copy'));assert.ok(frame.includes("default-src 'none'"));assert.ok(!frame.includes('<script>'));
 console.log('shared Markdown: required structures, raw HTML/URL rejection, incomplete fences and sandboxed file previews passed');
+
+for(const origin of ['https://magnus.example','tauri://localhost','null']) {
+ const native={URL,location:{origin}};vm.runInNewContext(readFileSync(new URL('../ui/compose.js',import.meta.url),'utf8')+';globalThis.renderer=Compose;',native);
+ const rendered=native.renderer.markdown('![Revenue chart](/v1/files/file_chart)');assert.ok(rendered.includes('data-prose-image="/v1/files/file_chart"'),origin);assert.ok(rendered.includes('alt="Revenue chart"'));
+ for(const url of ['/v1/files/../../outside','//evil.example/v1/files/chart','javascript:evil','data:image/svg+xml,evil'])assert.ok(!native.renderer.markdown(`![unsafe](${url})`).includes('data-prose-image'),`${origin}/${url}`);
+}
+console.log('local image hydration paths work for HTTP, Tauri and opaque origins without widening URL/sandbox permissions');

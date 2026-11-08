@@ -315,7 +315,7 @@ fn file_path(path: &str) -> Res<()> {
     Ok(())
 }
 
-async fn bytes(app: &App, path: &str) -> Res<Vec<u8>> {
+async fn file_response(app: &App, path: &str) -> Res<reqwest::Response> {
     file_path(path)?;
     let (url, c, token) = app.session()?;
     let r = c.get(format!("{url}{path}")).bearer_auth(&token).send().await.map_err(|e| pin::describe(&e))?;
@@ -323,14 +323,21 @@ async fn bytes(app: &App, path: &str) -> Res<Vec<u8>> {
         let (s, b) = body_of(r).await;
         return Err(message(&b, s));
     }
-    r.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+    Ok(r)
 }
-
+async fn bytes(app: &App, path: &str) -> Res<Vec<u8>> {
+    file_response(app, path).await?.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+}
+#[derive(serde::Serialize)]
+struct FileBytes { data_b64: String, media_type: String }
 #[tauri::command]
-async fn fetch_bytes(app: State<'_, App>, path: String) -> Res<String> {
-    Ok(base64::engine::general_purpose::STANDARD.encode(bytes(&app, &path).await?))
+async fn fetch_bytes(app: State<'_, App>, path: String) -> Res<FileBytes> {
+    let response = file_response(&app, &path).await?;
+    let media_type = response.headers().get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").to_owned();
+    let data = response.bytes().await.map_err(|e| e.to_string())?;
+    Ok(FileBytes { data_b64: base64::engine::general_purpose::STANDARD.encode(data), media_type })
 }
-
 /// Save a delivered file in the person's Downloads folder.
 #[tauri::command]
 async fn download(app: State<'_, App>, path: String, name: String) -> Res<String> {

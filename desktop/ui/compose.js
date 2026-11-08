@@ -89,6 +89,17 @@ const Compose = (() => {
   function safeUrl(value) {
     try { const u = new URL(value, location.origin); return ["http:", "https:"].includes(u.protocol) ? u.href : null; } catch { return null; }
   }
+  function localImagePath(raw) {
+    try {
+      let url;
+      if(raw.startsWith("/v1/files/"))url=new URL(raw,"https://appliance.invalid");
+      else {const safe=safeUrl(raw);if(!safe)return null;url=new URL(safe);if(url.origin!==location.origin)return null;}
+      return /^\/v1\/files\/[^/?#]+$/.test(url.pathname) ? url.pathname : null;
+    } catch {return null;}
+  }
+  function codeBlock(text,language="") {
+    return `<div class="code-block"><div class="code-head"><span>${esc(language)}</span><button type="button" data-code-copy aria-label="Copy code" data-tooltip="Copy code">Copy code</button></div><pre class="code"><code>${esc(text)}</code></pre></div>`;
+  }
   function markdownInline(text, depth = 0) {
     if (depth > 8) return esc(text);
     const pattern = /(`+)([\s\S]*?)\1|(!?)\[([^\]\n]*)\]\(([^\s]*?)(?:\s+"[^"\n]*")?\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*|_([^_\n]+)_|<(https?:\/\/[^>\s]+)>/g;
@@ -98,8 +109,8 @@ const Compose = (() => {
       if (m[1]) out += `<code>${esc(m[2].replace(/\n/g, " "))}</code>`;
       else if (m[4] !== undefined || m[10]) {
         const label = m[4] ?? m[10], raw = m[5] ?? m[10], url = safeUrl(raw);
-        const localImage = m[3] && url && new URL(url).origin === location.origin && new URL(url).pathname.startsWith("/v1/files/");
-        if (localImage) out += `<img data-prose-image="${esc(new URL(url).pathname)}" alt="${esc(label)}" loading="lazy">`;
+        const localImage = m[3] && localImagePath(raw);
+        if (localImage) out += `<img data-prose-image="${esc(localImage)}" alt="${esc(label)}" loading="lazy">`;
         else out += url ? `<a href="${esc(url)}" data-prose-link rel="noopener noreferrer">${markdownInline(label, depth + 1)}</a>` : esc(label);
       } else if (m[6] || m[7]) out += `<strong>${markdownInline(m[6] || m[7], depth + 1)}</strong>`;
       else out += `<em>${markdownInline(m[8] || m[9], depth + 1)}</em>`;
@@ -118,7 +129,7 @@ const Compose = (() => {
         const fence = m[1], lang = m[2], body = [];
         for (i++; i < lines.length && !new RegExp(`^\\s{0,3}${fence[0]}{${fence.length},}\\s*$`).test(lines[i]); i++) body.push(lines[i]);
         if (i < lines.length) i++;
-        out.push(`<div class="code-block"><div class="code-head"><span>${esc(lang)}</span><button type="button" data-code-copy aria-label="Copy code" data-tooltip="Copy code">Copy code</button></div><pre><code>${esc(body.join("\n"))}</code></pre></div>`);
+        out.push(codeBlock(body.join("\n"),lang));
       } else if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/))) { out.push(`<h${m[1].length}>${markdownInline(m[2])}</h${m[1].length}>`); i++; }
       else if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) { out.push("<hr>"); i++; }
       else if (line.includes("|") && tableRule.test(lines[i + 1] || "")) {
@@ -199,7 +210,7 @@ const Compose = (() => {
       case "map": return map(c);
       case "timeline": return timeline(c);
       case "comparison": return comparison(c);
-      case "code": return frame(c, `<pre class="code"${c.language ? ` data-language="${esc(c.language)}"` : ""}><code>${esc(c.code)}</code></pre>`);
+      case "code": return frame(c, `<div class="markdown">${codeBlock(c.code,c.language)}</div>`);
       case "image": return files[c.file]?.image ? frame(c, `<img src="${files[c.file].image}" alt="${esc(c.caption || c.file)}">`) : frame(c, `<p class="cap">${esc(c.file)} (not an image this app can show)</p>`);
       case "file": return `<section class="file" data-file="${esc(c.file)}"><p class="fname">${esc(c.file)}</p>${fileParts(c.file, files[c.file], limit).map(x => part(x, files, limit)).join("\n")}</section>`;
       default: return "";
@@ -218,11 +229,13 @@ const Compose = (() => {
 .markdown a { color: var(--accent-text); text-decoration: underline; }
 .markdown ul, .markdown ol { padding-left: 24px; }
 .markdown blockquote { border-left: 2px solid var(--muted); margin: 12px 0; padding: 4px 16px; }
-.markdown code { font-family: var(--mono, monospace); font-size: 13px; }
+.markdown code { font-family: var(--mono, monospace); font-size: 15px; }
 .markdown :not(pre) > code { background: var(--raised); border-radius: 4px; padding: 2px 4px; }
 .markdown .code-block { background: var(--raised); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin: 12px 0; }
 .markdown .code-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 12px; color: var(--muted); }
 .markdown .code-head button { min-height: 36px; padding: 4px 12px; background: var(--surface); border: 1px solid var(--muted); color: var(--fg); border-radius: 8px; cursor: pointer; }
+.markdown .code-head button:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+@media (any-pointer: coarse) { .markdown .code-head button { min-width: 44px; min-height: 44px; } }
 .markdown pre { overflow: auto; white-space: pre; margin: 0; padding: 12px 16px; max-width: 100%; }
 .markdown .markdown-table { overflow: auto; max-width: 100%; margin: 12px 0; }
 .markdown table { border-collapse: collapse; width: 100%; }
@@ -286,7 +299,7 @@ const Compose = (() => {
     .cmp th[scope=row] { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--fg); font-weight: 500; }
     .cmp td.best { font-weight: 650; color: var(--bar); }
     .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-    pre.code { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: color-mix(in srgb, var(--line) 35%, transparent); padding: 10px 12px; border-radius: 4px; overflow-x: auto; white-space: pre; }
+    pre.code { font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: color-mix(in srgb, var(--line) 35%, transparent); padding: 10px 12px; border-radius: 4px; overflow-x: auto; white-space: pre; }
   `;
 
   /// A whole document for the frame's srcdoc. `files` maps a delivered
@@ -295,7 +308,9 @@ const Compose = (() => {
   /// `tokens`, the app's look (Theme.tokens), colors it; `mode` is its
   /// light or dark, so the frame's own color scheme agrees with the page.
   function documentFor(view, files, fontCss, limit, tokens, mode) {
-    const body = (view || []).map(c => part(c, files || {}, limit || { chars: 160000, rows: 200 })).join("\n");
+    const body = (view || []).map(c => part(c, files || {}, limit || { chars: 160000, rows: 200 })).join("\n")
+      .replace(/<button type="button" data-code-copy[^>]*>Copy code<\/button>/g,'<span data-code-copy-anchor aria-hidden="true" style="display:inline-flex;align-items:center;min-height:44px;padding:0 12px">Copy code</span>')
+      .replace(/<a href="([^"]*)" data-prose-link rel="noopener noreferrer">([\s\S]*?)<\/a>/g,'<span data-prose-url="$1" aria-hidden="true" style="color:var(--accent-text);text-decoration:underline">$2</span>');
     return `<!doctype html><html style="color-scheme: ${mode === "dark" ? "dark" : "light"}"><head><meta charset="utf-8">
       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data: ${location.origin}">
       <style>:root{${vars(tokens)}}${fontCss || ""}${CSS}${markdownStyles}</style></head><body>${body}</body></html>`;
