@@ -42,7 +42,7 @@ await step("sign in", async () => {
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   // Signed in: the workspace, with Needs you in the sidebar.
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
 await step("make a project with instructions", async () => {
@@ -116,7 +116,8 @@ await step("open files from the library", async () => {
 });
 
 await step("the task is listed in Tasks", async () => {
-  await page.getByRole("link", { name: /^Tasks/ }).click();
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
+  await page.getByRole("navigation", { name: "Activity views" }).getByRole("link", { name: "Tasks", exact: true }).click();
   // Under the request that started it, a conversation; done work is folded.
   const group = page.locator("#detail .tgroup", { hasText: "Total the prices" });
   await group.locator("summary").click();

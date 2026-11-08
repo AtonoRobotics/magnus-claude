@@ -35,7 +35,7 @@ const signIn = async (who, pw) => {
   await page.getByLabel("Username").fill(who);
   await page.getByLabel("Password").fill(pw);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
 };
 const settings = async section => {
   await page.getByRole("link", { name: "Settings" }).click();

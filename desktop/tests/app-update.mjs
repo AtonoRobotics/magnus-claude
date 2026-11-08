@@ -35,7 +35,7 @@ if (phase === "before") {
   console.log("update offered and started");
 } else {
   await step("the updated app is the new version, still signed in", async () => {
-    await xpath("//nav//button[starts-with(normalize-space(),'Needs you')]");
+    await xpath("//nav//*[self::a or self::button][@aria-label='Needs you' or starts-with(@aria-label,'Needs you,') or starts-with(normalize-space(),'Needs you')]");
     const v = await version();
     if (v !== fresh) throw new Error(`the app is ${v}, not ${fresh}`);
   });
@@ -46,7 +46,7 @@ if (phase === "before") {
     await click(button("Got it"));
   });
   await step("the task that waited through the update is approved and finishes", async () => {
-    await click(xpath("//nav//button[starts-with(normalize-space(),'Needs you')]"));
+    await click(xpath("//nav//*[self::a or self::button][@aria-label='Needs you' or starts-with(@aria-label,'Needs you,') or starts-with(normalize-space(),'Needs you')]"));
     const card = "//aside[@id='detail']//article[contains(@class,'approval')]";
     await click(button("Approve once", card));
     await seen("Approved.");

@@ -251,11 +251,12 @@ const Compose = (() => {
 `;
   const CSS = `
     :root { --bar: var(--accent); --s0: var(--accent); --s1:#c2410c; --s2:#0f766e; --s3:#7c3aed; --s4:#a16207; --s5:#be123c; }
-    html,body { margin:0; background: transparent; color:var(--fg); font: 14px/1.45 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; font-feature-settings: "tnum" 1, "cv11" 1; }
-    body { padding: 1px 1px 2px; display: flex; flex-direction: column; gap: 16px; }
+    :is(a,button,input,textarea,select,summary,[tabindex]):focus-visible { outline:2px solid var(--accent-text); outline-offset:2px; }
+    html,body { margin:0; background: transparent; color:var(--fg); font: 15px/1.5 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; font-feature-settings: "tnum" 1, "cv11" 1; }
+    body { padding: 4px; display: flex; flex-direction: column; gap: 16px; }
     body > * { margin: 0; }
     h2 { font-size: 15px; font-weight: 600; letter-spacing: 0; }
-    h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 0 8px; }
+    h3 { font-size: 16px; font-weight: 600; color: var(--muted); margin: 0 0 8px; }
     figure > h3 { padding: 14px 16px 0; margin: 0; }
     p { max-width: 70ch; white-space: pre-line; font-size: 15px; }
     h4 { font-size: 14px; font-weight: 600; }
@@ -271,10 +272,10 @@ const Compose = (() => {
     .cap { color: var(--muted); font-size: 13px; }
     figure > .cap { padding-bottom: 12px; }
     .tw { overflow-x: auto; padding: 14px 16px; }
-    table { border-collapse: collapse; width: 100%; font-size: 14px; }
+    table { border-collapse: collapse; width: 100%; font-size: 15px; }
     th, td { text-align: left; padding: 4px 12px 4px 0; color: var(--fg2); }
     th:last-child, td:last-child { padding-right: 0; }
-    th { color: var(--muted); font-weight: 600; font-size: 12px; padding-bottom: 8px; }
+    th { color: var(--muted); font-weight: 600; font-size: 13px; padding-bottom: 8px; }
     td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
     tr.total td { color: var(--fg); font-weight: 600; border-top: 1px solid var(--hair); padding-top: 8px; }
     .stat { display: inline-block; margin: 0 32px 0 0; vertical-align: top; }
@@ -315,7 +316,7 @@ const Compose = (() => {
   function documentFor(view, files, fontCss, limit, tokens, mode) {
     const body = (view || []).map(c => part(c, files || {}, limit || { chars: 160000, rows: 200 })).join("\n")
       .replace(/<button type="button" data-code-copy[^>]*>Copy code<\/button>/g,'<span data-code-copy-anchor aria-hidden="true" style="display:inline-flex;align-items:center;min-height:44px;padding:0 12px">Copy code</span>')
-      .replace(/<a href="([^"]*)" data-prose-link rel="noopener noreferrer">([\s\S]*?)<\/a>/g,'<span data-prose-url="$1" aria-hidden="true" style="color:var(--accent-text);text-decoration:underline">$2</span>');
+      .replace(/<a href="([^"]*)" data-prose-link rel="noopener noreferrer">([\s\S]*?)<\/a>/g,'<span data-prose-url="$1" style="color:var(--accent-text);text-decoration:underline">$2</span>');
     return `<!doctype html><html style="color-scheme: ${mode === "dark" ? "dark" : "light"}"><head><meta charset="utf-8">
       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data: ${location.origin}">
       <style>:root{${vars(tokens)}}${fontCss || ""}${CSS}${markdownStyles}</style></head><body>${body}</body></html>`;

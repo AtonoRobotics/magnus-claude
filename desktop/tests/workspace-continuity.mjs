@@ -35,7 +35,7 @@ try {
  await until(()=>document.activeElement?.tagName==='H2' && !!document.activeElement.closest('#detail'));
  assert.equal(await page.locator('#msg').inputValue(),'First retained draft');
  await page.goBack();await page.locator('#detail [data-panel=files]').waitFor();
- await page.locator('#detail [data-act=close-panel]').click();
+ await page.getByRole('button',{name:'Close work',exact:true}).click();
  assert.ok(await page.evaluate(()=>document.activeElement===document.querySelector('#conv-head h1')));
  // A removed pending upload may finish, but must never reattach itself.
  let releaseLate,lateFile;const lateHeld=new Promise(resolve=>releaseLate=resolve);
@@ -77,14 +77,15 @@ try {
  const acceptedLost=(await(await context.request.get(`${base}/v1/chat/${lostThread}`)).json()).entries.filter(e=>e.kind==='message');assert.equal(acceptedLost.length,1);
  await page.unroute('**/v1/chat');
  // Definite server validation rejection keeps submitted and newer text separate.
- const rejectedId=await newDraft();await page.locator('#msg').fill('Rejected submitted text');
+ const rejectedText='  Rejected submitted text \n with original whitespace  ';
+ const rejectedId=await newDraft();await page.locator('#msg').fill(rejectedText);await page.locator('#msg').evaluate(box=>box.setSelectionRange(5,19));
  const validModel=await page.locator('#say [data-model]').inputValue();
  await page.locator('#say [data-model]').evaluate(select=>{const option=new Option('Removed model',JSON.stringify(['missing-adapter','removed-model']));select.append(option);select.value=option.value;});
  let releaseRejected;const rejectedHeld=new Promise(resolve=>releaseRejected=resolve);
  await page.route('**/v1/chat',async route=>{if(route.request().method()!=='POST')return route.continue();const response=await route.fetch();assert.equal(response.status(),400);await rejectedHeld;await route.fulfill({response});});
  await page.locator('#send').click();await until(()=>document.querySelector('#msg').value==='');await page.locator('#msg').fill('Newer edits after rejection');releaseRejected();
  await page.locator('#submitted').getByText('Message was not accepted',{exact:true}).waitFor();assert.equal(await page.locator('#msg').inputValue(),'Newer edits after rejection');
- await page.unroute('**/v1/chat');await page.getByRole('button',{name:'Edit rejected message'}).click();await until(()=>document.querySelector('#msg')?.value==='Rejected submitted text');
+ await page.unroute('**/v1/chat');await page.getByRole('button',{name:'Edit rejected message'}).click();await until(text=>document.querySelector('#msg')?.value===text,rejectedText);assert.deepEqual(await page.locator('#msg').evaluate(box=>[box.selectionStart,box.selectionEnd]),[5,19]);
  assert.equal(await page.evaluate(id=>MessageDrafts.get(id).text,rejectedId),'Newer edits after rejection');await page.locator('#say [data-model]').selectOption(validModel);
  { // A rejection from an unmounted request recovers into the newly mounted composer.
  await page.goto(`${base}/#/chat/${accepted.thread}`);await page.locator('#msg').fill('Late rejection after remount');
@@ -102,11 +103,24 @@ try {
  await page.getByRole('button',{name:'Edit rejected message'}).click();await until(()=>location.hash.startsWith('#/draft/') && App.draftRecord?.localEntry && document.querySelector('#msg')?.value==='Late rejection after remount');const recoveredId=await page.evaluate(()=>App.draftRecord.id);await page.locator('#say [data-model]').selectOption(validModel);
  let releaseRecovered;const recoveredHeld=new Promise(resolve=>releaseRecovered=resolve);
  await page.route('**/v1/chat',async route=>{if(route.request().method()!=='POST')return route.continue();const response=await route.fetch();assert.equal(response.status(),201);await recoveredHeld;await route.fulfill({response});});
- await page.locator('#send').click();await until(()=>document.querySelector('#msg').value==='');await page.locator('#msg').fill('Additional recovered draft edits');
- await page.locator('#say [data-attach]').setInputFiles({name:'newer.txt',mimeType:'text/plain',buffer:Buffer.from('newer attachment')});await page.locator('#pending').getByText('Ready',{exact:true}).waitFor();releaseRecovered();await until(()=>!App.draftRecord.pending.length);await page.unroute('**/v1/chat');
+ await page.locator('#send').click();await until(()=>document.querySelector('#msg').value==='');releaseRecovered();await until(()=>!App.draftRecord.pending.length);assert.equal(await page.evaluate(()=>App.draftRecord.localEntry),true);await page.locator('#msg').fill('Additional recovered draft edits');
+ await page.locator('#say [data-attach]').setInputFiles({name:'newer.txt',mimeType:'text/plain',buffer:Buffer.from('newer attachment')});await page.locator('#pending').getByText('Ready',{exact:true}).waitFor();await page.unroute('**/v1/chat');
  assert.equal(await page.evaluate(()=>App.draftRecord.localEntry),true);await page.reload();await until(()=>document.querySelector('#msg')?.value==='Additional recovered draft edits');await page.locator('#pending').getByText('newer.txt',{exact:true}).waitFor();
  await page.getByRole('link',{name:'Settings',exact:true}).click();await page.locator(`nav.side a[href="#/draft/${recoveredId}"]`).click();await until(()=>document.querySelector('#msg')?.value==='Additional recovered draft edits');assert.equal(await page.evaluate(thread=>MessageDrafts.forThread(thread).text,accepted.thread),'Original independent thread draft');
+ await page.goto(`${base}/#/chat/${accepted.thread}`);await until(()=>document.querySelector('#msg')?.value==='Original independent thread draft');await page.getByRole('button',{name:'Discard local draft',exact:true}).click();await until(id=>App.draftRecord?.id!==id && !App.draftRecord?.localEntry && document.querySelector('#msg')?.value==='',recoveredId);await page.locator(`nav.side a[href="#/draft/${recoveredId}"]`).click();await until(()=>document.querySelector('#msg')?.value==='Additional recovered draft edits');await page.locator('#pending').getByText('newer.txt',{exact:true}).waitFor();
+
  }
+ // Definite rejection restores the original raw input and caret when no newer edits exist.
+ const exactId=await newDraft(),exactText='  Exact rejected message \n trailing spaces  ';await page.locator('#msg').fill(exactText);await page.locator('#msg').evaluate(box=>box.setSelectionRange(3,16));
+ await page.locator('#say [data-model]').evaluate(select=>{const option=new Option('Removed model',JSON.stringify(['missing-adapter','removed-model']));select.append(option);select.value=option.value;});
+ await page.locator('#send').click();await until(text=>document.querySelector('#msg')?.value===text,exactText);assert.deepEqual(await page.locator('#msg').evaluate(box=>[box.selectionStart,box.selectionEnd]),[3,16]);assert.equal(await page.evaluate(id=>MessageDrafts.get(id).pending.length,exactId),0);
+ await page.getByRole('link',{name:'Settings',exact:true}).click();assert.deepEqual(await page.evaluate(id=>MessageDrafts.get(id).selection,exactId),[3,16],'journal selection on leaving');await openDraft(exactId);assert.equal(await page.locator('#msg').inputValue(),exactText);assert.deepEqual(await page.locator('#msg').evaluate(box=>({selection:[box.selectionStart,box.selectionEnd],stored:App.draftRecord.selection,connected:box.form.isConnected,hash:location.hash})),{selection:[3,16],stored:[3,16],connected:true,hash:`#/draft/${exactId}`});
+ // Typing and then erasing is still a newer edit, not permission to restore over it.
+ await newDraft();await page.locator('#msg').fill('Do not overwrite a newer intentional deletion');await page.locator('#say [data-model]').evaluate(select=>{const option=new Option('Removed model',JSON.stringify(['missing-adapter','removed-model']));select.append(option);select.value=option.value;});
+ let releaseErased;const erasedHeld=new Promise(resolve=>releaseErased=resolve);await page.route('**/v1/chat',async route=>{if(route.request().method()!=='POST')return route.continue();const response=await route.fetch();assert.equal(response.status(),400);await erasedHeld;await route.fulfill({response});});
+ await page.locator('#send').click();await until(()=>document.querySelector('#msg').value==='');await page.locator('#msg').fill('Temporary newer input');await page.locator('#msg').fill('');releaseErased();await page.getByRole('button',{name:'Edit rejected message'}).waitFor();assert.equal(await page.locator('#msg').inputValue(),'');await page.unroute('**/v1/chat');
+ // Recovering a rejected first send still replaces its local entry on acceptance.
+ await page.getByRole('button',{name:'Edit rejected message'}).click();await until(()=>location.hash.startsWith('#/draft/') && App.draftRecord?.localEntry && !App.draftRecord.thread);const recoveredFirstId=await draft();await page.locator('#say [data-model]').selectOption(validModel);await page.locator('#send').click();await page.waitForURL(/#\/chat\//);await until(()=>App.draftRecord?.thread && App.draftRecord.pending.length===0);assert.equal(await page.locator(`nav.side a[href="#/draft/${recoveredFirstId}"]`).count(),0);assert.equal(await page.evaluate(()=>App.draftRecord.localEntry),false);
  // Controlled observer delivery reproduces a deliberate scroll during resize restoration.
  await page.evaluate(()=>{
    const NativeObserver=window.ResizeObserver;let resize;
@@ -124,7 +138,13 @@ try {
  const previous=await anchor();assert.ok(previous.bottom>80);
  const response=await page.evaluate(body=>Magnus.api('POST','/v1/chat',body),{thread:accepted.thread,text:'Activity while reading above'});assert.equal(response.thread,accepted.thread);
  await page.locator('.entry[data-kind=message]').nth(expectedMessages).waitFor();const after=await anchor();assert.equal(after.id,previous.id);assert.ok(Math.abs(after.offset-previous.offset)<3);
+ // A real uploaded image gains intrinsic size above the reader after hydration.
+ const image=await page.evaluate(body=>Magnus.api('POST','/v1/files',body),{name:'anchor-pixel.png',media_type:'image/png',data_b64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='});
+ await page.evaluate(async id=>{const first=document.querySelector('#thread [data-entry]'),img=document.createElement('img');img.alt='Delayed intrinsic-size anchor fixture';img.style.width='160px';img.dataset.proseImage=`/v1/files/${id}`;first.append(img);loadMarkdownImages(first);await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=reject;});await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));},image.id);
+ const afterImage=await anchor();assert.equal(afterImage.id,previous.id);assert.ok(Math.abs(afterImage.offset-previous.offset)<3,'late intrinsic image size preserves the reader anchor');
+ await page.evaluate(()=>{const stamp=document.querySelector('#thread .entry .small');if(stamp)stamp.textContent='Magnus · refreshed timestamp';});await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));const afterStamp=await anchor();assert.equal(afterStamp.id,previous.id);assert.ok(Math.abs(afterStamp.offset-previous.offset)<3,'timestamp-only changes do not follow latest');
  await page.getByRole('button',{name:'New activity · Jump to latest'}).click();assert.ok((await anchor()).bottom<=80);
+ await page.evaluate(body=>Magnus.api('POST','/v1/chat',body),{thread:accepted.thread,text:'Follow new activity while already at bottom'});await page.locator('.entry[data-kind=message]').nth(expectedMessages+1).waitFor();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));assert.ok((await anchor()).bottom<=80,'readers at bottom keep following actual new content');
 
  // Unavailable storage keeps the current draft through ordinary navigation.
  await page.evaluate(()=>{window.originalStorageSet=Storage.prototype.setItem;Storage.prototype.setItem=function(){throw new Error('test storage unavailable');};});

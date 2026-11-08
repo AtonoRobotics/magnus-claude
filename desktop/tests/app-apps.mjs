@@ -26,14 +26,14 @@ await d.step("connect it from its card in the Library; the code comes back to th
   // exists only once the app can navigate. (The address was for reaching
   // the Library from Settings, which has no sidebar; the app is added
   // through the API now, so sign-in lands on the workspace with its own.)
-  await d.click(d.xpath("//nav//a[normalize-space()='Library']"));
+  await d.click(d.xpath("//nav//a[normalize-space()='Apps']"));
   // Connect opens the app's page in this computer's browser (the test's, as
   // a person's would): the page approves and sends its code to the shell's
   // one-time loopback address, and the card turns Connected. Nothing else
   // may use that address first.
   await d.click(d.xpath("//*[@data-connector='calendar']//button[starts-with(@aria-label,'Connect ')]"));
   await d.css('[data-connector="calendar"][data-state="connected"]');
-  await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
+  await d.click(d.xpath("//nav//a[@aria-label='Settings']"));
   await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Connectors']"));
 });
 

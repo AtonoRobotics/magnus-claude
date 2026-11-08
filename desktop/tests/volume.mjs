@@ -46,21 +46,29 @@ await step("sign in", async () => {
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   // Signed in: the workspace, with Needs you in the sidebar.
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
-await step("everything that needs you fits one screen", async () => {
+await step("actionable tasks lead and stay reachable without page scrolling", async () => {
   // Tasks opens beside the conversation.
-  await page.getByRole("link", { name: /^Tasks/ }).click();
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
+  await page.getByRole("navigation", { name: "Activity views" }).getByRole("link", { name: "Tasks", exact: true }).click();
   const rows = page.locator('#detail [data-section="needs"] .trow[data-state="needs"]');
   await until(`${needs} tasks needing you`, async () => await rows.count() === Number(needs));
   const order = await page.locator("section.tsec").evaluateAll(els => els.map(e => e.dataset.section));
   const wanted = ["needs", "running", "waiting", "done", "failed"];
   if (order.join() !== wanted.filter(s => order.includes(s)).join()) throw new Error(`sections out of order: ${order.join(", ")}`);
   if (await page.evaluate(() => window.scrollY) !== 0) throw new Error("the page scrolled");
-  for (const box of await rows.evaluateAll(els => els.map(e => e.getBoundingClientRect().toJSON()))) {
-    if (box.top < 0 || box.bottom > win.height) throw new Error(`a task needing you is off screen (bottom ${box.bottom} of ${win.height})`);
+  // UX-01 keeps readable typography and permits long lists to scroll locally.
+  const reading=page.locator('#detail .detail-body');
+  await rows.first().scrollIntoViewIfNeeded();
+  for(const row of await rows.all()){
+    await row.scrollIntoViewIfNeeded();const box=await row.boundingBox(),clip=await reading.boundingBox();
+    if(box.y<clip.y-1 || box.y+box.height>Math.min(win.height,clip.y+clip.height)+1)throw new Error('an actionable task cannot be reached inside its reading region');
+    if(await page.evaluate(()=>window.scrollY)!==0)throw new Error('task navigation scrolled the application shell');
   }
+  const heading=await page.locator('#detail .detail-head').boundingBox();if(heading.y<0 || heading.y+heading.height>win.height)throw new Error('task header is clipped');
+  const send=await page.locator('#send').boundingBox();if(send.y<0 || send.y+send.height>win.height)throw new Error('task reading hides the composer');
   const group = page.locator(".tgroup", { hasText: "Plan the team offsite." });
   const progress = await group.locator(".ghead").innerText();
   if (!/3 of 5 done · 2 need you/.test(progress)) throw new Error(`the group's progress reads ${progress}`);

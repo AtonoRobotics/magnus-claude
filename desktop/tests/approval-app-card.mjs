@@ -41,12 +41,17 @@ await step("sign in", async () => {
   await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
-const card = page.locator(`#detail [data-needs="${item}"] .conncard[data-connector="${app}"]`);
-await step(decides ? "the approval carries the app's card, saying the person needs to sign in again" : "the approval in Needs you carries the app's card, asking to sign in again", async () => {
-  await page.locator("nav button.needs").click();
+const card = page.locator(`#detail article[data-id="${item}"] .conncard[data-connector="${app}"]`);
+await step(decides ? "the approval carries the app's card, saying the person needs to sign in again" : "the approval waiting on another person remains available in Activity", async () => {
+  await page.locator("nav a.needs").click();
+  if(!decides){
+    if(await page.locator(`#detail [data-needs="${item}"]`).count())throw new Error("a non-actionable approval appeared in Needs you");
+    await page.getByRole("link",{name:"Activity",exact:true}).click();
+    await page.locator('details[data-key="other"] > summary').click();
+  }
   await card.waitFor({ timeout: T });
   if ((await card.getAttribute("data-state")) !== "needs_attention") throw new Error(`the card is ${await card.getAttribute("data-state")}, not needs_attention`);
   await card.locator(".ctile").waitFor({ timeout: T });
@@ -57,6 +62,7 @@ await step(decides ? "the approval carries the app's card, saying the person nee
     if (await card.locator("button").count()) throw new Error("someone else's card offers a button");
     await page.locator(`#detail [data-needs="${item}"] button[data-decision="approve:once"]`).waitFor({ timeout: T });
   } else {
+    if(await page.locator(`#detail article[data-id="${item}"] button[data-decision="approve:once"]`).count())throw new Error("the requester can decide another person’s approval");
     await card.getByRole("button", { name: /^Sign in to .+ again$/ }).waitFor({ timeout: T });
   }
   const said = await card.innerText();
@@ -64,16 +70,16 @@ await step(decides ? "the approval carries the app's card, saying the person nee
 });
 
 await step("in every look and at phone width", async () => {
-  for (const [mode, material] of [["light", "solid"], ["dark", "solid"], ["light", "glass"], ["dark", "glass"]]) {
+  for (const [theme, material] of ["light","dark","ember","corporate"].flatMap(theme=>["solid","glass"].map(material=>[theme,material]))) {
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 800 });
-      await page.evaluate(([mode, material]) => Theme.set({ mode, material }), [mode, material]);
+      await page.evaluate(([theme, material]) => Theme.set({ theme, material }), [theme, material]);
       await card.waitFor({ timeout: T });
       const over = await page.evaluate(() => Math.max(document.documentElement.scrollWidth - document.documentElement.clientWidth, ...[...document.querySelectorAll("main")].map(m => m.scrollWidth - m.clientWidth)));
-      if (over > 0) throw new Error(`${mode} ${material} at ${width}px scrolls sideways by ${over}px`);
+      if (over > 0) throw new Error(`${theme} ${material} at ${width}px scrolls sideways by ${over}px`);
     }
   }
-  await page.evaluate(() => Theme.set({ mode: "system", material: "solid" }));
+  await page.evaluate(() => Theme.set({ followComputer: true, material: "solid" }));
 });
 
 if (errors.length) { console.error(`FAIL page errors: ${errors.join("; ")}`); process.exit(1); }

@@ -36,7 +36,7 @@ await step("sign in", async () => {
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   // Signed in: the workspace, with Needs you in the sidebar.
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
 });
 
 await step("the itinerary is on the page in full", async () => {
@@ -70,6 +70,7 @@ await step("then the summary, evidence and cost; the steps a tab away", async ()
 
 await step("a one-tap verdict with a note is kept", async () => {
   const bar = () => page.locator(`[data-verdict-for="${task}"]`);
+  await page.locator("[data-work-feedback] > summary").click();
   await bar().getByRole("button", { name: "Partly", exact: true }).click();
   await page.getByText("Recorded.").waitFor({ timeout: T });
   await bar().locator("details.vnote > summary").click();
@@ -79,6 +80,7 @@ await step("a one-tap verdict with a note is kept", async () => {
   // Opened again from its link after a restart of the page, it is kept.
   await page.reload();
   await page.goto(`${base}/#/task/${task}`);
+  await page.locator("[data-work-feedback] > summary").click();
   await bar().locator('button[data-verdict="partly"][aria-pressed="true"]').waitFor({ timeout: T });
   const note = await bar().getByLabel("Note").inputValue();
   if (note !== "Lodging is far from the coast.") throw new Error(`the note reads "${note}" after a reload`);

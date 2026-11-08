@@ -50,7 +50,7 @@ await step("sign in and open the conversation", async () => {
   await page.getByLabel("Username").fill(person);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+  await page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
   await page.locator(`nav.side a[href="#/chat/${thread}"]`).first().click();
   await page.locator(`#thread [data-chat-task="${memo}"]`).waitFor({ timeout: T });
 });
@@ -87,7 +87,7 @@ await step("Cancel on the memo's card cancels it", async () => {
 
 await step("Cancel on the schedule's card cancels it, and the card says so", async () => {
   await page.locator("#thread .sched-state").getByRole("button", { name: "Cancel" }).click();
-  await page.locator("#thread [data-schedule-gone]").getByText("no longer runs").waitFor({ timeout: T });
+  await page.locator("#thread [data-schedule-gone]").getByText("Details unavailable", {exact:true}).waitFor({ timeout: T });
 });
 
 if (errors.length) { console.error(`FAIL page errors: ${errors.join("; ")}`); await browser.close(); process.exit(1); }

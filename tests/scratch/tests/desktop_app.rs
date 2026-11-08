@@ -884,7 +884,7 @@ fn the_update_script_waits_two_minutes_to_accept_the_task_that_waited() {
 #[test]
 fn the_apps_script_reaches_the_library_through_the_sidebar() {
     let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/tests/app-apps.mjs")).unwrap();
-    assert!(src.contains("//nav//a[normalize-space()='Library']"), "{src}");
+    assert!(src.contains("//nav//a[normalize-space()='Apps']"), "{src}");
     assert!(!src.contains("location.hash"), "hash navigation is back:\n{src}");
 }
 
@@ -951,4 +951,17 @@ async fn completed_work_links_remain_operable_while_native_content_resizes() {
     let _kc=keycloak(&mut f.app).await;let (url,fingerprint)=f.with_tls().await;
     let d=Driver::start().await;let (ok,log)=d.script("app-continuity.mjs",&url,&fingerprint,&[]).await;
     assert!(ok,"Native work link failed:\n{log}");
+}
+
+/// Real native table scrolling and OS browser handoff, with a recorded website.
+#[tokio::test(flavor="multi_thread")]
+#[ignore="needs the built desktop app, tauri-driver, WebKitWebDriver and xvfb-run"]
+async fn frame_links_remain_aligned_and_open_the_actual_browser_after_table_scrolling(){
+    let links=magnus_invariants::FakeWeb::start(&[("/first-link","<h1>First supplier reference</h1>"),("/last-link","<h1>Last supplier reference</h1>")]).await;
+    let (_f,_idp,url,fingerprint)=appliance().await;let d=Driver::start().await;
+    let (first,last)=(links.url("/first-link"),links.url("/last-link"));
+    let (ok,log)=d.script("app-frame-links.mjs",&url,&fingerprint,&[("MAGNUS_FIRST_LINK",&first),("MAGNUS_LAST_LINK",&last)]).await;
+    assert!(ok,"Native frame links failed:\n{log}");
+    for _ in 0..300{let hits=links.hits();if hits.iter().any(|p|p=="/first-link") && hits.iter().any(|p|p=="/last-link"){break;}tokio::time::sleep(std::time::Duration::from_millis(50)).await;}
+    let hits=links.hits();assert!(hits.iter().any(|p|p=="/first-link") && hits.iter().any(|p|p=="/last-link"),"The real default browser did not visit both clicked links: {hits:?}");
 }

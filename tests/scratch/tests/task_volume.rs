@@ -2,8 +2,8 @@
 //! start several tasks, typed tasks, schedules), driven in a real browser
 //! (`desktop/tests/volume.mjs`). Tasks are grouped by the request that
 //! started them, in sections ordered Needs you, Running, Waiting, Done,
-//! Failed; everything that needs the person fits on one screen of the app's
-//! window. A message that starts tasks shows one card, and their results
+//! Failed; actionable rows lead and remain reachable in the independently
+//! scrolling work region without hiding its header or the composer (UX-01). A message that starts tasks shows one card, and their results
 //! come back as one-liners.
 
 use magnus_invariants::appliance::workspace_root;
@@ -68,7 +68,7 @@ fn batch() -> Vec<(&'static str, &'static str, Vec<(&'static str, &'static str)>
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_batch_of_requests_is_organised_and_what_needs_you_fits_one_screen() {
+async fn a_batch_of_requests_prioritises_actionable_tasks_without_page_scrolling() {
     let web = FakeWeb::start(&[("/source", "ok")]).await;
     let page = web.url("/source");
     let starts: std::collections::HashMap<&str, Vec<(&str, &str)>> = batch().into_iter().map(|(t, _, s)| (t, s)).collect();

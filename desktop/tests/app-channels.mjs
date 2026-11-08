@@ -15,7 +15,7 @@ const d = await open(wd, app, process.env.MAGNUS_SHOTS, "channels");
 await pinAndSignIn(d, { url, fingerprint, provider, person });
 
 await d.step("the owner's app gets development's build", async () => {
-  await d.click(d.xpath("//nav//a[normalize-space()='Settings']"));
+  await d.click(d.xpath("//nav//a[@aria-label='Settings']"));
   await d.click(d.xpath("//nav[@aria-label='Settings']//a[normalize-space()='Updates']"));
   await d.seen(`Magnus ${fresh} is downloaded and checked.`);
   await d.seen("Sources in every answer");

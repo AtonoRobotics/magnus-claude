@@ -42,7 +42,7 @@ const step = async (name, f) => {
 };
 const T = 60_000;
 // Signed in: the workspace, with Needs you in the sidebar.
-const home = () => page.getByRole("button", { name: /^Needs you/ }).waitFor({ timeout: T });
+const home = () => page.getByRole("link", { name: /^Needs you/ }).waitFor({ timeout: T });
 const panel = page.locator("#detail");
 const conversations = () => page.locator('#side a[href^="#/chat/"]').count();
 
@@ -110,7 +110,7 @@ await step("ask for the work in a conversation", async () => {
 });
 
 await step("approve under Needs you", async () => {
-  await page.getByRole("button", { name: /^Needs you/ }).click();
+  await page.getByRole("link", { name: /^Needs you/ }).click();
   const card = panel.locator("article.item.approval").first();
   await card.waitFor({ timeout: T });
   // The card says exactly what will happen, and that a task waits on it.
@@ -132,6 +132,7 @@ await step("see the outcome with its evidence", async () => {
   await page.locator("#thread [data-chat-task][data-status=completed]").waitFor({ timeout: T });
   await page.locator("#thread [data-chat-task] a.rg-row").click();
   await panel.locator(".detail-head .chip", { hasText: "Done" }).waitFor({ timeout: T });
+  await panel.locator(".verification-detail > summary").click();
   await panel.locator(".evidence.pass").first().waitFor({ timeout: T });
   const holds = await panel.locator(".evidence.pass .chip.ok", { hasText: "holds" }).count();
   if (!holds) throw new Error("no criterion shows that it holds in the world");
@@ -187,7 +188,8 @@ if (question) await step("ask in a new conversation and see the answer", async (
   await page.waitForFunction(n => document.querySelectorAll('#side a[href^="#/chat/"]').length === n, before + 1, { timeout: T });
   await shot("chat thread");
   // A chat turn is a conversation, not a task.
-  await page.getByRole("link", { name: /^Tasks/ }).click();
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
+  await page.getByRole("navigation", { name: "Activity views" }).getByRole("link", { name: "Tasks", exact: true }).click();
   await panel.locator("section.tsec").first().waitFor({ timeout: T });
   if (await panel.getByText(question).count()) throw new Error("the chat message is listed as a task");
   // Opening Magnus again returns to the latest conversation, not a blank one.

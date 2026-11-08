@@ -5,7 +5,20 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const api = (m, p, b) => Magnus.api(m, p, b);
+const api = async (m,p,b) => {
+  const owner=App.me?.id, appliance=App.appliance, session=App.sessionGeneration, view=App.seq;
+  let result;
+  try { result=await Magnus.api(m,p,b); }
+  catch(error) {
+    // A lost mutation reply does not establish whether its effect happened.
+    // Keep authoritative error metadata (including send rejection handling).
+    if(!["GET","HEAD","OPTIONS"].includes(m) && (!error.status || error.status>=500))
+      throw Object.assign(new Error(`Outcome not confirmed. ${error.message || "Check the current state before trying again."}`),{status:error.status,body:error.body});
+    throw error;
+  }
+  if(m==="GET" && (owner!==App.me?.id || appliance!==App.appliance || session!==App.sessionGeneration || view!==App.seq)) throw Object.assign(new Error("This view changed."),{cancelled:true});
+  return result;
+};
 const enc = encodeURIComponent;
 
 // Read aloud in the appliance's own voice, a sentence at a time, so the first
@@ -82,6 +95,7 @@ const App = {
   leave: [],
   routes: [],
   seq: 0,
+  sessionGeneration: 0,
 };
 
 // One atomic journal per signed-in person/appliance. Only message text,
@@ -129,24 +143,27 @@ const MessageDrafts = (() => {
     const r = {id:uid(), thread, project, text:"", files:[], pending:[], selection:[0,0], anchor:null};
     rows[r.id] = r; changed(true); return r;
   }
-  function forThread(thread, project = null) { return Object.values(rows).find(r => r.thread === thread) || create(project,thread); }
+  function forThread(thread, project = null) { return Object.values(rows).find(r => r.thread === thread && !r.localEntry) || create(project,thread); }
   function discard(id) { if (!rows[id]) return; for (const f of rows[id].files) originals.delete(f.uid); delete rows[id]; changed(true); }
   function acknowledge(record, submission, response) {
     if (!rows[record.id] || !record.pending.some(p => p.id === submission.id)) return;
+    const secondary=!!(record.localEntry && record.thread);
     record.thread = response.thread;
     record.pending = record.pending.filter(p => p.id !== submission.id);
-    record.localEntry = !!(record.localEntry && (record.text || record.files.length || record.pending.length));
+    record.localEntry=secondary;
+    // Secondary thread drafts keep their independent navigation identity,
+    // including when the person edits only after this acknowledgement.
     // The current editable draft was separated at dispatch. Never clear it
     // on an acknowledgement arriving after the person continued typing.
     changed(true);
   }
   function submit(record, body) {
-    const submission = {id:uid(),state:"dispatching",body:clone(body),files:clone(record.files),at:new Date().toISOString()};
+    const submission = {id:uid(),state:"dispatching",body:clone(body),editRevision:record.editRevision||0,draftText:record.text,selection:clone(record.selection),files:clone(record.files),at:new Date().toISOString()};
     record.pending.push(submission); record.text = ""; record.files = []; record.selection = [0,0]; changed(true); return submission;
   }
   function reject(record, submission, message) {
     submission.state = "rejected"; submission.error = message;
-    if (!record.text && !record.files.length) { record.text = submission.body.text; record.files = clone(submission.files); record.pending = record.pending.filter(p => p.id !== submission.id); record.selection=[record.text.length,record.text.length]; }
+    if (!record.text && !record.files.length && (record.editRevision||0)===(submission.editRevision||0)) { record.text = submission.draftText ?? submission.body.text; record.files = clone(submission.files); record.pending = record.pending.filter(p => p.id !== submission.id); record.selection=clone(submission.selection || [record.text.length,record.text.length]); }
     changed(true);
   }
   return {open,leave,clear,create,forThread,discard,acknowledge,submit,reject,changed,flush,uid,
@@ -159,6 +176,7 @@ const ReadingAnchors = (() => {
   const state = new WeakMap();
   function capture(root) {
     if (!root) return null;
+    if (!root.clientHeight) return state.get(root) || null;
     const bounds = root.getBoundingClientRect();
     const frames=[...root.querySelectorAll("iframe.composed")];
     for (const [frameIndex,frame] of frames.entries()) {
@@ -177,7 +195,7 @@ const ReadingAnchors = (() => {
       offset:node ? node.getBoundingClientRect().top-bounds.top : 0};
   }
   function restore(root, anchor) {
-    if (!root || !anchor) return;
+    if (!root || !anchor || !root.clientHeight) return;
     if (anchor.follow) root.scrollTop = root.scrollHeight;
     else if (anchor.frameIndex!==undefined) {
       try {
@@ -201,6 +219,7 @@ const ReadingAnchors = (() => {
       // arrive before the next animation frame and must update the anchor.
       if(restoredTop!==null && Math.abs(root.scrollTop-restoredTop)<1){restoredTop=null;return;}
       restoredTop=null;
+      if (!root.clientHeight) return;
       const a = remember(root); if (!persist) a.follow=false; if (a.follow) root.parentElement?.querySelector("[data-jump-latest]")?.setAttribute("hidden", ""); if (record) { record.anchor = a; if (persist) MessageDrafts.changed(); }
     };
     root.addEventListener("scroll",onScroll,{passive:true});
@@ -209,10 +228,58 @@ const ReadingAnchors = (() => {
     });
     const observe = () => { resize.disconnect(); resize.observe(root); for (const n of root.children) resize.observe(n); };
     const content = new MutationObserver(observe); content.observe(root,{childList:true}); observe();
-    return () => { if (record) { record.anchor = capture(root); if (!persist) record.anchor.follow=false; } if (persist) MessageDrafts.flush(); root.removeEventListener("scroll",onScroll); content.disconnect(); resize.disconnect(); };
+    return () => { if (record) { record.anchor = capture(root) || record.anchor; if (!persist && record.anchor) record.anchor.follow=false; } if (persist) MessageDrafts.flush(); root.removeEventListener("scroll",onScroll); content.disconnect(); resize.disconnect(); };
   }
   return {capture,restore,remember,hold,watch};
 })();
+
+// Each resource retains its last good data; only its newest response may reconcile it.
+const Resources = (()=>{
+ let epoch=0, serial=0;const states=new Map();let announced="";
+ function render() {
+  const shell=$(".shell");if(!shell)return;
+  let el=$("#connection-status");if(!el){el=document.createElement("div");el.id="connection-status";el.className="connection-status";shell.append(el);}
+  const stale=[...states].filter(([,s])=>s.failed), text=stale.map(([name,s])=>`${name} may be stale · ${s.at ? `Last refreshed ${new Date(s.at).toLocaleTimeString()}` : "Not yet refreshed"}`).join(". ");
+  el.hidden=!stale.length;
+  if(el.textContent!==text)el.textContent=text;
+  // Announce transitions once, never repeat unchanged polling failures or timestamps.
+  const summary=stale.map(([name])=>name).join(", ");
+  if(summary!==announced){announced=summary;let live=$("#connection-announcement");if(!live){live=document.createElement("div");live.id="connection-announcement";live.className="sr";live.setAttribute("role","status");document.body.append(live);}live.textContent=summary ? `${summary} may be stale. Cached information remains available.` : "Connection restored.";}
+ }
+ function reset(){epoch++;states.clear();announced="";render();}
+ function forget(name){states.delete(name);render();}
+ function good(name){const s=states.get(name)||{};states.set(name,{...s,failed:false,at:Date.now()});render();}
+ function bad(name,error){if(error?.cancelled)return;const s=states.get(name)||{};states.set(name,{...s,failed:true});render();if(error?.status===401 && App.me){stop();signInScreen("Your session ended. Sign in again.");}}
+ async function read(name,path,key,cached=false){const scope=epoch,token=++serial,prior=states.get(name)||{};states.set(name,{...prior,token});
+  try{const response=await api("GET",path);if(scope!==epoch || states.get(name)?.token!==token)return;const value=key ? response[key] : response;states.set(name,{...states.get(name),path,value});good(name);return value;}
+  catch(error){if(cached && error?.cancelled)throw error;if(!error?.cancelled && scope===epoch && states.get(name)?.token===token){bad(name,error);if(cached && prior.path===path)return prior.value;}}
+ }
+
+ return {read,reset,forget,good,bad,render};
+})();
+
+// Retain the existing first-presentation effect on actual visible update cards.
+let openedFrame=null;
+function reportOpenedSoon() {
+  if(openedFrame!==null)return;
+  openedFrame=requestAnimationFrame(()=>{
+    openedFrame=null;if(!App.me)return;
+    const reported=App.reported ||= new Set(),reporting=App.reporting ||= new Set();
+    const eligible=new Map(App.inbox.filter(i=>i.status==="open" && ["observation","interrupt"].includes(i.kind) && !i.opened_at && !reported.has(i.id) && !reporting.has(i.id)).map(i=>[i.id,i]));
+    const ids=new Set();
+    for(const card of document.querySelectorAll("article[data-id]")){
+      const id=card.dataset.id;if(!eligible.has(id) || card.closest("details:not([open])") || !card.getClientRects().length)continue;
+      const bounds=card.getBoundingClientRect(),root=card.closest(".detail-body,.thread"),clip=root?.getBoundingClientRect();
+      if(bounds.bottom<=Math.max(0,clip?.top||0) || bounds.top>=Math.min(innerHeight,clip?.bottom??innerHeight) || bounds.right<=Math.max(0,clip?.left||0) || bounds.left>=Math.min(innerWidth,clip?.right??innerWidth))continue;
+      ids.add(id);
+    }
+    if(!ids.size)return;
+    for(const id of ids)reporting.add(id);
+    api("POST","/v1/inbox/opened",{ids:[...ids]}).then(response=>{
+      for(const id of response.opened || [])reported.add(id);
+    },()=>{}).finally(()=>{for(const id of ids)reporting.delete(id);});
+  });
+}
 
 // A question before an action, asked in the app itself: a webview may
 // ignore window.confirm and answer no without showing it, so a button
@@ -274,6 +341,9 @@ function paint(el, html) {
   // panel, Needs you), each copy with the same draft key: the copy being
   // typed in is the draft, and only a region that held the focus takes it.
   const active = document.activeElement;
+  // Keep explicitly transient credential controls in the live DOM only.
+  // Polling may redraw their surrounding form; never put keys in drafts.
+  const ephemeral=new Map($$("input[data-ephemeral][id]",el).map(input=>[input.id,{input,start:input.selectionStart,end:input.selectionEnd}]));
   const menuState = Menus.capture(el);
   $$("[data-draft]", el).forEach(i => { if (!(active !== i && active?.dataset?.draft === i.dataset.draft)) drafts[i.dataset.draft] = i.type === "checkbox" ? i.checked : i.value; });
   const opened = new Set($$("details[data-key]", el).filter(d => d.open).map(d => d.dataset.key));
@@ -285,6 +355,10 @@ function paint(el, html) {
   } : null;
   el.innerHTML = html;
   el._html = html;
+  for(const input of $$("input[data-ephemeral][id]",el)){
+    const prior=ephemeral.get(input.id);if(!prior || prior.input.type!==input.type)continue;
+    input.replaceWith(prior.input);if(prior.start!==null)prior.input.setSelectionRange(prior.start,prior.end);
+  }
   loadMarkdownImages(el);
   $$("details[data-key]", el).forEach(d => { if (opened.has(d.dataset.key)) d.open = true; });
   $$("[data-draft]", el).forEach(i => { const v = drafts[i.dataset.draft]; if (v === undefined) return; if (i.type === "checkbox") i.checked = !!v; else i.value = v; });
@@ -295,6 +369,7 @@ function paint(el, html) {
     target?.focus({preventScroll:true});
   }
   Menus.restore(menuState);
+  reportOpenedSoon();
   return true;
 }
 
@@ -318,7 +393,9 @@ const chip = st => { const [c, l] = STATUS[st] || ["", st]; return `<span class=
 // it in a panel, and the sidebar. Everything it shows is read together
 // (refresh), so a task, a schedule or a decision is one object wherever it
 // appears, and acting on it anywhere redraws every place it is shown.
-const needsMe = () => App.inbox.filter(i => i.status === "open" && i.can_respond && !(i.details && i.details.notify_at && Date.parse(i.details.notify_at) > Date.now()));
+const DECISION_KINDS=new Set(["approval","question","contract_change","review","policy_proposal","schedule_proposal","task_proposal","tool_change","deletion_request","endorsement","tool_review"]);
+const needsDecision=i=>i.status==="open" && i.can_respond && (DECISION_KINDS.has(i.kind) || (i.kind==="notice" && i.blocking)) && !(i.details?.notify_at && Date.parse(i.details.notify_at)>Date.now());
+const needsMe = () => App.inbox.filter(needsDecision);
 
 // The workspace's icons, drawn as in the Magnus Workspace design: 24px
 // outlines in the current color.
@@ -348,54 +425,117 @@ const UI = {
 };
 const icon = (k, cls = "") => `<svg class="ic${cls ? ` ${cls}` : ""}" viewBox="0 0 24 24" aria-hidden="true">${UI[k]}</svg>`;
 
-function nav() {
-  const route = location.hash || "#/home";
-  const link = (href, label, ic) => `<a href="${href}" class="${route === href || route.startsWith(href + "/") ? "on" : ""}">${ic ? icon(ic) : ""}<span class="ttl">${label}</span></a>`;
-  const on = what => Panel.what === what ? " on" : "";
-  const waiting = needsMe(), blocking = waiting.filter(i => i.blocking).length;
-  const ready = App.update?.ready;
-  // A project's conversations sit under it; the rest, each with its icon.
-  const conv = (t, nested = true) => `<a href="#/chat/${enc(t.thread)}" class="${nested ? "conv" : ""}${t.thread === App.thread ? " on" : ""}"${t.thread === App.thread ? ` aria-current="page"` : ""} title="${esc(t.title)}">${nested ? "" : icon("chat")}<span class="ttl">${esc(t.title)}</span></a>`;
-  const loose = App.threads.filter(t => !t.project);
-  const here = App.threads.find(t => t.thread === App.thread);
-  const running = App.tasks.filter(t => t.status === "running").length;
-  const count = n => n ? `<span class="count">${n}</span>` : "";
-  return `
-    ${ready ? `<div class="update-ready" title="${esc(ready.notes || "")}"><div class="small">Magnus ${esc(ready.version)} is ready.</div>
-      <button class="primary small" data-act="restart-update">Restart to update</button></div>` : ""}
-    <button class="needs${waiting.length ? " some" : ""}${on("needs")}" data-open="needs" title="${blocking ? `${blocking} waiting on you now` : "Approvals, questions and reviews"}">${icon("bell")}<span class="ttl">Needs you</span><span class="pill${blocking ? "" : " quiet"}" data-needs-count>${waiting.length}</span></button>
-    <div class="sect"><div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more${on("projects")}" title="All projects, and a new one">All</a></div>
-    ${App.projects.map(p => `<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" class="${[on(`project:${p.id}`).trim(), here?.project?.id === p.id ? "cur" : ""].filter(Boolean).join(" ")}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>
-      ${App.threads.filter(t => t.project?.id === p.id).map(t => conv(t)).join("")}`).join("") || `<p class="small faint pad">None yet.</p>`}</div>
-    ${loose.length ? `<div class="sect"><div class="group"><span>Conversations</span></div>${loose.map(t => conv(t, false)).join("")}</div>` : ""}
-    ${MessageDrafts.all().filter(r=>!r.thread || r.localEntry).length ? `<div class="sect"><div class="group"><span>Drafts</span></div>${MessageDrafts.all().filter(r=>!r.thread || r.localEntry).map(r=>`<a href="#/draft/${enc(r.id)}" title="Draft: ${esc((firstLine(r.text) || firstLine(r.pending[0]?.body.text) || "New conversation").slice(0,80))}"><span class="ttl">Draft: ${esc((firstLine(r.text) || firstLine(r.pending[0]?.body.text) || "New conversation").slice(0,80))}</span></a>`).join("")}</div>` : ""}
-    <div class="sect"><div class="group"><span>Across everything</span></div>
-    <div class="views">
-      <a href="#/tasks" data-open="tasks" class="${on("tasks").trim()}">${icon("tasks")}<span class="ttl">Tasks</span>${running ? `<span class="count">${running} running</span>` : ""}</a>
-      <a href="#/schedules" data-open="schedules" class="${on("schedules").trim()}">${icon("calendar")}<span class="ttl">Schedules</span>${count(App.schedules.length)}</a>
-      <a href="#/files" data-open="files" class="${on("files").trim()}">${icon("file")}<span class="ttl">Files</span></a>
-      <a href="#/library" class="${route.startsWith("#/library") ? "on" : ""}">${icon("grid")}<span class="ttl">Library</span></a>
-      ${link("#/trash", "Trash", "trash")}</div></div>
-    <div class="foot">
-    ${isDev() ? `<div class="group"><span>Developer</span></div>
-      ${link("#/dev/runs", "Runs")}
-      ${link("#/dev/experiments", "Experiments")}
-      ${link("#/dev/system", "System")}
-      ${link("#/dev/policy", "Policy")}
-      ${link("#/dev/playbook", "Playbook")}` : ""}
-    <div class="who"><span class="avatar" aria-hidden="true">${esc((App.me?.name || "?").trim().charAt(0).toUpperCase())}</span>
-      <div class="whoami" data-appliance="${esc(App.appliance)}"><div class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</div>
-      <button class="link" data-act="sign-out">Sign out</button></div>
-      <a href="#/settings" class="icon-btn${route.startsWith("#/settings") ? " on" : ""}" title="Settings">${icon("gear")}<span class="sr">Settings</span></a></div></div>`;
+function navigationTree() {
+  const current=href=>(location.hash || "#/home")===href ? 'class="on" aria-current="page"' : "";
+  const conv=t=>`<a class="conv${t.thread===App.thread ? " on" : ""}" href="#/chat/${enc(t.thread)}" ${t.thread===App.thread ? 'aria-current="page"' : ""} title="${esc(t.title)}"><span class="ttl">${esc(t.title)}</span></a>`;
+  const loose=App.threads.filter(t=>!t.project);
+  return `<div class="sect" role="group" aria-label="Projects"><div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more">All</a></div>
+    ${App.projects.map(p=>`<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" title="${esc(p.name)}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>${App.threads.filter(t=>t.project?.id===p.id).map(conv).join("")}`).join("") || '<p class="small muted pad">No projects yet.</p>'}</div>
+    <div class="sect" role="group" aria-label="Conversations"><div class="group"><span>Conversations</span></div>${loose.map(conv).join("") || '<p class="small muted pad">No conversations yet.</p>'}</div>
+    ${MessageDrafts.all().filter(r=>!r.thread || r.localEntry).length ? `<div class="sect" role="group" aria-label="Drafts"><div class="group"><span>Drafts</span></div>${MessageDrafts.all().filter(r=>!r.thread || r.localEntry).map(r=>{const href=`#/draft/${enc(r.id)}`,title=`Draft: ${(firstLine(r.text) || firstLine(r.pending[0]?.draftText || r.pending[0]?.body.text) || "New conversation").slice(0,80)}`;return `<a href="${href}" ${current(href)} title="${esc(title)}"><span class="ttl">${esc(title)}</span></a>`;}).join("")}</div>` : ""}
+    <div class="sect"><a href="#/trash" ${current("#/trash")}>${icon("trash")}<span>Trash</span></a>${isDev() ? `<details class="developer-nav"><summary>Developer</summary>${[["runs","Runs"],["experiments","Experiments"],["system","System"],["policy","Policy"],["playbook","Playbook"]].map(([k,l])=>`<a href="#/dev/${k}" ${current(`#/dev/${k}`)}>${l}</a>`).join("")}</details>` : ""}</div>`;
 }
-const sidebar = () => paint($("#side"), nav());
+function nav() {
+  const route=location.hash || "#/home", waiting=needsMe();
+  const item=Panel.what?.startsWith("item:") ? App.inbox.find(i=>i.id===Panel.what.slice(5)) : null;
+  const active=k=>k==="activity" ? ["activity","tasks","schedules"].includes(Panel.what) || /^(task|schedule):/.test(Panel.what || "") || (Panel.what?.startsWith("item:") && !needsDecision(item || {})) : k==="files" ? Panel.what==="files" || Panel.what?.startsWith("file:") : k==="needs" ? Panel.what==="needs" || (item && needsDecision(item)) : route.startsWith("#/library");
+  const primary=(k,label,ic,href)=>`<a class="primary-nav${k==="needs" ? " needs" : ""}${active(k) ? " on" : ""}" href="${href}" ${k!=="apps" ? `data-open="${k}"` : ""} ${active(k) ? 'aria-current="page"' : ""} aria-label="${label}${k==="needs" && waiting.length ? `, ${waiting.length} decisions` : ""}" title="${label}">${icon(ic)}<span class="nav-label">${label}</span>${k==="needs" ? `<span class="pill${waiting.length ? "" : " quiet"}" data-needs-count aria-hidden="true">${waiting.length}</span>` : ""}</a>`;
+  return `${App.update?.ready ? `<div class="update-ready"><span class="small">Magnus ${esc(App.update.ready.version)} is ready.</span><button data-act="restart-update">Restart to update</button></div>` : ""}
+    <a href="#/chat/new" class="new-chat primary-nav" aria-label="New conversation" title="New conversation">${icon("plus")}<span class="nav-label">New conversation</span></a>
+    <div class="primary-destinations">${primary("activity","Activity","tasks","#/activity")}${primary("needs","Needs you","bell","#/inbox")}${primary("files","Files","file","#/files")}${primary("apps","Apps","grid","#/library")}</div>
+    <button type="button" class="rail-tree icon-btn" data-nav-tree aria-label="Projects and conversations" title="Projects and conversations" aria-expanded="false" aria-controls="navigation-flyout">${icon("folder")}</button>
+    <div class="nav-tree">${navigationTree()}</div>
+    <div class="foot"><div class="who"><span class="avatar" aria-hidden="true">${esc((App.me?.name || "?").trim().charAt(0).toUpperCase())}</span><div class="whoami" data-appliance="${esc(App.appliance)}"><span class="ttl" title="${esc(App.me?.id)}">${esc(App.me?.name)}</span><button class="link" data-act="sign-out">Sign out</button></div><a href="#/settings" class="icon-btn${route.startsWith("#/settings") ? " on" : ""}" ${route.startsWith("#/settings") ? 'aria-current="page"' : ""} aria-label="Settings" title="Settings">${icon("gear")}</a></div></div>`;
+}
+function sidebar() {
+  paint($("#side"),nav());
+  if (!$("#navigation-flyout")?.hidden) paint($("#navigation-flyout"),`<h2>Projects and conversations</h2>${navigationTree()}<button data-act="sign-out">Sign out</button><button data-close-tree>Close navigation list</button>`);
+}
+
+// Fit is based on usable content width, independently of stored preferences.
+const Workspace = (() => {
+  let expanded=false, region="conversation", forceExpanded=false, installed=false, restoreDrawer=true;
+  function fit(width, preferred="expanded", conversation=420, work=false) {
+    const mobile=width<760;
+    const temporary=work && !expanded && !forceExpanded && preferred==="expanded" && width-228<936;
+    const nav=mobile ? "drawer" : preferred==="compact" || temporary ? "compact" : "expanded";
+    const navWidth=mobile ? 0 : nav==="compact" ? 64 : 228, available=width-navWidth;
+    const eligible=work && available>=936;
+    const max=Math.min(560,available-576), actual=Math.max(360,Math.min(560,Number(conversation)||420));
+    return {nav,navWidth,available,eligible,split:eligible && !expanded,min:360,max:Math.max(360,max),conversation:eligible ? Math.min(actual,max) : actual,temporary};
+  }
+  function update() {
+    const shell=$(".shell"); if (!shell) return;
+    const prefs=Theme.prefs(), work=!!Panel.what && !!App.workspace;
+    const m=fit(shell.clientWidth,prefs.navigation || "expanded",prefs.conversationWidthPx || 420,work);
+    const prior=[...document.querySelectorAll("#thread, #detail .detail-body")].filter(el=>el.clientHeight).map(root=>{
+      const rect=root.getBoundingClientRect(), nodes=[...root.querySelectorAll("[data-entry], iframe, h2, h3, p")], node=nodes.find(n=>n.getBoundingClientRect().bottom>rect.top);
+      return {root,node,top:root.scrollTop,offset:node ? node.getBoundingClientRect().top-rect.top : 0,follow:root.id==="thread" && root.scrollHeight-root.scrollTop-root.clientHeight<=80};
+    });
+    shell.style.setProperty("--nav-width",`${m.navWidth}px`);shell.style.setProperty("--conversation-width",`${m.conversation}px`);
+    document.body.dataset.navigation=m.nav;document.body.dataset.workspace=!work ? "conversation" : m.split ? "split" : "single";document.body.dataset.region=region;
+    const height=Math.min(innerHeight,window.visualViewport?.height || innerHeight);shell.style.setProperty("--workspace-height",`${height}px`);document.body.classList.toggle("short-viewport",height<520);
+    const toggle=$("[data-nav-toggle]");if(toggle){toggle.setAttribute("aria-label",m.nav==="expanded" ? "Collapse navigation" : "Expand navigation");toggle.title=toggle.getAttribute("aria-label");toggle.setAttribute("aria-expanded",String(m.nav==="expanded"));}
+    $("[data-open-drawer]").hidden=m.nav!=="drawer";
+    const selectors=$(".workspace-selectors");selectors.hidden=!work || m.split;
+    for(const b of $$("[data-region]",selectors)){const on=b.dataset.region===region;b.setAttribute("aria-pressed",String(on));}
+    const grow=$("[data-expand-work]");grow.hidden=!work || (!m.eligible && !expanded);grow.setAttribute("aria-label",expanded ? "Restore split view" : "Expand work");grow.title=grow.getAttribute("aria-label");grow.setAttribute("aria-pressed",String(expanded));
+    $("[data-close-work]").hidden=!work;
+    $(".workspace-heading").textContent=App.workspace ? "Conversation" : location.hash.startsWith("#/library") ? "Apps" : location.hash.startsWith("#/settings") ? "Settings" : location.hash.startsWith("#/dev") ? "Developer" : "Magnus";
+    $(".workspace-heading").hidden=work;
+    const separator=$("#workspace-splitter");separator.hidden=!m.split;separator.setAttribute("aria-valuenow",String(Math.round(m.conversation)));separator.setAttribute("aria-valuemin",String(m.min));separator.setAttribute("aria-valuemax",String(m.max));separator.setAttribute("aria-valuetext",`${Math.round(m.conversation)} pixels`);
+    if (m.nav!=="drawer" && $("#navigation-drawer").open) closeDrawer(false);
+    for(const a of prior){if(!a.root.clientHeight)continue;a.root.scrollTop=a.follow ? a.root.scrollHeight : a.node?.isConnected ? a.root.scrollTop+a.node.getBoundingClientRect().top-a.root.getBoundingClientRect().top-a.offset : a.top;}
+    reportOpenedSoon();
+    return m;
+  }
+  function remember() { history.replaceState({...history.state,workspace:{work:Panel.what,expanded,region}},"",location.href); }
+  function choose(which) {region=which;remember();update();const target=which==="work" ? $("#detail h2") : $("#msg");if(target){if(which==="work")target.tabIndex=-1;target.focus({preventScroll:true});}}
+  function opened() {const saved=history.state?.workspace;if(saved?.work===Panel.what){expanded=!!saved.expanded;region=saved.region==="conversation" ? "conversation" : "work";}else region="work";forceExpanded=false;remember();update();}
+  function closed() {expanded=false;region="conversation";remember();update();}
+  function openDrawer() {
+    const dialog=$("#navigation-drawer"),nav=$("nav.side");if(dialog.open)return;
+    dialog.append(nav);restoreDrawer=true;dialog.showModal();$("[data-close-drawer]",nav).focus();
+  }
+  function closeDrawer(restore=true) {const d=$("#navigation-drawer");if(!d?.open)return;restoreDrawer=restore;d.close();}
+  function closeTree(restore=true) {const fly=$("#navigation-flyout");if(!fly)return;fly.hidden=true;const b=$("[data-nav-tree]");b?.setAttribute("aria-expanded","false");if(restore)b?.focus({preventScroll:true});}
+  function resize(value) {const m=update();Theme.set({conversationWidthPx:Math.max(m.min,Math.min(m.max,value))});update();}
+  function install() {
+    expanded=false;region="conversation";forceExpanded=false;
+    const d=$("#navigation-drawer");d.addEventListener("click",e=>{if(e.target===d){const r=d.getBoundingClientRect();if(e.clientX<r.left || e.clientX>r.right || e.clientY<r.top || e.clientY>r.bottom)closeDrawer();}});d.addEventListener("close",()=>{const nav=$("nav.side",d);if(nav)$(".shell").prepend(nav);if(restoreDrawer)$("[data-open-drawer]")?.focus({preventScroll:true});});
+    $("#workspace-bar").onclick=e=>{const b=e.target.closest("button");if(!b)return;if(b.matches("[data-open-drawer]"))openDrawer();if(b.dataset.region)choose(b.dataset.region);if(b.matches("[data-expand-work]")){expanded=!expanded;if(expanded)region="work";remember();update();}if(b.matches("[data-close-work]"))closePanel(true);};
+    $("[data-nav-toggle]").onclick=()=>{const m=update(),navigation=m.nav==="compact" ? "expanded" : "compact";forceExpanded=navigation==="expanded";Theme.set({navigation});update();};
+    $("[data-close-drawer]").onclick=()=>closeDrawer();
+    $("[data-rail-search]").onclick=()=>{const dialog=$("#workspace-search");dialog.showModal();$("input",dialog).focus();};
+    $("#workspace-search form").onsubmit=e=>{e.preventDefault();const q=$("#workspace-search input").value.trim();$("#workspace-search").close();if(q){if(App.workspace)openPanel(`search:${q}`);else{App.openAfter=`search:${q}`;location.hash="#/home";}}};
+    $("[data-close-search]").onclick=()=>$("#workspace-search").close();
+    const separator=$("#workspace-splitter");separator.onkeydown=e=>{const m=update();let width=m.conversation;if(e.key==="Home")width=m.min;else if(e.key==="End")width=m.max;else if(["ArrowLeft","ArrowRight"].includes(e.key))width+=(e.key==="ArrowLeft" ? 1 : -1)*(e.shiftKey ? 48 : 16);else return;e.preventDefault();resize(width);};
+    separator.onpointerdown=e=>{if(e.button!==0)return;const m=update(),x=e.clientX,width=m.conversation;separator.setPointerCapture(e.pointerId);separator.onpointermove=move=>resize(width+x-move.clientX);separator.onpointerup=()=>{separator.onpointermove=null;separator.onpointerup=null;separator.releasePointerCapture(e.pointerId);};};
+    if(!installed){installed=true;
+      window.addEventListener("resize",()=>{forceExpanded=false;update();closeTree(false);});window.visualViewport?.addEventListener("resize",update);window.addEventListener("magnus-theme",update);
+      document.addEventListener("click",e=>{
+        const tree=e.target.closest("[data-nav-tree]");if(tree){const fly=$("#navigation-flyout");if(fly.hidden){fly.hidden=false;sidebar();tree.setAttribute("aria-expanded","true");$("a,button",fly)?.focus({preventScroll:true});}else closeTree();return;}
+        if(e.target.closest("[data-close-tree]"))closeTree();else if(!e.target.closest("#navigation-flyout"))closeTree(false);
+        const destination=e.target.closest("nav.side a, #navigation-flyout a");
+        if(destination){if(e.button===0 && !e.ctrlKey && !e.metaKey && !destination.dataset.open && destination.hash!==location.hash)App.routeFocus={opener:destination,composer:destination.hash.startsWith("#/chat/new")};closeTree(false);closeDrawer(false);}
+        if(e.target.closest("#navigation-flyout [data-act=sign-out]"))$("nav.side [data-act=sign-out]")?.click();
+      });
+      document.addEventListener("keydown",e=>{if(e.key==="Escape" && !$("#navigation-flyout")?.hidden){e.preventDefault();closeTree();}});
+    }
+    update();
+  }
+  return {fit,update,install,opened,closed,choose};
+})();
 
 function shell() {
-  document.body.innerHTML = `<div class="shell"><nav class="side" aria-label="Sections"><div class="brand"><span class="logo" aria-hidden="true">M</span><span>Magnus</span>
-    <a href="#/chat/new" class="icon-btn new-chat" title="New conversation">${icon("plus")}<span class="sr">New conversation</span></a></div>
-    <form id="find" role="search">${icon("search")}<label class="sr" for="q">Search conversations, tasks and files</label><input id="q" type="search" placeholder="Search chats, tasks, files" autocomplete="off"></form>
-    <div id="side"></div></nav>
-    <main id="main" tabindex="-1"></main><aside id="detail" class="detail" aria-label="Details" hidden></aside></div>`;
+  document.body.innerHTML = `<div class="shell"><nav class="side" aria-label="Sections"><div class="brand"><span class="logo" aria-hidden="true">M</span><span class="brand-name">Magnus</span><button class="icon-btn" data-nav-toggle aria-label="Collapse navigation" title="Collapse navigation">${icon("chev")}</button><button class="icon-btn" data-close-drawer aria-label="Close navigation">${icon("close")}</button></div>
+    <button class="icon-btn rail-search" data-rail-search aria-label="Search conversations, tasks and files" title="Search conversations, tasks and files">${icon("search")}</button>
+    <form id="find" role="search">${icon("search")}<label class="sr" for="q">Search conversations, tasks and files</label><input id="q" type="search" placeholder="Search conversations, tasks and files" autocomplete="off"></form><div id="side"></div></nav>
+    <header id="workspace-bar" class="workspace-bar"><button class="icon-btn" data-open-drawer aria-label="Open navigation">${icon("tasks")}</button><span class="workspace-heading">Conversation</span><div class="workspace-selectors" aria-label="Workspace region"><button data-region="work" aria-pressed="false">Work</button><button data-region="conversation" aria-pressed="true">Conversation</button></div><span class="grow"></span><button class="icon-btn" data-expand-work aria-label="Expand work">${icon("grid")}</button><button class="icon-btn" data-close-work data-act="close-panel" aria-label="Close work">${icon("close")}</button></header>
+    <main id="main" tabindex="-1"></main><div id="workspace-splitter" role="separator" tabindex="0" aria-label="Conversation width" aria-orientation="vertical" hidden></div><aside id="detail" class="detail" aria-label="Work" hidden></aside></div>
+    <dialog id="navigation-drawer" class="navigation-drawer" aria-label="Navigation"></dialog><div id="navigation-flyout" class="navigation-flyout" role="dialog" aria-label="Projects and conversations" hidden></div>
+    <dialog id="workspace-search" class="workspace-search" aria-label="Search conversations, tasks and files"><form><label for="workspace-query">Search conversations, tasks and files</label><input id="workspace-query" type="search" required><div class="row"><button type="submit">Search</button><button type="button" data-close-search>Close search</button></div></form></dialog>`;
+  Workspace.install();
   $("nav.side").addEventListener("click", async e => {
     if (e.target.closest("[data-act=restart-update]")) return restartToUpdate();
     if (e.target.closest("[data-act=sign-out]")) {
@@ -476,7 +616,7 @@ const Tooltips = (() => {
   const eligible = node => node instanceof Element ? node.closest("[data-tooltip]") : null;
   const label = el => el.dataset.tooltip || el.getAttribute("aria-label") || el.textContent.trim();
   function hide() {
-    clearTimeout(showTimer); clearTimeout(closeTimer);
+    clearTimeout(showTimer); clearTimeout(closeTimer); showTimer=null;closeTimer=null;
     if (tip) { const ids = (trigger?.getAttribute("aria-describedby") || "").split(/\s+/).filter(x => x && x !== tip.id); if (ids.length) trigger?.setAttribute("aria-describedby", ids.join(" ")); else trigger?.removeAttribute("aria-describedby"); tip.remove(); tip = null; }
   }
   function place() {
@@ -489,6 +629,7 @@ const Tooltips = (() => {
     tip.style.top = `${Math.max(y + 8, Math.min(top, y + h - t.height - 8))}px`;
   }
   function show() {
+    showTimer=null;
     if (!trigger?.isConnected || suppressed === trigger || !(hovered || focused)) return;
     tip = document.createElement("div"); tip.id = "magnus-tooltip"; tip.className = "tooltip"; tip.role = "tooltip"; tip.textContent = label(trigger);
     document.body.append(tip); trigger.setAttribute("aria-describedby", [trigger.getAttribute("aria-describedby"), tip.id].filter(Boolean).join(" "));
@@ -507,7 +648,7 @@ const Tooltips = (() => {
     clearTimeout(closeTimer); clearTimeout(showTimer);
     if (!tip && suppressed !== el) showTimer = setTimeout(show, focus || warm > Date.now() ? 80 : 350);
   }
-  function dismiss() { if (trigger) suppressed = trigger; hide(); }
+  function dismiss() { if (trigger && (hovered || focused)) suppressed = trigger; hide(); }
   function decorate(root) {
     for (const el of [root, ...root.querySelectorAll("[title]")]) {
       if (!el.hasAttribute?.("title")) continue;
@@ -551,6 +692,8 @@ function wireMarkdown(root) {
 
 // What works wherever it is shown, set once for the page.
 function wireDocument() {
+  document.addEventListener("toggle",reportOpenedSoon,true);
+  document.addEventListener("scroll",reportOpenedSoon,{capture:true,passive:true});
   window.addEventListener("popstate",()=>{
     if (App.currentHash!==location.hash || !App.workspace) return;
     if (history.state?.work) openPanel(history.state.work,{focus:true}); else closePanel(false);
@@ -561,7 +704,7 @@ function wireDocument() {
   Menus.install(); Tooltips.install(); wireMarkdown(document);
   const style = document.createElement("style"); style.textContent = Compose.markdownStyles; document.head.append(style);
   document.addEventListener("load", e => { if (e.target.matches?.("iframe.composed")) { try { wireMarkdown(e.target.contentDocument); sizeComposedFrame(e.target); } catch { /* frame unavailable */ } } }, true);
-  new MutationObserver(()=>{for(const [frame,sizing] of frameSizing)if(!frame.isConnected){sizing.observer.disconnect();frameSizing.delete(frame);}}).observe(document.body,{childList:true,subtree:true});
+  new MutationObserver(()=>{for(const [frame,sizing] of frameSizing)if(!frame.isConnected){sizing.observer.disconnect();frame._frameActions?.dispose();delete frame._frameActions;frameSizing.delete(frame);}}).observe(document.body,{childList:true,subtree:true});
   // Anything that names an item opens it beside the conversation, without
   // leaving it.
   document.addEventListener("click", e => {
@@ -709,7 +852,8 @@ async function go() {
   MessageDrafts.flush();
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
-  const h = location.hash || "#/home";
+  const h = location.hash || "#/home", routeFocus=App.routeFocus;App.routeFocus=null;
+  queueMicrotask(()=>Workspace.update());
   App.currentHash=location.hash;
   // A view still loading when the person moves on stops where it is: only
   // the latest navigation draws. Each view gets a main of its own, so one
@@ -729,6 +873,10 @@ async function go() {
         if (seq===App.seq) App.currentHash=location.hash;
         if (seq===App.seq && workspace && history.state && "work" in history.state) {
           if (history.state.work) await openPanel(history.state.work); else closePanel();
+        }
+        if(seq===App.seq && routeFocus && [document.body,routeFocus.opener,$("[data-open-drawer]")].includes(document.activeElement)) {
+          const target=routeFocus.composer ? $("#msg",main) : $("h1,h2",main) || main;
+          if(target){if(!target.matches("input,textarea"))target.tabIndex=-1;target.focus({preventScroll:true});}
         }
       }
       catch (e) { if (seq === App.seq) paint(main, `<div class="banner bad">${esc(e.message)}</div>`); }
@@ -885,7 +1033,8 @@ function save(k, v) { try { localStorage.setItem(seenKey(k), JSON.stringify(v));
 
 async function pollInbox() {
   try {
-    const { items } = await api("GET", "/v1/inbox");
+    const items = await Resources.read("Needs you", "/v1/inbox", "items");
+    if (!items) return;
     App.inbox = items;
     // Interrupt only for decisions a task is waiting on; the rest wait in
     // the inbox until the person looks (U3).
@@ -893,7 +1042,7 @@ async function pollInbox() {
     const wants = i => i.blocking ? App.prefs?.notify_blocking !== false : App.prefs?.notify_batched === true;
     // Each item is considered once, so turning a kind on later does not
     // bring back everything already waiting.
-    const fresh = items.filter(i => i.status === "open" && i.can_respond && !told.has(i.id));
+    const fresh = needsMe().filter(i => !told.has(i.id));
     for (const i of fresh.filter(wants)) Magnus.notify(i.blocking ? "A task needs you" : "Something for you", i.summary);
     if (fresh.length) save("told", [...told, ...fresh.map(i => i.id)].slice(-500));
     sidebar();
@@ -906,7 +1055,8 @@ async function pollInbox() {
 
 async function pollVersions() {
   try {
-    const v = await api("GET", "/v1/versions");
+    const v = await Resources.read("Agent changes", "/v1/versions");
+    if (!v) return;
     App.versions = v;
     const seen = load("version", null);
     if (seen === null) { save("version", v.latest_seq ?? 0); return; }
@@ -929,8 +1079,8 @@ function describeChange(c) {
 // Tasks, schedules, conversations and projects, read together with the
 // inbox; then every view that shows them is drawn again from what was read.
 async function refresh() {
-  const get = (path, k) => api("GET", path).then(v => v[k]).catch(() => null);
-  const [tasks, schedules, threads, projects, health] = await Promise.all([get("/v1/tasks", "tasks"), get("/v1/schedules", "schedules"), get("/v1/chat", "threads"), get("/v1/projects", "projects"), api("GET", "/v1/health").catch(() => null), pollInbox()]);
+  const get = (path, k) => Resources.read(({tasks:"Tasks",schedules:"Schedules",threads:"Conversations",projects:"Projects"})[k],path,k);
+  const [tasks, schedules, threads, projects, health] = await Promise.all([get("/v1/tasks", "tasks"), get("/v1/schedules", "schedules"), get("/v1/chat", "threads"), get("/v1/projects", "projects"), Resources.read("Appliance", "/v1/health"), pollInbox()]);
   if (!App.me) return;
   // Magnus's own background reviews are plumbing, not the person's tasks
   // (owner, 2026-11-07): developers see them in the run inspector.
@@ -950,7 +1100,8 @@ function banners() {
   const el = $("#banners");
   if (!el) return;
   const v = App.versions, news = v ? v.changes.filter(c => c.seq > load("version", 0)) : [];
-  paint(el, `${App.health?.kill_switch ? `<div class="banner bad"><strong>The kill switch is on.</strong> No task acts until the owner turns it off.</div>` : ""}
+  const sessionUpdates=App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length);
+  paint(el, `${sessionUpdates ? '<div class="banner small">Updates since your last session. <a href="#/activity" data-open="activity">View Activity</a></div>' : ""}${App.health?.kill_switch ? `<div class="banner bad"><strong>The kill switch is on.</strong> No task acts until the owner turns it off.</div>` : ""}
     ${news.length ? `<div class="banner" role="status"><strong>The agent changed since you last looked.</strong>
       <ul class="small" style="margin:6px 0">${news.map(c => `<li>${esc(describeChange(c))} <span class="faint">(${esc(when(c.at))})</span></li>`).join("")}</ul>
       <button data-act="seen-versions">Got it</button></div>` : ""}`);
@@ -1095,7 +1246,7 @@ function schedulesView() {
 // One schedule: what it does, when, how its runs went, and a way to stop it.
 function scheduleView(id) {
   const sc = App.schedules.find(x => x.id === id);
-  if (!sc) return `<p class="empty">This schedule was stopped.</p>`;
+  if (!sc) return `<p class="empty">Schedule details are not available.</p>`;
   return `<h2 class="ptitle">${esc(sc.title)}</h2><p class="small muted">${esc(rule(sc))}</p>
     <div class="card flat sched" data-schedule="${esc(sc.id)}"><p>${esc(sc.text)}</p>${scheduleFacts(sc)}<div class="small" data-last>${scheduleState(sc)}</div></div>
     <div class="row">${moveControl(sc.id, sc.project, App.projects)}${scheduleButtons(sc, "Stop this schedule")}</div>
@@ -1149,10 +1300,10 @@ function wireComposer(thread, project, record) {
   if (record.model && [...model.options].some(o => o.value === record.model)) model.value = record.model;
   const fit = () => { box.style.height = "auto"; box.style.height = `${Math.min(box.scrollHeight, innerHeight / 3)}px`; };
   const selected = () => { record.selection = [box.selectionStart,box.selectionEnd]; };
-  const read = () => { record.text = box.value; record.model = model?.value || ""; selected(); MessageDrafts.changed(); };
+  const read = (selection=true) => { if(record.text!==box.value)record.editRevision=(record.editRevision||0)+1; record.text = box.value; record.model = model?.value || ""; if(selection)selected(); MessageDrafts.changed(); };
   const status = () => MessageDrafts.saved() === true ? "Draft saved" : MessageDrafts.saved() === false ? "Draft not saved on this device" : "Saving draft…";
   const chips = () => record.files.map(f => `<span class="attachment-chip" data-upload="${esc(f.uid)}"><span>${esc(f.name)}</span><span class="small muted">${esc(f.state === "ready" ? "Ready" : f.state === "uploading" ? "Uploading…" : f.state === "unavailable" ? "Unavailable" : "Failed")}</span>${f.error ? `<span class="small">${esc(f.error)}</span>` : ""}${["failed","unavailable"].includes(f.state) ? `<button type="button" data-retry-upload="${esc(f.uid)}">Retry</button>` : ""}<button type="button" class="icon-btn" data-remove-upload="${esc(f.uid)}" aria-label="Remove ${esc(f.name)} from message" title="Remove ${esc(f.name)} from message">${icon("close")}</button></span>`).join("");
-  const submitted = () => record.pending.map(p => `<div class="submitted-message" data-submission="${esc(p.id)}"><strong>${p.state === "dispatching" ? "Sending message…" : p.state === "rejected" ? "Message was not accepted" : "Send outcome not confirmed"}</strong><p class="small">${esc(p.state === "unconfirmed" ? "This device cannot safely retry this submission. Delivery is not confirmed; no automatic resend will occur. Discarding the local draft does not cancel submitted work." : p.error || "You can continue typing.")}</p><details><summary>Submitted message</summary><p class="pre">${esc(p.body.text)}</p>${p.files.map(f => `<span class="small">${esc(f.name)}</span>`).join(" ")}</details>${p.state === "rejected" ? `<button type="button" data-recover-message="${esc(p.id)}">Edit rejected message</button>` : ""}</div>`).join("");
+  const submitted = () => record.pending.map(p => `<div class="submitted-message" data-submission="${esc(p.id)}"><strong>${p.state === "dispatching" ? "Sending message…" : p.state === "rejected" ? "Message was not accepted" : "Send outcome not confirmed"}</strong><p class="small">${esc(p.state === "unconfirmed" ? "This device cannot safely retry this submission. Delivery is not confirmed; no automatic resend will occur. Discarding the local draft does not cancel submitted work." : p.error || "You can continue typing.")}</p><details><summary>Submitted message</summary><p class="pre">${esc(p.draftText ?? p.body.text)}</p>${p.files.map(f => `<span class="small">${esc(f.name)}</span>`).join(" ")}</details>${p.state === "rejected" ? `<button type="button" data-recover-message="${esc(p.id)}">Edit rejected message</button>` : ""}</div>`).join("");
   const show = () => {
     if (!active || !form.isConnected) return;
     // Input events synchronize edits immediately. A journal transition may
@@ -1179,6 +1330,7 @@ function wireComposer(thread, project, record) {
   }
   input.onchange = e => {
     const files = [...e.target.files]; e.target.value = "";
+    if(files.length)record.editRevision=(record.editRevision||0)+1;
     for (const [i,file] of files.entries()) {
       const slot = i === 0 && replacing ? record.files.find(f => f.uid === replacing) : null;
       const item = slot || {uid:MessageDrafts.uid(),name:file.name,media_type:file.type,size:file.size,state:"uploading"};
@@ -1189,7 +1341,7 @@ function wireComposer(thread, project, record) {
   };
   pending.onclick = e => {
     const remove = e.target.closest("[data-remove-upload]"), retry = e.target.closest("[data-retry-upload]");
-    if (remove) { const uid=remove.dataset.removeUpload; record.files=record.files.filter(f=>f.uid!==uid); MessageDrafts.originals.delete(uid); MessageDrafts.changed(true); }
+    if (remove) { record.editRevision=(record.editRevision||0)+1; const uid=remove.dataset.removeUpload; record.files=record.files.filter(f=>f.uid!==uid); MessageDrafts.originals.delete(uid); MessageDrafts.changed(true); }
     if (retry) {
       const uid=retry.dataset.retryUpload, slot=record.files.find(f=>f.uid===uid), original=MessageDrafts.originals.get(uid);
       if (original) startUpload(slot,original); else { replacing=uid; input.click(); }
@@ -1201,7 +1353,7 @@ function wireComposer(thread, project, record) {
     // Recovery is another locally named draft so the current newer edits
     // remain separate, rather than being concatenated or overwritten.
     const recovered=MessageDrafts.create(record.project,record.thread);
-    recovered.localEntry=true; recovered.text=p.body.text; recovered.files=p.files; recovered.model=record.model;
+    recovered.localEntry=true; recovered.text=p.draftText ?? p.body.text; recovered.selection=[...(p.selection || [recovered.text.length,recovered.text.length])]; recovered.files=p.files; recovered.model=record.model;
     record.pending=record.pending.filter(x=>x.id!==p.id); MessageDrafts.changed(true);
     location.hash=`#/draft/${enc(recovered.id)}`;
   };
@@ -1243,7 +1395,9 @@ function wireComposer(thread, project, record) {
     }
     show(); sidebar();
   };
-  onLeave(() => { if (active) { read(); MessageDrafts.flush(); active=false; unsubscribe(); } });
+  // Input/select events already preserve the last editable caret. A browser
+  // may collapse an unfocused textarea selection during link navigation.
+  onLeave(() => { if (active) { read(false); MessageDrafts.flush(); active=false; unsubscribe(); } });
   // Only a missing/expired reference is marked unavailable. A connection
   // failure does not silently turn a valid attachment into a missing one.
   for (const f of record.files.filter(f=>f.state==="ready")) api("GET",`/v1/files/${enc(f.id)}/info`).catch(err=>{
@@ -1293,6 +1447,7 @@ async function showNewChat(main, project, draftRecord) {
   if (!draftRecord) history.replaceState({...history.state,draft:record.id},"",`#/draft/${enc(record.id)}`);
   if (!await chatLayout(main,null,project,record)) return;
   paint($("#thread",main), `<p class="muted hello">Ask a question, or say what you want done. Magnus answers, starts a task, or proposes a schedule for you to confirm. What it starts shows here as it goes.</p>`);
+  if (App.appSearch) { record.text=App.appSearch;record.selection=[record.text.length,record.text.length];App.appSearch=null;MessageDrafts.changed(true); }
   sidebar();
 }
 
@@ -1314,9 +1469,12 @@ async function showThread(main, thread, draftRecord) {
     });
     for (const id of Object.keys(listening)) if (!running.has(id)) { listening[id](); delete listening[id]; delete ui.live[id]; }
   };
-  let shown = [];
+  let shown = [], drawRevision=0;
+  onLeave(()=>Resources.forget("Conversation"));
   const draw = async () => {
-    const { entries } = await api("GET", `/v1/chat/${enc(thread)}`);
+    const revision=++drawRevision;
+    const entries = await Resources.read("Conversation", `/v1/chat/${enc(thread)}`, "entries");
+    if (!entries || revision!==drawRevision) return;
     if (App.thread !== thread) return;
     shown = entries;
     // A decision the thread now waits on, not read yet: read the inbox first.
@@ -1491,7 +1649,7 @@ route(/^#\/chat\/new\/([^/]+)$/, (m, project) => showNewChat(m, project), true);
 // Where the views over tasks, schedules, files and decisions used to be
 // pages: each opens beside the latest conversation.
 route(/^#\/inbox$/, main => home(main, "needs"), true);
-route(/^#\/(tasks|schedules|files|projects)$/, (main, k) => home(main, k), true);
+route(/^#\/(activity|tasks|schedules|files|projects)$/, (main, k) => home(main, k), true);
 // The Library is the connector catalog, a page of its own (connectors spec,
 // Library); a connector's page is under it.
 route(/^#\/library(?:\/([^/]+))?$/, (main, name) => showLibrary(main, name));
@@ -1533,7 +1691,7 @@ function ends(e) {
 }
 // Where a task stands, as the design draws it: an icon and a pill. A task
 // waiting on a decision the person can make needs them.
-const needsYou = t => !!t.waiting_item && App.inbox.some(i => i.id === t.waiting_item && i.status === "open" && i.can_respond);
+const needsYou = t => !!t.waiting_item && needsMe().some(i => i.id === t.waiting_item);
 function standing(t) {
   if (needsYou(t)) return ["need", `<span class="chip warn">Needs you</span>`];
   return [{ completed: "done", running: "working", failed: "stopped", cancelled: "stopped" }[t.status] || "working", chip(t.status)];
@@ -1612,7 +1770,7 @@ function cardOutcome(e) {
 function scheduleLine(e) {
   if (e.state !== "confirmed") return cardOutcome(e);
   const sc = App.schedules.find(x => x.id === e.schedule);
-  if (!sc) return `<p class="small" data-schedule-gone="${esc(e.schedule || "")}"><span class="chip">Cancelled</span> ${esc(e.title || "This schedule")} no longer runs.</p>`;
+  if (!sc) return `<p class="small" data-schedule-gone="${esc(e.schedule || "")}"><span class="chip">Details unavailable</span> ${esc(e.title || "This schedule")} · Schedule details are not currently available.</p>`;
   const act = (k, label) => `<button class="link small" data-sched-act="${k}" data-schedule-id="${esc(sc.id)}">${label}</button>`;
   const chip = sc.ended ? `<span class="chip">Ended</span>` : `<span class="chip sch">${sc.paused ? "Paused" : "Scheduled"}</span>`;
   const acts = sc.ended ? act("cancel", "Delete") : `${sc.paused ? act("resume", "Resume") : act("pause", "Pause")}${act("cancel", "Cancel")}`;
@@ -2056,40 +2214,78 @@ const keepHeights = el => $$("iframe[data-shown]", el).forEach(f => { if (frameH
 const frameSizing = new Map();
 // Native WebKit blocks frame event handlers when scripts are sandboxed. Keep
 // actions in the trusted parent, aligned to inert reading-surface markers.
+function alignFrameActions(frame,state) {
+  if(!frame.isConnected || frame.contentDocument!==state.doc)return;
+  const clips=new Map(), geometry=[];
+  for(const control of state.controls) {
+    const marker=control._marker;if(!marker.isConnected)continue;
+    const r=marker.getBoundingClientRect();
+    let left=0,top=0,right=frame.clientWidth,bottom=frame.clientHeight;
+    for(let node=marker.parentElement;node;node=node.parentElement) {
+      let clip=clips.get(node);
+      if(!clip){const style=state.doc.defaultView.getComputedStyle(node),box=node.getBoundingClientRect();clip={x:/auto|scroll|hidden|clip/.test(style.overflowX),y:/auto|scroll|hidden|clip/.test(style.overflowY),left:box.left+node.clientLeft,top:box.top+node.clientTop,right:box.left+node.clientLeft+node.clientWidth,bottom:box.top+node.clientTop+node.clientHeight};clips.set(node,clip);}
+      if(clip.x){left=Math.max(left,clip.left);right=Math.min(right,clip.right);}
+      if(clip.y){top=Math.max(top,clip.top);bottom=Math.min(bottom,clip.bottom);}
+    }
+    // Keep the 2px outline and 2px offset visible inside the scrollport.
+    const visible=Math.min(right,r.right)>Math.max(left,r.left) && Math.min(bottom,r.bottom)>Math.max(top,r.top);
+    geometry.push([control,{left:`${r.left}px`,top:`${r.top}px`,width:`${r.width}px`,height:`${r.height}px`,clipPath:visible?`inset(${Math.max(-4,top-r.top)}px ${Math.max(-4,r.right-right)}px ${Math.max(-4,r.bottom-bottom)}px ${Math.max(-4,left-r.left)}px)`:'inset(50%)'}]);
+  }
+  // Read frame geometry together before writing parent overlay styles.
+  for(const [control,style] of geometry)Object.assign(control.style,style);
+  state.scrollports=new Map([...clips].filter(([,clip])=>clip.x || clip.y).map(([node])=>[node,[node.scrollLeft,node.scrollTop]]));
+  const root=state.doc.scrollingElement;if(root)state.scrollports.set(root,[root.scrollLeft,root.scrollTop]);
+}
 function frameActions(frame,doc) {
   let wrapper=frame.parentElement;
   if(!wrapper.classList.contains('composed-wrap')) {
-    wrapper=document.createElement('div');wrapper.className='composed-wrap';
-    frame.before(wrapper);wrapper.append(frame);
+    wrapper=document.createElement('div');wrapper.className='composed-wrap';frame.before(wrapper);wrapper.append(frame);
   }
-  if(wrapper._actionDocument!==doc) {
-    wrapper.querySelector('.frame-actions')?.remove();
+  let state=frame._frameActions;
+  if(state?.doc!==doc || state?.body!==doc.body) {
+    state?.dispose();wrapper.querySelector('.frame-actions')?.remove();
     const layer=document.createElement('div');layer.className='frame-actions';wrapper.append(layer);
+    let scheduled=0,poll=0,disposed=false,visible=false,visibility;
+    state={doc,body:doc.body,controls:[],scrollports:new Map()};
+    const align=()=>alignFrameActions(frame,state);
+    const schedule=()=>{if(!disposed && !scheduled)scheduled=requestAnimationFrame(()=>{scheduled=0;align();});};
     for(const marker of doc.querySelectorAll('[data-code-copy-anchor], [data-prose-url]')) {
       const copy=marker.hasAttribute('data-code-copy-anchor'),control=document.createElement(copy?'button':'a');
       control.className=copy?'frame-code-copy':'frame-prose-link';
       if(copy){control.type='button';control.dataset.codeCopy='';control.textContent='Copy code';control.setAttribute('aria-label','Copy code');control.dataset.tooltip='Copy code';
         const text=marker.closest('.code-block').querySelector('code').textContent;
         control.onclick=async e=>{e.preventDefault();e.stopPropagation();Tooltips.dismiss();try{await copyText(text);toast('Code copied.');}catch(err){toast(err.message);}};
-      }else{control.textContent=marker.textContent;control.href=marker.dataset.proseUrl;control.rel='noopener noreferrer';control.onclick=e=>{e.preventDefault();Magnus.openExternal(control.href).catch(err=>toast(err.message));};}
-      layer.append(control);control._marker=marker;
+      }else{control.textContent=marker.textContent;control.setAttribute('aria-label',marker.textContent);control.href=marker.dataset.proseUrl;control.rel='noopener noreferrer';control.onclick=e=>{e.preventDefault();Magnus.openExternal(control.href).catch(err=>toast(err.message));};}
+      marker.style.scrollMargin='4px';
+      control.onfocus=()=>{marker.scrollIntoView({block:'nearest',inline:'nearest'});align();};
+      layer.append(control);control._marker=marker;state.controls.push(control);
     }
-    wrapper._actionDocument=doc;
+    const pollScroll=()=>{
+      poll=0;if(disposed || !visible || !frame.isConnected)return;
+      // Sandboxed WebKit may omit subdocument scroll events. Checking the
+      // few scrollport offsets is cheap; measure links only after movement.
+      if(!document.hidden && [...state.scrollports].some(([node,at])=>node.scrollLeft!==at[0] || node.scrollTop!==at[1]))align();
+      poll=requestAnimationFrame(pollScroll);
+    };
+    if(state.controls.length){
+      doc.addEventListener('scroll',schedule,true);doc.fonts?.addEventListener('loadingdone',schedule);doc.fonts?.ready.then(schedule);
+      if('IntersectionObserver' in window){visibility=new IntersectionObserver(entries=>{if(disposed)return;visible=entries[0].isIntersecting;if(visible){align();if(!poll)poll=requestAnimationFrame(pollScroll);}else{cancelAnimationFrame(poll);poll=0;}});visibility.observe(frame);}
+      else{visible=true;poll=requestAnimationFrame(pollScroll);}
+    }
+    state.dispose=()=>{disposed=true;cancelAnimationFrame(scheduled);cancelAnimationFrame(poll);visibility?.disconnect();doc.removeEventListener('scroll',schedule,true);doc.fonts?.removeEventListener('loadingdone',schedule);};
+    frame._frameActions=state;
   }
-  for(const control of wrapper.querySelectorAll('.frame-actions > *')) {
-    const r=control._marker.getBoundingClientRect();
-    Object.assign(control.style,{left:`${r.left}px`,top:`${r.top}px`,width:`${r.width}px`,height:`${r.height}px`});
-  }
+  alignFrameActions(frame,state);
 }
 function sizeComposedFrame(frame) {
   try {
     const doc=frame.contentDocument;
     if(!frame.isConnected || !frame.hasAttribute("srcdoc") || !doc?.body || doc.URL==="about:blank")return;
     let sizing=frameSizing.get(frame);
-    if(sizing?.doc!==doc) {
+    if(sizing?.doc!==doc || sizing?.body!==doc.body) {
       sizing?.observer.disconnect();
       const measure=()=>{
-        if(!frame.isConnected){frameSizing.get(frame)?.observer.disconnect();frameSizing.delete(frame);return;}
+        if(!frame.isConnected){frameSizing.get(frame)?.observer.disconnect();frame._frameActions?.dispose();delete frame._frameActions;frameSizing.delete(frame);return;}
         if(frame.contentDocument!==doc)return;
         const height=Math.ceil(Math.max(doc.body.scrollHeight,doc.body.getBoundingClientRect().height))+4;
         if(frame.style.height!==`${height}px`)frame.style.height=`${height}px`;
@@ -2098,7 +2294,7 @@ function sizeComposedFrame(frame) {
         frame.dataset.sized="1";
       };
       const observer=new ResizeObserver(measure);observer.observe(doc.body);
-      sizing={doc,observer,measure};frameSizing.set(frame,sizing);
+      sizing={doc,body:doc.body,observer,measure};frameSizing.set(frame,sizing);
     }
     sizing.measure();
   }catch{/* A frame still loading cannot be measured yet. */}
@@ -2141,43 +2337,36 @@ async function respond(btn, root) {
 function feedRows(feed) {
   const rows = [];
   for (const t of feed.ended) rows.push(`<div class="feed-row"><a href="#/task/${enc(t.task_id)}">${esc(t.title || "A task")}</a> <span class="chip ${t.status === "failed" ? "bad" : "ok"}">${esc(t.status)}</span></div>`);
-  for (const i of feed.arrived) rows.push(`<div class="feed-row"><a href="#/inbox">${esc(i.summary || i.kind)}</a> <span class="small muted">new ${esc(i.kind)}</span></div>`);
-  for (const i of feed.decided) rows.push(`<div class="feed-row"><a href="#/inbox">${esc(i.summary || i.kind)}</a> <span class="small muted">${esc(i.resolution?.decision || "decided")}</span></div>`);
+  for (const i of feed.arrived) rows.push(`<div class="feed-row"><a href="#/item/${enc(i.id)}" data-open="item:${esc(i.id)}">${esc(i.summary || i.kind)}</a> <span class="small muted">new ${esc(i.kind)}</span></div>`);
+  for (const i of feed.decided) rows.push(`<div class="feed-row"><a href="#/item/${enc(i.id)}" data-open="item:${esc(i.id)}">${esc(i.summary || i.kind)}</a> <span class="small muted">${esc(i.resolution?.decision || "decided")}</span></div>`);
   return rows.join("");
 }
 
+function activityLinks(selected="activity") {
+  return `<nav class="activity-views" aria-label="Activity views">${[["activity","Overview"],["tasks","Tasks"],["schedules","Schedules"]].map(([k,l])=>`<a href="#/${k}" data-open="${k}" ${selected===k ? 'aria-current="page"' : ""}>${l}</a>`).join("")}</nav>`;
+}
+function activityView(composed) {
+  const feed=App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) ? `<section><h3>Since you were last here</h3>${feedRows(App.feed)}</section>` : "";
+  const other=App.inbox.filter(i=>i.status==="open" && !needsDecision(i));
+  const decided=App.inbox.filter(i=>i.status!=="open").sort((a,b)=>(b.created_at || "").localeCompare(a.created_at || "")).slice(0,15);
+  return `${activityLinks()}${feed}<section><h3>Work</h3>${tasksView()}</section><section><h3>Schedules</h3>${schedulesView()}</section>
+    ${other.length ? `<details data-key="other"><summary>Updates and work waiting on others (${other.length})</summary>${other.map(i=>card(i,composed)).join("")}</details>` : ""}
+    ${decided.length ? `<details data-key="decided"><summary>Resolved decisions (${decided.length})</summary>${decided.map(i=>card(i,composed)).join("")}</details>` : ""}`;
+}
+
 function needsView(composed) {
-  const mine = App.inbox, open = mine.filter(i => i.status === "open");
-  // Presented observations and interruptions are recorded opened, once
-  // each: the panel draws again on every refresh (#367). An id counts
-  // as reported only after the request succeeds, so a transient
-  // failure is retried on the next refresh instead of losing first
-  // presentation for the session (#399); in-flight ids are held aside
-  // so overlapping refreshes do not report twice.
-  App.reported ??= new Set();
-  App.reporting ??= new Set();
-  const present = open.filter(i => (i.kind === "observation" || i.kind === "interrupt") && !App.reported.has(i.id) && !App.reporting.has(i.id));
-  if (present.length) {
-    for (const i of present) App.reporting.add(i.id);
-    api("POST", "/v1/inbox/opened", { ids: present.map(i => i.id) }).then(
-      () => { for (const i of present) { App.reporting.delete(i.id); App.reported.add(i.id); } },
-      () => { for (const i of present) App.reporting.delete(i.id); },
-    );
-  }
-  const now = open.filter(i => i.can_respond && i.blocking), later = open.filter(i => i.can_respond && !i.blocking), others = open.filter(i => !i.can_respond);
-  const done = mine.filter(i => i.status !== "open").sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, 15);
-  const feed = App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) ? `<h3>Since you were last here</h3>${feedRows(App.feed)}` : "";
+  const open=needsMe();
+  const now=open.filter(i=>i.blocking), later=open.filter(i=>!i.blocking);
   const where = i => {
     const t = i.thread && App.threads.find(x => x.thread === i.thread);
     return t ? `<div class="small where">In <a href="#/chat/${enc(t.thread)}">${esc(t.title)}</a></div>` : "";
   };
   const list = items => items.map(i => `<div class="needs-item" data-needs="${esc(i.id)}">${where(i)}${card(i, composed)}</div>`).join("");
-  return `${feed}<h3>A task is waiting ${now.length ? `<span class="badge">${now.length}</span>` : ""}</h3>
+  return `<h3>A task is waiting ${now.length ? `<span class="badge">${now.length}</span>` : ""}</h3>
     ${now.length ? list(now) : `<p class="empty">No task is waiting on you.</p>`}
     <h3>When you have a moment</h3>
     ${later.length ? list(later) : `<p class="empty">Nothing else.</p>`}
-    ${others.length ? `<h3>Waiting on someone else</h3>${list(others)}` : ""}
-    ${done.length ? `<details data-key="decided"><summary class="small muted">Decided (${done.length})</summary>${done.map(i => card(i, [])).join("")}</details>` : ""}`;
+    `;
 }
 
 // ---------- Task detail ----------
@@ -2288,6 +2477,7 @@ function openPanel(what, options={}) {
   document.body.classList.add("with-detail");
   sidebar();
   markOpen();
+  Workspace.opened();
   return drawPanel();
 }
 // The conversation's row for what the panel shows is marked, without
@@ -2302,6 +2492,7 @@ function closePanel(restoreFocus=false) {
   stopPanelLive();
   hush();
   Panel.what = null; Panel.drawn=null;
+  Panel.rendered=null;Resources.forget("Work");
   const el = $("#detail");
   if (!el) return;
   el.hidden = true;
@@ -2309,6 +2500,7 @@ function closePanel(restoreFocus=false) {
   paint(el, "");
   markOpen();
   if ($("#side")) sidebar();
+  Workspace.closed();
   if (restoreFocus) {
     const target=Panel.opener?.isConnected ? Panel.opener : $("#conv-head h1");
     if (target) { target.tabIndex=target.tabIndex<0?-1:target.tabIndex; target.focus({preventScroll:true}); }
@@ -2321,7 +2513,7 @@ function stopPanelLive() {
   Panel.liveText = "";
 }
 
-const PANEL_TITLES = { needs: "Needs you", tasks: "Tasks", schedules: "Schedules", files: "Files", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Decision", search: "Search", connector: "Connector" };
+const PANEL_TITLES = { activity: "Activity", needs: "Needs you", tasks: "Tasks", schedules: "Schedules", files: "Files", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Item", search: "Search", connector: "Connector" };
 
 async function drawPanel() {
   const el = $("#detail");
@@ -2330,27 +2522,32 @@ async function drawPanel() {
   const at = Panel.what.indexOf(":");
   const [kind, id] = at < 0 ? [Panel.what, ""] : [Panel.what.slice(0, at), Panel.what.slice(at + 1)];
   const composed = [];
-  let body, after = null, head = null;
+  let body, after = null, head = null, failed=false;
   try {
     ({ body, after, head } = await PANELS[kind](id, composed));
   } catch (e) {
+    if(e.cancelled)return;
+    failed=true;
+    if(n===Panel.seq){Resources.bad("Work",e);if(Panel.rendered===Panel.what)return;}
     body = `<div class="banner bad">${esc(e.status === 404 ? "This is gone: it was deleted, or it is not yours." : e.message)}</div>`;
   }
   if (n !== Panel.seq || !Panel.what) return;
+  if(!failed){Panel.rendered=Panel.what;Resources.good("Work");}
   const title = kind === "search" ? `Search: ${id}` : PANEL_TITLES[kind] || kind;
   // A view names itself in the head (a task: its title and where it
   // stands); the others are named by what they are.
   const entry=Panel.anchors[Panel.what] ||= {anchor:{follow:false,top:0}};
-  if (Panel.drawn===Panel.what) { entry.anchor=ReadingAnchors.capture(el); entry.anchor.follow=false; }
+  if (Panel.drawn===Panel.what) { const current=ReadingAnchors.capture($(".detail-body",el)); if(current){entry.anchor=current;entry.anchor.follow=false;} }
   const prior=entry.anchor;
-  const changed = paint(el, `<div class="detail-head"><div class="dh-main">${head || `<h2>${esc(title)}</h2>`}</div><button class="icon-btn close" data-act="close-panel" title="Close">${icon("close")}<span class="sr">Close</span></button></div><div class="detail-body" data-panel="${esc(kind)}">${body}</div>`);
+  const changed = paint(el, `<div class="detail-head"><div class="dh-main">${head || `<h2>${esc(title)}</h2>`}</div></div><div class="detail-body" data-panel="${esc(kind)}">${body}</div>`);
   if (!changed) {
+    reportOpenedSoon();
     if (Panel.focusNext) { const heading=$("h2",el); if (heading) { heading.tabIndex=-1; heading.focus({preventScroll:true}); } Panel.focusNext=false; }
     return;
   }
   Panel.unwatch?.(); Panel.drawn=Panel.what;
-  ReadingAnchors.restore(el,prior);
-  entry.anchor=prior; Panel.unwatch=ReadingAnchors.watch(el,entry,false);
+  ReadingAnchors.restore($(".detail-body",el),prior);
+  entry.anchor=prior; Panel.unwatch=ReadingAnchors.watch($(".detail-body",el),entry,false);
   for (const [iid, view, , task] of composed) fill($(`iframe[data-view="${CSS.escape(iid)}"]`, el), view, task);
   if (after) await after(el);
   loadGlimpses(el);
@@ -2360,9 +2557,10 @@ async function drawPanel() {
 // A view whose content is already read (App's objects) or read here.
 const plain = body => ({ body });
 const PANELS = {
+  activity: (_, composed) => plain(activityView(composed)),
   needs: (_, composed) => plain(needsView(composed)),
-  tasks: () => plain(tasksView()),
-  schedules: () => plain(schedulesView()),
+  tasks: () => plain(activityLinks("tasks") + tasksView()),
+  schedules: () => plain(activityLinks("schedules") + schedulesView()),
   schedule: id => plain(scheduleView(id)),
   item: (id, composed) => {
     const i = App.inbox.find(x => x.id === id);
@@ -2385,8 +2583,8 @@ function appOfferCard(e, theirs = true) {
   const app = { title: e.title, listing: { letters: e.letters, tint: e.tint } };
   const STATE = { needs_attention: "Needs signing in again", needs_more_access: "Needs more access", available: "Not connected" };
   const act = e.state === "connected" ? `<span class="chip ok">Connected</span>`
-    : !theirs ? `<span class="chip warn">${esc(STATE[e.state] || "Not in their Library")}</span>`
-    : e.state === "unavailable" ? `<span class="small muted">No longer in your Library.</span>`
+    : !theirs ? `<span class="chip warn">${esc(STATE[e.state] || "Not in their Apps")}</span>`
+    : e.state === "unavailable" ? `<span class="small muted">No longer in your Apps.</span>`
     : e.ready === false ? `<span class="small muted">Not ready on this appliance yet.</span>`
     : e.state === "needs_attention" ? `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Sign in to ${esc(e.title || "")} again</button>`
     : e.state === "needs_more_access" ? `<button class="primary" data-act="connect" data-app="${esc(e.connector)}">Approve more access</button>`
@@ -2412,16 +2610,17 @@ async function taskView(id, composed) {
   const files = latestOutputs(t);
   const cs = t.criteria || [];
   const checked = cs.filter(c => c.verified === true && !String(c.verified_by || "").startsWith("person:")).length;
-  const cost = `$${(t.usage?.cost_usd ?? 0).toFixed(2)}`;
+  const cost = Number.isFinite(t.usage?.cost_usd) ? `$${t.usage.cost_usd.toFixed(2)}` : null;
   // The result leads with the deliverable, then its files, the person's
   // verdict, and the evidence; what it cost closes it.
   const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="pview"></iframe>` : running ? "" : `<p class="empty">No result yet.</p>`}
     ${t.spoken && App.canReadAloud ? `<div class="row" style="margin:10px 0"><button type="button" class="icon-btn" data-act="${voice.entry===`task:${id}` ? "hush" : "speak"}" data-voice-entry="task:${esc(id)}" aria-label="${voice.entry===`task:${id}` ? "Stop reading" : "Read aloud"}" data-tooltip="${voice.entry===`task:${id}` ? "Stop reading" : "Read aloud"}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[voice.entry===`task:${id}` ? "hush" : "listen"]}</svg></button></div>` : ""}
     ${files.length ? `<div class="frows">${files.map(f => fileRow(f, t.project)).join("")}</div>` : ""}
     ${t.outcome_view && t.summary ? `<h3>Summary</h3><p data-summary>${esc(t.summary)}</p>` : ""}
-    <h3>Checks</h3><div class="checklist">${doneLine(t)}${criteria(t)}</div>
-    ${ENDED.includes(t.status) ? verdictBar(t.task_id, t.verdict) : ""}
-    <p class="foot-note num" data-cost title="${esc(t.model?.adapter)} · ${t.usage?.actions ?? 0} actions">${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} steps · ${cost}</p>`;
+    <h3>Verification</h3>${doneLine(t)}<details class="verification-detail" data-key="checks:${esc(id)}" ${cs.some(c=>c.verified===false) ? "open" : ""}><summary>${esc(glance(t) || "No checks available")}</summary><div class="checklist">${criteria(t)}</div></details>
+    ${ENDED.includes(t.status) ? `<details data-work-feedback data-key="feedback:${esc(id)}"><summary>Feedback</summary>${verdictBar(t.task_id, t.verdict)}</details>` : ""}
+    ${cost ? `<p class="foot-note num" data-cost>${cost}</p>` : ""}
+    ${t.model?.name || Number.isFinite(t.usage?.model_calls) || Number.isFinite(t.usage?.actions) ? `<details data-key="usage:${esc(id)}"><summary>Execution details</summary><p class="small muted">${[t.model?.name,Number.isFinite(t.usage?.model_calls) ? `${t.usage.model_calls} model calls` : null,Number.isFinite(t.usage?.actions) ? `${t.usage.actions} actions` : null].filter(Boolean).map(esc).join(" · ")}</p></details>` : ""}`;
   const contract = `<h3>Request</h3><p class="request">${esc(t.text)}</p>
     ${t.files?.length ? `<p class="small"><span class="muted">Your files:</span> ${t.files.map(fileChip).join(" ")}</p>` : ""}
     <h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}`;
@@ -2446,7 +2645,7 @@ function fileRow(f, project) {
   const type = FILE_TYPES[f.media_type] || (f.media_type || "").split("/").pop().slice(0, 4).toUpperCase() || "FILE";
   const p = project && (typeof project === "object" ? project : App.projects.find(x => x.id === project));
   return `<div class="frow" data-file-row="${esc(f.id)}"><span class="ftype ${type === "PDF" ? "pdf" : ""}">${esc(type)}</span>
-    <div class="rg-main"><a class="ttl" href="#/file/${enc(f.id)}" data-open="file:${esc(f.id)}">${esc(f.name)}</a><span class="sub">Saved to Files${p ? ` · ${esc(p.name)}` : ""} · ${esc(kb(f.size))}</span></div>
+    <div class="rg-main"><a class="ttl" href="#/file/${enc(f.id)}" data-open="file:${esc(f.id)}" title="${esc(f.name)}">${esc(f.name)}</a><span class="sub">Saved to Files${p ? ` · ${esc(p.name)}` : ""} · ${esc(kb(f.size))}</span></div>
     <button class="icon-btn" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}" title="Download ${esc(f.name)}">${icon("download")}<span class="sr">Download</span></button></div>`;
 }
 
@@ -2558,18 +2757,26 @@ function librarySections(all) {
 async function showLibrary(main, name) {
   Lib.main = main;
   if (name) return showConnectorPage(main, name);
-  const { connectors } = await api("GET", "/v1/connectors");
+  const connectors = await Resources.read("Apps", "/v1/connectors", "connectors",true);
   // An app blocked for your groups is not in your Library; the owner still
   // manages it in Settings.
-  Lib.all = connectors.filter(c => c.for_you !== false);
+  Lib.all = (connectors || []).filter(c => c.for_you !== false);
   const seg = (k, label) => `<button data-lib-tab="${k}" aria-pressed="${Lib.tab === k}">${label}</button>`;
-  main.innerHTML = `<div class="libpage"><header class="lhead"><div><h1>Library</h1><p>Connect the apps and programs you want Magnus to work in. You only ever sign in.</p></div>
-    <a class="icon-btn lclose" href="#/home" aria-label="Close Library">${icon("close")}</a></header>
+  main.innerHTML = `<div class="libpage"><header class="lhead"><div><h1>Apps</h1><p>Connect the apps and programs you want Magnus to work in. You only ever sign in.</p></div>
+    <a class="icon-btn lclose" href="#/home" aria-label="Close Apps">${icon("close")}</a></header>
     <div class="lbar"><div class="lseg" role="group" aria-label="Show">${seg("yours", "Yours")}${seg("discover", "Discover")}</div>
-    <div class="lsearch">${SVG.search}<label class="sr" for="libq">Search connectors</label><input id="libq" type="search" value="${esc(Lib.q)}" placeholder="Search connectors, or describe what you want done" autocomplete="off"></div></div>
+    <div class="lsearch">${SVG.search}<label class="sr" for="libq">Search apps and capabilities</label><input id="libq" type="search" value="${esc(Lib.q)}" placeholder="Search apps and capabilities" autocomplete="off"></div></div>
     <div class="lchips" role="group" aria-label="Category">${CATEGORIES.map(([k, l]) => `<button data-lib-cat="${k}" aria-pressed="${Lib.cat === k}">${esc(l)}</button>`).join("")}</div>
-    <div id="lib-sections">${librarySections(connectors)}</div></div>`;
+    <p><a href="#/chat/new" data-ask-app>Ask Magnus to find an app</a></p><div id="lib-sections">${connectors ? librarySections(Lib.all) : '<p class="empty">Apps are unavailable. Retrying when connected.</p>'}</div></div>`;
   bindConnectorActs(main);
+  const update=async()=>{
+    const connectors=await Resources.read("Apps","/v1/connectors","connectors",true);
+    if(!connectors || !main.querySelector('#lib-sections'))return;
+    Lib.all=connectors.filter(c=>c.for_you!==false);
+    paint($('#lib-sections',main),librarySections(Lib.all));
+  };
+  App.redraw=update;onLeave(()=>{if(App.redraw===update)App.redraw=null;});
+  $("[data-ask-app]",main).onclick=()=>{const query=$("#libq",main).value.trim();App.appSearch=query ? `Find an app for: ${query}` : "Help me find an app for ";};
   let t;
   $("#libq", main).addEventListener("input", e => { clearTimeout(t); t = setTimeout(() => { Lib.q = e.target.value.trim(); $("#lib-sections", main).innerHTML = librarySections(Lib.all); }, 150); });
 }
@@ -2600,7 +2807,7 @@ function connectorBody(c) {
 
 async function showConnectorPage(main, name) {
   const c = await api("GET", `/v1/connectors/${enc(name)}`);
-  main.innerHTML = `<div class="libpage cpage"><p class="small"><a href="#/library">Library</a></p><section class="cp" aria-label="${esc(c.title)}">${connectorBody(c)}</section></div>`;
+  main.innerHTML = `<div class="libpage cpage"><p class="small"><a href="#/library">Apps</a></p><section class="cp" aria-label="${esc(c.title)}">${connectorBody(c)}</section></div>`;
   bindConnectorActs(main);
 }
 
@@ -2743,7 +2950,7 @@ function wirePanel() {
           await api("POST", `/v1/tasks/${enc(id)}/cancel`, {}); break;
         case "resume": await api("POST", `/v1/tasks/${enc(id)}/resume`, {}); break;
         case "stop-schedule":
-          if (!await ask("Stop this schedule? No more of its runs start. Runs already started go on, and stay in Tasks.", "Stop schedule")) return;
+          if (!await ask("Stop this schedule? No more of its runs start. Active runs stop too. Work already done stays done, and the runs stay in Tasks.", "Stop schedule")) return;
           await api("DELETE", `/v1/schedules/${enc(id)}`); toast("The schedule is stopped."); break;
         case "delete-schedule":
           if (!await ask("Delete this schedule? It has ended, so nothing stops; its runs stay in Tasks.", "Delete schedule")) return;
@@ -2830,17 +3037,20 @@ async function modelsSection(main) {
   let pick = null;
   const catalogs = {};
   const catalog = async a => {
-    if (!catalogs[a]) catalogs[a] = await api("GET", `/v1/adapters/${enc(a)}/catalog`).then(c => c.models ? { ids: c.models.map(m => m.id) } : { error: c.message || "the adapter sent no list" }).catch(e => ({ error: e.message }));
-    return catalogs[a];
+    const c=await Resources.read(`Models for ${a}`,`/v1/adapters/${enc(a)}/catalog`,undefined,true);
+    if(c)catalogs[a]=c.models ? {ids:c.models.map(m=>m.id)} : {error:c.message || "the adapter sent no list"};
+    return catalogs[a] || {error:"The provider is unavailable. Retrying when connected."};
   };
   const draw = async () => {
-    const [{ adapters }, cur] = await Promise.all([api("GET", "/v1/adapters"), api("GET", "/v1/model")]);
+    const [providers, cur] = await Promise.all([Resources.read("Providers", "/v1/adapters",undefined,true), Resources.read("Model", "/v1/model",undefined,true)]);
+    if(!providers || !cur){if(!main._html)paint(main,'<h2>Models</h2><p class="empty">Models are unavailable. Retrying when connected.</p>');return;}
+    const {adapters}=providers;
     const p = pick || cur.adapter, models = await catalog(p);
     const chosen = p === cur.adapter ? cur.model : null;
     paint(main, `<h2>Models</h2><p class="muted">Connect providers here. Keys and sign-ins go to the appliance's vault; this app keeps none.</p>
       <div class="card"><div class="small muted">New tasks run on</div><div class="mono" style="font-size:16px;margin:2px 0 10px">${esc(cur.adapter)} · ${esc(cur.model)}</div>
-        <div class="row"><select id="madapter" aria-label="Provider">${adapters.map(a => `<option ${a.id === p ? "selected" : ""}>${esc(a.id)}</option>`).join("")}</select>
-        ${models.ids ? `<select id="mname" aria-label="Model">${chosen && !models.ids.includes(chosen) ? `<option selected>${esc(chosen)}</option>` : ""}${models.ids.map(m => `<option ${m === chosen ? "selected" : ""}>${esc(m)}</option>`).join("")}</select><button class="primary" data-act="use">Use this model</button>` : ""}</div>
+        <div class="row"><select id="madapter" aria-label="Provider" data-draft="model-provider">${adapters.map(a => `<option ${a.id === p ? "selected" : ""}>${esc(a.id)}</option>`).join("")}</select>
+        ${models.ids ? `<select id="mname" aria-label="Model" data-draft="model-choice-${esc(p)}">${chosen && !models.ids.includes(chosen) ? `<option selected>${esc(chosen)}</option>` : ""}${models.ids.map(m => `<option ${m === chosen ? "selected" : ""}>${esc(m)}</option>`).join("")}</select><button class="primary" data-act="use">Use this model</button>` : ""}</div>
         ${models.error ? `<p class="small muted" style="margin-top:8px">No model list from ${esc(p)} yet: ${esc(models.error)}</p>` : ""}</div>
       ${adapters.map(a => `<div class="card" data-adapter="${esc(a.id)}"><div class="spread"><strong>${esc(a.id)}</strong>
           <span class="row">${a.conformance ? `<span class="chip ${a.conformance.passed ? "ok" : "bad"}">suite ${a.conformance.passed ? "passed" : "failed"} · ${esc(a.conformance.model)}</span>` : `<span class="chip warn">suite not run</span>`}</span></div>
@@ -2870,7 +3080,7 @@ async function modelsSection(main) {
         if (step.event === "error") { show(a, `<p class="small" style="color:var(--bad)">${esc(step.message)}</p>`); return; }
         const head = `<div style="margin-top:12px"><p class="small">${esc(step.instructions)}</p>`;
         if (step.flow?.kind === "api_key") {
-          show(a, `${head}<label for="key-${esc(a)}">API key</label><input type="password" id="key-${esc(a)}" style="width:100%" autocomplete="off">
+          show(a, `${head}<label for="key-${esc(a)}">API key</label><input type="password" id="key-${esc(a)}" data-ephemeral style="width:100%" autocomplete="off">
             <div class="row" style="margin-top:8px"><button class="primary" data-act="key" data-adapter="${esc(a)}">Save to the vault</button></div></div>`);
           signins[`${a}:step`] = step;
         } else {
@@ -2896,6 +3106,7 @@ async function modelsSection(main) {
       }
     } catch (err) { toast(err.message); b.disabled = false; }
   };
+  App.redraw=draw;onLeave(()=>{if(App.redraw===draw)App.redraw=null;});
   await draw();
 }
 
@@ -2915,7 +3126,7 @@ const changesFor = name => App.inbox.filter(i => i.status === "open" && (i.kind 
 async function connectorsSection(main) {
   const draw = async () => {
     const { connectors } = await api("GET", "/v1/connectors");
-    paint(main, `<h2>Connectors</h2><p class="muted">The apps in Magnus's catalog, already set up for your organisation. Each is in everyone's Library, and each person connects it with their own account; no one acts through anyone else's.</p>
+    paint(main, `<h2>Connectors</h2><p class="muted">The apps in Magnus's catalog, already set up for your organisation. Each is in everyone's Apps, and each person connects it with their own account; no one acts through anyone else's.</p>
       ${connectors.map(c => `<div class="card" data-app="${esc(c.name)}"><div class="spread"><strong>${esc(c.title)}</strong>
           <span class="row">${c.source === "config" ? `<span class="chip">set in the config file</span>` : c.source === "catalog" ? `<span class="chip">from the catalog</span>` : `<button class="link" data-act="remove" data-app="${esc(c.name)}">Remove for everyone</button>`}</span></div>
         <div class="small muted">${esc(c.summary)}</div>
@@ -2924,7 +3135,7 @@ async function connectorsSection(main) {
           ${c.tools.map(t => `<tr><td class="mono">${esc(t.name)}</td><td class="muted">${esc(t.description)}</td>
             <td><select data-tool="${esc(t.name)}" data-app="${esc(c.name)}" aria-label="What ${esc(t.name)} may do" ${c.source === "app" ? "" : "disabled"}>
               ${RISKS.map(([v, l]) => `<option value="${v}" ${(t.risk || "") === v ? "selected" : ""}>${esc(l)}${v && v === t.suggested && !t.risk ? " (the app's hint)" : ""}</option>`).join("")}</select></td></tr>`).join("")}</tbody></table>`
-          : c.signed_in ? "" : `<p class="small">Connect it in your Library to see its tools and choose what each may do.</p>`}
+          : c.signed_in ? "" : `<p class="small">Connect it in Apps to see its tools and choose what each may do.</p>`}
       </div>`).join("") || `<p class="empty">No apps yet.</p>`}`);
   };
   main.onchange = async e => {
@@ -3298,6 +3509,8 @@ async function updateRequiredScreen(info) {
 window.addEventListener("magnus-update-required", e => updateRequiredScreen(e.detail));
 
 async function boot() {
+  App.sessionGeneration++;
+  Resources.reset();
   App.me = await api("GET", "/v1/me");
   Theme.scope(App.appliance, App.me.id);
   App.unsubscribeDrafts?.();
@@ -3319,7 +3532,9 @@ async function boot() {
   App.reported = new Set();
   App.reporting = new Set();
   App.feed = await api("POST", "/v1/home/opened", {}).catch(() => null);
-  if (App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) && (!location.hash || location.hash === "#/home")) App.openAfter = "needs";
+  // Return-session details stay in Activity; informational arrivals do
+  // not switch the selected region or hide the conversation's composer.
+  banners();
   background = [setInterval(refresh, 3000), setInterval(pollVersions, 30000)];
   go();
 }
@@ -3327,16 +3542,20 @@ async function boot() {
 function stop() {
   App.unsubscribeDrafts?.(); App.unsubscribeDrafts=null;
   MessageDrafts.leave();
+  App.sessionGeneration++;
+  Resources.reset();
   background.forEach(clearInterval); background = [];
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   window.onhashchange = null;
   Panel.what = null;
+  Panel.rendered=null;Resources.forget("Work");
   Theme.scope(null, null);
   Panel.unwatch?.(); Panel.unwatch=null; Panel.anchors={}; Panel.layers={}; Panel.opener=null; Panel.drawn=null; Panel.what=null; App.draftRecord=null;
   App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null; App.feed = null; App.reported = new Set(); App.reporting = new Set();
   // What one person was typing or filtering by is not the next one's here.
   Panel.lib = { q: "", project: "" };
+  delete Lib.all; Lib.q=""; Lib.cat="all"; Lib.tab="discover";
   for (const k of Object.keys(drafts)) delete drafts[k];
 }
 
