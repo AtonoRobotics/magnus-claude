@@ -1243,7 +1243,7 @@ function composer(placeholder, picker) {
 // around the app (#544).
 function wireComposer(thread, project, record) {
   const form = $("#say"), box = $("#msg",form), pending = $("#pending",form), input = $("[data-attach]",form), epoch = MessageDrafts.epoch();
-  let replacing = null, active = true, sending = false;
+  let replacing = null, active = true;
   box.value = record.text;
   const model = $("[data-model]",form);
   if (record.model && record.modelUnder === model.dataset.default && [...model.options].some(o => o.value === record.model)) model.value = record.model;
@@ -1251,10 +1251,14 @@ function wireComposer(thread, project, record) {
   const selected = () => { record.selection = [box.selectionStart,box.selectionEnd]; };
   const read = (selection=true) => { record.text = box.value; record.model = model?.value || ""; record.modelUnder = model?.dataset.default || ""; if(selection)selected(); };
   const chips = () => record.files.map(f => `<span class="attachment-chip" data-upload="${esc(f.uid)}"><span>${esc(f.name)}</span><span class="small muted">${esc(f.state === "ready" ? "Ready" : f.state === "uploading" ? "Uploading…" : f.state === "unavailable" ? "Unavailable" : "Failed")}</span>${f.error ? `<span class="small">${esc(f.error)}</span>` : ""}${["failed","unavailable"].includes(f.state) ? `<button type="button" data-retry-upload="${esc(f.uid)}">Retry</button>` : ""}<button type="button" class="icon-btn" data-remove-upload="${esc(f.uid)}" aria-label="Remove ${esc(f.name)} from message" title="Remove ${esc(f.name)} from message">${icon("close")}</button></span>`).join("");
+  // The record is shared by every composer mounted on this conversation:
+  // a send that finishes after the person left and came back updates the
+  // one now showing, and a send in flight stays in flight there too.
   const show = () => {
     if (!active || !form.isConnected) return;
+    if (box.value !== record.text) { box.value = record.text; fit(); }
     paint(pending,chips());
-    $("#send",form).disabled = sending || record.files.some(f => f.state !== "ready");
+    $("#send",form).disabled = !!record.sending || record.files.some(f => f.state !== "ready");
   };
   const unsubscribe = MessageDrafts.subscribe(show);
   async function startUpload(slot, file) {
@@ -1296,22 +1300,21 @@ function wireComposer(thread, project, record) {
   box.onkeydown = e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); form.requestSubmit(); } };
   form.onsubmit = async e => {
     e.preventDefault(); read();
-    const text=record.text.trim(); if (!text || sending) return;
+    const text=record.text.trim(); if (!text || record.sending) return;
     if (record.files.some(f=>f.state!=="ready")) { toast("Wait for uploads, or retry/remove unavailable files before sending."); return; }
     const files=[...record.files], body={text, model:chosenModel(form), files:files.map(f=>f.id)};
     if (record.thread) body.thread=record.thread; else if (record.project) body.project=record.project;
-    sending=true; show();
+    record.sending=true; MessageDrafts.changed();
     try {
       const response=await api("POST","/v1/chat",body);
       if (epoch !== MessageDrafts.epoch()) return;
       // Clear what was sent; anything typed or attached meanwhile stays.
       if (record.text.trim()===text) { record.text=""; record.selection=[0,0]; }
       record.files=record.files.filter(f=>!files.includes(f));
-      if (active && form.isConnected) { box.value=record.text; fit(); }
       if (!record.thread && response?.thread) {
         MessageDrafts.discard(record.id);
         const next=MessageDrafts.forThread(response.thread); next.text=record.text; next.files=record.files; next.model=record.model; next.modelUnder=record.modelUnder;
-        if (App.workspace && App.draftRecord === record) { history.replaceState(history.state,"",`#/chat/${enc(response.thread)}`); sending=false; await go(); return; }
+        if (App.workspace && App.draftRecord === record) { history.replaceState(history.state,"",`#/chat/${enc(response.thread)}`); record.sending=false; await go(); return; }
       }
       await refresh();
     } catch (err) {
@@ -1321,7 +1324,7 @@ function wireComposer(thread, project, record) {
       const rejected=err.status>=400 && err.status<500 && typeof err.body?.error === "string";
       toast(rejected ? err.message : "Send outcome not confirmed. Your message is still here; check the conversation before sending it again.");
       if (!rejected) refresh().catch(()=>{});
-    } finally { sending=false; show(); }
+    } finally { record.sending=false; MessageDrafts.changed(); }
   };
   onLeave(() => { if (active) { read(false); active=false; unsubscribe(); } });
   // Only a missing/expired reference is marked unavailable. A connection

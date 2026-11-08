@@ -70,6 +70,18 @@ try {
  await page.locator('#msg').fill('Rejected message stays');await invalidModel();await page.locator('#send').click();
  await until(()=>!document.querySelector('#send').disabled);assert.equal(await page.locator('#msg').inputValue(),'Rejected message stays');
  await page.locator('#say [data-model]').selectOption(validModel);await page.locator('#msg').fill('');
+ // A send in flight stays in flight after leaving and coming back, and its
+ // acknowledgement clears the composer now showing (#553 review).
+ await page.locator('#msg').fill('Held reply');let held=0,releaseHeld;const replyHeld=new Promise(resolve=>releaseHeld=resolve);
+ await page.route('**/v1/chat',async route=>{if(route.request().method()!=='POST')return route.continue();held++;const response=await route.fetch();await replyHeld;await route.fulfill({response});});
+ await page.locator('#send').click();await until(()=>document.querySelector('#send').disabled);
+ await page.getByRole('link',{name:'Settings',exact:true}).click();await until(()=>!document.querySelector('#msg'));
+ await page.locator(`nav.side a[href="#/chat/${accepted.thread}"]`).click();await until(()=>document.querySelector('#msg')?.value==='Held reply');
+ assert.equal(await page.locator('#send').isDisabled(),true,'Send stays disabled while the earlier send is in flight');
+ await page.locator('#msg').press('Enter');await page.waitForTimeout(300);assert.equal(held,1,'no second POST');
+ releaseHeld();await until(()=>document.querySelector('#msg')?.value==='' && !document.querySelector('#send').disabled);
+ await page.getByRole('link',{name:'Settings',exact:true}).click();await page.locator(`nav.side a[href="#/chat/${accepted.thread}"]`).click();await page.locator('#msg').waitFor();
+ assert.equal(await page.locator('#msg').inputValue(),'','the sent reply is not resurrected');await page.unroute('**/v1/chat');
  // Controlled observer delivery reproduces a deliberate scroll during resize restoration.
  await page.evaluate(()=>{
    const NativeObserver=window.ResizeObserver;let resize;
