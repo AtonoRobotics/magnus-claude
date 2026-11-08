@@ -87,7 +87,7 @@ await step("Cancel on the memo's card cancels it", async () => {
 
 await step("Cancel on the schedule's card cancels it, and the card says so", async () => {
   await page.locator("#thread .sched-state").getByRole("button", { name: "Cancel" }).click();
-  await page.locator("#thread [data-schedule-gone]").getByText("no longer runs").waitFor({ timeout: T });
+  await page.locator("#thread [data-schedule-gone]").getByText("Details unavailable", {exact:true}).waitFor({ timeout: T });
 });
 
 if (errors.length) { console.error(`FAIL page errors: ${errors.join("; ")}`); await browser.close(); process.exit(1); }

@@ -807,7 +807,7 @@ function schedulesView() {
 // One schedule: what it does, when, how its runs went, and a way to stop it.
 function scheduleView(id) {
   const sc = App.schedules.find(x => x.id === id);
-  if (!sc) return `<p class="empty">This schedule was stopped.</p>`;
+  if (!sc) return `<p class="empty">Schedule details are not available.</p>`;
   return `<h2 class="ptitle">${esc(sc.title)}</h2><p class="small muted">${esc(rule(sc))}</p>
     <div class="card flat sched" data-schedule="${esc(sc.id)}"><p>${esc(sc.text)}</p>${scheduleFacts(sc)}<div class="small" data-last>${scheduleState(sc)}</div></div>
     <div class="row">${moveControl(sc.id, sc.project, App.projects)}${scheduleButtons(sc, "Stop this schedule")}</div>
@@ -1220,7 +1220,7 @@ function cardOutcome(e) {
 function scheduleLine(e) {
   if (e.state !== "confirmed") return cardOutcome(e);
   const sc = App.schedules.find(x => x.id === e.schedule);
-  if (!sc) return `<p class="small" data-schedule-gone="${esc(e.schedule || "")}"><span class="chip">Cancelled</span> ${esc(e.title || "This schedule")} no longer runs.</p>`;
+  if (!sc) return `<p class="small" data-schedule-gone="${esc(e.schedule || "")}"><span class="chip">Details unavailable</span> ${esc(e.title || "This schedule")} · Schedule details are not currently available.</p>`;
   const act = (k, label) => `<button class="link small" data-sched-act="${k}" data-schedule-id="${esc(sc.id)}">${label}</button>`;
   const chip = sc.ended ? `<span class="chip">Ended</span>` : `<span class="chip sch">${sc.paused ? "Paused" : "Scheduled"}</span>`;
   const acts = sc.ended ? act("cancel", "Delete") : `${sc.paused ? act("resume", "Resume") : act("pause", "Pause")}${act("cancel", "Cancel")}`;
