@@ -46,7 +46,10 @@ const MEASURE = `
   // Behind glass: the system's material over anything on the desktop (its
   // tint over black, grey and white), or the drawn wallpaper's colors where
   // the page draws its own backdrop.
-  const behind = [[0,0,0,1],[255,255,255,1]];
+  const glass = Theme.GLASS[document.documentElement.dataset.mode];
+  const behind = document.documentElement.dataset.backdrop === "native"
+    ? [[0, 0, 0, 1], [128, 128, 128, 1], [255, 255, 255, 1]].map(d => over(rgba(glass.system), d))
+    : [...glass.backdrop.matchAll(/#([0-9a-f]{6})/gi)].map(m => [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16)).concat(1));
   const backs = el => { const ls = under(el); const opaque = ls.length && ls[ls.length - 1][3] === 1; return (opaque ? [ls.pop()] : behind).map(b => ls.reduceRight((acc, l) => over(l, acc), b)); };
   const shown = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.opacity !== "0" && !el.closest(".sr, [hidden], option"); };
   const texts = root => [...root.querySelectorAll("*")].filter(el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()) && shown(el));
