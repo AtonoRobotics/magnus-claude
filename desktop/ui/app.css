@@ -597,3 +597,44 @@ blockquote.asked { margin: 0 0 6px; padding: 4px 10px; border-left: 3px solid va
 .jump-latest[hidden] { display: none; }
 .thread { overflow-anchor: none; }
 @media (any-pointer: coarse) { .attachment-chip button, .jump-latest { min-height: 44px; min-width: 44px; } }
+/* Workspace baseline v1.2: chrome and content have independent aliases. */
+nav.side, .conv-head, .workspace-bar {
+  --fg: var(--chrome-text); --fg2: var(--chrome-text); --avatar: var(--chrome-selected);
+  --muted: var(--chrome-muted); --faint: var(--chrome-muted);
+  --focus: var(--chrome-focus); --accent: var(--chrome-focus);
+  --accent-text: var(--chrome-focus); --accent-fg: var(--chrome-accent-fg);
+  --surface: var(--chrome-surface); --raised: var(--chrome-selected);
+  --row-sel: var(--chrome-selected); --row-hi: var(--chrome-selected);
+  --search: var(--chrome-selected); --search-muted: var(--chrome-muted);
+  --seg: var(--chrome-surface); --seg-on: var(--chrome-selected);
+  --line-strong: var(--chrome-line); --btn-border: var(--chrome-line);
+  --button-bg: var(--chrome-surface);
+  background: var(--side); color: var(--fg);
+}
+html[data-theme="corporate"] :is(nav.side, .conv-head, .workspace-bar) {
+  --ok: #86DBA0; --ok-icon: #86DBA0; --warn: #FFBE78; --warn-icon: #FFBE78; --bad: #FF8A80;
+  --ok-soft: var(--chrome-surface); --warn-soft: var(--chrome-surface); --bad-soft: var(--chrome-surface);
+}
+.theme-presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.theme-presets button { min-width: 0; padding: 8px; border-radius: 12px; color: var(--fg); }
+.theme-presets button.on { border-color: var(--focus); box-shadow: inset 2px 0 var(--focus); background: var(--row-sel); }
+.preset-preview { display: grid; grid-template-columns: 20% 50% 30%; height: 56px; margin-bottom: 8px; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; background: var(--preview-canvas); }
+.preset-preview > span { border-right: 1px solid var(--preview-text); opacity: .7; }
+.preset-preview > span:first-child { background: var(--preview-chrome); opacity: 1; }
+.follow-computer { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.follow-computer input { width: 20px; height: 20px; }
+:where(a, button, input, textarea, select, summary, [tabindex]):focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+input:not([type="checkbox"]):not([type="radio"]), textarea, select { border-color: var(--line-strong); }
+.chip.ok, .chip.warn, .chip.bad { border: 1px solid currentColor; }
+html[data-motion="full"] aside.detail.opening { animation: glide .18s var(--ease) both; }
+html[data-motion="full"] :is(.entry.enter, .tcard.finished .st, .tcard.finished .rg-row, .tcard.changed .chip, .tcard.changed .st) { animation-duration: .18s; }
+@media (any-pointer: coarse) { button, .icon-btn, a.icon-btn, summary { min-width: 44px; min-height: 44px; } }
+@media (max-width: 480px) { .theme-presets { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (forced-colors: active) {
+  :root { --fg: CanvasText !important; --fg2: CanvasText !important; --muted: CanvasText !important; --faint: CanvasText !important; --surface: Canvas !important; --main: Canvas !important; --side: Canvas !important; --panel: Canvas !important; --raised: Canvas !important; --bg: Canvas !important; --backdrop: Canvas !important; --accent: Highlight !important; --accent-text: LinkText !important; --accent-fg: HighlightText !important; --focus: Highlight !important; --line: CanvasText !important; --line-strong: CanvasText !important; --btn-border: ButtonText !important; --button-bg: ButtonFace !important; --row-sel: Canvas !important; --chrome-text: CanvasText !important; --chrome-muted: CanvasText !important; --chrome-focus: Highlight !important; --chrome-surface: Canvas !important; --chrome-selected: Canvas !important; --chrome-line: CanvasText !important; --chrome-accent-fg: HighlightText !important; }
+  nav.side, .conv-head, .workspace-bar { backdrop-filter: none; -webkit-backdrop-filter: none; }
+  button, input, textarea, select { border: 1px solid ButtonText; }
+  :is(.on, [aria-current="page"], [aria-selected="true"]) { outline: 2px solid Highlight; }
+}
+
+aside.detail { -webkit-backdrop-filter: none; backdrop-filter: none; }
