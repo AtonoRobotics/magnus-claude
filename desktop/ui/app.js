@@ -279,7 +279,8 @@ const Workspace = (() => {
       document.addEventListener("click",e=>{
         const tree=e.target.closest("[data-nav-tree]");if(tree){const fly=$("#navigation-flyout");if(fly.hidden){fly.hidden=false;sidebar();tree.setAttribute("aria-expanded","true");$("a,button",fly)?.focus({preventScroll:true});}else closeTree();return;}
         if(e.target.closest("[data-close-tree]"))closeTree();else if(!e.target.closest("#navigation-flyout"))closeTree(false);
-        if(e.target.closest("nav.side a, #navigation-flyout a")){closeTree(false);closeDrawer(false);}
+        const destination=e.target.closest("nav.side a, #navigation-flyout a");
+        if(destination){if(e.button===0 && !e.ctrlKey && !e.metaKey && !destination.dataset.open && destination.hash!==location.hash)App.routeFocus={opener:destination,composer:destination.hash.startsWith("#/chat/new")};closeTree(false);closeDrawer(false);}
         if(e.target.closest("#navigation-flyout [data-act=sign-out]"))$("nav.side [data-act=sign-out]")?.click();
       });
       document.addEventListener("keydown",e=>{if(e.key==="Escape" && !$("#navigation-flyout")?.hidden){e.preventDefault();closeTree();}});
@@ -461,7 +462,7 @@ async function loadGlimpses(root) {
 async function go() {
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
-  const h = location.hash || "#/home";
+  const h = location.hash || "#/home", routeFocus=App.routeFocus;App.routeFocus=null;
   queueMicrotask(()=>Workspace.update());
   // A view still loading when the person moves on stops where it is: only
   // the latest navigation draws. Each view gets a main of its own, so one
@@ -476,7 +477,13 @@ async function go() {
       App.workspace = workspace;
       if (!workspace) { App.thread = null; closePanel(); }
       sidebar();
-      try { await view(main, ...m.slice(1).map(x => x === undefined ? x : decodeURIComponent(x))); }
+      try {
+        await view(main, ...m.slice(1).map(x => x === undefined ? x : decodeURIComponent(x)));
+        if(seq===App.seq && routeFocus && [document.body,routeFocus.opener,$("[data-open-drawer]")].includes(document.activeElement)) {
+          const target=routeFocus.composer ? $("#msg",main) : $("h1,h2",main) || main;
+          if(target){if(!target.matches("input,textarea"))target.tabIndex=-1;target.focus({preventScroll:true});}
+        }
+      }
       catch (e) { if (seq === App.seq) paint(main, `<div class="banner bad">${esc(e.message)}</div>`); }
       return;
     }
