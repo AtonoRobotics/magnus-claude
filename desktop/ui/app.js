@@ -71,6 +71,30 @@ const App = {
   seq: 0,
 };
 
+// Each resource retains its last good data; only its newest response may reconcile it.
+const Resources = (()=>{
+ let epoch=0, serial=0;const states=new Map();let announced="";
+ function render() {
+  const shell=$(".shell");if(!shell)return;
+  let el=$("#connection-status");if(!el){el=document.createElement("div");el.id="connection-status";el.className="connection-status";shell.append(el);}
+  const stale=[...states].filter(([,s])=>s.failed), text=stale.map(([name,s])=>`${name} may be stale · ${s.at ? `Last refreshed ${new Date(s.at).toLocaleTimeString()}` : "Not yet refreshed"}`).join(". ");
+  el.hidden=!stale.length;
+  if(el.textContent!==text)el.textContent=text;
+  // Announce transitions once, never repeat unchanged polling failures or timestamps.
+  const summary=stale.map(([name])=>name).join(", ");
+  if(summary!==announced){announced=summary;let live=$("#connection-announcement");if(!live){live=document.createElement("div");live.id="connection-announcement";live.className="sr";live.setAttribute("role","status");document.body.append(live);}live.textContent=summary ? `${summary} may be stale. Cached information remains available.` : "Connection restored.";}
+ }
+ function reset(){epoch++;states.clear();announced="";render();}
+ function forget(name){states.delete(name);render();}
+ function good(name){const s=states.get(name)||{};states.set(name,{...s,failed:false,at:Date.now()});render();}
+ function bad(name,error){const s=states.get(name)||{};states.set(name,{...s,failed:true});render();if(error?.status===401 && App.me){stop();signInScreen("Your session ended. Sign in again.");}}
+ async function read(name,path,key){const scope=epoch,token=++serial,prior=states.get(name)||{};states.set(name,{...prior,token});
+  try{const value=await api("GET",path);if(scope!==epoch || states.get(name)?.token!==token)return;good(name);return key ? value[key] : value;}
+  catch(error){if(scope===epoch && states.get(name)?.token===token)bad(name,error);}
+ }
+ return {read,reset,forget,good,bad,render};
+})();
+
 // A question before an action, asked in the app itself: a webview may
 // ignore window.confirm and answer no without showing it, so a button
 // behind one did nothing at all (the Windows app, owner 2026-11-03:
@@ -571,7 +595,8 @@ function save(k, v) { try { localStorage.setItem(seenKey(k), JSON.stringify(v));
 
 async function pollInbox() {
   try {
-    const { items } = await api("GET", "/v1/inbox");
+    const items = await Resources.read("Needs you", "/v1/inbox", "items");
+    if (!items) return;
     App.inbox = items;
     // Interrupt only for decisions a task is waiting on; the rest wait in
     // the inbox until the person looks (U3).
@@ -592,7 +617,8 @@ async function pollInbox() {
 
 async function pollVersions() {
   try {
-    const v = await api("GET", "/v1/versions");
+    const v = await Resources.read("Agent changes", "/v1/versions");
+    if (!v) return;
     App.versions = v;
     const seen = load("version", null);
     if (seen === null) { save("version", v.latest_seq ?? 0); return; }
@@ -615,8 +641,8 @@ function describeChange(c) {
 // Tasks, schedules, conversations and projects, read together with the
 // inbox; then every view that shows them is drawn again from what was read.
 async function refresh() {
-  const get = (path, k) => api("GET", path).then(v => v[k]).catch(() => null);
-  const [tasks, schedules, threads, projects, health] = await Promise.all([get("/v1/tasks", "tasks"), get("/v1/schedules", "schedules"), get("/v1/chat", "threads"), get("/v1/projects", "projects"), api("GET", "/v1/health").catch(() => null), pollInbox()]);
+  const get = (path, k) => Resources.read(({tasks:"Tasks",schedules:"Schedules",threads:"Conversations",projects:"Projects"})[k],path,k);
+  const [tasks, schedules, threads, projects, health] = await Promise.all([get("/v1/tasks", "tasks"), get("/v1/schedules", "schedules"), get("/v1/chat", "threads"), get("/v1/projects", "projects"), Resources.read("Appliance", "/v1/health"), pollInbox()]);
   if (!App.me) return;
   // Magnus's own background reviews are plumbing, not the person's tasks
   // (owner, 2026-11-07): developers see them in the run inspector.
@@ -911,9 +937,12 @@ async function showThread(main, thread) {
     });
     for (const id of Object.keys(listening)) if (!running.has(id)) { listening[id](); delete listening[id]; delete ui.live[id]; }
   };
-  let shown = [];
+  let shown = [], drawRevision=0;
+  onLeave(()=>Resources.forget("Conversation"));
   const draw = async () => {
-    const { entries } = await api("GET", `/v1/chat/${enc(thread)}`);
+    const revision=++drawRevision;
+    const entries = await Resources.read("Conversation", `/v1/chat/${enc(thread)}`, "entries");
+    if (!entries || revision!==drawRevision) return;
     if (App.thread !== thread) return;
     shown = entries;
     // A decision the thread now waits on, not read yet: read the inbox first.
@@ -1823,6 +1852,7 @@ function closePanel() {
   stopPanelLive();
   hush();
   Panel.what = null;
+  Panel.rendered=null;Resources.forget("Work");
   const el = $("#detail");
   if (!el) return;
   el.hidden = true;
@@ -1846,13 +1876,16 @@ async function drawPanel() {
   const at = Panel.what.indexOf(":");
   const [kind, id] = at < 0 ? [Panel.what, ""] : [Panel.what.slice(0, at), Panel.what.slice(at + 1)];
   const composed = [];
-  let body, after = null, head = null;
+  let body, after = null, head = null, failed=false;
   try {
     ({ body, after, head } = await PANELS[kind](id, composed));
   } catch (e) {
+    failed=true;
+    if(n===Panel.seq){Resources.bad("Work",e);if(Panel.rendered===Panel.what)return;}
     body = `<div class="banner bad">${esc(e.status === 404 ? "This is gone: it was deleted, or it is not yours." : e.message)}</div>`;
   }
   if (n !== Panel.seq || !Panel.what) return;
+  if(!failed){Panel.rendered=Panel.what;Resources.good("Work");}
   const title = kind === "search" ? `Search: ${id}` : PANEL_TITLES[kind] || kind;
   // A view names itself in the head (a task: its title and where it
   // stands); the others are named by what they are.
@@ -1918,16 +1951,17 @@ async function taskView(id, composed) {
   const files = latestOutputs(t);
   const cs = t.criteria || [];
   const checked = cs.filter(c => c.verified === true && !String(c.verified_by || "").startsWith("person:")).length;
-  const cost = `$${(t.usage?.cost_usd ?? 0).toFixed(2)}`;
+  const cost = Number.isFinite(t.usage?.cost_usd) ? `$${t.usage.cost_usd.toFixed(2)}` : null;
   // The result leads with the deliverable, then its files, the person's
   // verdict, and the evidence; what it cost closes it.
   const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="pview"></iframe>` : running ? "" : `<p class="empty">No result yet.</p>`}
     ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
     ${files.length ? `<div class="frows">${files.map(f => fileRow(f, t.project)).join("")}</div>` : ""}
     ${t.outcome_view && t.summary ? `<h3>Summary</h3><p data-summary>${esc(t.summary)}</p>` : ""}
-    <h3>Checks</h3><div class="checklist">${doneLine(t)}${criteria(t)}</div>
+    <h3>Verification</h3>${doneLine(t)}<details class="verification-detail" data-key="checks:${esc(id)}" ${cs.some(c=>c.verified===false) ? "open" : ""}><summary>${esc(glance(t) || "No checks available")}</summary><div class="checklist">${criteria(t)}</div></details>
     ${ENDED.includes(t.status) ? verdictBar(t.task_id, t.verdict) : ""}
-    <p class="foot-note num" data-cost title="${esc(t.model?.adapter)} · ${t.usage?.actions ?? 0} actions">${esc(t.model?.name)} · ${t.usage?.model_calls ?? 0} steps · ${cost}</p>`;
+    ${cost ? `<p class="foot-note num" data-cost>${cost}</p>` : ""}
+    ${t.model?.name || Number.isFinite(t.usage?.model_calls) || Number.isFinite(t.usage?.actions) ? `<details data-key="usage:${esc(id)}"><summary>Execution details</summary><p class="small muted">${[t.model?.name,Number.isFinite(t.usage?.model_calls) ? `${t.usage.model_calls} model calls` : null,Number.isFinite(t.usage?.actions) ? `${t.usage.actions} actions` : null].filter(Boolean).map(esc).join(" · ")}</p></details>` : ""}`;
   const contract = `<h3>Request</h3><p class="request">${esc(t.text)}</p>
     ${t.files?.length ? `<p class="small"><span class="muted">Your files:</span> ${t.files.map(fileChip).join(" ")}</p>` : ""}
     <h3>Contract</h3>${contractSection(t)}<h3>Plan</h3>${plan(t)}`;
@@ -2248,7 +2282,7 @@ function wirePanel() {
           await api("POST", `/v1/tasks/${enc(id)}/cancel`, {}); break;
         case "resume": await api("POST", `/v1/tasks/${enc(id)}/resume`, {}); break;
         case "stop-schedule":
-          if (!await ask("Stop this schedule? No more of its runs start. Runs already started go on, and stay in Tasks.", "Stop schedule")) return;
+          if (!await ask("Stop this schedule? No more of its runs start. Active runs stop too. Work already done stays done, and the runs stay in Tasks.", "Stop schedule")) return;
           await api("DELETE", `/v1/schedules/${enc(id)}`); toast("The schedule is stopped."); break;
         case "delete-schedule":
           if (!await ask("Delete this schedule? It has ended, so nothing stops; its runs stay in Tasks.", "Delete schedule")) return;
@@ -2803,6 +2837,7 @@ async function updateRequiredScreen(info) {
 window.addEventListener("magnus-update-required", e => updateRequiredScreen(e.detail));
 
 async function boot() {
+  Resources.reset();
   Theme.scope(App.appliance, App.me.id);
   shell();
   window.onhashchange = go;
@@ -2822,11 +2857,13 @@ async function boot() {
 }
 
 function stop() {
+  Resources.reset();
   background.forEach(clearInterval); background = [];
   App.timers.forEach(clearInterval); App.timers = [];
   App.leave.forEach(f => { try { f(); } catch { /* ignore */ } }); App.leave = [];
   window.onhashchange = null;
   Panel.what = null;
+  Panel.rendered=null;Resources.forget("Work");
   Theme.scope(null, null);
   App.me = null; App.inbox = []; App.tasks = []; App.schedules = []; App.threads = []; App.projects = []; App.thread = null; App.feed = null; App.reported = new Set(); App.reporting = new Set();
   // What one person was typing or filtering by is not the next one's here.

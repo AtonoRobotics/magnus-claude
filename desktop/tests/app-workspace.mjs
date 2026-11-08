@@ -118,6 +118,7 @@ await step("read the result beside the conversation", async () => {
   await xpath(`${panel}//div[contains(@class,'detail-head')]//h2[normalize-space()='Q3 revenue summary']`);
   await xpath(`${panel}//div[contains(@class,'detail-head')]//span[contains(@class,'checks')]`);
   await xpath(`${panel}//div[contains(@class,'seg')]//button[@aria-selected='true' and normalize-space()='Result']`);
+  await click(xpath(`${panel}//details[contains(@class,'verification-detail')]/summary`));
   await xpath(`${panel}//div[contains(@class,'evidence') and contains(@class,'pass')]//span[normalize-space()='holds']`);
   await xpath(`${panel}//div[contains(@class,'evidence') and contains(@class,'pass')]//span[normalize-space()='confirmed by ${person}']`);
 });

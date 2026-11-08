@@ -586,7 +586,7 @@ ul.allows { margin: 4px 0 8px; padding-left: 18px; }
 blockquote.asked { margin: 0 0 6px; padding: 4px 10px; border-left: 3px solid var(--line-strong); color: var(--fg2); }
 
 /* Workspace baseline v1.2: chrome and content have independent aliases. */
-nav.side, .conv-head, .workspace-bar {
+nav.side, .conv-head, .workspace-bar, .connection-status {
   --fg: var(--chrome-text); --fg2: var(--chrome-text); --avatar: var(--chrome-selected);
   --muted: var(--chrome-muted); --faint: var(--chrome-muted);
   --focus: var(--chrome-focus); --accent: var(--chrome-focus);
@@ -599,7 +599,7 @@ nav.side, .conv-head, .workspace-bar {
   --button-bg: var(--chrome-surface);
   background: var(--side); color: var(--fg);
 }
-html[data-theme="corporate"] :is(nav.side, .conv-head, .workspace-bar) {
+html[data-theme="corporate"] :is(nav.side, .conv-head, .workspace-bar, .connection-status) {
   --ok: #86DBA0; --ok-icon: #86DBA0; --warn: #FFBE78; --warn-icon: #FFBE78; --bad: #FF8A80;
   --ok-soft: var(--chrome-surface); --warn-soft: var(--chrome-surface); --bad-soft: var(--chrome-surface);
 }
@@ -620,9 +620,14 @@ html[data-motion="full"] :is(.entry.enter, .tcard.finished .st, .tcard.finished 
 @media (max-width: 480px) { .theme-presets { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (forced-colors: active) {
   :root { --fg: CanvasText !important; --fg2: CanvasText !important; --muted: CanvasText !important; --faint: CanvasText !important; --surface: Canvas !important; --main: Canvas !important; --side: Canvas !important; --panel: Canvas !important; --raised: Canvas !important; --bg: Canvas !important; --backdrop: Canvas !important; --accent: Highlight !important; --accent-text: LinkText !important; --accent-fg: HighlightText !important; --focus: Highlight !important; --line: CanvasText !important; --line-strong: CanvasText !important; --btn-border: ButtonText !important; --button-bg: ButtonFace !important; --row-sel: Canvas !important; --chrome-text: CanvasText !important; --chrome-muted: CanvasText !important; --chrome-focus: Highlight !important; --chrome-surface: Canvas !important; --chrome-selected: Canvas !important; --chrome-line: CanvasText !important; --chrome-accent-fg: HighlightText !important; }
-  nav.side, .conv-head, .workspace-bar { backdrop-filter: none; -webkit-backdrop-filter: none; }
+  nav.side, .conv-head, .workspace-bar, .connection-status { backdrop-filter: none; -webkit-backdrop-filter: none; }
   button, input, textarea, select { border: 1px solid ButtonText; }
   :is(.on, [aria-current="page"], [aria-selected="true"]) { outline: 2px solid Highlight; }
 }
 
 aside.detail { -webkit-backdrop-filter: none; backdrop-filter: none; }
+
+/* Quiet scoped connection feedback reserves space instead of covering controls. */
+.connection-status { grid-column: 2 / -1; grid-row: 3; min-height: 28px; padding: 4px 12px; background: var(--side); color: var(--fg); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; border-top: 1px solid var(--line); }
+.shell:has(> .connection-status:not([hidden])) { grid-template-rows: 48px minmax(0, 1fr) auto; }
+body[data-navigation=drawer] .connection-status { grid-column: 1; }

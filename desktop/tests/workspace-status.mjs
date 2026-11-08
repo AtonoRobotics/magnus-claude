@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';import {join,dirname} from 'node:path';import {fileURLToPath} from 'node:url';
+const root=join(dirname(fileURLToPath(import.meta.url)),'../..');const {chromium}=createRequire(import.meta.url)(join(root,'browser/node_modules/playwright-core'));
+const browser=await chromium.launch({executablePath:process.env.MAGNUS_CHROMIUM,args:['--no-sandbox','--disable-dev-shm-usage']});const page=await browser.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+const until=async(fn,arg)=>{for(const end=Date.now()+15000;Date.now()<end;await page.waitForTimeout(40))if(await page.evaluate(fn,arg))return;throw Error('UI condition timed out');};
+try{
+ await page.goto(process.env.MAGNUS_URL);await page.getByLabel('Username').fill('alice');await page.getByLabel('Password').fill(process.env.MAGNUS_PASSWORD);await page.getByRole('button',{name:'Sign in',exact:true}).click();await page.locator('#msg').waitFor();
+ await page.evaluate(()=>{background.forEach(clearInterval);background=[];});
+ await page.evaluate(async()=>{await Magnus.api('POST','/v1/projects',{name:'Retained project'});await refresh();});
+ assert.equal(await page.evaluate(()=>App.projects.length),1);
+ await page.route('**/v1/projects',r=>r.request().method()==='GET' ? r.fulfill({status:503,contentType:'application/json',body:'{"error":"unavailable"}'}) : r.continue());
+ await page.evaluate(()=>refresh());await page.locator('#connection-status').getByText(/Projects may be stale/).waitFor();assert.equal(await page.evaluate(()=>App.projects[0].name),'Retained project');
+ await page.evaluate(async()=>{await Magnus.api('POST','/v1/chat',{text:'Actual new conversation'});await refresh();});assert.equal(await page.evaluate(()=>App.threads.length),1,'healthy conversations continue updating');
+ const announcement=await page.locator('#connection-announcement').textContent();await page.evaluate(()=>refresh());assert.equal(await page.locator('#connection-announcement').textContent(),announcement,'unchanged failures are not announced again');
+ await page.unroute('**/v1/projects');await page.evaluate(()=>refresh());await until(()=>document.querySelector('#connection-status').hidden);
+ // An older successful response must not replace newer authoritative objects.
+ let release,started=false;const held=new Promise(r=>release=r);
+ await page.route('**/v1/projects',async r=>{if(r.request().method()!=='GET' || started)return r.continue();started=true;const response=await r.fetch();await held;await r.fulfill({response});});
+ const old=page.evaluate(()=>refresh());await until(()=>true);while(!started)await page.waitForTimeout(20);
+ await page.evaluate(async()=>{await Magnus.api('POST','/v1/projects',{name:'New authoritative project'});await refresh();});assert.equal(await page.evaluate(()=>App.projects.length),2);release();await old;assert.equal(await page.evaluate(()=>App.projects.length),2);
+ await page.unroute('**/v1/projects');
+ const failure='**/v1/{tasks,schedules,chat,projects,health,inbox,versions}';await page.route(failure,r=>r.request().method()==='GET' ? r.abort('failed') : r.continue());await page.evaluate(()=>refresh());
+ assert.equal(await page.evaluate(()=>App.projects.length),2);assert.equal(await page.evaluate(()=>App.threads.length),1);await page.locator('#connection-status').getByText(/Tasks may be stale/).waitFor();await page.unroute(failure);await page.evaluate(()=>refresh());await until(()=>document.querySelector('#connection-status').hidden);
+ // A failed work refresh keeps the actual composed file available.
+ const file=await page.evaluate(async()=>Magnus.api('POST','/v1/files',{name:'cached.txt',media_type:'text/plain',data_b64:btoa('Readable cached work')}));
+ await page.evaluate(id=>openPanel(`file:${id}`),file.id);await page.frameLocator('#fview').getByText('Readable cached work').waitFor();
+ await page.route(`**/v1/files/${file.id}/info`,r=>r.fulfill({status:503,contentType:'application/json',body:'{"error":"unavailable"}'}));
+ await page.evaluate(()=>drawPanel());await page.frameLocator('#fview').getByText('Readable cached work').waitFor();await page.locator('#connection-status').getByText(/Work may be stale/).waitFor();
+ await page.unroute(`**/v1/files/${file.id}/info`);await page.evaluate(()=>drawPanel());await until(()=>document.querySelector('#connection-status').hidden);
+ // A session failure invokes the existing sign-in flow and invalidates all outstanding resource replies.
+ await page.route('**/v1/inbox',r=>r.fulfill({status:401,contentType:'application/json',body:'{"error":"session expired"}'}));await page.evaluate(()=>refresh());await page.getByLabel('Username').waitFor();assert.equal(await page.locator('#si').count(),1);
+ assert.deepEqual(errors,[]);console.log('partial/all resource failures retain actual data; healthy updates, latest response and recovery passed');
+}finally{await browser.close();}

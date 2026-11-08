@@ -55,6 +55,7 @@ await step("approve under Needs you", async () => {
 await step("see the outcome with its evidence, beside the conversation", async () => {
   await click(xpath("//div[@id='thread']//li[@data-chat-task][@data-status='completed']//a"));
   await xpath("//aside[@id='detail']//div[contains(@class,'detail-head')]//span[contains(@class,'chip') and normalize-space()='Done']");
+  await click(xpath("//details[contains(@class,'verification-detail')]/summary"));
   await xpath("//div[contains(@class,'evidence') and contains(@class,'pass')]//span[normalize-space()='holds']");
   await xpath(`//div[contains(@class,'evidence') and contains(@class,'pass')]//span[normalize-space()='confirmed by ${person}']`);
   const sandbox = await run("return document.querySelector('iframe.composed')?.getAttribute('sandbox')");
