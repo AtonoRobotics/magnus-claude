@@ -761,3 +761,7 @@ html[data-theme="corporate"] :is(nav.side, .conv-head, .workspace-bar) { color-s
   background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);
   background-position:right 14px center,right 10px center; background-size:4px 4px; background-repeat:no-repeat;
 }
+
+@media (any-pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]), select { min-width:44px; min-height:44px; }
+}

@@ -205,7 +205,8 @@ function navigationTree() {
 }
 function nav() {
   const route=location.hash || "#/home", waiting=needsMe();
-  const active=k=>k==="activity" ? ["activity","tasks","schedules"].includes(Panel.what) || /^(task|schedule):/.test(Panel.what || "") : k==="files" ? Panel.what==="files" || Panel.what?.startsWith("file:") : k==="needs" ? Panel.what==="needs" || Panel.what?.startsWith("item:") : route.startsWith("#/library");
+  const item=Panel.what?.startsWith("item:") ? App.inbox.find(i=>i.id===Panel.what.slice(5)) : null;
+  const active=k=>k==="activity" ? ["activity","tasks","schedules"].includes(Panel.what) || /^(task|schedule):/.test(Panel.what || "") || (Panel.what?.startsWith("item:") && !needsDecision(item || {})) : k==="files" ? Panel.what==="files" || Panel.what?.startsWith("file:") : k==="needs" ? Panel.what==="needs" || (item && needsDecision(item)) : route.startsWith("#/library");
   const primary=(k,label,ic,href)=>`<a class="primary-nav${k==="needs" ? " needs" : ""}${active(k) ? " on" : ""}" href="${href}" ${k!=="apps" ? `data-open="${k}"` : ""} ${active(k) ? 'aria-current="page"' : ""} aria-label="${label}${k==="needs" && waiting.length ? `, ${waiting.length} decisions` : ""}" title="${label}">${icon(ic)}<span class="nav-label">${label}</span>${k==="needs" ? `<span class="pill${waiting.length ? "" : " quiet"}" data-needs-count aria-hidden="true">${waiting.length}</span>` : ""}</a>`;
   return `${App.update?.ready ? `<div class="update-ready"><span class="small">Magnus ${esc(App.update.ready.version)} is ready.</span><button data-act="restart-update">Restart to update</button></div>` : ""}
     <a href="#/chat/new" class="new-chat primary-nav" aria-label="New conversation" title="New conversation">${icon("plus")}<span class="nav-label">New conversation</span></a>
@@ -706,7 +707,8 @@ function banners() {
   const el = $("#banners");
   if (!el) return;
   const v = App.versions, news = v ? v.changes.filter(c => c.seq > load("version", 0)) : [];
-  paint(el, `${App.health?.kill_switch ? `<div class="banner bad"><strong>The kill switch is on.</strong> No task acts until the owner turns it off.</div>` : ""}
+  const sessionUpdates=App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length);
+  paint(el, `${sessionUpdates ? '<div class="banner small">Updates since your last session. <a href="#/activity" data-open="activity">View Activity</a></div>' : ""}${App.health?.kill_switch ? `<div class="banner bad"><strong>The kill switch is on.</strong> No task acts until the owner turns it off.</div>` : ""}
     ${news.length ? `<div class="banner" role="status"><strong>The agent changed since you last looked.</strong>
       <ul class="small" style="margin:6px 0">${news.map(c => `<li>${esc(describeChange(c))} <span class="faint">(${esc(when(c.at))})</span></li>`).join("")}</ul>
       <button data-act="seen-versions">Got it</button></div>` : ""}`);
@@ -1746,8 +1748,8 @@ async function respond(btn, root) {
 function feedRows(feed) {
   const rows = [];
   for (const t of feed.ended) rows.push(`<div class="feed-row"><a href="#/task/${enc(t.task_id)}">${esc(t.title || "A task")}</a> <span class="chip ${t.status === "failed" ? "bad" : "ok"}">${esc(t.status)}</span></div>`);
-  for (const i of feed.arrived) rows.push(`<div class="feed-row"><a href="#/inbox">${esc(i.summary || i.kind)}</a> <span class="small muted">new ${esc(i.kind)}</span></div>`);
-  for (const i of feed.decided) rows.push(`<div class="feed-row"><a href="#/inbox">${esc(i.summary || i.kind)}</a> <span class="small muted">${esc(i.resolution?.decision || "decided")}</span></div>`);
+  for (const i of feed.arrived) rows.push(`<div class="feed-row"><a href="#/item/${enc(i.id)}" data-open="item:${esc(i.id)}">${esc(i.summary || i.kind)}</a> <span class="small muted">new ${esc(i.kind)}</span></div>`);
+  for (const i of feed.decided) rows.push(`<div class="feed-row"><a href="#/item/${enc(i.id)}" data-open="item:${esc(i.id)}">${esc(i.summary || i.kind)}</a> <span class="small muted">${esc(i.resolution?.decision || "decided")}</span></div>`);
   return rows.join("");
 }
 
@@ -1903,7 +1905,7 @@ function stopPanelLive() {
   Panel.liveText = "";
 }
 
-const PANEL_TITLES = { activity: "Activity", needs: "Needs you", tasks: "Tasks", schedules: "Schedules", files: "Files", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Decision", search: "Search", connector: "Connector" };
+const PANEL_TITLES = { activity: "Activity", needs: "Needs you", tasks: "Tasks", schedules: "Schedules", files: "Files", projects: "Projects", task: "Task", file: "File", schedule: "Schedule", project: "Project", item: "Item", search: "Search", connector: "Connector" };
 
 async function drawPanel() {
   const el = $("#detail");
@@ -2884,7 +2886,9 @@ async function boot() {
   App.reported = new Set();
   App.reporting = new Set();
   App.feed = await api("POST", "/v1/home/opened", {}).catch(() => null);
-  if (App.feed && (App.feed.ended.length || App.feed.arrived.length || App.feed.decided.length) && (!location.hash || location.hash === "#/home")) App.openAfter = "activity";
+  // Return-session details stay in Activity; informational arrivals do
+  // not switch the selected region or hide the conversation's composer.
+  banners();
   background = [setInterval(refresh, 3000), setInterval(pollVersions, 30000)];
   go();
 }
