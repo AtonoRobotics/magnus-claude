@@ -101,7 +101,7 @@ await step("connect Claude", async () => {
 });
 
 await step("ask for the work in a conversation", async () => {
-  await page.getByRole("link", { name: "New conversation" }).click();
+  await page.getByRole("link", { name: "New conversation", exact: true }).click();
   await page.getByLabel("Model").waitFor({ timeout: T });
   await page.getByRole("textbox", { name: "Message", exact: true }).fill(task);
   await page.getByRole("button", { name: "Send" }).click();
@@ -172,7 +172,7 @@ const [question, answer] = [process.env.MAGNUS_CHAT_QUESTION, process.env.MAGNUS
 if (question) await step("ask in a new conversation and see the answer", async () => {
   const answers = n => page.locator("#thread [data-answer]", { hasText: answer }).nth(n - 1).waitFor({ timeout: T });
   const before = await conversations();
-  await page.getByRole("link", { name: "New conversation" }).click();
+  await page.getByRole("link", { name: "New conversation", exact: true }).click();
   await page.waitForURL(/#\/chat\/new$/, { timeout: T });
   await page.getByText("Magnus answers, starts a task, or proposes a schedule").waitFor({ timeout: T });
   if (await page.locator("#thread [data-answer]").count()) throw new Error("a new conversation shows the old one's answers");
