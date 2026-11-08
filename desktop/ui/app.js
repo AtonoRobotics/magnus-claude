@@ -139,8 +139,10 @@ const MessageDrafts = (() => {
   function discard(id) { if (!rows[id]) return; for (const f of rows[id].files) originals.delete(f.uid); delete rows[id]; changed(true); }
   function acknowledge(record, submission, response) {
     if (!rows[record.id] || !record.pending.some(p => p.id === submission.id)) return;
+    const secondary=!!(record.localEntry && record.thread);
     record.thread = response.thread;
     record.pending = record.pending.filter(p => p.id !== submission.id);
+    record.localEntry=secondary;
     // Secondary thread drafts keep their independent navigation identity,
     // including when the person edits only after this acknowledgement.
     // The current editable draft was separated at dispatch. Never clear it
