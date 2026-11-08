@@ -584,3 +584,16 @@ ul.allows { margin: 4px 0 8px; padding-left: 18px; }
 .card-acts { display: flex; gap: 12px; align-items: center; padding: 4px 12px 8px 44px; }
 .tcard .card-acts { padding-top: 0; }
 blockquote.asked { margin: 0 0 6px; padding: 4px 10px; border-left: 3px solid var(--line-strong); color: var(--fg2); }
+
+.draft-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
+.attachment-picker { display: inline-flex; }
+#composer .attachment-picker button { min-width: 44px; min-height: 44px; }
+.attachment-chip { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 12px; max-width: 100%; overflow-wrap: anywhere; }
+.attachment-chip button { min-width: 36px; min-height: 36px; }
+.submitted-message { padding: 8px 12px; margin-bottom: 8px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--raised); }
+.submitted-message .pre { max-height: 160px; overflow: auto; }
+#submitted { max-height: 28dvh; overflow-y: auto; }
+.jump-latest { align-self: center; margin: 4px; min-height: 36px; padding: 8px 16px; border-radius: 12px; background: var(--surface); color: var(--fg); border: 1px solid var(--line-strong); }
+.jump-latest[hidden] { display: none; }
+.thread { overflow-anchor: none; }
+@media (any-pointer: coarse) { .attachment-chip button, .jump-latest { min-height: 44px; min-width: 44px; } }
