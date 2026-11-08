@@ -326,6 +326,37 @@ async fn deleting_the_last_admin_is_refused_and_erases_nothing() {
     assert_eq!(sc["schedules"].as_array().map(Vec::len), Some(1), "the refused delete erased his schedule: {sc}");
 }
 
+/// Deleting a local person erases their data and then removes their
+/// account: they leave the list, their sessions and schedules are
+/// counted, and nothing of theirs signs in (#529).
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_local_person_erases_then_removes_them() {
+    let s = Setup::start(60).await;
+    let alice = s.alice(true).await;
+    let (st, v) = s.send(reqwest::Method::POST, "/users", &alice, Some(json!({ "email": "dee@acme.test", "name": "Dee Ray", "role": "member" }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let token = v["invite_token"].as_str().unwrap().to_string();
+    let http = reqwest::Client::new();
+    let r = http.post(format!("{}/v1/invites/accept", s.app.base)).json(&json!({ "token": token, "password": "dee-long-password" })).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK, "{}", r.text().await.unwrap());
+    let (st, v) = s.app_sign_in("dee", "dee-long-password").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let dee_token = v["token"].as_str().unwrap().to_string();
+    let r = http.post(format!("{}/v1/schedules", s.app.base)).bearer_auth(&dee_token).json(&json!({ "text": "Water the plants.", "daily_at": "03:00" })).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().await.unwrap());
+
+    let (st, v) = s.send(reqwest::Method::DELETE, "/users/dee", &alice, Some(json!({ "email": "dee@acme.test" }))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["account_removed"], true, "{v}");
+    assert_eq!((v["erased"]["schedules_ended"].as_u64(), v["erased"]["sessions_ended"].as_u64()), (Some(1), Some(1)), "{v}");
+    assert!(s.user(&alice, "dee").await.is_none(), "the deleted person is still listed");
+    let (st, _) = s.app_sign_in("dee", "dee-long-password").await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "the deleted person still signs in");
+    let r = http.get(format!("{}/v1/schedules", s.app.base)).bearer_auth(&dee_token).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 401, "the deleted person's session still works");
+    assert!(s.audited(&alice).await.iter().any(|a| a == "user_deleted"), "not in the audit log");
+}
+
 /// Issue #192: two changes aimed at the last two admins, sent together,
 /// each demoting or turning off one of them. The console lets one through
 /// and refuses the other, whatever the timing: at least one admin turned on

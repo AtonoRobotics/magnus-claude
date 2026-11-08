@@ -365,24 +365,17 @@ async fn admin_delete(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axu
     if k.person(&id).is_none() {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
     }
-    // The account first: its removal (or disabling) holds the
-    // last-admin guard, so a refused deletion erases nothing, and a
-    // refusal is never discarded (#527).
+    // Disable first: it holds the last-admin guard, so a refused
+    // deletion erases nothing — and a failed erasure leaves a listed,
+    // disabled account whose deletion retries cleanly, instead of a
+    // vanished person with orphaned content (#529).
     let local = k.accounts.is_local(&id);
-    let ended = if local {
-        match k.accounts.remove_person(&id).await {
-            Ok(ended) => ended,
-            Err(e) if last_admin_refused(&e) => return last_admin(),
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
-        }
-    } else {
-        match k.accounts.set_status(&id, crate::accounts::Status::Disabled).await {
-            Ok(ended) => ended,
-            Err(e) if last_admin_refused(&e) => return last_admin(),
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
-        }
+    let ended = match k.accounts.set_status(&id, crate::accounts::Status::Disabled).await {
+        Ok(ended) => ended,
+        Err(e) if last_admin_refused(&e) => return last_admin(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response(),
     };
-    // Sessions the removal ended are signed out on the record, as a
+    // Sessions the disabling ended are signed out on the record, as a
     // disable signs its own.
     if !ended.is_empty() {
         let evs: Vec<(&str, Ev)> = ended.iter().map(|session| (actor.as_str(), Ev::SignedOut { person: id.clone(), session: session.clone() })).collect();
@@ -394,9 +387,18 @@ async fn admin_delete(State(k): State<Arc<Kernel>>, axum::extract::Path(id): axu
         Ok(v) => v,
         Err(r) => return person_refused(r),
     };
-    // The removal already ended their sessions; the erasure counts its
-    // own. The answer counts every session the deletion ended.
+    // The disabling already ended their sessions; the erasure counts
+    // its own. The answer counts every session the deletion ended.
     erased["sessions_ended"] = json!(ended.len() as u64 + erased["sessions_ended"].as_u64().unwrap_or(0));
+    // Then the local directory entry goes, its content already erased. A
+    // disabled account is never the last enabled admin, so this only
+    // fails the store itself — leaving a listed, disabled shell whose
+    // deletion retries (the erasure finds nothing new) and removes.
+    if local {
+        if let Err(e) = k.accounts.remove_person(&id).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("{e:#}") }))).into_response();
+        }
+    }
     Json(json!({ "erased": erased, "account_removed": local })).into_response()
 }
 
