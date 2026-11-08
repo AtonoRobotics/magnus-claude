@@ -1075,6 +1075,16 @@ impl Accounts {
         Ok(Some((person, ended)))
     }
 
+    /// Whether an invitation token is live: present and unexpired. Peeks
+    /// without consuming, for the invitation page.
+    pub async fn invite_live(&self, token: &str) -> bool {
+        let Ok(mut g) = self.client().await else { return false };
+        let Some(c) = g.as_mut() else { return false };
+        let now = Utc::now();
+        let _ = c.execute("DELETE FROM public.account_invites WHERE expires <= $1", &[&now]).await;
+        c.query_opt("SELECT person FROM public.account_invites WHERE hash = $1", &[&token_hash(token.trim())]).await.ok().flatten().is_some()
+    }
+
     /// Whether a recovery token is live: present and unexpired. Peeks
     /// without consuming, for the recovery page.
     pub async fn reset_live(&self, token: &str) -> bool {
@@ -2157,6 +2167,20 @@ mod tests {
         assert_eq!(accounts.confirm_reset(&first.token, "ada-newer-password").await.unwrap(), None, "the removed token confirmed");
         accounts.add_person("ada", "Ada", Some("ada@example.com")).await.unwrap();
         assert_eq!(accounts.confirm_reset(&first.token, "ada-newest-password").await.unwrap(), None, "the old token took over the recreated account");
+    }
+
+    /// An invitation token reads live until it is used: a bad token never
+    /// is, and peeking consumes nothing (#535).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invitation_token_reads_live_until_it_is_used() {
+        let (_db, url) = db().await;
+        let accounts = Accounts::open(&url, cfg()).await.unwrap();
+        let invite = accounts.invite_person("ada", "Ada", Some("ada@example.com"), Role::Member).await.unwrap();
+        assert!(accounts.invite_live(&invite).await, "the fresh invitation reads dead");
+        assert!(!accounts.invite_live("deadbeef").await, "a bad token reads live");
+        assert!(accounts.invite_live(&invite).await, "peeking consumed the invitation");
+        accounts.accept(&invite, "ada-long-password").await.unwrap();
+        assert!(!accounts.invite_live(&invite).await, "the used invitation reads live");
     }
 
     /// One call makes an invited admin with a token: person, invited

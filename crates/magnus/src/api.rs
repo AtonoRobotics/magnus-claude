@@ -92,12 +92,12 @@ pub(crate) async fn developer(k: &Kernel, h: &HeaderMap) -> Result<Person, Respo
 /// cookie must also carry a header another site's page cannot set. The
 /// recovery form is the exception: its authorization is the emailed
 /// token, which a plain form can carry, so a stale session cookie must
-/// not block it (#541).
+/// not block it (#541). The invitation form is the same (#535).
 async fn cookie_guard(req: Request, next: Next) -> Response {
     let h = req.headers();
     let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
-    let recovery = *req.method() == Method::POST && req.uri().path() == "/reset";
-    if !safe && !recovery && bearer(h).is_none() && cookie(h, SESSION_COOKIE).is_some() && h.get("x-magnus-client").is_none() {
+    let token_form = *req.method() == Method::POST && matches!(req.uri().path(), "/reset" | "/invite");
+    if !safe && !token_form && bearer(h).is_none() && cookie(h, SESSION_COOKIE).is_some() && h.get("x-magnus-client").is_none() {
         return err(StatusCode::FORBIDDEN, "missing x-magnus-client header");
     }
     next.run(req).await
@@ -125,6 +125,7 @@ pub fn router(k: Arc<Kernel>, transport: Transport) -> Router {
         .route("/v1/sign-in/device", post(device_start))
         .route("/v1/sign-in/device/{flow}", post(device_poll))
         .route("/v1/invites/accept", post(accept_invite))
+        .route("/invite", get(invite_page).post(invite_confirm))
         .route("/v1/password-reset/request", post(password_reset_request))
         .route("/reset", get(reset_page).post(reset_confirm))
         .route("/v1/password", post(choose_password))
@@ -758,11 +759,50 @@ async fn accept_invite(State(k): K, Extension(t): Extension<Transport>, ConnectI
     }
 }
 
+/// The invitation page behind an emailed link: a live token gets the
+/// form, anything else an explanation and no oracle beyond it.
+async fn invite_page(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Query(q): Query<std::collections::HashMap<String, String>>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let token = q.get("token").map(|s| s.trim().to_string()).unwrap_or_default();
+    if token.is_empty() || !k.accounts.invite_live(&token).await {
+        return reset_shell("Invitation expired", "<h1>This invitation link is used or expired.</h1><p>Ask your admin for a new invitation.</p>");
+    }
+    reset_shell(
+        "Accept your invitation",
+        &format!(
+            "<h1>Accept your invitation</h1><p>Choose the password you will sign in to Magnus with.</p><form method=post action=/invite><input type=hidden name=token value=\"{}\"><label>New password<input type=password name=password autocomplete=new-password required></label><label>Repeat it<input type=password name=confirm autocomplete=new-password required></label><button>Accept invitation</button></form>",
+            h_escape(&token)
+        ),
+    )
+}
+
+/// Accept the invitation from the page.
+async fn invite_confirm(State(k): K, Extension(t): Extension<Transport>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Form(f): Form<std::collections::HashMap<String, String>>) -> Response {
+    if let Err(r) = over_tls(&k, t, peer) {
+        return r;
+    }
+    let token = f.get("token").map(|s| s.trim().to_string()).unwrap_or_default();
+    let password = f.get("password").cloned().unwrap_or_default();
+    if f.get("confirm").map(|s| s.as_str()) != Some(password.as_str()) {
+        return reset_shell("Accept your invitation", &format!("<h1>Accept your invitation</h1><p class=error>The two passwords do not match.</p><form method=post action=/invite><input type=hidden name=token value=\"{}\"><label>New password<input type=password name=password autocomplete=new-password required></label><label>Repeat it<input type=password name=confirm autocomplete=new-password required></label><button>Accept invitation</button></form>", h_escape(&token)));
+    }
+    if password.chars().count() < k.cfg.sign_in.min_password_length {
+        return reset_shell("Accept your invitation", &format!("<h1>Accept your invitation</h1><p class=error>A password needs at least {} characters.</p><form method=post action=/invite><input type=hidden name=token value=\"{}\"><label>New password<input type=password name=password autocomplete=new-password required></label><label>Repeat it<input type=password name=confirm autocomplete=new-password required></label><button>Accept invitation</button></form>", k.cfg.sign_in.min_password_length, h_escape(&token)));
+    }
+    match k.accounts.accept(&token, &password).await {
+        Ok(Some(person)) => reset_shell("Invitation accepted", &format!("<h1>Your invitation is accepted.</h1><p>Sign in to Magnus as {} with your new password.</p>", h_escape(&person))),
+        Ok(None) => reset_shell("Invitation expired", "<h1>This invitation link is used or expired.</h1><p>Ask your admin for a new invitation.</p>"),
+        Err(e) => internal(e),
+    }
+}
+
 /// Where account links point: the configured mail base, else the public
 /// hostname when pairing is on. Nothing else is trusted: the request's
 /// own host is attacker-controlled, so without either of these no
-/// recovery mail goes out at all (#541).
-fn link_base(k: &Kernel) -> Option<String> {
+/// account mail goes out at all (#541).
+pub(crate) fn link_base(k: &Kernel) -> Option<String> {
     if let Some(base) = k.cfg.mail.as_ref().and_then(|m| m.link_base.clone()) {
         return Some(base.trim_end_matches('/').to_string());
     }

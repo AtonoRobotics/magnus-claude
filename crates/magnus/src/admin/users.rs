@@ -104,9 +104,9 @@ fn role_of(b: &Value) -> Option<bool> {
 }
 
 /// Invite someone: the appliance makes their account and a single-use
-/// token, shown once here for the admin to pass on — the appliance
-/// cannot send mail, so no email is ever sent (#508). Inviting an admin
-/// needs a fresh password.
+/// token, emailed to them when it can send mail, else shown once here
+/// for the admin to pass on (#535). Inviting an admin needs a fresh
+/// password.
 pub async fn invite(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Json(b): Json<Value>) -> Response {
     let email = b["email"].as_str().map(str::trim).unwrap_or_default().to_lowercase();
     let name = b["name"].as_str().map(str::trim).unwrap_or_default().to_string();
@@ -123,9 +123,20 @@ pub async fn invite(State(c): State<Arc<Console>>, Extension(a): Extension<Admin
     let body = json!({ "email": email, "name": name, "role": if admin { "admin" } else { "member" } });
     let r = recorded(&c, &a, "user_invited", &email, None, Some(after), c.kernel.call(Method::POST, "/v1/admin/people", Some(&body))).await;
     match r {
-        Ok(v) => (StatusCode::CREATED, Json(json!({ "id": v["id"], "email": v["email"], "invite_token": v["invite_token"], "invite_expires": v["invite_expires"], "email_sent": false }))).into_response(),
+        Ok(v) => {
+            let sent = send_invite(&c, &email, v["invite_link"].as_str()).await;
+            (StatusCode::CREATED, Json(json!({ "id": v["id"], "email": v["email"], "invite_token": v["invite_token"], "invite_expires": v["invite_expires"], "email_sent": sent }))).into_response()
+        }
         Err(r) => r,
     }
+}
+
+/// Email an invitation link through the kernel's mailer. False with no
+/// link (no trusted base) or no mail: the shown token is the fallback.
+async fn send_invite(c: &Console, email: &str, link: Option<&str>) -> bool {
+    let Some(link) = link else { return false };
+    let text = format!("You are invited to Magnus. Choose your password within seven days:\n\n{link}\n\nIf you did not expect this invitation, ignore it.");
+    c.kernel.call(Method::POST, "/v1/admin/mail", Some(&json!({ "to": email, "subject": "Your Magnus invitation", "text": text }))).await.map(|v| v["sent"].as_bool().unwrap_or(false)).unwrap_or(false)
 }
 
 fn valid_email(e: &str) -> bool {
@@ -214,14 +225,21 @@ async fn invited(c: &Console, id: &str) -> Result<Value, Response> {
     Ok(p)
 }
 
-/// Send the invitation again: a fresh token, shown once here; the old
-/// one dies with it.
+/// Send the invitation again: a fresh token, emailed when the appliance
+/// can send mail, else shown once here; the old one dies with it.
 pub async fn resend(State(c): State<Arc<Console>>, Extension(a): Extension<Admin>, Path(id): Path<String>) -> Response {
-    if let Err(r) = invited(&c, &id).await {
-        return r;
-    }
+    let p = match invited(&c, &id).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
     match recorded(&c, &a, "user_invite_resent", &id, None, None, c.kernel.call(Method::POST, &format!("/v1/admin/people/{id}/invite"), None)).await {
-        Ok(v) => Json(json!({ "id": v["id"], "invite_token": v["invite_token"], "invite_expires": v["invite_expires"] })).into_response(),
+        Ok(v) => {
+            let sent = match p["email"].as_str() {
+                Some(email) => send_invite(&c, email, v["invite_link"].as_str()).await,
+                None => false,
+            };
+            Json(json!({ "id": v["id"], "invite_token": v["invite_token"], "invite_expires": v["invite_expires"], "email_sent": sent })).into_response()
+        }
         Err(r) => r,
     }
 }
