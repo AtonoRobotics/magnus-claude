@@ -196,7 +196,7 @@ function navigationTree() {
   const conv=t=>`<a class="conv${t.thread===App.thread ? " on" : ""}" href="#/chat/${enc(t.thread)}" ${t.thread===App.thread ? 'aria-current="page"' : ""} title="${esc(t.title)}"><span class="ttl">${esc(t.title)}</span></a>`;
   const loose=App.threads.filter(t=>!t.project);
   return `<div class="sect"><div class="group"><span>Projects</span><a href="#/projects" data-open="projects" class="more">All</a></div>
-    ${App.projects.map(p=>`<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}">${icon("folder")}<span class="ttl" title="${esc(p.name)}">${esc(p.name)}</span></a>${App.threads.filter(t=>t.project?.id===p.id).map(conv).join("")}`).join("") || '<p class="small muted pad">No projects yet.</p>'}</div>
+    ${App.projects.map(p=>`<a href="#/project/${enc(p.id)}" data-open="project:${esc(p.id)}" title="${esc(p.name)}">${icon("folder")}<span class="ttl">${esc(p.name)}</span></a>${App.threads.filter(t=>t.project?.id===p.id).map(conv).join("")}`).join("") || '<p class="small muted pad">No projects yet.</p>'}</div>
     <div class="sect"><div class="group"><span>Conversations</span></div>${loose.map(conv).join("") || '<p class="small muted pad">No conversations yet.</p>'}</div>
     <div class="sect"><a href="#/trash">${icon("trash")}<span>Trash</span></a>${isDev() ? `<details class="developer-nav"><summary>Developer</summary>${[["runs","Runs"],["experiments","Experiments"],["system","System"],["policy","Policy"],["playbook","Playbook"]].map(([k,l])=>`<a href="#/dev/${k}">${l}</a>`).join("")}</details>` : ""}</div>`;
 }
@@ -253,7 +253,7 @@ const Workspace = (() => {
     return m;
   }
   function remember() { history.replaceState({...history.state,workspace:{work:Panel.what,expanded,region}},"",location.href); }
-  function choose(which) {region=which;remember();update();if(which==="work") $("#detail h2")?.focus({preventScroll:true});else $("#msg")?.focus({preventScroll:true});}
+  function choose(which) {region=which;remember();update();const target=which==="work" ? $("#detail h2") : $("#msg");if(target){if(which==="work")target.tabIndex=-1;target.focus({preventScroll:true});}}
   function opened() {const saved=history.state?.workspace;if(saved?.work===Panel.what){expanded=!!saved.expanded;region=saved.region==="conversation" ? "conversation" : "work";}else region="work";forceExpanded=false;remember();update();}
   function closed() {expanded=false;region="conversation";remember();update();}
   function openDrawer() {
@@ -2009,7 +2009,7 @@ function fileRow(f, project) {
   const type = FILE_TYPES[f.media_type] || (f.media_type || "").split("/").pop().slice(0, 4).toUpperCase() || "FILE";
   const p = project && (typeof project === "object" ? project : App.projects.find(x => x.id === project));
   return `<div class="frow" data-file-row="${esc(f.id)}"><span class="ftype ${type === "PDF" ? "pdf" : ""}">${esc(type)}</span>
-    <div class="rg-main"><a class="ttl" href="#/file/${enc(f.id)}" data-open="file:${esc(f.id)}">${esc(f.name)}</a><span class="sub">Saved to Files${p ? ` · ${esc(p.name)}` : ""} · ${esc(kb(f.size))}</span></div>
+    <div class="rg-main"><a class="ttl" href="#/file/${enc(f.id)}" data-open="file:${esc(f.id)}" title="${esc(f.name)}">${esc(f.name)}</a><span class="sub">Saved to Files${p ? ` · ${esc(p.name)}` : ""} · ${esc(kb(f.size))}</span></div>
     <button class="icon-btn" data-file-download="${esc(f.id)}" data-name="${esc(f.name)}" title="Download ${esc(f.name)}">${icon("download")}<span class="sr">Download</span></button></div>`;
 }
 
