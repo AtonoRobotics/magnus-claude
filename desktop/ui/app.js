@@ -12,47 +12,58 @@ const enc = encodeURIComponent;
 // is heard while the next is made. With no voice on the appliance, the
 // system's own voice reads it.
 const voice = { run: 0, audio: null, done: null, entry: null };
+function speechEntry(id) {
+  voice.entry=id;
+  for(const button of document.querySelectorAll("button[data-voice-entry]")) {
+    const reading=button.dataset.voiceEntry===id, action=reading ? "hush" : "listen", label=reading ? "Stop reading" : "Read aloud";
+    if(button.hasAttribute("data-msg-act"))button.dataset.msgAct=action;else button.dataset.act=reading ? "hush" : "speak";
+    button.setAttribute("aria-label",label);button.dataset.tooltip=label;
+    const svg=button.querySelector("svg");if(svg)svg.innerHTML=ICONS[action];
+  }
+}
 function hush() {
   voice.run++;
-  voice.entry = null;
   if (voice.audio) voice.audio.pause();
   if (voice.done) voice.done();
   voice.audio = voice.done = null;
+  speechEntry(null);
   return Magnus.stopSpeaking();
 }
-async function readAloud(text, entryId) {
-  await hush();
-  voice.entry = entryId;
-  // A sentence at a time; a very long one in pieces, as the appliance reads
-  // at most 2000 characters at once.
-  const pieces = s => { const out = []; let cur = ""; for (const w of s.split(/\s+/)) { if (cur && (cur + " " + w).length > 1500) { out.push(cur); cur = w; } else cur = cur ? `${cur} ${w}` : w; } if (cur) out.push(cur); return out; };
-  const run = voice.run, parts = text.split(/(?<=[.!?])\s+/).filter(s => s.trim()).flatMap(pieces);
-  // The voice makes a few pieces at a time for everyone: busy, wait and ask again.
-  const ask = async (s, tries = 8) => {
-    try { return await api("POST", "/v1/speak", { text: s }); } catch (e) {
-      if (e.status !== 429 || tries <= 1 || run !== voice.run) throw e;
-      await new Promise(r => setTimeout(r, 400));
-      return ask(s, tries - 1);
+async function readAloud(source, entryId) {
+  const textReady=Promise.resolve(source);textReady.catch(()=>{});
+  const stopped=hush(), run=voice.run;
+  speechEntry(entryId);
+  // Own startup before awaiting the host or the spoken-script request.
+  try {
+    await stopped;if(run!==voice.run)return;
+    const text=await textReady;if(run!==voice.run)return;
+    if(typeof text!=="string")throw new Error("No spoken text is available.");
+    const pieces = s => { const out = []; let cur = ""; for (const w of s.split(/\s+/)) { if (cur && (cur + " " + w).length > 1500) { out.push(cur); cur = w; } else cur = cur ? `${cur} ${w}` : w; } if (cur) out.push(cur); return out; };
+    const parts=text.split(/(?<=[.!?])\s+/).filter(s=>s.trim()).flatMap(pieces);
+    const ask=async(s,tries=8)=>{
+      if(run!==voice.run)return null;
+      try{return await api("POST","/v1/speak",{text:s});}catch(e){
+        if(e.status!==429 || tries<=1 || run!==voice.run)throw e;
+        await new Promise(r=>setTimeout(r,400));return ask(s,tries-1);
+      }
+    };
+    const make=s=>{const p=ask(s);p.catch(()=>{});return p;};
+    let next=parts.length ? make(parts[0]) : null;
+    for(let i=0;i<parts.length;i++) {
+      let r;
+      try{r=await next;}catch(e){if(e.status===503 && i===0 && run===voice.run){for(const part of parts){if(run!==voice.run)return;await Magnus.speak(part);}return;}throw e;}
+      if(run!==voice.run || !r)return;
+      next=i+1<parts.length ? make(parts[i+1]) : null;
+      const src=URL.createObjectURL(new Blob([Uint8Array.from(atob(r.audio_b64),c=>c.charCodeAt(0))],{type:r.media_type}));
+      await new Promise((done,fail)=>{
+        const audio=voice.audio=new Audio(src);voice.done=done;
+        audio.onended=done;audio.onerror=()=>fail(new Error("Could not play the audio."));audio.play().catch(fail);
+      }).finally(()=>URL.revokeObjectURL(src));
+      if(run!==voice.run)return;
     }
-  };
-  const make = s => { const p = ask(s); p.catch(() => {}); return p; };
-  let next = parts.length ? make(parts[0]) : null;
-  for (let i = 0; i < parts.length; i++) {
-    let r;
-    try { r = await next; } catch (e) { if (e.status === 503 && i === 0) return run === voice.run && Magnus.speak(text); throw e; }
-    if (run !== voice.run) return;
-    next = i + 1 < parts.length ? make(parts[i + 1]) : null;
-    const src = URL.createObjectURL(new Blob([Uint8Array.from(atob(r.audio_b64), c => c.charCodeAt(0))], { type: r.media_type }));
-    await new Promise((done, fail) => {
-      const a = voice.audio = new Audio(src);
-      voice.done = done;
-      a.onended = done;
-      a.onerror = () => fail(new Error("Could not play the audio."));
-      a.play().catch(fail);
-    }).finally(() => URL.revokeObjectURL(src));
-    if (run !== voice.run) return;
+  } finally {
+    if(run===voice.run){voice.audio=voice.done=null;speechEntry(null);}
   }
-  voice.audio = voice.done = null;
 }
 
 const App = {
@@ -261,21 +272,25 @@ function shell() {
 
 // One open menu and one shared tooltip, for both input families.
 const Menus = (() => {
-  let current = null, trigger = null;
+  let current = null, trigger = null, anchorPosition = null;
   const items = () => current ? $$('[role="menuitem"]:not(:disabled), [role="menuitemcheckbox"]:not(:disabled)', current) : [];
   function close(restore = false) {
     if (!current) return;
     current.hidden = true; trigger?.setAttribute("aria-expanded", "false");
-    const back = trigger; current = trigger = null;
+    const back = trigger; current = trigger = null; anchorPosition=null;
     if (restore && back?.isConnected) back.focus({ preventScroll: true });
   }
   function open(button, focus = true) {
     const menu = document.getElementById(button.dataset.menu);
     if (!menu) return;
     if (current === menu) return close(true);
+    // A transformed entry becomes the containing block of fixed descendants.
+    // End its entrance before placing a viewport-relative menu.
+    button.closest('.entry.enter')?.classList.remove('enter');
     close(); current = menu; trigger = button; menu.hidden = false;
     button.setAttribute("aria-expanded", "true");
     const anchor = button.getBoundingClientRect(), r = menu.getBoundingClientRect();
+    anchorPosition={left:anchor.left,top:anchor.top};
     menu.style.left = `${Math.max(8, Math.min(anchor.left, innerWidth - r.width - 8))}px`;
     menu.style.top = `${anchor.bottom + r.height <= innerHeight - 8 ? anchor.bottom : Math.max(8, anchor.top - r.height)}px`;
     if (focus) items()[0]?.focus({ preventScroll: true });
@@ -295,7 +310,11 @@ const Menus = (() => {
       const at = e.key === "Home" ? 0 : e.key === "End" ? list.length - 1 : (n + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length;
       list[at]?.focus({ preventScroll: true });
     });
-    document.addEventListener("scroll", e => { if (current && !current.contains(e.target)) close(); }, true);
+    document.addEventListener("scroll", e => {
+      if(!current || current.contains(e.target))return;
+      const now=trigger.getBoundingClientRect();
+      if(!anchorPosition || Math.abs(now.left-anchorPosition.left)>1 || Math.abs(now.top-anchorPosition.top)>1)close();
+    }, true);
     window.addEventListener("resize", () => close(true));
     new MutationObserver(() => { if (current && (!current.isConnected || !trigger?.isConnected)) { close(); $("#conv-head h1")?.focus({ preventScroll: true }); } }).observe(document.body, { childList: true, subtree: true });
   }
@@ -392,7 +411,8 @@ function wireMarkdown(root) {
 function wireDocument() {
   Menus.install(); Tooltips.install(); wireMarkdown(document);
   const style = document.createElement("style"); style.textContent = Compose.markdownStyles; document.head.append(style);
-  document.addEventListener("load", e => { if (e.target.matches?.("iframe.composed")) { try { wireMarkdown(e.target.contentDocument); } catch { /* frame unavailable */ } } }, true);
+  document.addEventListener("load", e => { if (e.target.matches?.("iframe.composed")) { try { wireMarkdown(e.target.contentDocument); sizeComposedFrame(e.target); } catch { /* frame unavailable */ } } }, true);
+  new MutationObserver(()=>{for(const [frame,sizing] of frameSizing)if(!frame.isConnected){sizing.observer.disconnect();frameSizing.delete(frame);}}).observe(document.body,{childList:true,subtree:true});
   // Anything that names an item opens it beside the conversation, without
   // leaving it.
   document.addEventListener("click", e => {
@@ -1105,18 +1125,12 @@ async function showThread(main, thread) {
       }
       case "export": return toast(`Saved ${await Magnus.download(path(id, "export"), safeName(e))}`);
       case "save": await api("POST", path(id, "save"), {}); return toast("Saved to Files.");
-      case "listen": {
-        const script = (await api("POST", path(id, "spoken"), {})).script;
-        const reading = readAloud(script, id);
-        await draw();
-        try { await reading; } finally { if (voice.entry === id) voice.entry = null; await draw(); }
-        return;
-      }
-      case "hush": await hush(); return draw();
+      case "listen": return readAloud(api("POST",path(id,"spoken"),{}).then(r=>r.script),id);
+      case "hush": return hush();
       case "feedback": {
         const d = document.createElement("dialog"); d.className = "feedback-dialog"; d.setAttribute("aria-label", "Feedback");
         d.innerHTML = `<h2>Feedback</h2>${e.task_id ? verdictBar(e.task_id, e.verdict) : ""}<div class="row">${["great", "annoying"].map(a => `<button data-msg-act="${a}" aria-pressed="${e.reaction === a}">${a === "great" ? "That was great" : "That was annoying"}</button>`).join("")}</div><button data-close-feedback>Close feedback</button>`;
-        d.onclick = async event => { const action = event.target.closest("[data-msg-act]"); if (event.target.closest("[data-close-feedback]")) d.close(); if (action) { try { await msgAct(action, el); d.close(); } catch (err) { toast(err.message); action.disabled = false; } } };
+        d.onclick = async event => { const action=event.target.closest("[data-msg-act]");if(event.target.closest("[data-close-feedback]"))d.close();if(action){const status=document.createElement("p");status.className="small";status.setAttribute("role","status");status.textContent="Saving feedback…";d.append(status);try{await msgAct(action,el);d.close();}catch(err){status.textContent="Feedback was not confirmed. Try again when connected.";toast(err.message);action.disabled=false;}} };
         d.onclose = () => { d.remove(); $(`[data-entry="${CSS.escape(id)}"] .menu-trigger`, main)?.focus({preventScroll:true}); };
         document.body.append(d); d.showModal(); return;
       }
@@ -1362,7 +1376,10 @@ function motion(el, ui) {
   ui.status ||= {};
   for (const n of $$(".entry[data-entry]", el)) {
     const k = n.dataset.entry;
-    if (!first && k && !ui.seen.has(k)) n.classList.add("enter");
+    if (!first && k && !ui.seen.has(k)) {
+      n.classList.add("enter");
+      n.addEventListener("animationend",()=>n.classList.remove("enter"),{once:true});
+    }
     ui.seen.add(k);
   }
   for (const n of $$("[data-chat-task]", el)) {
@@ -1453,7 +1470,7 @@ function msgActions(e, ui) {
   const mine = e.kind === "message", magnus = e.kind === "answer" || e.kind === "turn";
   const said = ["answer", "turn", "result", "tasks", "proposal_card", "grant_card", "suggestion_card", "schedule_card", "connector_card", "opener"].includes(e.kind);
   const id = `message-menu-${enc(e.id)}`, reading = voice.entry === e.id;
-  const button = (a, label) => `<button class="icon" data-msg-act="${a}" aria-label="${label}" data-tooltip="${label}"><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[a]}</svg></button>`;
+  const button = (a, label) => `<button class="icon" data-msg-act="${a}"${a==="listen" || a==="hush" ? ` data-voice-entry="${esc(e.id)}"` : ""} aria-label="${label}" data-tooltip="${label}"><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[a]}</svg></button>`;
   const primary = mine ? button("edit", "Edit") : button("copy", "Copy response") + (e.kind === "answer" && App.canReadAloud ? button(reading ? "hush" : "listen", reading ? "Stop reading" : "Read aloud") : "");
   const actions = [mine && ["copy", "Copy message"], magnus && ["retry", "Retry"], ["branch", "Branch"], ["share", "Share"], ["export", "Export"], ["save", "Save to Files"], ["task", "Make a task"], said && ["feedback", "Feedback"], ["delete", "Delete message"]].filter(Boolean);
   const share = ui.sharing === e.id ? `<div class="row small share-to"><label class="sr" for="share-${esc(e.id)}">Share with</label>
@@ -1780,21 +1797,64 @@ const frameHeights = {};
 // same and a loaded frame does not make the thread draw itself again.)
 const shownFrame = (id, title) => `<iframe class="composed" sandbox="allow-same-origin" title="${title}" data-shown="${esc(id)}"></iframe>`;
 const keepHeights = el => $$("iframe[data-shown]", el).forEach(f => { if (frameHeights[f.dataset.shown]) f.style.height = frameHeights[f.dataset.shown] + "px"; });
+const frameSizing = new Map();
+// Native WebKit blocks frame event handlers when scripts are sandboxed. Keep
+// actions in the trusted parent, aligned to inert reading-surface markers.
+function frameActions(frame,doc) {
+  let wrapper=frame.parentElement;
+  if(!wrapper.classList.contains('composed-wrap')) {
+    wrapper=document.createElement('div');wrapper.className='composed-wrap';
+    frame.before(wrapper);wrapper.append(frame);
+  }
+  if(wrapper._actionDocument!==doc) {
+    wrapper.querySelector('.frame-actions')?.remove();
+    const layer=document.createElement('div');layer.className='frame-actions';wrapper.append(layer);
+    for(const marker of doc.querySelectorAll('[data-code-copy-anchor], [data-prose-url]')) {
+      const copy=marker.hasAttribute('data-code-copy-anchor'),control=document.createElement(copy?'button':'a');
+      control.className=copy?'frame-code-copy':'frame-prose-link';
+      if(copy){control.type='button';control.dataset.codeCopy='';control.textContent='Copy code';control.setAttribute('aria-label','Copy code');control.dataset.tooltip='Copy code';
+        const text=marker.closest('.code-block').querySelector('code').textContent;
+        control.onclick=async e=>{e.preventDefault();e.stopPropagation();try{await copyText(text);toast('Code copied.');}catch(err){toast(err.message);}};
+      }else{control.textContent=marker.textContent;control.href=marker.dataset.proseUrl;control.rel='noopener noreferrer';control.onclick=e=>{e.preventDefault();Magnus.openExternal(control.href).catch(err=>toast(err.message));};}
+      layer.append(control);control._marker=marker;
+    }
+    wrapper._actionDocument=doc;
+  }
+  for(const control of wrapper.querySelectorAll('.frame-actions > *')) {
+    const r=control._marker.getBoundingClientRect();
+    Object.assign(control.style,{left:`${r.left}px`,top:`${r.top}px`,width:`${r.width}px`,height:`${r.height}px`});
+  }
+}
+function sizeComposedFrame(frame) {
+  try {
+    const doc=frame.contentDocument;
+    if(!frame.isConnected || !doc?.body || (frame.hasAttribute("srcdoc") && doc.URL==="about:blank"))return;
+    let sizing=frameSizing.get(frame);
+    if(sizing?.doc!==doc) {
+      sizing?.observer.disconnect();
+      const measure=()=>{
+        if(!frame.isConnected){frameSizing.get(frame)?.observer.disconnect();frameSizing.delete(frame);return;}
+        if(frame.contentDocument!==doc)return;
+        const height=Math.ceil(Math.max(doc.body.scrollHeight,doc.body.getBoundingClientRect().height))+4;
+        if(frame.style.height!==`${height}px`)frame.style.height=`${height}px`;
+        if(frame.dataset.shown)frameHeights[frame.dataset.shown]=height;
+        frameActions(frame,doc);
+        frame.dataset.sized="1";
+      };
+      const observer=new ResizeObserver(measure);observer.observe(doc.body);
+      sizing={doc,observer,measure};frameSizing.set(frame,sizing);
+    }
+    sizing.measure();
+  }catch{/* A frame still loading cannot be measured yet. */}
+}
+
 async function fill(frame, view, taskId, task) {
   if (!frame || frame._drawn) return;
   frame._drawn = true;
   const t = task || (view?.some(c => c.type === "image" || c.type === "file") ? await api("GET", `/v1/tasks/${enc(taskId)}`) : null);
+  frame.removeAttribute("data-sized");
   frame.srcdoc = Compose.documentFor(view, await fileData(view, t), fontCss(), t?.preview, ...look());
-  frame.onload = () => {
-    try {
-      const h = frame.contentDocument.documentElement.scrollHeight + 4;
-      frame.style.height = h + "px";
-      if (frame.dataset.shown) frameHeights[frame.dataset.shown] = h;
-    } catch { /* sized by CSS */ }
-    // At its height: what is below it has stopped moving (the installed-app
-    // driver clicks once its card's frames are, #207).
-    frame.dataset.sized = "1";
-  };
+  frame.onload=()=>{wireMarkdown(frame.contentDocument);sizeComposedFrame(frame);};
 }
 
 async function respond(btn, root) {
@@ -2072,7 +2132,7 @@ async function taskView(id, composed) {
   // The result leads with the deliverable, then its files, the person's
   // verdict, and the evidence; what it cost closes it.
   const outcome = `${view.length ? `<iframe class="composed" sandbox="allow-same-origin" title="The deliverable" id="pview"></iframe>` : running ? "" : `<p class="empty">No result yet.</p>`}
-    ${t.spoken ? `<div class="row" style="margin:10px 0"><button data-act="speak">Read aloud</button><button data-act="hush">Stop</button></div>` : ""}
+    ${t.spoken && App.canReadAloud ? `<div class="row" style="margin:10px 0"><button type="button" class="icon-btn" data-act="${voice.entry===`task:${id}` ? "hush" : "speak"}" data-voice-entry="task:${esc(id)}" aria-label="${voice.entry===`task:${id}` ? "Stop reading" : "Read aloud"}" data-tooltip="${voice.entry===`task:${id}` ? "Stop reading" : "Read aloud"}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[voice.entry===`task:${id}` ? "hush" : "listen"]}</svg></button></div>` : ""}
     ${files.length ? `<div class="frows">${files.map(f => fileRow(f, t.project)).join("")}</div>` : ""}
     ${t.outcome_view && t.summary ? `<h3>Summary</h3><p data-summary>${esc(t.summary)}</p>` : ""}
     <h3>Checks</h3><div class="checklist">${doneLine(t)}${criteria(t)}</div>
@@ -2124,7 +2184,8 @@ async function fileView(id) {
         else if (Compose.TEXT.test(f.media_type)) files[f.name] = { text: decodeText(await Magnus.dataUrl(path, f.media_type)), media_type: f.media_type };
       } catch (e) { toast(e.message); }
       const frame = $("#fview", el);
-      frame.srcdoc = Compose.documentFor([{ type: "file", file: f.name }], files, fontCss(), f.preview, ...look());
+      frame.removeAttribute("data-sized");
+  frame.srcdoc = Compose.documentFor([{ type: "file", file: f.name }], files, fontCss(), f.preview, ...look());
       frame.onload = () => { try { frame.style.height = frame.contentDocument.documentElement.scrollHeight + 4 + "px"; } catch { /* sized by CSS */ } };
     },
   };
@@ -2391,7 +2452,7 @@ function wirePanel() {
     const id = a.dataset.id;
     try {
       switch (a.dataset.act) {
-        case "speak": await readAloud(Panel.task.spoken); break;
+        case "speak": await readAloud(Panel.task.spoken,`task:${Panel.task.task_id}`); break;
         case "hush": await hush(); break;
         case "cancel":
           if (!await ask("Cancel this task? What it already did stays done.", "Cancel task")) return;

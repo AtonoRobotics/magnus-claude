@@ -95,14 +95,16 @@ await d.step("react to started tasks", async () => {
     await d.click(d.xpath("//div[@data-kind='tasks']//button[@role='menuitem'][normalize-space()='Feedback']"));
   };
   await feedback();
-  const btn = "//dialog//button[normalize-space()='That was great']";
+  const btn = "//dialog[@open]//button[normalize-space()='That was great']";
   await d.click(d.xpath(btn));
+  await d.until("feedback saved and closed",()=>d.run("return !document.querySelector(\"dialog.feedback-dialog[open]\")"));
   await feedback();
   if (await d.attr(d.xpath(btn),"aria-pressed") !== "true") throw new Error("reaction was not recorded");
   await d.click(d.xpath(btn));
+  await d.until("feedback saved and closed",()=>d.run("return !document.querySelector(\"dialog.feedback-dialog[open]\")"));
   await feedback();
   if (await d.attr(d.xpath(btn),"aria-pressed") !== "false") throw new Error("reaction was not removed");
-  await d.click(d.xpath("//dialog//button[normalize-space()='Close feedback']"));
+  await d.click(d.xpath("//dialog[@open]//button[normalize-space()='Close feedback']"));
 });
 
 await d.step("share with a colleague", async () => {
