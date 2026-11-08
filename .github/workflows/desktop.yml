@@ -172,6 +172,7 @@ jobs:
           # make a release depend on a fresh unverified request (#516).
           export LDAI_RUNTIME_FILE
           LDAI_RUNTIME_FILE=$("$GITHUB_WORKSPACE/release/ensure-appimage-runtime.sh")
+          "$GITHUB_WORKSPACE/release/ensure-nsis-tools.sh"
           cargo tauri build --bundles deb,appimage --config "$c"
           cargo tauri build --runner cargo --target x86_64-pc-windows-gnu --bundles nsis --config "$c"
       - name: Collect this version's installers
