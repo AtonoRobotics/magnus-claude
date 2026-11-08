@@ -50,3 +50,18 @@ U.os=()=>({dark:false});U.apply();assert.equal(U.look.mode,'dark','disabled Foll
 assert.equal(U.prefs().accent,'clay');
 assert.ok(events.some(e=>e.type==='magnus-theme'));
 console.log('v2: 4 presets × 2 materials, extreme-backdrop contrast, 72 legacy combinations, isolation and storage failure passed');
+
+// Reviewed regressions: named dark → custom accent, and changing OS before disabling follow.
+for (const theme of ['light','dark','ember','corporate','custom']) for (const dark of [false,true]) for (const followComputer of [false,true]) {
+ const p=T.preferences({...T.V2_DEFAULTS,theme,followComputer,mode:followComputer ? 'system' : 'dark',accent:'clay'}), os={dark};
+ const shown=T.effective(p,os);
+ const accented=T.transition(p,{accent:'teal'},os);
+ assert.equal(T.effective(accented,os).mode,shown.mode,`${theme}/${dark}/${followComputer} accent mode`);
+ assert.equal(accented.followComputer,followComputer);
+ assert.equal(accented.accent,'teal');
+ const frozen=T.transition(p,{followComputer:false},os);
+ for(const later of [false,true]) assert.equal(T.effective(frozen,{dark:later}).mode,shown.mode,`${theme}/${dark}/${followComputer} freeze`);
+}
+U.os=()=>({dark:false});U.set({theme:'dark'});U.set({accent:'teal'});assert.equal(U.look.mode,'dark');
+U.set({followComputer:true});U.os=()=>({dark:true});U.apply();U.set({followComputer:false});U.os=()=>({dark:false});U.apply();assert.equal(U.look.mode,'dark');
+console.log('40 preference transition cases and actual Theme.set regressions passed');

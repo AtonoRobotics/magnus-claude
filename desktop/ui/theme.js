@@ -184,7 +184,23 @@
     if (look.material === "glass") { t.side = tint(t["chrome-surface"]); t.blur = "blur(20px)"; }
     return t;
   }
-  root.Theme = { LIGHT, DARK, GLASS, ACCENTS, MODES, MATERIALS, MOTIONS, MOTION_HINTS, DEFAULTS, V2_DEFAULTS, PRESETS, THEMES, GLASS_SURFACES, preferences, contrast, effective: effectiveV2, tokens: tokensV2 };
+  // Preference transitions start from the rendered mode, never stale legacy fields.
+  function transition(prefs, change, os={}) {
+    const before=preferences(prefs), shown=effectiveV2(before,os), next={...before,...change};
+    if (change.theme && change.theme!=="custom") next.followComputer=false;
+    if (change.followComputer===true) next.theme=os.dark ? "dark" : "light";
+    if (change.followComputer===false && before.followComputer) {
+      if (before.theme==="custom") next.mode=shown.mode;
+      else if (!change.theme) next.theme=shown.theme;
+    }
+    if (change.accent) {
+      next.theme="custom";
+      next.mode=next.followComputer ? "system" : shown.mode;
+    }
+    if (change.mode) { next.theme="custom"; next.followComputer=change.mode==="system"; }
+    return preferences(next);
+  }
+  root.Theme = { LIGHT, DARK, GLASS, ACCENTS, MODES, MATERIALS, MOTIONS, MOTION_HINTS, DEFAULTS, V2_DEFAULTS, PRESETS, THEMES, GLASS_SURFACES, preferences, transition, contrast, effective: effectiveV2, tokens: tokensV2 };
   if (typeof document === "undefined") return;
 
   // In the page: the person's choices are kept on this device (the look
@@ -225,12 +241,7 @@
     return look;
   };
   Theme.set = change => {
-    const next = { ...current, ...change };
-    if (change.theme && change.theme !== "custom") next.followComputer = false;
-    if (change.followComputer === true) next.theme = Theme.os().dark ? "dark" : "light";
-    if (change.followComputer === false && next.theme === "custom" && next.mode === "system") next.mode = Theme.look.mode;
-    if (change.mode || change.accent) { next.theme = "custom"; next.followComputer = change.mode === "system"; }
-    current = preferences(next);
+    current = transition(current, change, Theme.os());
     Theme.saved = true;
     if (key) { try { localStorage.setItem(key, JSON.stringify(current)); } catch { Theme.saved = false; } }
     return Theme.apply();
