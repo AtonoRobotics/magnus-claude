@@ -38,8 +38,9 @@ try {
 
   // A draft keeps its pick under the same default and gives it up when that changes.
   // Drafts live for the session, so going elsewhere and back stands in for reopening.
-  const away=async()=>{await page.getByRole('link',{name:'Settings',exact:true}).click();await page.getByRole('link',{name:'New conversation',exact:true}).click();await page.locator('#msg').waitFor();};
-  await page.getByRole('link',{name:'New conversation',exact:true}).click();await page.locator('#msg').waitFor();
+  const fresh=async()=>{await page.getByRole('link',{name:'New conversation',exact:true}).click();await until(()=>location.hash==='#/chat/new' && App.draftRecord?.id==='new:' && document.querySelector('#msg'));};
+  const away=async()=>{await page.getByRole('link',{name:'Settings',exact:true}).click();await until(()=>!document.querySelector('#msg'));await fresh();};
+  await fresh();
   await picker.selectOption(picked);await page.locator('#msg').fill('A draft on the picked model');
   await away();
   assert.equal(await page.locator('#msg').inputValue(),'A draft on the picked model');
