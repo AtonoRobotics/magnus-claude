@@ -41,6 +41,17 @@ try {
   await page.mouse.move(0,0);await copy.focus();await page.getByRole('tooltip').waitFor({timeout:1000});
   assert.ok((await copy.getAttribute('aria-describedby')).includes('magnus-tooltip'));
   await page.keyboard.press('Escape');await page.waitForTimeout(200);assert.equal(await page.getByRole('tooltip').count(),0);
+  // Moving over the tooltip bridges its physical gap and keeps it readable.
+  await page.locator('#msg').focus();await page.mouse.move(0,0);await copy.hover();await page.getByRole('tooltip').waitFor();const hoverTip=await page.getByRole('tooltip').boundingBox();await page.mouse.move(hoverTip.x+hoverTip.width/2,hoverTip.y+hoverTip.height/2);await page.waitForTimeout(220);assert.equal(await page.getByRole('tooltip').count(),1);
+  await more.hover();await page.getByRole('tooltip').getByText('More message actions',{exact:true}).waitFor({timeout:250});
+  // Long dynamic labels wrap and flip within the viewport at both extremes.
+  await page.locator('#msg').focus();await page.mouse.move(0,0);await page.keyboard.press('Escape');
+  const originalLabel=await copy.getAttribute('data-tooltip');
+  for(const edge of ['top:0;right:0','bottom:0;left:0']){
+    await copy.evaluate((el,edge)=>{el.style.cssText=`position:fixed;z-index:80;${edge}`;el.dataset.tooltip='Copy response with a long recognizable conversation label that wraps across multiple lines without clipping at a viewport edge';},edge);
+    await copy.evaluate(el=>el.focus({preventScroll:true}));await page.getByRole('tooltip').waitFor({timeout:1000});const r=await page.getByRole('tooltip').boundingBox();assert.ok(r.x>=8 && r.y>=8 && r.x+r.width<=1272 && r.y+r.height<=712);assert.ok(r.width<=280 && r.height>30);assert.equal(await page.getByRole('tooltip').locator('button,a,input,[tabindex]').count(),0);assert.equal(await copy.getAttribute('aria-label'),'Copy response');await page.locator('#msg').focus();await page.mouse.move(640,0);await page.keyboard.press('Escape');
+  }
+  await copy.evaluate((el,label)=>{el.style.cssText='';el.dataset.tooltip=label;},originalLabel);
   // In-place removal cannot leave an orphaned tooltip.
   await page.locator('#msg').focus();await copy.focus();await page.getByRole('tooltip').waitFor();await copy.evaluate(el=>el.remove());await page.getByRole('tooltip').waitFor({state:'hidden'});
   // Controlled startup promises exercise UI ownership, independently of real native audio checks.

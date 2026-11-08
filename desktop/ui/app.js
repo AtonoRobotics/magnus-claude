@@ -141,18 +141,19 @@ const MessageDrafts = (() => {
     if (!rows[record.id] || !record.pending.some(p => p.id === submission.id)) return;
     record.thread = response.thread;
     record.pending = record.pending.filter(p => p.id !== submission.id);
-    record.localEntry = !!(record.localEntry && (record.text || record.files.length || record.pending.length));
+    // Secondary thread drafts keep their independent navigation identity,
+    // including when the person edits only after this acknowledgement.
     // The current editable draft was separated at dispatch. Never clear it
     // on an acknowledgement arriving after the person continued typing.
     changed(true);
   }
   function submit(record, body) {
-    const submission = {id:uid(),state:"dispatching",body:clone(body),files:clone(record.files),at:new Date().toISOString()};
+    const submission = {id:uid(),state:"dispatching",body:clone(body),editRevision:record.editRevision||0,draftText:record.text,selection:clone(record.selection),files:clone(record.files),at:new Date().toISOString()};
     record.pending.push(submission); record.text = ""; record.files = []; record.selection = [0,0]; changed(true); return submission;
   }
   function reject(record, submission, message) {
     submission.state = "rejected"; submission.error = message;
-    if (!record.text && !record.files.length) { record.text = submission.body.text; record.files = clone(submission.files); record.pending = record.pending.filter(p => p.id !== submission.id); record.selection=[record.text.length,record.text.length]; }
+    if (!record.text && !record.files.length && (record.editRevision||0)===(submission.editRevision||0)) { record.text = submission.draftText ?? submission.body.text; record.files = clone(submission.files); record.pending = record.pending.filter(p => p.id !== submission.id); record.selection=clone(submission.selection || [record.text.length,record.text.length]); }
     changed(true);
   }
   return {open,leave,clear,create,forThread,discard,acknowledge,submit,reject,changed,flush,uid,
@@ -573,7 +574,7 @@ const Tooltips = (() => {
   const eligible = node => node instanceof Element ? node.closest("[data-tooltip]") : null;
   const label = el => el.dataset.tooltip || el.getAttribute("aria-label") || el.textContent.trim();
   function hide() {
-    clearTimeout(showTimer); clearTimeout(closeTimer);
+    clearTimeout(showTimer); clearTimeout(closeTimer); showTimer=null;closeTimer=null;
     if (tip) { const ids = (trigger?.getAttribute("aria-describedby") || "").split(/\s+/).filter(x => x && x !== tip.id); if (ids.length) trigger?.setAttribute("aria-describedby", ids.join(" ")); else trigger?.removeAttribute("aria-describedby"); tip.remove(); tip = null; }
   }
   function place() {
@@ -586,6 +587,7 @@ const Tooltips = (() => {
     tip.style.top = `${Math.max(y + 8, Math.min(top, y + h - t.height - 8))}px`;
   }
   function show() {
+    showTimer=null;
     if (!trigger?.isConnected || suppressed === trigger || !(hovered || focused)) return;
     tip = document.createElement("div"); tip.id = "magnus-tooltip"; tip.className = "tooltip"; tip.role = "tooltip"; tip.textContent = label(trigger);
     document.body.append(tip); trigger.setAttribute("aria-describedby", [trigger.getAttribute("aria-describedby"), tip.id].filter(Boolean).join(" "));
@@ -604,7 +606,7 @@ const Tooltips = (() => {
     clearTimeout(closeTimer); clearTimeout(showTimer);
     if (!tip && suppressed !== el) showTimer = setTimeout(show, focus || warm > Date.now() ? 80 : 350);
   }
-  function dismiss() { if (trigger) suppressed = trigger; hide(); }
+  function dismiss() { if (trigger && (hovered || focused)) suppressed = trigger; hide(); }
   function decorate(root) {
     for (const el of [root, ...root.querySelectorAll("[title]")]) {
       if (!el.hasAttribute?.("title")) continue;
@@ -1254,10 +1256,10 @@ function wireComposer(thread, project, record) {
   if (record.model && [...model.options].some(o => o.value === record.model)) model.value = record.model;
   const fit = () => { box.style.height = "auto"; box.style.height = `${Math.min(box.scrollHeight, innerHeight / 3)}px`; };
   const selected = () => { record.selection = [box.selectionStart,box.selectionEnd]; };
-  const read = () => { record.text = box.value; record.model = model?.value || ""; selected(); MessageDrafts.changed(); };
+  const read = (selection=true) => { if(record.text!==box.value)record.editRevision=(record.editRevision||0)+1; record.text = box.value; record.model = model?.value || ""; if(selection)selected(); MessageDrafts.changed(); };
   const status = () => MessageDrafts.saved() === true ? "Draft saved" : MessageDrafts.saved() === false ? "Draft not saved on this device" : "Saving draft…";
   const chips = () => record.files.map(f => `<span class="attachment-chip" data-upload="${esc(f.uid)}"><span>${esc(f.name)}</span><span class="small muted">${esc(f.state === "ready" ? "Ready" : f.state === "uploading" ? "Uploading…" : f.state === "unavailable" ? "Unavailable" : "Failed")}</span>${f.error ? `<span class="small">${esc(f.error)}</span>` : ""}${["failed","unavailable"].includes(f.state) ? `<button type="button" data-retry-upload="${esc(f.uid)}">Retry</button>` : ""}<button type="button" class="icon-btn" data-remove-upload="${esc(f.uid)}" aria-label="Remove ${esc(f.name)} from message" title="Remove ${esc(f.name)} from message">${icon("close")}</button></span>`).join("");
-  const submitted = () => record.pending.map(p => `<div class="submitted-message" data-submission="${esc(p.id)}"><strong>${p.state === "dispatching" ? "Sending message…" : p.state === "rejected" ? "Message was not accepted" : "Send outcome not confirmed"}</strong><p class="small">${esc(p.state === "unconfirmed" ? "This device cannot safely retry this submission. Delivery is not confirmed; no automatic resend will occur. Discarding the local draft does not cancel submitted work." : p.error || "You can continue typing.")}</p><details><summary>Submitted message</summary><p class="pre">${esc(p.body.text)}</p>${p.files.map(f => `<span class="small">${esc(f.name)}</span>`).join(" ")}</details>${p.state === "rejected" ? `<button type="button" data-recover-message="${esc(p.id)}">Edit rejected message</button>` : ""}</div>`).join("");
+  const submitted = () => record.pending.map(p => `<div class="submitted-message" data-submission="${esc(p.id)}"><strong>${p.state === "dispatching" ? "Sending message…" : p.state === "rejected" ? "Message was not accepted" : "Send outcome not confirmed"}</strong><p class="small">${esc(p.state === "unconfirmed" ? "This device cannot safely retry this submission. Delivery is not confirmed; no automatic resend will occur. Discarding the local draft does not cancel submitted work." : p.error || "You can continue typing.")}</p><details><summary>Submitted message</summary><p class="pre">${esc(p.draftText ?? p.body.text)}</p>${p.files.map(f => `<span class="small">${esc(f.name)}</span>`).join(" ")}</details>${p.state === "rejected" ? `<button type="button" data-recover-message="${esc(p.id)}">Edit rejected message</button>` : ""}</div>`).join("");
   const show = () => {
     if (!active || !form.isConnected) return;
     // Input events synchronize edits immediately. A journal transition may
@@ -1284,6 +1286,7 @@ function wireComposer(thread, project, record) {
   }
   input.onchange = e => {
     const files = [...e.target.files]; e.target.value = "";
+    if(files.length)record.editRevision=(record.editRevision||0)+1;
     for (const [i,file] of files.entries()) {
       const slot = i === 0 && replacing ? record.files.find(f => f.uid === replacing) : null;
       const item = slot || {uid:MessageDrafts.uid(),name:file.name,media_type:file.type,size:file.size,state:"uploading"};
@@ -1294,7 +1297,7 @@ function wireComposer(thread, project, record) {
   };
   pending.onclick = e => {
     const remove = e.target.closest("[data-remove-upload]"), retry = e.target.closest("[data-retry-upload]");
-    if (remove) { const uid=remove.dataset.removeUpload; record.files=record.files.filter(f=>f.uid!==uid); MessageDrafts.originals.delete(uid); MessageDrafts.changed(true); }
+    if (remove) { record.editRevision=(record.editRevision||0)+1; const uid=remove.dataset.removeUpload; record.files=record.files.filter(f=>f.uid!==uid); MessageDrafts.originals.delete(uid); MessageDrafts.changed(true); }
     if (retry) {
       const uid=retry.dataset.retryUpload, slot=record.files.find(f=>f.uid===uid), original=MessageDrafts.originals.get(uid);
       if (original) startUpload(slot,original); else { replacing=uid; input.click(); }
@@ -1306,7 +1309,7 @@ function wireComposer(thread, project, record) {
     // Recovery is another locally named draft so the current newer edits
     // remain separate, rather than being concatenated or overwritten.
     const recovered=MessageDrafts.create(record.project,record.thread);
-    recovered.localEntry=true; recovered.text=p.body.text; recovered.files=p.files; recovered.model=record.model;
+    recovered.localEntry=true; recovered.text=p.draftText ?? p.body.text; recovered.selection=[...(p.selection || [recovered.text.length,recovered.text.length])]; recovered.files=p.files; recovered.model=record.model;
     record.pending=record.pending.filter(x=>x.id!==p.id); MessageDrafts.changed(true);
     location.hash=`#/draft/${enc(recovered.id)}`;
   };
@@ -1348,7 +1351,9 @@ function wireComposer(thread, project, record) {
     }
     show(); sidebar();
   };
-  onLeave(() => { if (active) { read(); MessageDrafts.flush(); active=false; unsubscribe(); } });
+  // Input/select events already preserve the last editable caret. A browser
+  // may collapse an unfocused textarea selection during link navigation.
+  onLeave(() => { if (active) { read(false); MessageDrafts.flush(); active=false; unsubscribe(); } });
   // Only a missing/expired reference is marked unavailable. A connection
   // failure does not silently turn a valid attachment into a missing one.
   for (const f of record.files.filter(f=>f.state==="ready")) api("GET",`/v1/files/${enc(f.id)}/info`).catch(err=>{

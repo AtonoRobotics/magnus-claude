@@ -7,3 +7,14 @@ Activity groups real task/schedule views and the existing return-session summary
 Backend `can_respond` includes informational items whose only operation is Dismiss; it is permission evidence, not a decision classification. Needs you uses the existing decision/input kinds plus notices that authoritatively block a paused run, while retaining status/permission/time filtering. The same collection drives its view, badge, task waiting indication and decision notifications. Shared/message/observation/interrupt updates remain reachable in Activity; changing their location does not resolve them.
 
 Corporate's content scope stays light while native chrome widgets explicitly use a dark color scheme. The compact header select paints its token background and current-color chevron, retaining native select semantics; selected values join native contrast checks.
+
+## Consolidated v1.2 integration
+The owner clarified that one concern means a continuous related body of work and explicitly asked to reduce overlapping integration PRs. The remaining status work from #484 and verified frame-link correction from #498 are preserved in #483 with their tests and evidence records. Those PRs are closed with branches retained; #464/#497 remain open until this combined change merges. Landed continuity is integrated through actual master-conflict resolution, not an alternate implementation.
+
+Draft entries now use the same named navigation tree in sidebar and rail. Work anchors follow the actual detail-body scroll region; hidden Work/Conversation regions retain their anchors. Work history and explicit region/expansion state coexist, and deliberate close restores focus. Apps discovery prefill updates the mounted draft journal.
+
+The #496 recovery follow-up stays in this continuous implementation: secondary recovered drafts retain navigation identity after an empty acknowledgement, and immutable submissions retain original text and selection separately from normalized wire bodies. Definite rejection and explicit recovery restore that raw input without overwriting newer edits. Verification includes post-acknowledgement typing/upload/restart, exact whitespace/caret recovery and the independent primary draft.
+
+The pre-continuity controls/layout native appearance integration passed all eight theme/material combinations (24.69s). Combined production-path browser/native/CI acceptance remains required; no milestone here claims the complete implementation is finished.
+
+Keep input revisions separate from submitted snapshots so a later intentional empty draft is still protected from rejection restoration. Preserve the last input/select caret during navigation instead of replacing it with a browser-collapsed blurred selection. For #499, completed tooltip timers are cleared and irrelevant Escape/click events cannot suppress a future focus; an actually hovered/focused dismissed trigger retains suppression until that state changes.

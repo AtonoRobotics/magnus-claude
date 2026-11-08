@@ -27,3 +27,34 @@ The combined native research/approval/result/schedule workflow still needs the c
 A further real native eight-look run passed selected-control contrast and Corporate chrome color-scheme checks (24.31s); screenshot inspection confirms the formerly white-on-white Project selector is readable. Real backend review/shared-message fixtures verify AT-09: a dismissible shared update does not count as a decision, the actionable review appears once, accepting it clears Needs you, and Activity navigation leaves the shared item unresolved. The full responsive browser scenario also passes with these real records.
 
 Coarse-pointer verification now includes standalone inputs/selectors, with 44px minimum targets. A real return-session fixture exposed automatic Activity selection hiding the mobile composer at startup; the initial conversation now remains selected, with a quiet View Activity link retaining the same authoritative home/opened summary. Summary links open their actual item; informational item detail selects Activity, while actionable decisions select Needs you. Full responsive/touch browser scenario passed (5.26s), including the real review/shared-update fixtures and all measured visible targets.
+
+## Consolidated v1.2 integration
+The owner clarified that one concern means a continuous related body of work and explicitly asked to reduce overlapping integration PRs. The remaining status work from #484 and verified frame-link correction from #498 are preserved in #483 with their tests and evidence records. Those PRs are closed with branches retained; #464/#497 remain open until this combined change merges. Landed continuity is integrated through actual master-conflict resolution, not an alternate implementation.
+
+Draft entries now use the same named navigation tree in sidebar and rail. Work anchors follow the actual detail-body scroll region; hidden Work/Conversation regions retain their anchors. Work history and explicit region/expansion state coexist, and deliberate close restores focus. Apps discovery prefill updates the mounted draft journal.
+
+The #496 recovery follow-up stays in this continuous implementation: secondary recovered drafts retain navigation identity after an empty acknowledgement, and immutable submissions retain original text and selection separately from normalized wire bodies. Definite rejection and explicit recovery restore that raw input without overwriting newer edits. Verification includes post-acknowledgement typing/upload/restart, exact whitespace/caret recovery and the independent primary draft.
+
+The pre-continuity controls/layout native appearance integration passed all eight theme/material combinations (24.69s). Combined production-path browser/native/CI acceptance remains required; no milestone here claims the complete implementation is finished.
+
+## Combined acceptance evidence
+The real appliance/browser suites pass chat-result geometry, scrolling frame links, all eight appearance/material compositions, durable continuity/rejection/restart, responsive layout, per-resource recovery and shared controls. The continuity suite additionally covers actual late uploaded-image hydration, timestamp-only changes and following new messages only for a reader at the bottom. Exact raw input/caret and a newer intentional deletion survive rejection; the pre-fix deletion test restored unwanted submitted text and now passes. A traced navigation selection defect came from rereading a blurred control during leave; input/select events now retain its last editable caret while leave flushes text.
+
+An opt-in actual-host zoom scenario (`MAGNUS_REAL_ZOOM=1`, `xvfb-run`, `xdotool`) passes real Chrome 200% zoom: devicePixelRatio 1→2 and viewport 1280→640 CSS pixels, no outer overflow, drawer/Files/Conversation navigation and composer/draft reachability. This is actual browser zoom, not CSS or CDP page-scale emulation.
+
+Shared tooltip acceptance exposed #499: a completed timer still appeared active, so Escape without an active tooltip could suppress a later focus. Timer handles now clear and suppression requires a relevant hovered/focused trigger. The actual-browser regression passes hover-to-tooltip persistence, warm transitions, both viewport edges, wrapping, independent names and the original Escape suppression/removal checks (6.06s). Appearance checks also pass 72 legacy migrations, 40 preference transitions, extreme-backdrop contrast and native material ordering.
+
+| Acceptance | Production-path evidence |
+| --- | --- |
+| AT-01–04 | workspace_layout, workspace_continuity, browser/installed looks; exact fit bounds, pointer/keyboard resizing, named rail tree, mobile drawer and focus |
+| AT-05–08 | workspace_controls and installed message actions; shared menu/tooltip interaction, native speech capability and coarse-pointer target measurements |
+| AT-09 | actual unresolved shared message plus actionable review fixture; one filtered Needs collection and successful real review resolution |
+| AT-10 | actual schedule endpoint cancellation/deletion test and matching conversation/detail wording; no missing-data cancellation inference |
+| AT-11–12 | workspace_continuity + draft journal; multiple local IDs, actual uploads, restart/scoped sign-out, confirmed/rejected/unconfirmed sends and immutable newer edits |
+| AT-13 | actual new-message updates, late uploaded-image sizing, timestamp-only mutation, controlled resize race; installed real streaming/composed and completed-work links |
+| AT-14 | workspace_status; resource failures, cached content, stale navigation/identity generations and reconciliation |
+| AT-15–16 | safe Markdown/actual file previews, native composed/image/clipboard/CSP, original-byte downloads and literal Apps discovery routing |
+| AT-17–19 | browser/installed eight compositions, measured text/control contrast, fallback media/reflow/real zoom, migration/isolation/rollback records |
+| AT-20 | actual installed WebKit and HTTP browser bridge flows; full CI additionally gates KVM-dependent work and two-version AppImage update workflows |
+
+Fixed responses and controlled layout/error fixtures establish UI behavior only. Final CI and post-merge master gate remain required. No Windows/macOS interactive-host acceptance is inferred from Linux checks or cross-compilation.

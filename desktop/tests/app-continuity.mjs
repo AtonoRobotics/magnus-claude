@@ -3,7 +3,7 @@ const [wd,app,url,fingerprint,provider,person]=['MAGNUS_WEBDRIVER','MAGNUS_APP',
 const d=await open(wd,app,process.env.MAGNUS_SHOTS,'continuity');await pinAndSignIn(d,{url,fingerprint,provider,person});
 await d.step('start real work and accept its review',async()=>{
  await d.type(d.css('#msg'),'Create anchor work');await d.click(d.css('#send'));
- await d.click(d.xpath("//nav//button[starts-with(normalize-space(),'Needs you')]"));
+ await d.click(d.xpath("//nav//*[self::a or self::button][@aria-label='Needs you' or starts-with(@aria-label,'Needs you,') or starts-with(normalize-space(),'Needs you')]"));
  await d.click(d.xpath("//aside[@id='detail']//article[contains(@class,'review')]//button[normalize-space()='Accept']"));
  await d.xpath("//div[@id='thread']//li[@data-chat-task][@data-status='completed']");
 });
