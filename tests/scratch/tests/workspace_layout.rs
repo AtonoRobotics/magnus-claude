@@ -18,3 +18,16 @@ async fn responsive_workspace_preserves_access_and_preferences() {
  assert!(out.status.success(),"{}{}",String::from_utf8_lossy(&out.stdout),String::from_utf8_lossy(&out.stderr));
  println!("{}",String::from_utf8_lossy(&out.stdout));
 }
+
+#[tokio::test(flavor="multi_thread")]
+async fn activity_updates_record_only_presented_items_and_retry_failures() {
+ let model=FakeModel::start(script(|c|async move{
+  if c.body["system"].to_string().contains("reviewing one person's state") && c.turn()==0{return tool("observe",json!({"what":"Actual Activity observation","why":"Useful update","evidence":"Recorded fixture source"}));}
+  tool("task_complete",json!({"summary":"Review complete","deliverable":[{"type":"text","text":"Reviewed actual state"}]}))
+ })).await;
+ let app=Appliance::start(Spec::default().proactive(json!({"on":true})),&model).await;
+ let alice=app.api("alice");let observation=eventually("actual Alice observation",std::time::Duration::from_secs(60),||{let api=alice.clone();async move{api.inbox().await.into_iter().find(|i|i["kind"]=="observation" && i["status"]=="open")}}).await;
+ assert!(set_password(&app,"alice",PASSWORD));
+ let out=tokio::process::Command::new("node").arg(workspace_root().join("desktop/tests/workspace-opened.mjs")).env("MAGNUS_OBSERVATION",observation["id"].as_str().unwrap()).env("MAGNUS_URL",&app.base).env("MAGNUS_PASSWORD",PASSWORD).env("MAGNUS_CHROMIUM",chromium()).output().await.unwrap();
+ assert!(out.status.success(),"{}{}",String::from_utf8_lossy(&out.stdout),String::from_utf8_lossy(&out.stderr));println!("{}",String::from_utf8_lossy(&out.stdout));
+}

@@ -250,6 +250,29 @@ const Resources = (()=>{
  return {read,reset,forget,good,bad,render};
 })();
 
+// Retain the existing first-presentation effect on actual visible update cards.
+let openedFrame=null;
+function reportOpenedSoon() {
+  if(openedFrame!==null)return;
+  openedFrame=requestAnimationFrame(()=>{
+    openedFrame=null;if(!App.me)return;
+    const reported=App.reported ||= new Set(),reporting=App.reporting ||= new Set();
+    const eligible=new Map(App.inbox.filter(i=>i.status==="open" && ["observation","interrupt"].includes(i.kind) && !i.opened_at && !reported.has(i.id) && !reporting.has(i.id)).map(i=>[i.id,i]));
+    const ids=new Set();
+    for(const card of document.querySelectorAll("article[data-id]")){
+      const id=card.dataset.id;if(!eligible.has(id) || card.closest("details:not([open])") || !card.getClientRects().length)continue;
+      const bounds=card.getBoundingClientRect(),root=card.closest(".detail-body,.thread"),clip=root?.getBoundingClientRect();
+      if(bounds.bottom<=Math.max(0,clip?.top||0) || bounds.top>=Math.min(innerHeight,clip?.bottom??innerHeight) || bounds.right<=Math.max(0,clip?.left||0) || bounds.left>=Math.min(innerWidth,clip?.right??innerWidth))continue;
+      ids.add(id);
+    }
+    if(!ids.size)return;
+    for(const id of ids)reporting.add(id);
+    api("POST","/v1/inbox/opened",{ids:[...ids]}).then(response=>{
+      for(const id of response.opened || [])reported.add(id);
+    },()=>{}).finally(()=>{for(const id of ids)reporting.delete(id);});
+  });
+}
+
 // A question before an action, asked in the app itself: a webview may
 // ignore window.confirm and answer no without showing it, so a button
 // behind one did nothing at all (the Windows app, owner 2026-11-03:
@@ -331,6 +354,7 @@ function paint(el, html) {
     target?.focus({preventScroll:true});
   }
   Menus.restore(menuState);
+  reportOpenedSoon();
   return true;
 }
 
@@ -447,6 +471,7 @@ const Workspace = (() => {
     const separator=$("#workspace-splitter");separator.hidden=!m.split;separator.setAttribute("aria-valuenow",String(Math.round(m.conversation)));separator.setAttribute("aria-valuemin",String(m.min));separator.setAttribute("aria-valuemax",String(m.max));separator.setAttribute("aria-valuetext",`${Math.round(m.conversation)} pixels`);
     if (m.nav!=="drawer" && $("#navigation-drawer").open) closeDrawer(false);
     for(const a of prior){if(!a.root.clientHeight)continue;a.root.scrollTop=a.follow ? a.root.scrollHeight : a.node?.isConnected ? a.root.scrollTop+a.node.getBoundingClientRect().top-a.root.getBoundingClientRect().top-a.offset : a.top;}
+    reportOpenedSoon();
     return m;
   }
   function remember() { history.replaceState({...history.state,workspace:{work:Panel.what,expanded,region}},"",location.href); }
@@ -652,6 +677,8 @@ function wireMarkdown(root) {
 
 // What works wherever it is shown, set once for the page.
 function wireDocument() {
+  document.addEventListener("toggle",reportOpenedSoon,true);
+  document.addEventListener("scroll",reportOpenedSoon,{capture:true,passive:true});
   window.addEventListener("popstate",()=>{
     if (App.currentHash!==location.hash || !App.workspace) return;
     if (history.state?.work) openPanel(history.state.work,{focus:true}); else closePanel(false);
@@ -2499,6 +2526,7 @@ async function drawPanel() {
   const prior=entry.anchor;
   const changed = paint(el, `<div class="detail-head"><div class="dh-main">${head || `<h2>${esc(title)}</h2>`}</div></div><div class="detail-body" data-panel="${esc(kind)}">${body}</div>`);
   if (!changed) {
+    reportOpenedSoon();
     if (Panel.focusNext) { const heading=$("h2",el); if (heading) { heading.tabIndex=-1; heading.focus({preventScroll:true}); } Panel.focusNext=false; }
     return;
   }
