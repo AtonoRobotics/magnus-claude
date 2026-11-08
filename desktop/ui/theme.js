@@ -209,7 +209,27 @@
   const LEGACY_KEY = "magnus.appearance";
   const media = q => typeof matchMedia === "function" ? matchMedia(q) : null;
   const darkQ = media("(prefers-color-scheme: dark)"), motionQ = media("(prefers-reduced-motion: reduce)"), clearQ = media("(prefers-reduced-transparency: reduce)"), forcedQ = media("(forced-colors: active)");
-  let system = {}, key = null, current = preferences(), revision = 0;
+  let system = {}, key = null, current = preferences();
+  let pendingMaterial=null, changingMaterial=false, desiredMaterial=null;
+  async function changeMaterial(request) {
+    request.key=JSON.stringify(request.args);
+    if(request.key===desiredMaterial)return;
+    desiredMaterial=request.key;pendingMaterial=request;
+    if(changingMaterial)return;
+    changingMaterial=true;
+    try {
+      while(pendingMaterial) {
+        const next=pendingMaterial;pendingMaterial=null;
+        try {
+          const result=await root.Magnus.setMaterial(...next.args);
+          if(next.key===desiredMaterial) document.documentElement.dataset.backdrop=next.glass && result?.native ? "native" : "drawn";
+          if(pendingMaterial?.key===next.key)pendingMaterial=null;
+        } catch {
+          if(next.key===desiredMaterial) document.documentElement.dataset.backdrop="drawn";
+        }
+      }
+    } finally { changingMaterial=false; }
+  }
   const parse = k => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } };
   Theme.prefs = () => ({ ...current });
   Theme.scope = (appliance, person) => {
@@ -223,7 +243,7 @@
   Theme.os = () => ({ dark: !!darkQ?.matches, reduceMotion: !!motionQ?.matches, reduceTransparency: !!clearQ?.matches || !!system.reduce_transparency,
     forcedColors: !!forcedQ?.matches, blur: !root.CSS?.supports || CSS.supports("backdrop-filter", "blur(20px)") || CSS.supports("-webkit-backdrop-filter", "blur(20px)") });
   Theme.apply = () => {
-    const rev = ++revision, look = effectiveV2(current, Theme.os()), el = document.documentElement, t = tokensV2(look);
+    const look = effectiveV2(current, Theme.os()), el = document.documentElement, t = tokensV2(look);
     for (const [k, v] of Object.entries(t)) el.style.setProperty(`--${k}`, v);
     el.style.colorScheme = look.mode;
     Object.assign(el.dataset, { mode: look.mode, theme: look.theme, material: look.material, motion: look.motion, accent: look.accent });
@@ -234,8 +254,7 @@
       try { const r = f.contentDocument?.documentElement; if (r) { for (const [k, v] of Object.entries(t)) r.style.setProperty(`--${k}`, v); r.style.colorScheme = look.mode; } } catch { /* frame still loading */ }
     }
     const glass = look.material === "glass", color = t["chrome-surface"];
-    if (root.Magnus?.setMaterial) root.Magnus.setMaterial(glass, look.mode === "dark", [...[1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16)), 235])
-      .then(m => { if (rev === revision) el.dataset.backdrop = glass && m.native ? "native" : "drawn"; }).catch(() => { if (rev === revision) el.dataset.backdrop = "drawn"; });
+    if (root.Magnus?.setMaterial) changeMaterial({glass,args:[glass,look.mode==="dark",[...[1,3,5].map(i=>parseInt(color.slice(i,i+2),16)),235]]});
     else el.dataset.backdrop = "drawn";
     root.dispatchEvent(new CustomEvent("magnus-theme", { detail: { look, saved: Theme.saved } }));
     return look;
