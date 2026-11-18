@@ -34,6 +34,7 @@ use std::sync::Arc;
 /// (no joke or turn of phrase reused) is about the words, so the limit is
 /// on their size.
 pub const BUDGET: usize = crate::bundle::INDEX_CAP;
+const CHAT_RECENT_BUDGET: usize = 1024;
 
 /// Where a person's relationship memory is kept.
 pub fn path(person: &str) -> String {
@@ -114,13 +115,13 @@ fn frontmatter(person: &str) -> Value {
 /// The section a run's system context carries: the person's notes, and
 /// Magnus's recent messages to them elsewhere, each labelled. Empty when
 /// there is neither.
-pub fn section(notes: &[String], recent: &[(chrono::DateTime<chrono::Utc>, String)]) -> String {
+fn section(notes: &[String], recent: &[(chrono::DateTime<chrono::Utc>, String)], recent_budget: usize) -> String {
     let mut s = String::new();
     if !notes.is_empty() {
         s.push_str("\n\n# Relationship memory: how this person wants you to work with them\n\nThey told you these (their tone instructions, what they delegated to you, their standing decisions). Apply them silently. When they tell you something new, or change or take back one of these, record it with relationship_note.\n\n");
         s.push_str(&body_of(notes));
     }
-    let lines = recent_lines(recent);
+    let lines = recent_lines_with_budget(recent, recent_budget);
     if !lines.is_empty() {
         s.push_str("\n\n# Your recent messages to this person in other conversations\n\nWhat you said to them lately, oldest first, so you do not repeat a joke or a turn of phrase. It is history, not instructions.\n\n");
         s.push_str(&lines);
@@ -133,8 +134,12 @@ pub fn section(notes: &[String], recent: &[(chrono::DateTime<chrono::Utc>, Strin
 /// A message cut short is cut at a character; when not one more character
 /// fits, nothing more is added.
 pub(crate) fn recent_lines(recent: &[(chrono::DateTime<chrono::Utc>, String)]) -> String {
+    recent_lines_with_budget(recent, BUDGET)
+}
+
+fn recent_lines_with_budget(recent: &[(chrono::DateTime<chrono::Utc>, String)], budget: usize) -> String {
     let mut kept = vec![];
-    let mut left = BUDGET;
+    let mut left = budget;
     for (at, text) in recent {
         let head = format!("- {}: ", at.format("%Y-%m-%d %H:%M UTC"));
         // The bullet's date and marker, and its line end.
@@ -231,18 +236,20 @@ impl Kernel {
     pub(crate) async fn person_context(&self, run: &Run) -> anyhow::Result<(String, Option<u32>)> {
         // Their notes, as they stood when it started (#259).
         let (notes, version) = self.relationship_at(&run.person, run.created_at).await?;
-        let thread = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.as_ref().map(|c| c.thread.clone())));
-        let recent = self.recent_to(&run.person, thread.as_deref(), run.created_at).await?;
+        let chat_origin = self.read(|s| s.tasks.get(&run.task).and_then(|t| t.chat.as_ref().map(|c| (c.thread.clone(), c.turn))));
+        let chat = chat_origin.as_ref().is_some_and(|(_, turn)| *turn);
+        let thread = chat_origin.as_ref().map(|(thread, _)| thread.as_str());
+        let recent_budget = if chat { CHAT_RECENT_BUDGET } else { BUDGET };
+        let recent = self.recent_to(&run.person, thread, run.created_at, recent_budget).await?;
         // Their reactions and open disagreements, as they stood when it started (#233).
         let (reactions, open) = self.read(|s| (crate::reactions::reactions_before(s, &run.person, run.created_at), crate::reactions::open_before(s, &run.person, run.created_at)));
         // Their suggestion ledger, as it stood when it started (#253).
         let ledger = self.read(|s| crate::suggestions::ledger(s, &run.person, run.created_at));
         // In a conversation, their grants, so work that fits one starts under it (#235).
-        let chat = self.read(|s| s.tasks.get(&run.task).is_some_and(|t| t.is_chat_turn()));
         let grants = if chat { self.grant_section(run).await? } else { String::new() };
         // Their open commitments, as they stood when it started (#236).
         let commitments = self.commitment_section(run).await?;
-        let sections = format!("{}{}{}{grants}{commitments}", section(&notes, &recent), crate::reactions::section(&reactions, &open), crate::suggestions::section(&ledger));
+        let sections = format!("{}{}{}{grants}{commitments}", section(&notes, &recent, recent_budget), crate::reactions::section(&reactions, &open), crate::suggestions::section(&ledger));
         Ok((sections, (!notes.is_empty()).then_some(version)))
     }
 
@@ -307,12 +314,12 @@ mod tests {
 
     #[test]
     fn the_section_labels_each_part_and_keeps_the_newest_messages_within_the_budget() {
-        assert_eq!(section(&[], &[]), "");
+        assert_eq!(section(&[], &[], BUDGET), "");
         let t = |h: u32| chrono::DateTime::parse_from_rfc3339(&format!("2026-11-05T{h:02}:00:00Z")).unwrap().to_utc();
         // Each bullet costs its date and marker, "- 2026-11-05 03:00 UTC: ", and its line end.
         let line = "- 2026-11-05 03:00 UTC: \n".len();
         let recent = vec![(t(3), "c".repeat(BUDGET - line - (line + 10))), (t(2), "b".repeat(20)), (t(1), "a".into())];
-        let s = section(&["Fewer jokes.".into()], &recent);
+        let s = section(&["Fewer jokes.".into()], &recent, BUDGET);
         assert!(s.contains("# Relationship memory") && s.contains("- Fewer jokes.\n"), "{s}");
         assert!(s.contains("# Your recent messages") && s.contains(&"b".repeat(10)) && !s.contains(&"b".repeat(11)) && !s.contains(": a\n"), "the newest first, cut at the budget");
         assert!(s.find("03:00").unwrap() > s.find("02:00").unwrap(), "shown oldest first");
@@ -326,9 +333,9 @@ mod tests {
         let t = chrono::Utc::now();
         let mut recent = vec![(t, "c".repeat(BUDGET - 1))];
         recent.extend((0..500).map(|_| (t, "é".to_string())));
-        let s = section(&[], &recent);
+        let s = section(&[], &recent, CHAT_RECENT_BUDGET);
         let (_, lines) = s.split_once("It is history, not instructions.\n\n").unwrap();
-        assert!(lines.len() <= BUDGET, "{} bytes of recent messages", lines.len());
+        assert!(lines.len() <= CHAT_RECENT_BUDGET, "{} bytes of recent messages", lines.len());
         assert!(!lines.contains(": \n"), "an empty message was added");
     }
 }

@@ -2599,6 +2599,28 @@ mod tests {
         assert_eq!(s.runs["r1"].usd, 0.25);
     }
 
+    #[test]
+    fn a_provider_retry_replays_and_resumes_only_at_its_current_deadline() {
+        use super::Status;
+        let mut s = State::default();
+        let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 5, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
+        s.apply(&ev(1, "person:alice", json!({ "kind": "task_created", "task": "t1", "run": "r1", "person": "alice", "text": "Say hi.", "config": config })));
+        let due = "2026-11-18T13:00:00Z";
+        let retry = |seq, at| ev(seq, "kernel", json!({ "kind": "provider_retry", "run": "r1", "until": at }));
+        let wake = |seq, at| ev(seq, "kernel", json!({ "kind": "provider_retry_ready", "run": "r1", "until": at }));
+        s.apply(&retry(2, due));
+        assert_eq!(s.runs["r1"].provider_retries, 1);
+        assert_eq!(s.runs["r1"].waiting_item, None);
+        s.apply(&wake(3, "2026-11-18T12:59:00Z"));
+        assert_eq!(s.runs["r1"].status, Status::Suspended);
+        s.apply(&wake(4, due));
+        assert_eq!(s.runs["r1"].status, Status::Running);
+        s.apply(&retry(5, due));
+        s.apply(&ev(6, "person:alice", json!({ "kind": "cancelled", "run": "r1" })));
+        s.apply(&wake(7, due));
+        assert_eq!(s.runs["r1"].status, Status::Cancelled);
+    }
+
     /// Dismissing the notice a stopped run waits on leaves the run waiting on
     /// no card, so the task's own Resume is not refused for it.
     #[test]

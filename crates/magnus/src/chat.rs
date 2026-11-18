@@ -332,8 +332,8 @@ impl Kernel {
     /// (behavior spec, Per-user relationship, "No repetition"), newest
     /// first: those `recent_runs` selects, a result's task title recalled
     /// for them through their wall.
-    pub(crate) async fn recent_to(&self, person: &str, except: Option<&str>, before: DateTime<Utc>) -> Result<Vec<(DateTime<Utc>, String)>> {
-        let picked = self.read(|s| recent_runs(s, person, except, before, crate::relationship::BUDGET));
+    pub(crate) async fn recent_to(&self, person: &str, except: Option<&str>, before: DateTime<Utc>, budget: usize) -> Result<Vec<(DateTime<Utc>, String)>> {
+        let picked = self.read(|s| recent_runs(s, person, except, before, budget));
         let w = self.words(picked.iter().filter(|r| !r.turn).map(|r| (person.to_string(), r.task.seq))).await?;
         Ok(picked
             .into_iter()

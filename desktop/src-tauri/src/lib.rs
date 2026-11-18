@@ -214,6 +214,9 @@ async fn connect(app: State<'_, App>, url: String) -> Res<Value> {
 #[tauri::command]
 async fn trust(app: State<'_, App>, url: String, fingerprint: String) -> Res<()> {
     let url = normalize(&url)?;
+    if managed_bootstrap().ok().flatten().is_some_and(|(origin, expected)| origin == url && expected != fingerprint) {
+        return Err("The configured appliance certificate does not match this installer".into());
+    }
     // Trust only what the appliance presents now.
     let now = pin::look(&url).await?;
     if now != fingerprint {
