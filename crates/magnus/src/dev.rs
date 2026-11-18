@@ -57,7 +57,7 @@ pub fn failure(s: &State, r: &Run, stall_minutes: u32) -> Option<&'static str> {
             Some("budget") | Some("grant_budget") => Some("budget"),
             Some("provider") | Some("usage_limit") | Some("auth") | Some("invalid_request") => Some("provider"),
             Some("kill_switch") => Some("kill_switch"),
-            Some("timer") => None,
+            Some("timer") | Some("provider_retry") => None,
             _ => Some("waiting_on_person"),
         },
         Status::Running => {

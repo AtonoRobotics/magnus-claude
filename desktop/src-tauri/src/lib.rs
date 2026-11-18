@@ -99,7 +99,26 @@ fn message(body: &Value, status: u16) -> String {
 
 #[tauri::command]
 async fn restore(app: State<'_, App>) -> Res<Value> {
-    let Ok((url, c, token)) = app.session() else { return Ok(Value::Null) };
+    let Ok((url, c, token)) = app.session() else {
+        if let Some(url) = app.store.config().appliance {
+            let managed = managed_bootstrap().ok().flatten().is_some_and(|(origin, _)| origin == url);
+            return Ok(json!({ "sign_in_url": url, "managed": managed }));
+        }
+        let Some((url, fingerprint)) = managed_bootstrap()? else { return Ok(Value::Null) };
+        let c = pin::client(Some(&fingerprint))?;
+        let r = c.get(format!("{url}/v1/health")).timeout(std::time::Duration::from_secs(10)).send().await
+            .map_err(|e| format!("Cannot reach the configured appliance: {}", pin::describe(&e)))?;
+        let (status, body) = body_of(r).await;
+        if status == 426 {
+            app.store.set_pin(&url, &fingerprint)?;
+            return Ok(json!({ "update_required": body, "appliance": url }));
+        }
+        if status != 200 || body.get("version").is_none() || body.get("ok").is_none() {
+            return Err(format!("The configured appliance could not be verified: {}", message(&body, status)));
+        }
+        app.store.set_pin(&url, &fingerprint)?;
+        return Ok(json!({ "sign_in_url": url, "managed": true }));
+    };
     match c.get(format!("{url}/v1/me")).bearer_auth(&token).send().await {
         Ok(r) if r.status().is_success() => Ok(json!({ "person": body_of(r).await.1, "appliance": url })),
         Ok(r) if r.status().as_u16() == 401 => {
@@ -110,7 +129,7 @@ async fn restore(app: State<'_, App>) -> Res<Value> {
                 return Ok(json!({ "note": msg }));
             }
             app.store.clear_token(&url);
-            Ok(json!({ "note": "Your session ended. Sign in again." }))
+            Ok(json!({ "note": "Your session ended. Sign in again.", "sign_in_url": url }))
         }
         Ok(r) if r.status().as_u16() == 403 && pin::is_public_appliance(&url) => {
             let _ = body_of(r).await;
@@ -126,6 +145,32 @@ async fn restore(app: State<'_, App>) -> Res<Value> {
         }
         Err(e) => Ok(json!({ "note": format!("Cannot reach {url}: {}", pin::describe(&e)) })),
     }
+}
+
+/// The installer binds this deployment's DNS name to its TLS identity.
+/// The values come from the signed build and carry no user credential.
+fn managed_bootstrap() -> Res<Option<(String, String)>> {
+    parse_bootstrap(option_env!("MAGNUS_BOOTSTRAP_ORIGIN").unwrap_or_default(), option_env!("MAGNUS_BOOTSTRAP_FINGERPRINT").unwrap_or_default())
+}
+
+fn parse_bootstrap(origin: &str, fingerprint: &str) -> Res<Option<(String, String)>> {
+    let origin = origin.trim();
+    let fingerprint = fingerprint.trim();
+    if origin.is_empty() && fingerprint.is_empty() {
+        return Ok(None);
+    }
+    let url = url::Url::parse(origin).map_err(|_| "The installer has an invalid appliance address")?;
+    if url.scheme() != "https" || !matches!(url.host(), Some(url::Host::Domain(_))) || !url.username().is_empty()
+        || url.password().is_some() || url.path() != "/" || url.query().is_some() || url.fragment().is_some() || pin::is_public_appliance(origin) {
+        return Err("The installer needs the HTTPS DNS name of the appliance's private listener".into());
+    }
+    let hex = fingerprint.replace(':', "");
+    let bytes = hex::decode(hex).map_err(|_| "The installer has an invalid appliance certificate fingerprint")?;
+    if bytes.len() != 32 {
+        return Err("The installer needs the appliance's SHA-256 certificate fingerprint".into());
+    }
+    let canonical = bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":");
+    Ok(Some((url.origin().ascii_serialization(), canonical)))
 }
 
 #[tauri::command]
@@ -169,6 +214,9 @@ async fn connect(app: State<'_, App>, url: String) -> Res<Value> {
 #[tauri::command]
 async fn trust(app: State<'_, App>, url: String, fingerprint: String) -> Res<()> {
     let url = normalize(&url)?;
+    if managed_bootstrap().ok().flatten().is_some_and(|(origin, expected)| origin == url && expected != fingerprint) {
+        return Err("The configured appliance certificate does not match this installer".into());
+    }
     // Trust only what the appliance presents now.
     let now = pin::look(&url).await?;
     if now != fingerprint {
@@ -373,18 +421,16 @@ async fn live_start(handle: AppHandle, app: State<'_, App>, task: String) -> Res
     let job = tokio::spawn(async move {
         let Ok(r) = c.get(format!("{url}/v1/tasks/{t}/live")).bearer_auth(&token).send().await else { return };
         let mut stream = r.bytes_stream();
-        let mut buf = String::new();
+        let mut buf = Vec::new();
         while let Some(Ok(chunk)) = stream.next().await {
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(end) = buf.find("\n\n") {
-                let event: String = buf.drain(..end + 2).collect();
-                for line in event.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(v) = serde_json::from_str::<Value>(data) {
-                            let _ = handle.emit("live", json!({ "task": t, "text": v["text"] }));
-                        }
+            buf.extend_from_slice(&chunk);
+            while let Some(end) = buf.windows(2).position(|bytes| bytes == b"\n\n") {
+                if let Some(data) = buf[..end].strip_prefix(b"data: ") {
+                    if let Ok(v) = serde_json::from_slice::<Value>(data) {
+                        let _ = handle.emit("live", json!({ "task": t, "text": v["text"], "replace": v["replace"] }));
                     }
                 }
+                buf.drain(..end + 2);
             }
         }
     });
@@ -725,6 +771,19 @@ mod tests {
         assert_eq!(normalize("https://10.0.0.5:7443/some/path").unwrap(), "https://10.0.0.5:7443");
         assert_eq!(normalize("http://127.0.0.1:7700/").unwrap(), "http://127.0.0.1:7700");
         assert!(normalize("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn managed_bootstrap_requires_a_dns_origin_and_a_full_sha256_pin() {
+        let hash = "ab".repeat(32);
+        let (origin, pin) = parse_bootstrap("https://appliance.example:7700", &hash).unwrap().unwrap();
+        assert_eq!(origin, "https://appliance.example:7700");
+        assert_eq!(pin, ["AB"; 32].join(":"));
+        assert!(parse_bootstrap("", "").unwrap().is_none());
+        assert!(parse_bootstrap("https://appliance.example:7700", "").is_err());
+        for wrong in ["http://appliance.example", "https://192.168.0.1", "https://appliance.example/path", "https://user@appliance.example", "https://magnus.pyrallon.ai"] {
+            assert!(parse_bootstrap(wrong, &hash).is_err(), "{wrong}");
+        }
     }
 
     #[test]

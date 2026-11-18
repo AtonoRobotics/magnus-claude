@@ -16,6 +16,10 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+const CHAT_CONTEXT_ENTRIES: usize = 24;
+const CHAT_CONTEXT_BYTES: usize = 8 * 1024;
+const CHAT_COMPONENT_BYTES: usize = 768;
+
 /// An id fixed by the action's idempotency key, so a call resent after a
 /// restart finds what the first one made.
 pub(crate) fn derived(prefix: &str, key: &str) -> String {
@@ -59,12 +63,16 @@ impl Kernel {
             }
             None => (new_id("thread"), project),
         };
-        let conversation = self.conversation(person, &thread).await?;
+        let mut context_entries: Vec<_> = self.entries_with(person, &thread, &Default::default()).unwrap_or_default()
+            .iter().rev().filter(|entry| entry["kind"] != "turn")
+            .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
+            .take(CHAT_CONTEXT_ENTRIES).collect();
+        context_entries.reverse();
         // What the turn reads in the conversation carries the taint of the
         // runs that wrote it, as their tasks would (I2).
         let label = self.thread_label(person, &thread, None);
         let o = NewRun {
-            chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, conversation, opener: None }),
+            chat: Some(ChatOrigin { thread: thread.clone(), turn: true, from_run: None, context_entries: Some(context_entries), conversation: vec![], opener: None }),
             label: (label != Label::PRINCIPAL).then_some(label),
             model,
             experiment,
@@ -168,7 +176,7 @@ impl Kernel {
         if self.thread_gone(thread) {
             return Ok(None);
         }
-        let w = self.person_words(person).await?;
+        let w = self.words(self.thread(person, thread).into_iter().map(|(task, _)| (person.to_owned(), task.seq))).await?;
         Ok(self.entries_with(person, thread, &w))
     }
 
@@ -325,8 +333,8 @@ impl Kernel {
     /// (behavior spec, Per-user relationship, "No repetition"), newest
     /// first: those `recent_runs` selects, a result's task title recalled
     /// for them through their wall.
-    pub(crate) async fn recent_to(&self, person: &str, except: Option<&str>, before: DateTime<Utc>) -> Result<Vec<(DateTime<Utc>, String)>> {
-        let picked = self.read(|s| recent_runs(s, person, except, before, crate::relationship::BUDGET));
+    pub(crate) async fn recent_to(&self, person: &str, except: Option<&str>, before: DateTime<Utc>, budget: usize) -> Result<Vec<(DateTime<Utc>, String)>> {
+        let picked = self.read(|s| recent_runs(s, person, except, before, budget));
         let w = self.words(picked.iter().filter(|r| !r.turn).map(|r| (person.to_string(), r.task.seq))).await?;
         Ok(picked
             .into_iter()
@@ -337,9 +345,65 @@ impl Kernel {
             .collect())
     }
 
-    /// The thread as the model reads it in the next turn: who said what.
-    pub(crate) async fn conversation(&self, person: &str, thread: &str) -> Result<Vec<Value>> {
-        Ok(Self::transcript_of(self.thread_entries(person, thread).await?.unwrap_or_default()))
+    /// Resolve a turn's context through the conversation's current visibility.
+    pub(crate) async fn chat_context(&self, task: &Task) -> Result<Vec<Value>> {
+        let Some(chat) = &task.chat else { return Ok(vec![]) };
+        if !chat.turn {
+            return Ok(chat.conversation.clone());
+        }
+        if self.thread_gone(&chat.thread) || chat.opener.is_some() || chat.context_entries.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(vec![]);
+        }
+        let mut projected = self.entries_with(&task.person, &chat.thread, &Default::default()).unwrap_or_default();
+        match &chat.context_entries {
+            Some(ids) => projected.retain(|entry| entry["id"].as_str().is_some_and(|id| ids.iter().any(|wanted| wanted == id))),
+            // Older turns stored verbatim snapshots. Recover their history
+            // from visible entries before their own message instead.
+            None => {
+                let own = format!("m:{}", task.task_id);
+                let Some(index) = projected.iter().position(|entry| entry["id"] == own.as_str()) else { return Ok(vec![]) };
+                projected.truncate(index);
+            }
+        }
+        let selected: Vec<_> = projected.into_iter().rev().filter(|entry| entry["kind"] != "turn").take(CHAT_CONTEXT_ENTRIES).collect();
+        let selected_ids: HashSet<_> = selected.iter().filter_map(|entry| entry["id"].as_str()).collect();
+        let task_ids: HashSet<_> = selected.iter().flat_map(|entry| {
+            entry["task_id"].as_str().into_iter().chain(entry["tasks"].as_array().into_iter().flatten().filter_map(|task| task["task_id"].as_str()))
+        }).collect();
+        let seqs = self.read(|state| task_ids.iter().filter_map(|id| state.tasks.get(*id))
+            .filter(|source| source.person == task.person).map(|source| (task.person.clone(), source.seq)).collect::<Vec<_>>());
+        let words = self.words(seqs).await?;
+        if self.thread_gone(&chat.thread) {
+            return Ok(vec![]);
+        }
+        let entries = self.entries_with(&task.person, &chat.thread, &words).unwrap_or_default();
+        Ok(Self::bounded_transcript(entries.into_iter().filter(|entry| entry["id"].as_str().is_some_and(|id| selected_ids.contains(id))).collect()))
+    }
+
+    pub(crate) fn bounded_transcript(entries: Vec<Value>) -> Vec<Value> {
+        let mut left = CHAT_CONTEXT_BYTES;
+        let mut recent = Vec::new();
+        for mut entry in Self::transcript_of(entries).into_iter().rev().take(CHAT_CONTEXT_ENTRIES) {
+            let text = entry["text"].as_str().unwrap_or_default();
+            if text.is_empty() {
+                continue;
+            }
+            const ENTRY_OVERHEAD: usize = 32;
+            if left <= ENTRY_OVERHEAD {
+                break;
+            }
+            let mut bytes = text.len().min(left - ENTRY_OVERHEAD);
+            while !text.is_char_boundary(bytes) {
+                bytes -= 1;
+            }
+            if bytes < text.len() {
+                entry["text"] = json!(&text[..bytes]);
+            }
+            left -= bytes + ENTRY_OVERHEAD;
+            recent.push(entry);
+        }
+        recent.reverse();
+        recent
     }
 
     /// Entries as the model reads them: who said what.
@@ -352,8 +416,18 @@ impl Kernel {
                     "message" => ("person", text("text")),
                     // Its instruction was the appliance's: only that Magnus opened it.
                     "opener" => ("you", format!("(You opened this conversation yourself: {}.)", text("text"))),
-                    // What the answer showed below its text is part of what it said.
-                    "answer" if e["view"].is_array() => ("you", format!("{}\n[Shown below the answer: {}]", text("text"), e["view"])),
+                    "answer" if e["view"].is_array() => {
+                        let view = &e["view"];
+                        let data = view.to_string();
+                        let shown = if data.len() <= CHAT_COMPONENT_BYTES {
+                            data
+                        } else {
+                            view.as_array()?.iter().take(8)
+                                .filter_map(|part| part["title"].as_str().or_else(|| part["type"].as_str()))
+                                .map(|label| label.chars().take(72).collect::<String>()).collect::<Vec<_>>().join(", ")
+                        };
+                        ("you", format!("{}\n[Shown below the answer: {shown}]", text("text")))
+                    }
                     "answer" => ("you", text("text")),
                     "tasks" => ("you", format!("Started tasks: {}", e["tasks"].as_array().into_iter().flatten().map(|t| format!("{} ({})", t["title"].as_str().unwrap_or_default(), t["text"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("; "))),
                     "result" => ("task result", format!("{} ({}): {}", text("title"), text("status"), text("summary"))),
@@ -423,13 +497,13 @@ impl Kernel {
         let Some(chat) = task.chat.clone() else { anyhow::bail!("task {} is not from chat", task.task_id) };
         let (task_id, run_id) = (derived("task", key), derived("run", key));
         if !self.read(|s| s.tasks.contains_key(&task_id)) {
-            let mut conversation = chat.conversation.clone();
+            let mut conversation = self.chat_context(task).await?;
             // An opener's text is the appliance's instruction, not something the person asked.
             if chat.opener.is_none() {
                 conversation.push(json!({ "role": "person", "text": self.asked(run).await? }));
             }
             let o = NewRun {
-                chat: Some(ChatOrigin { thread: chat.thread.clone(), turn: false, from_run: Some(run.id.clone()), conversation, opener: None }),
+                chat: Some(ChatOrigin { thread: chat.thread.clone(), turn: false, from_run: Some(run.id.clone()), context_entries: None, conversation, opener: None }),
                 label: Some(Label { untrusted: run.untrusted, private: run.private }),
                 ids: Some((task_id.clone(), run_id)),
                 model: Some((run.config.adapter.clone(), run.config.model.clone())),
@@ -716,6 +790,24 @@ mod tests {
     use crate::log::Event;
     use crate::state::State;
     use serde_json::json;
+
+    #[test]
+    fn chat_history_keeps_recent_utf8_within_its_budget_without_component_payloads() {
+        let entries = vec![
+            json!({ "kind": "message", "text": "oldest" }),
+            json!({ "kind": "message", "text": "界".repeat(super::CHAT_CONTEXT_BYTES) }),
+            json!({ "kind": "answer", "text": "Recent reply", "view": [{ "type": "table", "title": "Revenue", "rows": [["large component payload".repeat(100)]] }] }),
+        ];
+        let history = super::Kernel::bounded_transcript(entries);
+        assert_eq!(history.len(), 2);
+        let bytes: usize = history.iter().map(|entry| entry["text"].as_str().unwrap().len()).sum();
+        assert!(bytes <= super::CHAT_CONTEXT_BYTES);
+        let reply = history[1]["text"].as_str().unwrap();
+        assert!(reply.contains("Revenue"));
+        assert!(!reply.contains("large component payload"));
+        let tiny = super::Kernel::bounded_transcript(vec![json!({ "kind": "answer", "text": "Recent reply", "view": [{ "type": "table", "rows": [[86753]] }] })]);
+        assert!(tiny[0]["text"].as_str().unwrap().contains("86753"));
+    }
 
     /// Review of #245: the recent messages are chosen newest first and the
     /// choosing stops at the budget, not after every conversation of the

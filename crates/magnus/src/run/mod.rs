@@ -169,13 +169,17 @@ impl Kernel {
         let scope = task.as_ref().and_then(|t| words.opt(t.seq, "scope"));
         let project = task.as_ref().and_then(|t| t.project.clone());
         let chat = task.as_ref().and_then(|t| t.chat.clone());
+        let history = match &task {
+            Some(t) => self.chat_context(t).await?,
+            None => vec![],
+        };
         let review = task.as_ref().is_some_and(|t| t.review);
         let mut first = vec![];
         // A chat turn sees the thread so far, as recorded when the person
         // wrote; a task from chat, the conversation that started it.
         match &chat {
-            Some(c) if c.turn && !c.conversation.is_empty() => {
-                first.push(Block::Text { text: format!("The conversation so far (answers and task results are yours):\n\n{}\n\nThe person's new message follows.", transcript(&c.conversation)) });
+            Some(c) if c.turn && !history.is_empty() => {
+                first.push(Block::Text { text: format!("Recent conversation (answers and task results are yours):\n\n{}\n\nThe person's new message follows.", transcript(&history)) });
             }
             _ => {}
         }
@@ -207,9 +211,9 @@ impl Kernel {
             }
             first.push(Block::Text { text: t });
         }
-        if let Some(c) = chat.as_ref().filter(|c| !c.turn && !c.conversation.is_empty()) {
+        if chat.as_ref().is_some_and(|c| !c.turn) && !history.is_empty() {
             first.push(Block::Text {
-                text: format!("This task was started from a chat with the person. Write its contract from what they said there:\n\n{}", transcript(&c.conversation)),
+                text: format!("This task was started from a chat with the person. Write its contract from what they said there:\n\n{}", transcript(&history)),
             });
         }
         for a in &attachments {

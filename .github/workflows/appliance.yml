@@ -21,6 +21,7 @@ env:
 
 jobs:
   release:
+    if: github.ref == 'refs/heads/master' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/appliance-v'))
     # The build box: the one runner with the appliance whose updates
     # directory the owner's app reads (magnus-linux and magnus-light; see
     # desktop.yml and #204).
@@ -30,7 +31,9 @@ jobs:
       # The whole history, so publishing can check a release contains the
       # one before it.
       - uses: actions/checkout@v7
-        with: { clean: false, fetch-depth: 0 }
+        with: { fetch-depth: 0 }
+      - name: Verify release source
+        run: git merge-base --is-ancestor HEAD origin/master
       # Short of disk, the run stops here saying so (#203; release/ci-disk.sh).
       - name: Free disk
         run: release/ci-disk.sh

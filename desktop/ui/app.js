@@ -332,6 +332,7 @@ const WAITING = {
   approval: "waiting for an approval", review: "waiting for your review", question: "waiting for your answer", budget: "paused: budget reached",
   contract_change: "waiting for you to decide on a change to its done-criteria",
   provider: "paused: the model provider is unavailable", usage_limit: "paused: model usage limit", auth: "paused: sign in to the model again",
+  provider_retry: "waiting to retry the model provider",
   kill_switch: "stopped by the kill switch", timer: "waiting until a set time", invalid_request: "paused: the model rejected the request",
 };
 const chip = st => { const [c, l] = STATUS[st] || ["", st]; return `<span class="chip ${c}">${esc(l)}</span>`; };
@@ -833,7 +834,7 @@ async function go() {
 
 // ---------- sign-in ----------
 
-async function signInScreen(note) {
+async function signInScreen(note, url, managed = false) {
   document.body.innerHTML = `<div class="signin"><h1>Magnus</h1><p class="muted">Sign in to your appliance.</p><div class="card" id="si"></div></div>`;
   const box = $("#si");
   // Signed in. Pair this computer for the public name once, on the private
@@ -889,8 +890,14 @@ async function signInScreen(note) {
       paint(box, `<p class="small muted">${esc(data.url || location.origin)}</p><p class="small muted">Connecting…</p>`);
       try {
         const m = await Magnus.signInMethod();
-        ask("password", { ...data, public_url: m.public_url, label: m.method === "oidc" ? m.label : undefined });
+        const signIn = { ...data, public_url: m.public_url, label: m.method === "oidc" ? m.label : undefined };
+        ask(data.managed && signIn.label ? "managed" : "password", signIn);
       } catch (err) { note = err.message || String(err); ask(Magnus.kind === "app" ? "address" : "password", data); }
+    } else if (stage === "managed") {
+      paint(box, `<p>${esc(note || `Sign in with ${data.label}.`)}</p>
+        <div class="row"><button id="provider" class="primary">Sign in in your browser</button><button id="password" class="link">Use a password</button></div>`);
+      $("#provider").onclick = () => ask("browser", data);
+      $("#password").onclick = () => ask("password", data);
     } else if (stage === "browser") {
       // The provider's own page in the person's browser: for a passkey, the
       // first time, or when their account needs finishing there.
@@ -967,6 +974,7 @@ async function signInScreen(note) {
     }
   };
   if (Magnus.kind === "web") ask("method", { url: location.origin });
+  else if (url) ask("method", { url, managed });
   else ask("address");
 }
 
@@ -1386,8 +1394,8 @@ async function showThread(main, thread) {
   const listening = {};
   const listen = entries => {
     const running = new Set(entries.filter(e => e.kind === "turn" && e.status === "running").map(e => e.task_id));
-    for (const id of running) if (!listening[id]) listening[id] = Magnus.live(id, t => {
-      ui.live[id] = (ui.live[id] || "") + t;
+    for (const id of running) if (!listening[id]) listening[id] = Magnus.live(id, (text, replace) => {
+      ui.live[id] = replace ? text : (ui.live[id] || "") + text;
       const el = $(`[data-live="${CSS.escape(id)}"]`, main);
       if(el){
         const root=$("#thread",main), followed=ReadingAnchors.capture(root)?.follow;
@@ -3479,7 +3487,7 @@ async function start() {
     const r = await Magnus.restore();
     if (r && r.update_required) return updateRequiredScreen(r.update_required);
     if (r && r.person) { App.me = r.person; App.appliance = r.appliance; return boot(); }
-    signInScreen(r && r.note);
+    signInScreen(r?.note, r?.sign_in_url, r?.managed);
   } catch (e) { signInScreen(e.message || String(e)); }
 }
 

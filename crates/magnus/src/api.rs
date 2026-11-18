@@ -2048,21 +2048,28 @@ async fn live(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
         Err(r) => return r,
     };
     let Some((_, run)) = find(&k, &p, &id) else { return err(StatusCode::NOT_FOUND, "no such task") };
-    let (so_far, mut rx) = k.live_text.subscribe(&run.id);
-    let stream = async_stream(move |tx| async move {
-        if !so_far.is_empty() && tx.send(format!("data: {}\n\n", json!({ "text": so_far }))).await.is_err() {
-            return;
+    let (so_far, rx) = k.live_text.subscribe(&run.id);
+    if k.read(|s| s.runs.get(&run.id).is_none_or(|r| r.status.terminal())) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let stream = futures::stream::unfold((Some(so_far), rx, k, run.id), |(snapshot, mut rx, k, run)| async move {
+        let event = |text: String, replace: bool| Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json!({ "text": text, "replace": replace })));
+        if let Some(text) = snapshot {
+            return Some((event(text, true), (None, rx, k, run)));
         }
         loop {
             match rx.recv().await {
-                Ok((r, text)) if r == run.id => {
-                    if tx.send(format!("data: {}\n\n", json!({ "text": text }))).await.is_err() {
-                        return;
-                    }
-                }
+                Ok((r, Some(text))) if r == run => return Some((event(text, false), (None, rx, k, run))),
+                Ok((r, None)) if r == run => return None,
                 Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(_) => return,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let (text, rx) = k.live_text.subscribe(&run);
+                    if k.read(|s| s.runs.get(&run).is_none_or(|r| r.status.terminal())) {
+                        return None;
+                    }
+                    return Some((event(text, true), (None, rx, k, run)));
+                }
+                Err(_) => return None,
             }
         }
     });
@@ -2071,16 +2078,6 @@ async fn live(State(k): K, h: HeaderMap, Path(id): Path<String>) -> Response {
         .header("cache-control", "no-cache")
         .body(axum::body::Body::from_stream(stream))
         .unwrap()
-}
-
-fn async_stream<F, Fut>(f: F) -> impl futures::Stream<Item = Result<String, std::convert::Infallible>>
-where
-    F: FnOnce(tokio::sync::mpsc::Sender<String>) -> Fut,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(f(tx));
-    futures::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|s| (Ok(s), rx)) })
 }
 
 /// Speech to text on the appliance. The person reviews the text before sending it.

@@ -76,7 +76,7 @@ impl Kernel {
             None => OPENER.to_string(),
         };
         let opener = Opener { app: app.map(String::from), app_title };
-        let o = NewRun { chat: Some(ChatOrigin { thread, turn: true, from_run: None, conversation: vec![], opener: Some(Box::new(opener)) }), ids: Some((task, run)), ..Default::default() };
+        let o = NewRun { chat: Some(ChatOrigin { thread, turn: true, from_run: None, context_entries: Some(vec![]), conversation: vec![], opener: Some(Box::new(opener)) }), ids: Some((task, run)), ..Default::default() };
         self.create_run("kernel", person, text, vec![], o).await?;
         Ok(())
     }

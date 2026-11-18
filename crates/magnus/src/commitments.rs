@@ -174,7 +174,7 @@ impl Kernel {
         let mut said = vec![];
         if let Some(c) = &task.chat {
             let roles: &[&str] = if magnus { &["person", "you"] } else { &["person"] };
-            said.extend(c.conversation.iter().filter(|m| roles.iter().any(|r| m["role"] == *r)).filter_map(|m| m["text"].as_str().map(String::from)));
+            said.extend(self.chat_context(&task).await?.iter().filter(|m| roles.iter().any(|r| m["role"] == *r)).filter_map(|m| m["text"].as_str().map(String::from)));
             if c.turn && c.opener.is_none() {
                 said.push(self.asked(run).await?);
             }
