@@ -21,8 +21,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { persist-credentials: false }
+      - name: Test Postgres
+        timeout-minutes: 5
+        run: |
+          dev/postgres.sh
+          until docker exec magnus-claude-pg pg_isready -U postgres -h 127.0.0.1; do sleep 1; done
       - name: Rust workspace
-        run: cargo test --locked --workspace --lib
+        run: cargo test --locked --workspace --lib -- --test-threads=8
       - name: Renderer and browser
         run: |
           node --check desktop/ui/app.js
