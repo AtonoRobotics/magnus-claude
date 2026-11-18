@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 const CHAT_CONTEXT_ENTRIES: usize = 24;
 const CHAT_CONTEXT_BYTES: usize = 8 * 1024;
+const CHAT_COMPONENT_BYTES: usize = 768;
 
 /// An id fixed by the action's idempotency key, so a call resent after a
 /// restart finds what the first one made.
@@ -416,10 +417,16 @@ impl Kernel {
                     // Its instruction was the appliance's: only that Magnus opened it.
                     "opener" => ("you", format!("(You opened this conversation yourself: {}.)", text("text"))),
                     "answer" if e["view"].is_array() => {
-                        let components = e["view"].as_array()?.iter().take(8)
-                            .filter_map(|part| part["title"].as_str().or_else(|| part["type"].as_str()))
-                            .map(|label| label.chars().take(100).collect::<String>()).collect::<Vec<_>>();
-                        ("you", format!("{}\n[Shown below the answer: {}]", text("text"), components.join(", ")))
+                        let view = &e["view"];
+                        let data = view.to_string();
+                        let shown = if data.len() <= CHAT_COMPONENT_BYTES {
+                            data
+                        } else {
+                            view.as_array()?.iter().take(8)
+                                .filter_map(|part| part["title"].as_str().or_else(|| part["type"].as_str()))
+                                .map(|label| label.chars().take(72).collect::<String>()).collect::<Vec<_>>().join(", ")
+                        };
+                        ("you", format!("{}\n[Shown below the answer: {shown}]", text("text")))
                     }
                     "answer" => ("you", text("text")),
                     "tasks" => ("you", format!("Started tasks: {}", e["tasks"].as_array().into_iter().flatten().map(|t| format!("{} ({})", t["title"].as_str().unwrap_or_default(), t["text"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("; "))),
@@ -789,7 +796,7 @@ mod tests {
         let entries = vec![
             json!({ "kind": "message", "text": "oldest" }),
             json!({ "kind": "message", "text": "界".repeat(super::CHAT_CONTEXT_BYTES) }),
-            json!({ "kind": "answer", "text": "Recent reply", "view": [{ "type": "table", "title": "Revenue", "rows": [["large component payload"]] }] }),
+            json!({ "kind": "answer", "text": "Recent reply", "view": [{ "type": "table", "title": "Revenue", "rows": [["large component payload".repeat(100)]] }] }),
         ];
         let history = super::Kernel::bounded_transcript(entries);
         assert_eq!(history.len(), 2);
@@ -798,6 +805,8 @@ mod tests {
         let reply = history[1]["text"].as_str().unwrap();
         assert!(reply.contains("Revenue"));
         assert!(!reply.contains("large component payload"));
+        let tiny = super::Kernel::bounded_transcript(vec![json!({ "kind": "answer", "text": "Recent reply", "view": [{ "type": "table", "rows": [[86753]] }] })]);
+        assert!(tiny[0]["text"].as_str().unwrap().contains("86753"));
     }
 
     /// Review of #245: the recent messages are chosen newest first and the
