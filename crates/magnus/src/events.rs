@@ -1073,6 +1073,7 @@ pub enum Ev {
     ProviderRetry {
         run: String,
         until: chrono::DateTime<chrono::Utc>,
+        attempt: u32,
     },
     ProviderRetryReady {
         run: String,

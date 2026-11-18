@@ -18,10 +18,8 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The longest wait between attempts at a failed model call (the backoff
-/// below doubles from one second up to this).
-const LONGEST_BACKOFF: Duration = Duration::from_millis(500 * 2u64.pow(6));
-const PROVIDER_RETRY_SECONDS: [u64; 5] = [5, 15, 45, 120, 300];
+const QUICK_RETRY: Duration = Duration::from_secs(1);
+const PROVIDER_RETRY_SECONDS: [u64; 5] = [5, 30, 120, 300, 900];
 const MAX_PROVIDER_RETRY_AFTER_SECONDS: f64 = 900.0;
 
 pub enum Flow {
@@ -173,7 +171,8 @@ impl Kernel {
                 estimated_input_tokens(&system, &messages, &tools)
             }
         };
-        let mut attempt = 0u32;
+        let mut attempt = run.provider_retries;
+        let retry_limit = run.config.max_retries.min(PROVIDER_RETRY_SECONDS.len() as u32);
         loop {
             // Each attempt, a retry too, reads the run as it is now: a failed
             // call may have been charged, and a person may have cancelled or
@@ -259,28 +258,24 @@ impl Kernel {
                     )
                     .await?;
                     match e.class {
-                        // An outage, or a rate limit the provider says will
-                        // pass within the longest backoff, is waited out and
-                        // asked again; a limit it says lasts longer (a spent
-                        // quota) persists, and pauses the task below.
+                        // One quick retry keeps brief interruptions out of the UI.
+                        // Longer waits are recorded and release the driver.
                         ErrorClass::Unavailable | ErrorClass::UsageLimit
-                            if run.provider_retries == 0 && attempt < run.config.max_retries && e.retry_after_s.is_none_or(|s| s <= LONGEST_BACKOFF.as_secs_f64()) =>
+                            if attempt == 0 && retry_limit > 1 && e.retry_after_s.is_none_or(|s| s <= QUICK_RETRY.as_secs_f64()) =>
                         {
                             attempt += 1;
-                            let backoff = Duration::from_millis(500 * 2u64.pow(attempt.min(6))).min(LONGEST_BACKOFF);
-                            let asked = e.retry_after_s.filter(|s| s.is_finite() && *s > 0.0).map(Duration::from_secs_f64).unwrap_or_default();
-                            tokio::time::sleep(backoff.max(asked)).await;
+                            tokio::time::sleep(QUICK_RETRY).await;
                         }
                         ErrorClass::Unavailable | ErrorClass::UsageLimit
-                            if run.provider_retries < PROVIDER_RETRY_SECONDS.len()
+                            if attempt < retry_limit
                                 && e.retry_after_s.is_none_or(|delay| delay.is_finite() && delay <= MAX_PROVIDER_RETRY_AFTER_SECONDS) =>
                         {
                             if !self.may_ask_model(run_id).await? {
                                 return Ok(Flow::Stop);
                             }
-                            let delay = (PROVIDER_RETRY_SECONDS[run.provider_retries] as f64).max(e.retry_after_s.unwrap_or_default());
+                            let delay = (PROVIDER_RETRY_SECONDS[attempt as usize] as f64).max(e.retry_after_s.unwrap_or_default());
                             let until = chrono::Utc::now() + chrono::Duration::milliseconds((delay * 1000.0).ceil() as i64);
-                            self.emit("kernel", Ev::ProviderRetry { run: run_id.into(), until }).await?;
+                            self.emit("kernel", Ev::ProviderRetry { run: run_id.into(), until, attempt: attempt + 1 }).await?;
                             self.on_stop(run_id, false).await;
                             return Ok(Flow::Stop);
                         }

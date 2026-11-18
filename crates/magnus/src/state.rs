@@ -118,7 +118,7 @@ pub struct Run {
     pub usd: f64,
     pub intents: HashMap<String, Intent>,
     pub wait_until: Option<DateTime<Utc>>,
-    pub provider_retries: usize,
+    pub provider_retries: u32,
     pub summary: Option<String>,
     /// Delivered files: (id, name, media type, size in bytes).
     pub outputs: Vec<(String, String, String, usize)>,
@@ -2361,9 +2361,9 @@ impl State {
                     r.wait_until = Some(*until);
                 }
             }
-            Ev::ProviderRetry { run, until } => {
+            Ev::ProviderRetry { run, until, attempt } => {
                 if let Some(r) = self.runs.get_mut(run).filter(|r| r.status == Status::Running) {
-                    r.provider_retries += 1;
+                    r.provider_retries = *attempt;
                     r.status = Status::Suspended;
                     r.reason = Some("provider_retry".into());
                     r.wait_until = Some(*until);
@@ -2606,16 +2606,16 @@ mod tests {
         let config = json!({ "adapter": "a", "model": "m", "max_retries": 0, "max_tokens": 1, "budget": { "max_model_calls": 5, "max_actions": 1, "max_usd": 1.0 }, "verifier": false, "instructions": "", "harness": "" });
         s.apply(&ev(1, "person:alice", json!({ "kind": "task_created", "task": "t1", "run": "r1", "person": "alice", "text": "Say hi.", "config": config })));
         let due = "2026-11-18T13:00:00Z";
-        let retry = |seq, at| ev(seq, "kernel", json!({ "kind": "provider_retry", "run": "r1", "until": at }));
+        let retry = |seq, at, attempt| ev(seq, "kernel", json!({ "kind": "provider_retry", "run": "r1", "until": at, "attempt": attempt }));
         let wake = |seq, at| ev(seq, "kernel", json!({ "kind": "provider_retry_ready", "run": "r1", "until": at }));
-        s.apply(&retry(2, due));
-        assert_eq!(s.runs["r1"].provider_retries, 1);
+        s.apply(&retry(2, due, 2));
+        assert_eq!(s.runs["r1"].provider_retries, 2);
         assert_eq!(s.runs["r1"].waiting_item, None);
         s.apply(&wake(3, "2026-11-18T12:59:00Z"));
         assert_eq!(s.runs["r1"].status, Status::Suspended);
         s.apply(&wake(4, due));
         assert_eq!(s.runs["r1"].status, Status::Running);
-        s.apply(&retry(5, due));
+        s.apply(&retry(5, due, 3));
         s.apply(&ev(6, "person:alice", json!({ "kind": "cancelled", "run": "r1" })));
         s.apply(&wake(7, due));
         assert_eq!(s.runs["r1"].status, Status::Cancelled);
