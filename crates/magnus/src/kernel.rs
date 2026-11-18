@@ -709,7 +709,7 @@ impl Kernel {
                             // Each run posts to the schedule's own thread,
                             // so recurring output does not bury the
                             // conversation it was set up in (behavior spec).
-                            chat: Some(crate::events::ChatOrigin { thread: crate::chat::schedule_thread(&sc.id), turn: false, from_run: None, conversation: vec![], opener: None }),
+                            chat: Some(crate::events::ChatOrigin { thread: crate::chat::schedule_thread(&sc.id), turn: false, from_run: None, context_entries: None, conversation: vec![], opener: None }),
                             // A confirmed schedule runs on its own: the
                             // verifier judges the criteria no code checks,
                             // and only what it cannot judge goes to its
@@ -751,6 +751,17 @@ impl Kernel {
                     self.wake(&run);
                 }
             }
+            if !self.read(|s| s.kill_switch || s.updating.is_some()) {
+                let retries = self.read(|s| s.runs.values()
+                    .filter(|r| r.status == Status::Suspended && r.reason.as_deref() == Some("provider_retry"))
+                    .filter_map(|r| r.wait_until.filter(|until| *until <= now).map(|until| (r.id.clone(), until)))
+                    .collect::<Vec<_>>());
+                for (run, until) in retries {
+                    if self.emit("kernel", Ev::ProviderRetryReady { run: run.clone(), until }).await.is_ok() {
+                        self.wake(&run);
+                    }
+                }
+            }
             for run in running {
                 if !self.driving(&run) {
                     self.wake(&run);
@@ -770,6 +781,7 @@ impl Kernel {
     pub async fn on_stop(&self, run: &str, terminal: bool) {
         self.leases.lock().unwrap().retain(|_, holder| holder != run);
         if terminal {
+            self.live_text.close(run);
             self.browser.close(run).await;
             self.sandboxes.destroy(run).await;
         } else {
@@ -818,7 +830,7 @@ impl Kernel {
             let runs: Vec<String> = s
                 .runs
                 .values()
-                .filter(|r| r.status == crate::state::Status::Suspended && !["timer", "update", "kill_switch"].contains(&r.reason.as_deref().unwrap_or_default()))
+                .filter(|r| r.status == crate::state::Status::Suspended && !["timer", "provider_retry", "update", "kill_switch"].contains(&r.reason.as_deref().unwrap_or_default()))
                 .filter(|r| s.tasks.get(&r.task).is_some_and(|t| t.background()))
                 .map(|r| r.id.clone())
                 .collect();
@@ -941,7 +953,7 @@ pub(crate) fn notice_event(task: Option<String>, run: Option<String>, person: St
 /// and each run's reply so far, so a view that opens mid-reply starts with
 /// what was already said.
 pub struct Live {
-    tx: tokio::sync::broadcast::Sender<(String, String)>,
+    tx: tokio::sync::broadcast::Sender<(String, Option<String>)>,
     so_far: Mutex<HashMap<String, String>>,
 }
 
@@ -949,7 +961,7 @@ impl Live {
     pub fn send(&self, run: &str, text: &str) {
         let mut so_far = self.so_far.lock().unwrap();
         so_far.entry(run.to_string()).or_default().push_str(text);
-        let _ = self.tx.send((run.to_string(), text.to_string()));
+        let _ = self.tx.send((run.to_string(), Some(text.to_string())));
     }
 
     /// The run's reply is complete (or failed): nothing more streams for it.
@@ -957,9 +969,15 @@ impl Live {
         self.so_far.lock().unwrap().remove(run);
     }
 
+    fn close(&self, run: &str) {
+        let mut so_far = self.so_far.lock().unwrap();
+        so_far.remove(run);
+        let _ = self.tx.send((run.to_owned(), None));
+    }
+
     /// The run's reply so far and what streams after it, with nothing lost
     /// or repeated between the two.
-    pub fn subscribe(&self, run: &str) -> (String, tokio::sync::broadcast::Receiver<(String, String)>) {
+    pub fn subscribe(&self, run: &str) -> (String, tokio::sync::broadcast::Receiver<(String, Option<String>)>) {
         let so_far = self.so_far.lock().unwrap();
         (so_far.get(run).cloned().unwrap_or_default(), self.tx.subscribe())
     }

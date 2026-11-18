@@ -42,8 +42,11 @@ const appBridge = tauri && {
   },
   live(task, onText) {
     let stop = false, unlisten = null;
-    tauri.event.listen("live", e => { if (!stop && e.payload.task === task) onText(e.payload.text); }).then(u => { unlisten = u; if (stop) u(); });
-    this.invoke("live_start", { task }).catch(() => {});
+    tauri.event.listen("live", e => { if (!stop && e.payload.task === task) onText(e.payload.text, e.payload.replace); }).then(u => {
+      if (stop) return u();
+      unlisten = u;
+      return this.invoke("live_start", { task });
+    }).catch(() => {});
     return () => { stop = true; if (unlisten) unlisten(); this.invoke("live_stop", { task }).catch(() => {}); };
   },
   async notify(title, body) { return this.invoke("notify", { title, body }).catch(() => {}); },
@@ -106,7 +109,7 @@ const webBridge = {
   },
   live(task, onText) {
     const es = new EventSource(`/v1/tasks/${encodeURIComponent(task)}/live`);
-    es.onmessage = e => { try { onText(JSON.parse(e.data).text); } catch { /* ignore */ } };
+    es.onmessage = e => { try { const { text, replace } = JSON.parse(e.data); onText(text, replace); } catch { /* ignore */ } };
     return () => es.close();
   },
   async notify(title, body) {

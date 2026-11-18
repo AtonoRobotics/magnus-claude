@@ -318,7 +318,7 @@ async fn task(State(k): K, h: HeaderMap, Path((thread, entry)): Path<(String, St
     // The files the message came with go with the task made from it.
     let files = k.read(|s| e["task_id"].as_str().and_then(|t| s.tasks.get(t)).filter(|_| e["kind"] == "message").map(|t| t.files.clone()).unwrap_or_default());
     let o = NewRun {
-        chat: Some(ChatOrigin { thread: thread.clone(), turn: false, from_run, conversation: Kernel::transcript_of(entries[..=at].to_vec()), opener: None }),
+        chat: Some(ChatOrigin { thread: thread.clone(), turn: false, from_run, context_entries: None, conversation: Kernel::bounded_transcript(entries[..=at].to_vec()), opener: None }),
         files,
         label: (label != Label::PRINCIPAL).then_some(label),
         project: k.read(|s| s.project_of(&thread)),

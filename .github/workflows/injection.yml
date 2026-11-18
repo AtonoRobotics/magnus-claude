@@ -8,7 +8,7 @@ name: injection
 on:
   push:
     branches: [master]
-    paths: &boundary
+    paths:
       - crates/magnus/src/boundary.rs
       - crates/magnus/src/policy.rs
       - crates/magnus/src/tools.rs
@@ -22,30 +22,26 @@ on:
       - crates/magnus/src/run/**
       - tests/scratch/tests/injection.rs
       - .github/workflows/injection.yml
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
-    paths: *boundary
   workflow_dispatch:
 
 concurrency:
   group: injection-${{ github.ref }}
-  # A pull request's new push cancels its earlier run; master's runs wait
-  # for each other, so each finishes and the next tests all merged since (#228).
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: never
 
 jobs:
   injection:
-    # Drafts skip this the same way they skip the desktop run. Marking the
-    # pull request ready starts it, because ready_for_review is a trigger.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: github.ref == 'refs/heads/master'
     runs-on: [self-hosted, linux, magnus-linux]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-        with: { clean: false }
+        with: { persist-credentials: false }
       # Short of disk, the run stops here saying so (#203; release/ci-disk.sh).
       - name: Free disk
         run: release/ci-disk.sh

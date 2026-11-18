@@ -118,6 +118,7 @@ pub struct Run {
     pub usd: f64,
     pub intents: HashMap<String, Intent>,
     pub wait_until: Option<DateTime<Utc>>,
+    pub provider_retries: usize,
     pub summary: Option<String>,
     /// Delivered files: (id, name, media type, size in bytes).
     pub outputs: Vec<(String, String, String, usize)>,
@@ -1096,7 +1097,7 @@ impl State {
         self.tasks.values().filter(|t| t.schedule.as_deref() == Some(schedule)).find_map(|t| {
             let r = self.runs.get(&t.run_id).filter(|r| r.ended_at.is_none() && r.status == Status::Suspended)?;
             let reason = r.reason.as_deref().unwrap_or("someone");
-            (!["timer", "update", "kill_switch"].contains(&reason)).then(|| (t.task_id.clone(), format!("its last run is waiting on you ({reason})")))
+            (!["timer", "provider_retry", "update", "kill_switch"].contains(&reason)).then(|| (t.task_id.clone(), format!("its last run is waiting on you ({reason})")))
         })
     }
 
@@ -1947,6 +1948,12 @@ impl State {
                 if chat.as_ref().is_some_and(|c| c.opener.is_some()) {
                     self.openers.insert((person.clone(), task.clone()));
                 }
+                let chat = chat.clone().map(|mut origin| {
+                    if origin.turn {
+                        origin.conversation = Vec::new();
+                    }
+                    origin
+                });
                 self.tasks.insert(
                     task.clone(),
                     Task {
@@ -1954,7 +1961,7 @@ impl State {
                         run_id: run.clone(),
                         person: person.clone(),
                         created_at: e.at,
-                        chat: chat.clone(),
+                        chat,
                         // Known from the start, so its first step knows it is scheduled.
                         schedule: e.actor.strip_prefix("schedule:").map(String::from),
                         review: e.actor == "review",
@@ -2006,6 +2013,7 @@ impl State {
                         usd: 0.0,
                         intents: HashMap::new(),
                         wait_until: None,
+                        provider_retries: 0,
                         summary: None,
                         outputs: vec![],
                         last_seq: e.seq,
@@ -2042,6 +2050,7 @@ impl State {
             Ev::ModelReply { run, step, blocks, state, usage, .. } => {
                 self.charge_grant(run, e.at, usage.cost_usd);
                 if let Some(r) = self.runs.get_mut(run) {
+                    r.provider_retries = 0;
                     r.usd += usage.cost_usd;
                     r.tokens.input += usage.input_tokens;
                     r.tokens.output += usage.output_tokens;
@@ -2350,6 +2359,21 @@ impl State {
             Ev::Wait { run, until } => {
                 if let Some(r) = self.runs.get_mut(run) {
                     r.wait_until = Some(*until);
+                }
+            }
+            Ev::ProviderRetry { run, until } => {
+                if let Some(r) = self.runs.get_mut(run).filter(|r| r.status == Status::Running) {
+                    r.provider_retries += 1;
+                    r.status = Status::Suspended;
+                    r.reason = Some("provider_retry".into());
+                    r.wait_until = Some(*until);
+                }
+            }
+            Ev::ProviderRetryReady { run, until } => {
+                if let Some(r) = self.runs.get_mut(run).filter(|r| r.status == Status::Suspended && r.reason.as_deref() == Some("provider_retry") && r.wait_until == Some(*until)) {
+                    r.status = Status::Running;
+                    r.reason = None;
+                    r.wait_until = None;
                 }
             }
             Ev::BudgetExtended { run, budget } => {

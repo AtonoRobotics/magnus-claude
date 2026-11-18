@@ -21,6 +21,8 @@ use std::time::Duration;
 /// The longest wait between attempts at a failed model call (the backoff
 /// below doubles from one second up to this).
 const LONGEST_BACKOFF: Duration = Duration::from_millis(500 * 2u64.pow(6));
+const PROVIDER_RETRY_SECONDS: [u64; 5] = [5, 15, 45, 120, 300];
+const MAX_PROVIDER_RETRY_AFTER_SECONDS: f64 = 900.0;
 
 pub enum Flow {
     Continue,
@@ -262,12 +264,25 @@ impl Kernel {
                         // asked again; a limit it says lasts longer (a spent
                         // quota) persists, and pauses the task below.
                         ErrorClass::Unavailable | ErrorClass::UsageLimit
-                            if attempt < run.config.max_retries && (e.class == ErrorClass::Unavailable || e.retry_after_s.is_none_or(|s| s <= LONGEST_BACKOFF.as_secs_f64())) =>
+                            if run.provider_retries == 0 && attempt < run.config.max_retries && e.retry_after_s.is_none_or(|s| s <= LONGEST_BACKOFF.as_secs_f64()) =>
                         {
                             attempt += 1;
                             let backoff = Duration::from_millis(500 * 2u64.pow(attempt.min(6))).min(LONGEST_BACKOFF);
                             let asked = e.retry_after_s.filter(|s| s.is_finite() && *s > 0.0).map(Duration::from_secs_f64).unwrap_or_default();
                             tokio::time::sleep(backoff.max(asked)).await;
+                        }
+                        ErrorClass::Unavailable | ErrorClass::UsageLimit
+                            if run.provider_retries < PROVIDER_RETRY_SECONDS.len()
+                                && e.retry_after_s.is_none_or(|delay| delay.is_finite() && delay <= MAX_PROVIDER_RETRY_AFTER_SECONDS) =>
+                        {
+                            if !self.may_ask_model(run_id).await? {
+                                return Ok(Flow::Stop);
+                            }
+                            let delay = (PROVIDER_RETRY_SECONDS[run.provider_retries] as f64).max(e.retry_after_s.unwrap_or_default());
+                            let until = chrono::Utc::now() + chrono::Duration::milliseconds((delay * 1000.0).ceil() as i64);
+                            self.emit("kernel", Ev::ProviderRetry { run: run_id.into(), until }).await?;
+                            self.on_stop(run_id, false).await;
+                            return Ok(Flow::Stop);
                         }
                         ErrorClass::Malformed => {
                             self.emit(

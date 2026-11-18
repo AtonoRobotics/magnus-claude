@@ -41,6 +41,8 @@ This writes `target/x86_64-pc-windows-gnu/release/bundle/nsis/Magnus_<version>_x
 
 ## Before the first sign-in (owner, on the appliance)
 
+For managed installers, set `MAGNUS_BOOTSTRAP_ORIGIN` to the appliance's private HTTPS DNS origin, for example `https://magnus.internal.example:7700`, and `MAGNUS_BOOTSTRAP_FINGERPRINT` to the SHA-256 fingerprint printed by the appliance. Set both as variables on the trusted desktop build. Windows and Linux resolve that DNS name on the deployment network, verify the pinned certificate, and go directly to sign-in. Use a DNS name reachable from the LAN or tailnet. After sign-in the existing device pairing flow provisions access to the public tunnel. Generic installers can still enter an appliance address manually.
+
 1. Turn on HTTPS: set `appliance.tls_listen` (for example `"0.0.0.0:7700"`) and restart. The appliance prints its certificate's SHA-256 fingerprint at start. People compare it once, when the app first connects.
 2. To sign in through Keycloak (or another OpenID Connect provider), register the appliance as a client and add `[sign_in.oidc]` to `magnus.toml`:
 
@@ -81,7 +83,9 @@ On each platform:
 
 ## Release checks
 
-`.github/workflows/desktop.yml` builds the installers, runs the installed-app tests on Linux, and, for a `desktop-v<version>` tag, publishes a pre-release with those installers only when every test passed. The Windows build is the same app and frontend; it is not tested separately. Installers are no longer published by hand.
+`.github/workflows/desktop.yml` builds the signed installers and runs the full suite, including installed-app tests on Linux. Only the trusted `master` and desktop release tags run on the build box. Pull requests run workspace and renderer checks on GitHub-hosted Ubuntu and native Rust desktop tests on GitHub-hosted Windows. A `desktop-v<version>` tag publishes the tested installers after the release job passes.
+
+Keep the runner registration for the signing appliance restricted to trusted release workflows and refs. A runner label is a selection rule. Restricting access to the runner itself requires a workflow-restricted runner group or a private deployment repository. Remove the persistent signing runners from the public repository's unrestricted runner pool before treating pull request isolation as enforced. Protect `master` and the `desktop-v*` and `appliance-v*` tag patterns through GitHub rulesets.
 
 To release: bump the version in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`, commit, then push an annotated tag whose message is the release notes: `git tag -a desktop-v0.5.0 -m "What changed, in plain words." && git push origin desktop-v0.5.0`.
 
@@ -94,4 +98,4 @@ The jobs run on a self-hosted runner on the build box (the machine with KVM, the
 
 ## Updates
 
-A build that passes its tests is also put, signed, in the appliance's updates directory (`release/publish.sh`), in its release channel: a pull request's in development, master's in test, a tag in production. The appliance decides which channel each app gets: the owner's apps development, testers' test, everyone else's production (DECISIONS.md, "Release channels"); an app only moves forward. Installed apps ask the appliance for their release when a session begins and every hour, download it in the background, and offer "Restart to update"; after the restart they show the tag's message as "What's new", so write it for the person. On Windows the installer updates the app in place; on Linux the AppImage updates itself, and a .deb is updated with the package manager. Version 0.5.0 is the first with the updater: 0.4.5 and earlier are replaced by hand once.
+A build that passes its tests is put, signed, in the appliance's updates directory (`release/publish.sh`). `master` feeds test and development, and a desktop release tag feeds production. The appliance chooses the release channel for each app, and an app only moves forward. Installed apps check at session start and every hour, download in the background, and offer "Restart to update". The tag message becomes "What's new". The Windows installer updates in place, the AppImage updates itself, and the Linux package manager handles `.deb` updates.

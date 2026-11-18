@@ -16,8 +16,12 @@ pub struct ChatOrigin {
     /// For a task: the chat turn that started it.
     #[serde(default)]
     pub from_run: Option<String>,
+    /// The visible entries preceding a chat turn, in order. Resolve their
+    /// text from the source so a deleted entry stops reaching the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_entries: Option<Vec<String>>,
     /// For a task: the conversation that led to it, carried into its contract.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversation: Vec<Value>,
     /// A turn Magnus started itself (behavior spec, cold start and a newly
     /// connected app): its text is the appliance's instruction, never the
@@ -1066,6 +1070,14 @@ pub enum Ev {
         run: String,
         until: chrono::DateTime<chrono::Utc>,
     },
+    ProviderRetry {
+        run: String,
+        until: chrono::DateTime<chrono::Utc>,
+    },
+    ProviderRetryReady {
+        run: String,
+        until: chrono::DateTime<chrono::Utc>,
+    },
     BudgetExtended {
         run: String,
         budget: crate::config::Budget,
@@ -1360,6 +1372,8 @@ impl Ev {
             | ApprovalUsed { run, .. }
             | GrantUsed { run, .. }
             | Wait { run, .. }
+            | ProviderRetry { run, .. }
+            | ProviderRetryReady { run, .. }
             | BudgetExtended { run, .. }
             | Memory { run, .. }
             | MemoryPass { run, .. }
